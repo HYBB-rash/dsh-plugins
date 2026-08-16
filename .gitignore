@@ -1,0 +1,57 @@
+# Reproducible dependencies
+node_modules/
+
+# Build and type-check outputs
+lib/
+dist/
+build/
+*.tsbuildinfo
+
+# Test, Python, and tool caches
+coverage/
+__pycache__/
+*.py[cod]
+.cache/
+.turbo/
+.vite/
+
+# Local runtime state and transient output
+.dsh/
+dsh-x-feed/data/*.lock
+*.log
+*.tmp
+*.sqlite
+*.sqlite3
+*-wal
+*-shm
+
+# Local credentials; keep documented templates versioned
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+
+# This repository is published as source code only. Keep personal operations,
+# acceptance notes, local plans, and machine-specific dependency snapshots out
+# of its public history while retaining them in the local checkout.
+AGENTS.md
+**/AGENTS.md
+archive/
+deployment/
+research/
+**/*指南.md
+**/TODO*.md
+**/CONTEXT-CONTRACT-VALIDATION.md
+*/README.md
+*/README.zh.md
+*/README.i18n.yaml
+**/pnpm-lock.yaml
+
+# The local X prompt contains personal feed preferences and remains private.
+dsh-x-feed/prompts/x-insight.md
+dsh-x-feed/tests/prompt-contract.spec.ts
