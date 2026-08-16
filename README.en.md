@@ -4,7 +4,7 @@
 
 This is an experimental, personal collection of plugins the author built for their own use of **DeepSeek Harness (DSH)**. They address ordinary situations: continuing a conversation with a home Harness from Telegram while away; having an agent do something every hour and report back; tracking a long-running responsibility without losing today's work; reducing an X (Twitter) timeline to a few useful items; and keeping a long Web conversation from losing its way.
 
-The repository evolves around the author's own needs. It makes **no promise of compatibility, long-term maintenance, timely support, or suitability for anyone else's production environment.** You are welcome to use the source as a reference and modify it for yourself; users are responsible for their own use, deployments, and consequences.
+The repository evolves around the author's own needs. It makes **no promise of compatibility, long-term maintenance, timely support, or suitability for anyone else's production environment.** You are welcome to read and study the source; until the author explicitly publishes a license, obtain authorization before copying, modifying, or distributing it. Users are responsible for their own use, deployments, and consequences.
 
 > The display names below are only for recognition and search in this README. The adjacent directory and npm package names are the real code identifiers. No API or package name has been changed.
 
@@ -12,7 +12,7 @@ The repository evolves around the author's own needs. It makes **no promise of c
 
 | Display name | Actual directory / package | When it helps | What changes after installation | Main boundary |
 | --- | --- | --- | --- | --- |
-| **Telegram On-the-Go / Telegram 随身入口** | [`telegram-gateway`](telegram-gateway) / `@deepseek-ai/dsh-telegram-gateway` | You are away from home and want to continue a Harness conversation with one Telegram message. | The bot feeds text into one fixed session and replies with Markdown, quotes, and reactions—without repeatedly editing streaming fragments. | Text only; needs Telegram credentials and an allowed chat ID; not a multi-bot or media gateway. |
+| **Telegram On-the-Go / Telegram 随身入口** | [`telegram-gateway`](telegram-gateway) / `@deepseek-ai/dsh-telegram-gateway` | You are away from home and want to continue a Harness conversation with one Telegram message. | The bot feeds text into one fixed session and replies through ordinary Telegram MarkdownV2 messages, retaining partial quotes and reactions—without repeatedly editing streaming fragments. | Text only; needs Telegram credentials and an allowed chat ID; not a multi-bot or media gateway. |
 | **Assistant Responsibility Desk / 私人助理责任台** | [`dsh-assistant`](dsh-assistant) / `@deepseek-ai/dsh-assistant` | You want an assistant to keep watching one thing without displacing what you are doing or have delegated. | It keeps focus, delegation, and monitoring separate, survives restart with the responsibility context, and reports back when a result arrives. | Not a full task list or a general workflow platform. |
 | **Scheduled Agent / 定时 Agent** | [`dsh-cron`](dsh-cron) / `@deepseek-ai/dsh-cron` | You want an agent to check something hourly or prepare something daily without leaving a Web page open. | A separate session wakes on schedule, does the work, and can deliver the result to Telegram. | Starts unattended agents; you own side effects, cost, and duplicate-run boundaries. |
 | **X Insight Filter / X 洞察筛选器** | [`dsh-x-feed`](dsh-x-feed) / `@deepseek-ai/dsh-x-feed` | You want a few worthwhile X/Twitter items, not an entire timeline pasted into Telegram. | It receives scheduled results and records your like/dislike/save feedback for specific X content. | Requires `dsh-cron` and Python; provides neither accounts, cookies, nor a general crawler. |
@@ -80,12 +80,13 @@ Telegram Bridge, Responsibility Ledger, and Agent Clock ask the credential provi
 
 ### Telegram On-the-Go / Telegram 随身入口
 
-When you are away, you may want to continue a conversation with your home Harness by sending one Telegram message, instead of opening a remote browser. With `telegram-gateway`, the bot feeds text into one fixed session and returns complete replies to Telegram; Markdown, quotes, and reactions work, but you do not get a half-sentence repeatedly edited while the model streams.
+When you are away, you may want to continue a conversation with your home Harness by sending one Telegram message, instead of opening a remote browser. With `telegram-gateway`, the bot feeds text into one fixed session and returns complete replies through ordinary `sendMessage` calls after Telegram MarkdownV2 conversion; partial quotes and reactions remain available, but you do not get a half-sentence repeatedly edited while the model streams.
 
 - Validates bot credentials and accepts messages only from the configured chat ID.
 - Keeps one stable session so the next message continues the existing context.
-- Sends Telegram Rich Markdown, reply quotes, reactions, complete interim messages, and chunked final messages.
+- Sends everyday text through ordinary `sendMessage` plus Telegram MarkdownV2, retaining partial quotes, reactions, complete interim messages, and chunked final messages.
 - Never shows `assistant/chunk` token fragments and never edits a message after it has been sent.
+- Falls back once to plain text with the same reply parameters only after Telegram explicitly rejects formatting as non-retryable; it does not resend after 429/5xx, timeout, or another ambiguous result.
 - Does not handle media, files, commands, multiple bots, or multi-tenancy; deployers still need to test network and duplicate-delivery behavior.
 
 ### Assistant Responsibility Desk / 私人助理责任台
@@ -111,6 +112,8 @@ If you want an agent to check information every hour or prepare something every 
 ### X Insight Filter / X 洞察筛选器
 
 Pulling a few worthwhile items from an X/Twitter timeline is often more useful than dumping the whole feed into Telegram. With `dsh-x-feed`, the scheduled result can reach an insight pipeline, while your like, dislike, and save feedback on specific X content becomes local input for later use.
+
+The public scope contains the Python collection/delivery-preparation pipeline, the `dsh-cron` receipt interface, and local feedback/store code. It **does not include the author's personal ranking or editorial prompt**. Write your own cron prompt for your goals, sources, and boundaries.
 
 - Listens for a bound `dsh-cron/run-finished` terminal event and invokes the Python insight pipeline.
 - Adds feedback tools to a chosen Telegram root for X URLs, likes/dislikes, and saving/unsaving.

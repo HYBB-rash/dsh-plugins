@@ -4,7 +4,7 @@
 
 这是作者为自己使用 **DeepSeek Harness（DSH）** 编写的实验性、自用插件集合。它解决的是很具体的日常场景：人在外面时想用 Telegram 继续指挥家里的 Harness；想让 Agent 定时做事、结束后回来告诉你；想同时盯一个长期任务又不丢掉手上正在做的事；想把 X（Twitter）时间线筛成少量值得看的内容；或想让长对话和 Web 界面不那么容易迷路。
 
-项目按作者自己的实际需要演进：**不承诺兼容性、长期维护、及时答疑，也不承诺适合他人的生产环境。** 欢迎把源码当作参考并自行修改；使用、部署及其后果由使用者自行承担。
+项目按作者自己的实际需要演进：**不承诺兼容性、长期维护、及时答疑，也不承诺适合他人的生产环境。** 欢迎阅读和参考；在作者明确发布许可证前，如需复制、修改或分发，请先取得作者授权。使用、部署及其后果由使用者自行承担。
 
 > 这里的“展示名”仅用于本 README 的识别和检索；紧邻的目录名与 npm package 名才是代码中的真实标识。它们没有修改 API 或包名。
 
@@ -12,7 +12,7 @@
 
 | 展示名 | 实际目录 / package | 什么时候会需要 | 装上后会怎样 | 主要边界 |
 | --- | --- | --- | --- | --- |
-| **Telegram 随身入口 / Telegram On-the-Go** | [`telegram-gateway`](telegram-gateway) / `@deepseek-ai/dsh-telegram-gateway` | 出门后还想用 Telegram 发一句话继续和家里的 Harness 对话。 | Bot 把话送进固定会话，并用 Markdown、引用和 reaction 回复；不会把流式半句话反复改来改去。 | 仅文本；需要 Telegram 凭据和允许的 chat ID；不是多 bot 或媒体网关。 |
+| **Telegram 随身入口 / Telegram On-the-Go** | [`telegram-gateway`](telegram-gateway) / `@deepseek-ai/dsh-telegram-gateway` | 出门后还想用 Telegram 发一句话继续和家里的 Harness 对话。 | Bot 把话送进固定会话，用 Telegram MarkdownV2 转换后的普通消息回复，保留局部引用和 reaction；不会把流式半句话反复改来改去。 | 仅文本；需要 Telegram 凭据和允许的 chat ID；不是多 bot 或媒体网关。 |
 | **私人助理责任台 / Assistant Responsibility Desk** | [`dsh-assistant`](dsh-assistant) / `@deepseek-ai/dsh-assistant` | 想让助手长期盯一件事，同时又不丢掉自己正在做或刚委派的事。 | 它能分别记住焦点、委派和监控；重启后仍知道该向谁回报，并在有结果时送回来。 | 不是完整待办清单或通用工作流平台。 |
 | **定时 Agent / Scheduled Agent** | [`dsh-cron`](dsh-cron) / `@deepseek-ai/dsh-cron` | 想让 Agent 每小时看一次信息、每天做一次整理，而不必一直开网页等着。 | 到点会唤醒独立会话完成工作，并可把结果送到 Telegram。 | 会启动无人值守 Agent；副作用、成本和重复执行边界要自行承担。 |
 | **X 洞察筛选器 / X Insight Filter** | [`dsh-x-feed`](dsh-x-feed) / `@deepseek-ai/dsh-x-feed` | 想从 X/Twitter 时间线挑几条值得看，而不是整条信息流搬进 Telegram。 | 它接收定时任务的结果，并记住你对具体 X 内容的喜欢、不喜欢和收藏反馈。 | 依赖 `dsh-cron` 与 Python；不提供账号、cookie 或通用爬虫。 |
@@ -80,12 +80,13 @@ flowchart LR
 
 ### Telegram 随身入口 / Telegram On-the-Go
 
-你在外面时，只想用 Telegram 发一句话继续和家里的 Harness 对话，而不是远程开浏览器。装上 `telegram-gateway` 后，bot 会把文本交给一个固定会话，并把完成的回复送回 Telegram；回复可以有 Markdown、引用和 reaction，也不会出现流式半句话被反复编辑的体验。
+你在外面时，只想用 Telegram 发一句话继续和家里的 Harness 对话，而不是远程开浏览器。装上 `telegram-gateway` 后，bot 会把文本交给一个固定会话，并用普通 `sendMessage` 把 Telegram MarkdownV2 转换后的完整回复送回 Telegram；局部引用和 reaction 会保留，也不会出现流式半句话被反复编辑的体验。
 
 - 验证 bot 凭据并只接受指定 chat ID 的消息。
 - 保留固定会话，让后续消息接上已有上下文。
-- 发送 Telegram Rich Markdown、回复引用、reaction、完整中途消息和分块终稿。
+- 日常正文走普通 `sendMessage` + Telegram MarkdownV2，保留局部引用、reaction、完整中途消息和分块终稿。
 - 不展示 `assistant/chunk` 的 token 半成品，也不编辑已经发送的正文。
+- 只有 Telegram 明确返回不可重试的格式拒绝时，才带同一引用参数回退一次纯文本；429/5xx、超时和其他不确定结果都不补发。
 - 不处理媒体、文件、命令、多 bot 或多租户；网络失败和重复投递仍要由部署者验收。
 
 ### 私人助理责任台 / Assistant Responsibility Desk
@@ -111,6 +112,8 @@ flowchart LR
 ### X 洞察筛选器 / X Insight Filter
 
 每小时从 X/Twitter 时间线里挑几条真正值得看的内容，比把整条信息流搬进 Telegram 更有用。装上 `dsh-x-feed` 后，它会接住相关定时任务的完成结果，并把你对具体 X 内容的喜欢、不喜欢和收藏，变成本地可用的下一轮反馈。
+
+公开范围只包括 Python 收集/投递准备管线、`dsh-cron` receipt 接口和本地 feedback/store；**不包含作者个人的排序或选稿 prompt**。使用者需要按自己的目标、来源和边界编写 cron prompt。
 
 - 监听绑定的 `dsh-cron/run-finished` 终态事件并调用 Python 洞察流水线。
 - 在指定 Telegram root 提供 X URL、喜欢/不喜欢、收藏/取消收藏的反馈工具。

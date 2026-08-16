@@ -786,7 +786,7 @@ describe('D. long-term recognition contract', () => {
   })
 
   it('treats the user\'s own concrete facts, preferences and existing long-term knowledge as learnable alongside future collaboration practices', () => {
-    // 反例防护（"纠正一下，我不喜欢羽毛球"）：只有"未来协作的具体做法"是不够的。
+    // 反例防护（例如：用户纠正一项长期偏好）：只有"未来协作的具体做法"是不够的。
     // 两个类别必须并列出现在同一强信号触发句群内（直接纠正、选择、否定、改写 … 普通一次性请求之前），
     // 防止实现只在禁止列表或文档别处提及"用户自己的具体事实、偏好或已有长期认识"而假绿。
     const triggerStart = STABLE_CONTRACT.indexOf('直接纠正、选择、否定、改写')

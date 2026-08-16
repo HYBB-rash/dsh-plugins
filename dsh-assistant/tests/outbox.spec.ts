@@ -189,14 +189,14 @@ describe('check-in revalidation and aborts', () => {
     store.close()
   })
 
-  it('stores scrubbed errors without tokens or message bodies', async () => {
+  it('stores scrubbed errors without endpoint placeholders or message bodies', async () => {
     const { store, http, pump } = setup()
     await seedResult(store, 'o1', '✅ done')
-    http.sendMessage.mockRejectedValueOnce(new Error('sendMessage failed: https://api.telegram.org/bot123456:secret-token/sendMessage -> 400'))
+    http.sendMessage.mockRejectedValueOnce(new Error('sendMessage failed: https://api.telegram.org/bot-placeholder/sendMessage -> 400'))
     await pump.pumpOnce()
     const error = store.getOutbox('o1')!.error ?? ''
-    expect(error).not.toContain('secret-token')
-    expect(error).not.toContain('bot123456')
+    expect(error).not.toContain('bot-placeholder')
+    expect(error).not.toContain('api.telegram.org')
     store.close()
   })
 })
