@@ -59,6 +59,8 @@ describe('feedback context contract (§10.3)', () => {
     expect(X_FEED_CONTRACT).toContain('引用报告有多个 X URL')
     expect(X_FEED_CONTRACT).toContain('当前消息明确在谈 X 内容或明确要求记录 X 反馈，但没有可定位的 X 引用上下文')
     expect(X_FEED_CONTRACT).toContain('不能调用工具写账本')
+    expect(X_FEED_CONTRACT).toContain('不能替代探索合同的独立记录')
+    expect(X_FEED_CONTRACT).toContain('不另建 Markdown、research 文件或其他平行收藏池')
   })
 })
 
