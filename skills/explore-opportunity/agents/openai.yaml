@@ -1,0 +1,4 @@
+interface:
+  display_name: "探索机会"
+  short_description: "从随手信息中查证机制，并把明确感兴趣的线索留下来继续研究"
+  default_prompt: "使用 $explore-opportunity 快速查证这条信息，并找出一个值得继续了解的机制。"
