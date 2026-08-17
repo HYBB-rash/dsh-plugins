@@ -45,6 +45,8 @@ archive/
 deployment/
 research/
 **/*指南.md
+/dsh-explore/Harness-探索机会池-第一批代码设计.md
+/dsh-explore/Harness-探索机会池-第一批开发计划.md
 **/TODO*.md
 **/CONTEXT-CONTRACT-VALIDATION.md
 */README.md

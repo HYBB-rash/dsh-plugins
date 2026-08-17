@@ -2,7 +2,7 @@
 
 [中文](README.md)
 
-This is an experimental, personal collection of plugins the author built for their own use of **DeepSeek Harness (DSH)**. They address ordinary situations: continuing a conversation with a home Harness from Telegram while away; having an agent do something every hour and report back; tracking a long-running responsibility without losing today's work; reducing an X (Twitter) timeline to a few useful items; and keeping a long Web conversation from losing its way.
+This is an experimental, personal collection of plugins the author built for their own use of **DeepSeek Harness (DSH)**. They address ordinary situations: continuing a conversation with a home Harness from Telegram while away; sending a link and wanting one verified reason it may be worth a closer look; keeping a genuinely interesting topic for later exploration; having an agent do something every hour and report back; tracking a long-running responsibility without losing today's work; reducing an X (Twitter) timeline to a few useful items; and keeping a long Web conversation from losing its way.
 
 The repository evolves around the author's own needs. It makes **no promise of compatibility, long-term maintenance, timely support, or suitability for anyone else's production environment.** You are welcome to read and study the source; until the author explicitly publishes a license, obtain authorization before copying, modifying, or distributing it. Users are responsible for their own use, deployments, and consequences.
 
@@ -16,6 +16,8 @@ The repository evolves around the author's own needs. It makes **no promise of c
 | **Assistant Responsibility Desk / 私人助理责任台** | [`dsh-assistant`](dsh-assistant) / `@deepseek-ai/dsh-assistant` | You want an assistant to keep watching one thing without displacing what you are doing or have delegated. | It keeps focus, delegation, and monitoring separate, survives restart with the responsibility context, and reports back when a result arrives. | Not a full task list or a general workflow platform. |
 | **Scheduled Agent / 定时 Agent** | [`dsh-cron`](dsh-cron) / `@deepseek-ai/dsh-cron` | You want an agent to check something hourly or prepare something daily without leaving a Web page open. | A separate session wakes on schedule, does the work, and can deliver the result to Telegram. | Starts unattended agents; you own side effects, cost, and duplicate-run boundaries. |
 | **X Insight Filter / X 洞察筛选器** | [`dsh-x-feed`](dsh-x-feed) / `@deepseek-ai/dsh-x-feed` | You want a few worthwhile X/Twitter items, not an entire timeline pasted into Telegram. | It receives scheduled results and records your like/dislike/save feedback for specific X content. | Requires `dsh-cron` and Python; provides neither accounts, cookies, nor a general crawler. |
+| **Read-only Web Evidence Reader / 只读网页查证器** | [`dsh-browser-readonly`](dsh-browser-readonly) / `@deepseek-ai/dsh-browser-readonly` | You send an article or a public X post in Telegram and first want to know what it actually says and whether there is a mechanism worth exploring. | The agent can read bounded public-page content, or extract one exact public X status, then answer with clear evidence limits. | Not a general browser: ordinary pages are static GET only, and X is exact-status only; no clicking, typing, downloads, or screenshots. |
+| **Exploration Opportunity Pool / 探索机会池** | [`dsh-explore`](dsh-explore) / `@deepseek-ai/dsh-explore` | A new concept sounds interesting, but you do not want to spend two hours researching it right now. | It keeps candidates with a concrete finding and next question, so you can choose one later without having uninterested topics repeatedly resurfaced. | Not a task system, long-term MEMORY, or scheduler; ordinary follow-up questions do not automatically retain an item, and it does no autonomous deep research. |
 | **Conversation Route Map / 会话路线提示** | [`ui-context-compactor`](ui-context-compactor) / `@deepseek-ai/dsh-client-ui-context-compactor` | A long conversation has happened and you need Harness to retain the goal, current approach, and review triggers. | It keeps a short route note for one session so compaction or context recovery can resume the thread. | One session only; summaries can be wrong, and the host chooses model/cost. |
 | **UI Plugin Watchdog / UI 插件自救器** | [`ui-plugin-guardian`](ui-plugin-guardian) / `@deepseek-ai/dsh-client-ui-plugin-guardian` | Your in-house Web UI plugin occasionally drops out and you do not want to restart it manually every time. | It notices selected plugin failures, waits out a cooldown, tries a remount, and leaves a short record. | It cannot repair bad config, dependencies, data, or external services. |
 | **TODO Planning Panel / TODO 思考面板** | [`ui-progressive-todo`](ui-progressive-todo) / `@deepseek-ai/dsh-client-ui-progressive-todo` | A long task has an unclear route and you need to think before turning it into a pile of TODOs. | The Web composer gets an expandable checklist, while the prompt reminds the agent to find the authoritative TODO first. | Guidance/UI only; it neither performs work nor stores a second task list. |
@@ -25,6 +27,10 @@ flowchart LR
   TG[Telegram Bridge] --> A[Responsibility Ledger]
   TG --> C[Agent Clock]
   C --> X[X Insight Loop]
+  TG --> E[Exploration Opportunity Pool]
+  TG --> B[Read-only Web Evidence Reader]
+  B --> DSH
+  E --> DSH
   A --> DSH[DeepSeek Harness / Cordis host]
   C --> DSH
   X --> DSH
@@ -34,7 +40,7 @@ flowchart LR
   P --> DSH
 ```
 
-The diagram shows code-level collaboration, not a requirement to install everything together. Telegram-related configuration in `dsh-assistant`, `dsh-cron`, and `dsh-x-feed` is resolved by the host credential provider; the UI packages are Web/session extensions for the host.
+The diagram shows code-level collaboration, not a requirement to install everything together. The exploration pool is called semantically by the model in the Telegram root and may use the read-only reader for evidence; either package also works independently. Telegram-related configuration in `dsh-assistant`, `dsh-cron`, and `dsh-x-feed` is resolved by the host credential provider; the UI packages are Web/session extensions for the host.
 
 ## Public scope and prerequisites
 
@@ -66,6 +72,12 @@ The following are **object shapes passed to `apply()`**, not a specific DSH prof
 // X Insight Loop: without a bound job ID, feedback tools remain but cron receipts are ignored.
 { cronJobId: '<dsh-cron-job-id>', pythonBin: '/usr/bin/python3' }
 
+// Read-only Web Evidence Reader: only mounts in the selected Telegram root; CDP accepts loopback HTTP only.
+{ telegramSessionId: 'session-telegram', cdpBaseUrl: 'http://127.0.0.1:9222' }
+
+// Exploration Opportunity Pool: a ledger separate from tasks, MEMORY, and cron.
+{ telegramSessionId: 'session-telegram', dataDir: '<host-managed-data-directory>' }
+
 // Session Route: provider and model must be supplied together, or both omitted.
 { maxInputChars: 32_000, maxOutputTokens: 2_400 }
 
@@ -74,7 +86,7 @@ The following are **object shapes passed to `apply()`**, not a specific DSH prof
 {}
 ```
 
-Telegram Bridge, Responsibility Ledger, and Agent Clock ask the credential provider for Telegram credentials; do not put a token or chat ID directly into a source-controlled object. X Insight Loop defaults its data under the host's `DSH_HOME`; Session Route uses an explicit reducer only when `provider` and `model` are set together.
+Telegram Bridge, Responsibility Ledger, and Agent Clock ask the credential provider for Telegram credentials; do not put a token or chat ID directly into a source-controlled object. Read-only Web Evidence Reader and Exploration Opportunity Pool expose capability only in the matching Telegram root; the latter's `dataDir` is a separate ledger, not a task, MEMORY, or cron directory. X Insight Loop defaults its data under the host's `DSH_HOME`; Session Route uses an explicit reducer only when `provider` and `model` are set together.
 
 ## Plugin behavior and limits
 
@@ -121,6 +133,26 @@ The public scope contains the Python collection/delivery-preparation pipeline, t
 - Lets a deployer configure Python, data directory, and the target Telegram session.
 - Requires `dsh-cron` and Python, manages no X account, includes no cookie/login state, and does not promise collection availability.
 
+### Read-only Web Evidence Reader / 只读网页查证器
+
+When you send an article, link, or X post in Telegram, you may first want to establish what it actually says and whether it contains a mechanism worth pursuing. With `dsh-browser-readonly`, the agent can read public-page content within explicit limits, then distinguish what was read from what is still unverified. It does not operate a browser on your behalf.
+
+- Mounts only in the selected Telegram root; it does not expose readable pages or an existing browser login state to Web, cron, or other agent roots.
+- Ordinary pages use static HTTP(S) GET without cookies, JavaScript, or subresources. Each connection validates and pins a public IP, blocking loopback, private-network, and redirected-to-private-address requests.
+- X permits only an exact public `/.../status/<numeric ID>` URL. It reuses an existing Chrome login state for fixed extraction, so it is not a zero-side-effect operation and is not a general X browser.
+- Provides no click, type, general evaluate, screenshot, or download operation, and does not follow page text asking it to run commands, disclose secrets, install code, or contact third parties.
+- A read failure, size cap, or insufficient static content must preserve the evidence boundary; a search snippet is not proof that the original page was read.
+
+### Exploration Opportunity Pool / 探索机会池
+
+When a new concept appears, you may want to hear one concrete reason it matters before deciding whether it deserves a future research session. With `dsh-explore`, the agent first does a short investigation and naturally explains one finding. It only retains a candidate or dismissal when you explicitly signal interest or disinterest, or when there is genuinely a remaining question worth revisiting.
+
+- An active candidate must include a concrete hook, current finding, next question, and citation, so it can be recalled by topic later.
+- Explicit interest keeps a candidate; explicit disinterest records a bounded dismissal. The count of ordinary follow-up questions does not retain an item by itself.
+- It does not show users the keep/dismiss mechanism, scoring, file paths, or a “should this go in the pool?” workflow, and it cannot claim retention after a failed write.
+- Its ledger is separate from `dsh-assistant` responsibilities, long-term MEMORY, and `dsh-cron` jobs: it creates no reminder, worker, or background work.
+- The first batch accepts Telegram text/links only. It excludes image input, general browser control, a daily chooser, and automatic deep investigation.
+
 ### Conversation Route Map / 会话路线提示
 
 After a long conversation, the annoying failure is that Harness loses the goal, the current approach, and the condition that should make it reconsider. With `ui-context-compactor`, one root session keeps a short route note that can reconnect the thread after compaction or context recovery.
@@ -164,6 +196,8 @@ export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
 (cd dsh-assistant && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd dsh-cron && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd dsh-x-feed && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
+(cd dsh-browser-readonly && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
+(cd dsh-explore && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd ui-context-compactor && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd ui-plugin-guardian && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd ui-progressive-todo && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
@@ -178,6 +212,8 @@ export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
 (cd dsh-assistant && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd dsh-cron && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd dsh-x-feed && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
+(cd dsh-browser-readonly && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
+(cd dsh-explore && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd telegram-gateway && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd ui-context-compactor && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd ui-plugin-guardian && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
@@ -201,6 +237,8 @@ For local development, change one plugin, build/test its own directory, then loa
 - `.gitignore` excludes common credentials, `.env`, key files, SQLite/WAL/SHM files, runtime logs, build outputs, and local session state. Ignore rules are not access control: review every change before committing.
 - Telegram credentials belong only in the host credential provider. Examples never contain a real token, chat ID, host, account, cookie, or personal profile.
 - X Insight Loop's interaction with external content and a browser environment is the deployer's responsibility; comply with service terms, applicable law, and account-security requirements.
+- `dsh-browser-readonly` sends only cookie-free, JavaScript-free, subresource-free static GET requests for ordinary pages and pins the verified public socket at connection time. Do not treat it as a private-network reader or a general browser. Its fixed public X-status extraction reuses an existing Chrome login state, so it is not a zero-side-effect operation.
+- `dsh-explore` stores only exploration candidates and bounded dismissal knowledge. It is not a task system, long-term MEMORY, or cron, and it does not autonomously start deep investigation.
 - This public repository excludes the author's deployment scripts, remote-host material, runtime databases, acceptance records, research notes, and personal long-term memory. It offers no production deployment promise.
 - Scheduling, automatic remounting, child agents, and external message delivery all carry irreversible or duplicate risks. Verify in isolation before using real accounts or data.
 
@@ -211,6 +249,8 @@ telegram-gateway/       Telegram bot/gateway source and tests
 dsh-assistant/          Personal-assistant responsibilities, reminders, outbox, migration tool
 dsh-cron/               Scheduled agent manager/scheduler
 dsh-x-feed/             X insight TypeScript integration and Python pipeline
+dsh-browser-readonly/   Telegram-scoped static-page/exact-X-status read-only evidence
+dsh-explore/            Telegram-scoped exploration candidate and dismissal ledger
 ui-context-compactor/   Single-session route and context projection
 ui-plugin-guardian/     Cordis plugin-fiber observation and remounting
 ui-progressive-todo/    Web TODO planning guidance and composer UI
