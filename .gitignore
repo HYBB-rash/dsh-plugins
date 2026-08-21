@@ -17,7 +17,6 @@ __pycache__/
 
 # Local runtime state and transient output
 .dsh/
-dsh-x-feed/data/*.lock
 *.log
 *.tmp
 *.sqlite
@@ -51,7 +50,3 @@ research/
 */README.zh.md
 */README.i18n.yaml
 **/pnpm-lock.yaml
-
-# The local X prompt contains personal feed preferences and remains private.
-dsh-x-feed/prompts/x-insight.md
-dsh-x-feed/tests/prompt-contract.spec.ts
