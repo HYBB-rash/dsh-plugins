@@ -295,31 +295,25 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
     const runtimes = new Map<Agent, () => void>()
     let stopping = false
-    let disposeProvider: (() => void) | undefined
-
     if (config.cronJobId === undefined || config.cronJobId === '') {
       ctx.logger.info(
         'dsh-x-feed: cronJobId 未绑定，receipt 保持未绑定（不处理终态事件）；交互反馈工具仍可用',
       )
     } else {
-      let registry: CronAgentEnvironmentRegistry | undefined
-      try {
-        registry = ctx.get('cronAgentEnvironmentRegistry') as CronAgentEnvironmentRegistry
-      } catch (error) {
-        ctx.logger.warn(`dsh-x-feed: cron agent environment registry unavailable; provider not registered: ${error instanceof Error ? error.message : String(error)}`)
-      }
-      if (registry === undefined || typeof registry.register !== 'function') {
-        ctx.logger.warn('dsh-x-feed: cron agent environment registry unavailable; provider not registered')
-      } else {
+      ctx.inject(['cronAgentEnvironmentRegistry'], providerCtx => {
+        const registry = providerCtx.get('cronAgentEnvironmentRegistry') as CronAgentEnvironmentRegistry
         const providerOptions: XFeedCronProviderOptions = {
           ctx,
-          cronJobId: config.cronJobId,
+          cronJobId: config.cronJobId!,
           dataDir,
           pythonBin,
           pipelinePath,
         }
-        disposeProvider = registry.register(createXFeedCronEnvironmentProvider(providerOptions))
-      }
+        providerCtx.effect(
+          () => registry.register(createXFeedCronEnvironmentProvider(providerOptions)),
+          'dsh-x-feed.cron-provider()',
+        )
+      })
       const receipt = new DeliveryReceipt({
         cronJobId: config.cronJobId,
         dataDir,
@@ -370,8 +364,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       stopping = true
       stopCreated()
       stopFeedback()
-      disposeProvider?.()
-      disposeProvider = undefined
       const cleanups = [...runtimes.values()]
       runtimes.clear()
       await Promise.allSettled(cleanups.map(cleanup => Promise.resolve(cleanup())))

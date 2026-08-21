@@ -212,6 +212,7 @@ function pluginCompositionContext(registry: unknown): {
       error: () => undefined,
     },
     get: (name: string) => name === 'cronAgentEnvironmentRegistry' ? registry : undefined,
+    inject: async (_deps: readonly string[], callback: (ctx: Record<string, unknown>) => unknown) => callback(context),
     effect: async (execute: () => unknown) => {
       const result = await execute()
       if (typeof result === 'function') cleanups.push(result as () => unknown)
@@ -249,13 +250,13 @@ describe('dsh-x-feed/v1 cron provider composition boundary', () => {
       pipelinePath: '/pkg/python/x_insight_pipeline.py',
     } as never)
     expect(registry.resolve(X_CRON_AGENT_ENVIRONMENT_MARKER)).toMatchObject({ ok: true })
-    expect(fixture.cleanups.length).toBe(2)
+    expect(fixture.cleanups.length).toBe(3)
     const states: boolean[] = []
     for (const cleanup of fixture.cleanups) {
       await cleanup()
       states.push(registry.resolve(X_CRON_AGENT_ENVIRONMENT_MARKER).ok)
     }
-    expect(states).toEqual([true, false])
+    expect(states).toEqual([false, false, false])
     expect(registry.resolve(X_CRON_AGENT_ENVIRONMENT_MARKER)).toMatchObject({
       ok: false,
       error: { code: 'missing_provider' },
@@ -268,6 +269,47 @@ describe('dsh-x-feed/v1 cron provider composition boundary', () => {
       ok: false,
       error: { code: 'missing_provider' },
     })
+  })
+
+  it('waits for a late sibling cron registry before registering the provider', async () => {
+    const directory = await temporaryDirectory()
+    const root = new Context()
+    const registry = createCronAgentEnvironmentRegistry()
+    root.provide('agents', { roots: () => [] })
+    try {
+      const feedFiber = root.plugin(apply, {
+        cronJobId: 'cron-x',
+        dataDir: directory,
+        pythonBin: 'python3',
+        pipelinePath: '/pkg/python/x_insight_pipeline.py',
+      })
+      const schedulerFiber = root.plugin(async ctx => {
+        await new Promise<void>(resolve => setTimeout(resolve, 10))
+        ctx.provide('cronAgentEnvironmentRegistry', registry)
+      })
+      await Promise.all([feedFiber, schedulerFiber])
+      await new Promise<void>(resolve => setImmediate(resolve))
+
+      expect(registry.resolve(X_CRON_AGENT_ENVIRONMENT_MARKER)).toMatchObject({ ok: true })
+      await schedulerFiber.dispose()
+      expect(registry.resolve(X_CRON_AGENT_ENVIRONMENT_MARKER)).toMatchObject({
+        ok: false,
+        error: { code: 'missing_provider' },
+      })
+      const reprovideFiber = root.plugin(async ctx => {
+        ctx.provide('cronAgentEnvironmentRegistry', registry)
+      })
+      await reprovideFiber
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(registry.resolve(X_CRON_AGENT_ENVIRONMENT_MARKER)).toMatchObject({ ok: true })
+      await reprovideFiber.dispose()
+      expect(registry.resolve(X_CRON_AGENT_ENVIRONMENT_MARKER)).toMatchObject({
+        ok: false,
+        error: { code: 'missing_provider' },
+      })
+    } finally {
+      await root.fiber.dispose()
+    }
   })
 
   it('checks the exact persisted job id before any preflight or Python side effect', async () => {
