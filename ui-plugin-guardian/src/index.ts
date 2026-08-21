@@ -47,7 +47,6 @@ export const Config: z<Config> = z.object({
 
 /** Our own plugin names (the ones this deployment develops and maintains). */
 export const DEFAULT_WATCHED = [
-  'ui-progressive-todo',
   'ui-context-compactor',
 ] as const
 

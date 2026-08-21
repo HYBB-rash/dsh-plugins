@@ -19,7 +19,6 @@
 | **探索机会 / Exploration Opportunity** | [`skills/explore-opportunity`](skills/explore-opportunity) / Skill | 你丢来一句话或链接，想先听懂背后最有意思的机制；真的感兴趣时再留到以后。 | Agent 用宿主已有的搜索、网页、文件或 Shell 能力做初步查证，先给一个“还想再听一点”的钩子；只有你明确表态才更新 `EXPLORE.md`。 | 不自带浏览器、网络隔离或后台任务；普通追问次数不会自动入池。 |
 | **会话路线提示 / Conversation Route Map** | [`ui-context-compactor`](ui-context-compactor) / `@deepseek-ai/dsh-client-ui-context-compactor` | 长对话过后，想让 Harness 还知道目标、当前做法和该复查什么。 | 它为一个会话整理简短路线摘要，压缩后也能重新接上上下文。 | 只服务单个 session；摘要仍可能错，模型和费用由宿主决定。 |
 | **UI 插件自救器 / UI Plugin Watchdog** | [`ui-plugin-guardian`](ui-plugin-guardian) / `@deepseek-ai/dsh-client-ui-plugin-guardian` | Web 上的自家 UI 插件偶发掉线时，不想每次都手动重启。 | 它发现指定插件失败后会按冷却时间尝试重新挂载，并留下简短记录。 | 不能修好坏配置、坏依赖、坏数据或外部服务。 |
-| **TODO 思考面板 / TODO Planning Panel** | [`ui-progressive-todo`](ui-progressive-todo) / `@deepseek-ai/dsh-client-ui-progressive-todo` | 面对路线不清的长期任务，想先把问题想明白，而不是立刻堆 TODO。 | Web 输入框旁会出现检查清单，系统提示也会提醒先找权威 TODO 再行动。 | 只提供提示和界面，不替你执行任务或保存第二份待办。 |
 
 ```mermaid
 flowchart LR
@@ -33,8 +32,6 @@ flowchart LR
   X --> DSH
   R[Session Route] --> DSH
   W[Plugin Watchdog] --> R
-  W --> P[Planning Dock]
-  P --> DSH
 ```
 
 图只表示代码中存在的协作关系，不表示必须一次安装全部组件。探索机会由宿主的 Skill 机制按语义发现，再协调这个 Agent 原本就有的搜索、网页、文件或 Shell 工具；它不依赖另一个探索插件，也不让其他插件因为发现它存在就偷偷改变行为。`dsh-assistant`、`dsh-cron`、`dsh-x-feed` 的 Telegram 相关配置由宿主的凭据提供方解析；UI 插件是宿主 Web/会话扩展。
@@ -73,9 +70,8 @@ flowchart LR
 // Session Route: provider 与 model 要同时提供，或同时省略。
 { maxInputChars: 32_000, maxOutputTokens: 2_400 }
 
-// Plugin Watchdog / Planning Dock
-{ watched: ['ui-progressive-todo'], repairCooldownMs: 30_000 }
-{}
+// Plugin Watchdog
+{ watched: ['ui-context-compactor'], repairCooldownMs: 30_000 }
 ```
 
 `Telegram Bridge`、`Responsibility Ledger` 和 `Agent Clock` 都会从 credential provider 查找 Telegram 凭据；不要把 token 或 chat ID 直接填到源码控制中的对象里。`Exploration Opportunity` 没有 `apply()` 配置：宿主发现 [`skills/explore-opportunity`](skills/explore-opportunity) 后，它只在当前工作区用 `EXPLORE.md` 保存明确的兴趣或排除信号。`X Insight Loop` 的默认数据目录位于宿主的 `DSH_HOME` 下，`Session Route` 的 reducer 只有 provider/model 成对设置时才使用显式模型。
@@ -150,21 +146,11 @@ flowchart LR
 
 如果 Web 上的自家 UI 插件偶发掉线，每次都手动重启很烦。装上 `ui-plugin-guardian` 后，它会盯住指定插件，发现失败或已卸载时按冷却时间尝试重新挂载，并留下简短记录供排查。
 
-- 默认关注 `ui-progressive-todo` 与 `ui-context-compactor`。
+- 默认关注 `ui-context-compactor`。
 - 可改成只监控配置里列出的插件名。
 - 每个插件有独立冷却时间，避免连续重挂造成循环。
 - 将检测、重挂开始、成功或失败写入简短审计记录。
 - 不能修复错误配置、依赖不兼容、数据损坏或外部服务；自动重挂可能放大故障，应先隔离观察。
-
-### TODO 思考面板 / TODO Planning Panel
-
-面对路线不清的长期任务，直接堆一长串 TODO 通常只会更乱。装上 `ui-progressive-todo` 后，Web 输入框旁会有可展开的检查清单，系统提示也会提醒先找到权威 TODO、再用小步验证当前路线。
-
-- 向 system prompt 加入任务前思考和渐进式 TODO 准则。
-- 为 Web composer 提供可展开的 checklist 与本地化文案。
-- 强调项目 `TODO.md` 或宿主指定来源才是权威状态。
-- 不另建第二个任务数据库，也不替你执行 TODO 中的事情。
-- 不适合把明确、低风险、一次性的操作仪式化。
 
 ## 构建、测试与本地开发
 
@@ -181,7 +167,6 @@ export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
 (cd dsh-x-feed && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd ui-context-compactor && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd ui-plugin-guardian && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
-(cd ui-progressive-todo && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 ```
 
 测试同样逐包执行：
@@ -196,10 +181,6 @@ export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
 (cd telegram-gateway && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd ui-context-compactor && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd ui-plugin-guardian && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
-
-# UI client 测试还需要兼容 React 包目录；不写死任何作者机器路径。
-export DSH_HARNESS_REACT='<path-to-compatible-react-package>'
-(cd ui-progressive-todo && DSH_HARNESS_REACT="$DSH_HARNESS_REACT" node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 
 # Skill 没有构建产物；可用兼容的 Skill Creator 校验目录结构和 frontmatter。
 python '<path-to-skill-creator>/scripts/quick_validate.py' skills/explore-opportunity
@@ -234,7 +215,6 @@ dsh-x-feed/             X 洞察 TypeScript 接口与 Python 流水线
 skills/explore-opportunity/  用现有工具查证线索并维护显式兴趣的 Skill
 ui-context-compactor/   单 session 路线与上下文投影
 ui-plugin-guardian/     Cordis 插件 fiber 观察与重挂
-ui-progressive-todo/    Web TODO 思考提示与 composer UI
 tsdown.client.ts        Web client 打包共用配置
 web/                    小型 Web 平台类型入口
 ```

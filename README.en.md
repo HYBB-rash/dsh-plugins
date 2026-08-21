@@ -19,7 +19,6 @@ The repository evolves around the author's own needs. It makes **no promise of c
 | **Exploration Opportunity / 探索机会** | [`skills/explore-opportunity`](skills/explore-opportunity) / Skill | You drop a sentence or link and want the most interesting mechanism first, then retain it only if it truly catches your interest. | The agent uses the host's existing search, Web, file, or Shell capabilities for a quick check and gives one hook; only an explicit reaction updates `EXPLORE.md`. | Adds no browser, network isolation, or background task; follow-up count alone never retains an item. |
 | **Conversation Route Map / 会话路线提示** | [`ui-context-compactor`](ui-context-compactor) / `@deepseek-ai/dsh-client-ui-context-compactor` | A long conversation has happened and you need Harness to retain the goal, current approach, and review triggers. | It keeps a short route note for one session so compaction or context recovery can resume the thread. | One session only; summaries can be wrong, and the host chooses model/cost. |
 | **UI Plugin Watchdog / UI 插件自救器** | [`ui-plugin-guardian`](ui-plugin-guardian) / `@deepseek-ai/dsh-client-ui-plugin-guardian` | Your in-house Web UI plugin occasionally drops out and you do not want to restart it manually every time. | It notices selected plugin failures, waits out a cooldown, tries a remount, and leaves a short record. | It cannot repair bad config, dependencies, data, or external services. |
-| **TODO Planning Panel / TODO 思考面板** | [`ui-progressive-todo`](ui-progressive-todo) / `@deepseek-ai/dsh-client-ui-progressive-todo` | A long task has an unclear route and you need to think before turning it into a pile of TODOs. | The Web composer gets an expandable checklist, while the prompt reminds the agent to find the authoritative TODO first. | Guidance/UI only; it neither performs work nor stores a second task list. |
 
 ```mermaid
 flowchart LR
@@ -33,8 +32,6 @@ flowchart LR
   X --> DSH
   R[Session Route] --> DSH
   W[Plugin Watchdog] --> R
-  W --> P[Planning Dock]
-  P --> DSH
 ```
 
 The diagram shows code-level collaboration, not a requirement to install everything together. The host discovers the Exploration Opportunity Skill semantically, and the Skill coordinates search, Web, file, or Shell tools the agent already has. It does not depend on another exploration plugin, and no plugin silently changes behavior merely because the Skill exists. Telegram-related configuration in `dsh-assistant`, `dsh-cron`, and `dsh-x-feed` is resolved by the host credential provider; the UI packages are Web/session extensions for the host.
@@ -73,9 +70,8 @@ The following are **object shapes passed to `apply()`**, not a specific DSH prof
 // Session Route: provider and model must be supplied together, or both omitted.
 { maxInputChars: 32_000, maxOutputTokens: 2_400 }
 
-// Plugin Watchdog / Planning Dock
-{ watched: ['ui-progressive-todo'], repairCooldownMs: 30_000 }
-{}
+// Plugin Watchdog
+{ watched: ['ui-context-compactor'], repairCooldownMs: 30_000 }
 ```
 
 Telegram Bridge, Responsibility Ledger, and Agent Clock ask the credential provider for Telegram credentials; do not put a token or chat ID directly into a source-controlled object. Exploration Opportunity has no `apply()` configuration: after the host discovers [`skills/explore-opportunity`](skills/explore-opportunity), it stores only explicit interest or dismissal signals in the current workspace's `EXPLORE.md`. X Insight Loop defaults its data under the host's `DSH_HOME`; Session Route uses an explicit reducer only when `provider` and `model` are set together.
@@ -150,21 +146,11 @@ After a long conversation, the annoying failure is that Harness loses the goal, 
 
 When an in-house Web UI plugin occasionally drops out, manually restarting it every time gets tiresome. With `ui-plugin-guardian`, selected plugins are watched; a failed or disposed one is remounted after a cooldown and leaves a small record for diagnosis.
 
-- Watches `ui-progressive-todo` and `ui-context-compactor` by default.
+- Watches `ui-context-compactor` by default.
 - Can instead watch only the plugin names listed in configuration.
 - Uses a separate cooldown per plugin to avoid a rapid remount loop.
 - Records detection, remount start, success, and failure in a short audit trail.
 - Cannot repair bad configuration, incompatible dependencies, corrupted data, or external services; automatic remounting can amplify a fault, so isolate it first.
-
-### TODO Planning Panel / TODO 思考面板
-
-For a long task with an unclear route, immediately piling up TODO items usually makes it less clear. With `ui-progressive-todo`, the Web composer gets an expandable checklist and the system prompt reminds the agent to find the authoritative TODO before taking the next small step.
-
-- Adds pre-task thinking and progressive TODO guidance to the system prompt.
-- Supplies an expandable Web-composer checklist and localized text.
-- Treats a project `TODO.md` or host-designated source as authoritative state.
-- Creates no second task database and does not perform the work written in a TODO.
-- Is not meant to ritualize a simple, low-risk, one-off operation.
 
 ## Build, test, and local development
 
@@ -181,7 +167,6 @@ export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
 (cd dsh-x-feed && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd ui-context-compactor && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd ui-plugin-guardian && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
-(cd ui-progressive-todo && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 ```
 
 Tests also run per package:
@@ -196,10 +181,6 @@ export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
 (cd telegram-gateway && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd ui-context-compactor && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd ui-plugin-guardian && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
-
-# The UI client test also needs a compatible React package directory; no author-machine path is hard-coded.
-export DSH_HARNESS_REACT='<path-to-compatible-react-package>'
-(cd ui-progressive-todo && DSH_HARNESS_REACT="$DSH_HARNESS_REACT" node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 
 # The Skill has no build artifact; validate its structure and frontmatter with a compatible Skill Creator.
 python '<path-to-skill-creator>/scripts/quick_validate.py' skills/explore-opportunity
@@ -234,7 +215,6 @@ dsh-x-feed/             X insight TypeScript integration and Python pipeline
 skills/explore-opportunity/  Skill for verifying a lead and retaining explicit interest
 ui-context-compactor/   Single-session route and context projection
 ui-plugin-guardian/     Cordis plugin-fiber observation and remounting
-ui-progressive-todo/    Web TODO planning guidance and composer UI
 tsdown.client.ts        Shared Web-client bundling configuration
 web/                    Small Web platform type entry point
 ```
