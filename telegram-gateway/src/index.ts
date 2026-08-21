@@ -47,12 +47,18 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { ignoreFeedbackFailure, TurnFeedback } from './turn-feedback.ts'
+import { dispatchInbound } from './inbound-dispatch.ts'
+import type {
+  TelegramInboundEnvelope,
+  TelegramInboundResult,
+} from './inbound-contract.ts'
 import {
   buildIncomingUserText,
   chunkText,
   createTelegramHttp,
   TelegramApiError,
   type TelegramHttp,
+  type TelegramUpdate,
 } from './telegram-contract.ts'
 
 // Shared transport contract re-exported so existing consumers (dsh-assistant,
@@ -71,6 +77,20 @@ export {
   type TelegramUpdate,
   type TelegramApiErrorKind,
 } from './telegram-contract.ts'
+
+export {
+  isTelegramInboundEnvelope,
+  type TelegramInboundChat,
+  type TelegramInboundEnvelope,
+  type TelegramInboundFailed,
+  type TelegramInboundHandled,
+  type TelegramInboundMessage,
+  type TelegramInboundReference,
+  type TelegramInboundResult,
+  type TelegramInboundRootDelivered,
+  type TelegramInboundReadyEvent,
+  type TelegramInboundWaterfallEvent,
+} from './inbound-contract.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'telegram-gateway'
@@ -101,6 +121,8 @@ export interface Config {
   offsetDir: string
   /** Text chunk limit for outbound messages (Telegram hard cap 4096). Defaults to 4096. */
   maxMessageChars: number
+  /** Require a ready inbound interceptor before dispatching messages. Defaults to false. */
+  requireInboundInterceptor: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -112,6 +134,7 @@ export const Config: z<Config> = z.object({
   pollTimeoutSeconds: z.number().step(1).min(1).max(50).default(30),
   offsetDir: z.string().default(''),
   maxMessageChars: z.number().step(1).min(1).max(4096).default(4096),
+  requireInboundInterceptor: z.boolean().default(false),
 })
 
 /**
@@ -222,7 +245,9 @@ interface DrivenTurn {
 }
 
 /**
- * Drive one user message through the owned turn. `TurnFeedback` enqueues each
+ * Drive one user message through the owned turn. The caller creates and starts
+ * the presentation handle before dispatching the inbound envelope; this keeps
+ * root and intercepted paths on one lifecycle. `TurnFeedback` enqueues each
  * complete `assistant/message` (text + tool-call) as an immutable interim
  * message while the agent works; the authority (`summarizeTurn`) outcome and
  * the feedback handle are returned for the final write. Returns undefined when
@@ -234,20 +259,14 @@ async function driveTurn(
   text: string,
   sessions: { flush(session: unknown): Promise<void> },
   signal: AbortSignal,
-  http: TelegramHttp,
-  chatId: number,
-  triggerMessageId: number,
-  maxMessageChars: number,
+  feedback: TurnFeedback,
 ): Promise<DrivenTurn | undefined> {
-  if (!await waitForIdle(agent, signal)) return undefined
-  const feedback = new TurnFeedback({
-    http,
-    chatId,
-    triggerMessageId,
-    signal,
-    logger: ctx.logger,
-    maxMessageChars,
-  })
+  if (!await waitForIdle(agent, signal)) {
+    // The presentation handle is created before dispatch, so an abort before
+    // the listener seam is installed still needs to close this one lifecycle.
+    feedback.close()
+    return undefined
+  }
   // 精确认领本轮：同一 Session、firstSeq 之后、本轮 turn 边界内的事件才进入反馈。
   const firstSeq = agent.session.seq
   const disposeListener = ctx.on('session/event', (session, event) => {
@@ -255,7 +274,6 @@ async function driveTurn(
   })
   let completed = false
   try {
-    await feedback.start()
     agent.followup(createUserMessage({
       content: [{ type: 'text', text }],
       source: { kind: 'user' },
@@ -304,6 +322,62 @@ async function deliverText(
   for (const chunk of chunkText(text, maxChars)) {
     await http.sendMessage(chatId, chunk, undefined, signal)
   }
+}
+
+/** Build the neutral transport envelope consumed by inbound listeners. */
+function buildInboundEnvelope(
+  message: NonNullable<TelegramUpdate['message']>,
+  currentText: string,
+  signal: AbortSignal,
+): TelegramInboundEnvelope {
+  const reply = message.reply_to_message
+  const selectedText = nonEmptyText(message.quote?.text)
+  const messageText = nonEmptyText(reply?.text) ?? nonEmptyText(reply?.caption)
+  const reference = {
+    ...(reply === undefined ? {} : { messageId: reply.message_id }),
+    ...(selectedText === undefined ? {} : { selectedText }),
+    ...(messageText === undefined ? {} : { messageText }),
+  }
+  return Object.freeze({
+    chat: Object.freeze({ id: message.chat.id, type: message.chat.type }),
+    message: Object.freeze({ id: message.message_id }),
+    currentText,
+    ...(Object.keys(reference).length === 0 ? {} : { reference: Object.freeze(reference) }),
+    signal,
+  })
+}
+
+function nonEmptyText(value: string | undefined): string | undefined {
+  return value === undefined || value.trim() === '' ? undefined : value
+}
+
+/**
+ * Keep the optional mode compatible with small legacy test hosts that expose
+ * only the gateway services. Real Cordis contexts provide both methods; the
+ * defaults still pass through the same S0 dispatcher and required mode stays
+ * fail-closed because its default readiness result is not true.
+ */
+function inboundDispatchContext(ctx: Context): Parameters<typeof dispatchInbound>[0] {
+  const host = ctx as unknown as {
+    bail?: (event: string, envelope: TelegramInboundEnvelope) => unknown
+    waterfall?: (
+      event: string,
+      envelope: TelegramInboundEnvelope,
+      next: () => TelegramInboundResult | Promise<TelegramInboundResult>,
+    ) => TelegramInboundResult | Promise<TelegramInboundResult>
+  }
+  return {
+    bail: (event: 'telegram/inbound/ready', envelope: TelegramInboundEnvelope) => typeof host.bail === 'function'
+      ? host.bail.call(ctx, event, envelope)
+      : undefined,
+    waterfall: (
+      event: 'telegram/inbound',
+      envelope: TelegramInboundEnvelope,
+      next: () => TelegramInboundResult | Promise<TelegramInboundResult>,
+    ) => typeof host.waterfall === 'function'
+      ? host.waterfall.call(ctx, event, envelope, next)
+      : next(),
+  } as unknown as Parameters<typeof dispatchInbound>[0]
 }
 
 /** Wait for a retry delay or plugin disposal. */
@@ -440,35 +514,55 @@ export async function runGateway(
         if (text === undefined || text.trim() === '') continue
         // 回复引用上下文（§9）：引用正文只作为定位参考，当前用户消息才是指令。
         const effectiveText = buildIncomingUserText(text, message.reply_to_message, message.quote)
+        const feedback = new TurnFeedback({
+          http,
+          chatId,
+          triggerMessageId: message.message_id,
+          signal,
+          logger: ctx.logger,
+          maxMessageChars: config.maxMessageChars,
+        })
         let driven: DrivenTurn | undefined
         try {
-          driven = await driveTurn(
-            ctx,
-            agent,
-            effectiveText,
-            sessions as never,
-            signal,
-            http,
-            chatId,
-            message.message_id,
-            config.maxMessageChars,
-          )
-          if (driven === undefined) return
-          if (driven.feedback.reactionArmed) {
+          await feedback.start()
+          if (feedback.reactionArmed) {
             armedReaction = { chatId, messageId: message.message_id }
+          }
+          const envelope = buildInboundEnvelope(message, text, signal)
+          const defaultRoot = async (): Promise<TelegramInboundResult> => {
+            driven = await driveTurn(ctx, agent, effectiveText, sessions as never, signal, feedback)
+            return { kind: 'root-delivered' }
+          }
+          const result = await dispatchInbound(
+            inboundDispatchContext(ctx),
+            envelope,
+            config.requireInboundInterceptor,
+            defaultRoot,
+          )
+
+          if (result.kind === 'handled') {
+            await feedback.finish(result.finalText)
+            armedReaction = undefined
+            continue
+          }
+          if (result.kind === 'failed') {
+            await feedback.fail(result.visibleError)
+            armedReaction = undefined
+            continue
+          }
+          if (driven === undefined) {
+            if (signal.aborted) return
+            await feedback.fail('Inbound root did not run')
+            armedReaction = undefined
+            continue
           }
           if (driven.outcome === undefined) {
             if (driven.failure !== undefined) {
               // 执行失败：沿用现有错误文案，收尾为 👎。
-              await driven.feedback.markFailed()
-              armedReaction = undefined
-              await deliverText(
-                http,
-                chatId,
+              await driven.feedback.fail(
                 `⚠️ 执行失败：${driven.failure instanceof Error ? driven.failure.message : String(driven.failure)}`,
-                config.maxMessageChars,
-                signal,
               )
+              armedReaction = undefined
               continue
             }
             // 插件中止：交给 finally 清理未完成的 👀。
@@ -483,6 +577,10 @@ export async function runGateway(
           }
           armedReaction = undefined
         } catch (error) {
+          if (feedback.reactionArmed) {
+            armedReaction = { chatId, messageId: message.message_id }
+          }
+          feedback.close()
           if (signal.aborted) return
           if (driven !== undefined) {
             // 最终交付失败：不标 👍，尽力收尾为 👎。

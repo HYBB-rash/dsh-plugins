@@ -3,7 +3,8 @@
  * X data directory (§10). Each line is one immutable event; queries fold.
  *
  * Validation contract:
- * - `canonicalUrl/originalUrl` or `topic` must be present;
+ * - newly appended save/unsave events must have a canonical URL; legacy
+ *   topic-only rating rows remain readable for audit compatibility;
  * - X/Twitter URLs are canonicalized to `https://x.com/...` (query/fragment
  *   stripped), same rule as the Python kernel's `canonical_url`;
  * - like/dislike and save/unsave are two independent dimensions: a later
@@ -46,6 +47,7 @@ export type XFeedbackEvent = {
 /** Stable write error value — the model must never claim a record it didn't make. */
 export type FeedbackWriteError =
   | { readonly code: 'invalid_operation'; readonly message: string }
+  | { readonly code: 'rating_requires_clean_feedback'; readonly message: string }
   | { readonly code: 'missing_target'; readonly message: string }
   | { readonly code: 'write_failed'; readonly message: string }
 
@@ -54,7 +56,7 @@ export type FeedbackWriteResult =
   | { readonly ok: true; readonly event: XFeedbackEvent }
   | ({ readonly ok: false } & FeedbackWriteError)
 
-/** Folded display-layer state for one URL (or one topic). */
+/** Folded display-layer state for one URL (or one legacy topic). */
 export type FoldedFeedback = {
   readonly key: string
   readonly like: boolean
@@ -75,7 +77,7 @@ export type SavedItem = {
   readonly note?: string
 }
 
-const OPERATIONS = new Set(['like', 'dislike', 'save', 'unsave'])
+const WRITABLE_OPERATIONS = new Set(['save', 'unsave'])
 
 /** Resolve the default Harness X data dir under DSH_HOME. */
 export function defaultStoreDir(dshHome: string): string {
@@ -148,13 +150,13 @@ export function foldFeedback(events: readonly XFeedbackEvent[]): Map<string, Fol
       state.saved = true
       state.savedAt = event.createdAt
       state.unsavedAt = undefined
+      state.title = event.title === undefined || event.title === '' ? undefined : event.title
+      state.note = event.note === undefined || event.note === '' ? undefined : event.note
     } else if (event.operation === 'unsave') {
       state.saved = false
       state.unsavedAt = event.createdAt
       state.savedAt = undefined
     }
-    if (event.title !== undefined && event.title !== '') state.title = event.title
-    if (event.note !== undefined && event.note !== '') state.note = event.note
   }
   return new Map([...folded.entries()].map(([key, s]) => [key, {
     key: s.key,
@@ -197,23 +199,29 @@ export class XFeedbackStore {
     return events
   }
 
-  /** Append one validated, normalized event as one durable JSONL line. */
+  /** Append one validated, normalized save/unsave event as one durable JSONL line. */
   append(input: {
-    operation: 'like' | 'dislike' | 'save' | 'unsave'
+    operation: 'save' | 'unsave'
     url?: string
     title?: string
-    topic?: string
     note?: string
     now?: () => number
   }): FeedbackWriteResult {
-    if (!OPERATIONS.has(input.operation)) {
-      return { ok: false, code: 'invalid_operation', message: `operation must be one of like|dislike|save|unsave, got "${String(input.operation)}"` }
+    const operation = (input as { operation: string }).operation
+    if (operation === 'like' || operation === 'dislike') {
+      return {
+        ok: false,
+        code: 'rating_requires_clean_feedback',
+        message: 'like/dislike 必须经过 Telegram clean feedback 与 TrustedFact 链，不能写入旧反馈账本',
+      }
+    }
+    if (!WRITABLE_OPERATIONS.has(input.operation)) {
+      return { ok: false, code: 'invalid_operation', message: `operation must be one of save|unsave, got "${String(input.operation)}"` }
     }
     const originalUrl = input.url !== undefined ? String(input.url).trim() : ''
     const canonical = originalUrl === '' ? '' : canonicalizeUrl(originalUrl)
-    const topic = input.topic !== undefined ? String(input.topic).trim() : ''
-    if (originalUrl === '' && topic === '') {
-      return { ok: false, code: 'missing_target', message: 'url 或 topic 至少提供一个，才能定位反馈对象' }
+    if (originalUrl === '') {
+      return { ok: false, code: 'missing_target', message: '收藏必须提供 URL，才能定位收藏对象' }
     }
     const event: XFeedbackEvent = {
       schemaVersion: 1,
@@ -225,7 +233,6 @@ export class XFeedbackStore {
       ...(input.title !== undefined && String(input.title).trim() !== ''
         ? { title: String(input.title).trim() }
         : {}),
-      ...(topic === '' ? {} : { topic }),
       ...(input.note !== undefined && String(input.note).trim() !== ''
         ? { note: String(input.note).trim() }
         : {}),

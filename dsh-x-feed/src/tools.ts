@@ -21,7 +21,6 @@ export interface RecordFeedbackInput {
   operation: 'like' | 'dislike' | 'save' | 'unsave'
   url?: string
   title?: string
-  topic?: string
   note?: string
 }
 
@@ -60,23 +59,23 @@ export function registerXFeedTools(
   disposers.push(toolCtx.tools.register(defineTool({
     name: 'x_feed_record_feedback',
     description:
-      '记录用户对 X 信息流具体内容的喜欢/不喜欢/收藏/取消收藏（Harness 本地反馈账本）。'
-      + '用户在回复中明确评价某条 X 内容时调用；先定位目标再写入。'
-      + '即使你认为该内容已经记录过，也必须调用本工具（写入是幂等覆盖），不要凭空声称「已记录」或「无需记录」。'
-      + '只有当前消息或当前 Telegram 引用能唯一定位 X URL、唯一序号、唯一标题或明确 topic 时才写入；含多个 X URL 的引用里只说「这个/那条」时必须先问用户，不能用 topic 代替猜测。'
+      '记录用户对 X 信息流具体内容的收藏/取消收藏（Harness 本地收藏账本）。'
+      + 'like/dislike 不得通过本工具写入；必须由 Telegram clean feedback 与 TrustedFact 链处理。'
+      + '用户明确收藏或取消收藏时调用；先定位目标再写入。'
+      + '即使你认为该内容已经记录过，也必须调用本工具（写入是 append-only），不要凭空声称「已记录」或「无需记录」。'
+      + '只有当前消息或当前 Telegram 引用能唯一定位 X URL、唯一序号或唯一标题时才写入；含多个 X URL 的引用里只说「这个/那条」时必须先问用户。'
       + '没有任何 X 线索的普通对话不调用本工具，也不根据会话历史猜。'
       + '写入失败必须如实返回错误，不能口头假称已记录。'
-      + '具体单条 like/save 只进 X 反馈账本，不进长期记忆；不创建当前承诺、cron 或后台 worker。',
+      + '具体单条 save/unsave 只进 X 收藏账本，不进长期记忆；不创建当前承诺、cron 或后台 worker。',
     parameters: {
       operation: {
         type: 'string',
         enum: ['like', 'dislike', 'save', 'unsave'],
         required: true,
-        description: 'like/dislike 与 save/unsave 是两个独立维度：收藏不自动等于喜欢，喜欢也不自动收藏。',
+        description: '兼容旧 schema；正常执行只接受 save/unsave。like/dislike 会稳定拒绝并引导 clean feedback。',
       },
       url: { type: 'string', description: '明确指向具体推文时传（引用里只有一个 X URL 时可以直接定位）。' },
       title: { type: 'string', description: '能从引用消息可靠还原标题时传。' },
-      topic: { type: 'string', description: '用户评价整类内容而不是单一 URL 时传（如“这批都没兴趣”）。' },
       note: { type: 'string', description: '用户表达的简短、具体理由，可省略。' },
     },
     output: {
@@ -105,14 +104,20 @@ export function registerXFeedTools(
     },
     async execute(args: Record<string, unknown>): Promise<RecordFeedbackOutput> {
       const operation = args.operation
-      if (operation !== 'like' && operation !== 'dislike' && operation !== 'save' && operation !== 'unsave') {
-        return { ok: false, code: 'invalid_operation', message: 'operation 必须是 like|dislike|save|unsave' }
+      if (operation === 'like' || operation === 'dislike') {
+        return {
+          ok: false,
+          code: 'rating_requires_clean_feedback',
+          message: 'like/dislike 必须经过 Telegram clean feedback 与 TrustedFact 链，不能写入旧反馈账本',
+        }
+      }
+      if (operation !== 'save' && operation !== 'unsave') {
+        return { ok: false, code: 'invalid_operation', message: 'operation 必须是 save|unsave' }
       }
       const result = deps.store.append({
         operation,
         ...(typeof args.url === 'string' ? { url: args.url } : {}),
         ...(typeof args.title === 'string' ? { title: args.title } : {}),
-        ...(typeof args.topic === 'string' ? { topic: args.topic } : {}),
         ...(typeof args.note === 'string' ? { note: args.note } : {}),
       })
       return toToolError(result)

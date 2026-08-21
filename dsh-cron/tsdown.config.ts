@@ -13,5 +13,6 @@ export default defineConfig({
   target: 'es2024',
   fixedExtension: false,
   dts: false,
-  clean: false,
+  // Only remove generated root-level JavaScript; preserve tsc-generated lib/types inputs.
+  clean: ['lib/*.js'],
 })

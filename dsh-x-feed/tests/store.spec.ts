@@ -43,9 +43,9 @@ describe('canonicalizeUrl', () => {
 })
 
 describe('XFeedbackStore.append validation (§10.1)', () => {
-  it('url 与 topic 都没有 → 稳定错误，不写账本', () => {
+  it('收藏 URL 没有 → 稳定错误，不写账本', () => {
     const store = new XFeedbackStore(tempDir())
-    const r = store.append({ operation: 'like', now })
+    const r = store.append({ operation: 'save', now })
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.code).toBe('missing_target')
     expect(store.readAll()).toHaveLength(0)
@@ -55,12 +55,15 @@ describe('XFeedbackStore.append validation (§10.1)', () => {
     const store = new XFeedbackStore(tempDir())
     const r = store.append({ operation: 'favorite' as never, url: 'https://x.com/a/1', now })
     expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.code).toBe('invalid_operation')
+    if (!r.ok) {
+      expect(r.code).toBe('invalid_operation')
+      expect(r.message).toBe('operation must be one of save|unsave, got "favorite"')
+    }
   })
 
-  it('写入事件包含规范化字段与原始 URL', () => {
+  it('写入收藏事件包含规范化字段与原始 URL', () => {
     const store = new XFeedbackStore(tempDir())
-    const r = store.append({ operation: 'like', url: 'https://twitter.com/u/status/9?x=1', title: '标题', note: '有增量', now })
+    const r = store.append({ operation: 'save', url: 'https://twitter.com/u/status/9?x=1', title: '标题', note: '有增量', now })
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.event.canonicalUrl).toBe('https://x.com/u/status/9')
@@ -71,13 +74,31 @@ describe('XFeedbackStore.append validation (§10.1)', () => {
     expect(r.event.id).toBeTruthy()
   })
 
-  it('topic-only 事件允许（batch feedback，不伪造 URL）', () => {
+  it('旧 rating append 被稳定拒绝且不写账本', () => {
     const store = new XFeedbackStore(tempDir())
-    const r = store.append({ operation: 'dislike', topic: 'Codex 转述', note: '没有新增信息', now })
-    expect(r.ok).toBe(true)
-    if (!r.ok) return
-    expect(r.event.topic).toBe('Codex 转述')
-    expect(r.event.canonicalUrl).toBeUndefined()
+    const r = store.append({ operation: 'dislike', url: 'https://x.com/u/1', note: '没有新增信息', now } as never)
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.code).toBe('rating_requires_clean_feedback')
+    expect(store.readAll()).toHaveLength(0)
+  })
+
+  it('旧 rating 原始行仍可读，但不会由 append 重新产生', () => {
+    const dir = tempDir()
+    const store = new XFeedbackStore(dir)
+    const ledger = join(dir, 'feedback.jsonl')
+    writeFileSync(ledger, JSON.stringify({
+      schemaVersion: 1,
+      id: 'legacy-rating',
+      createdAt: 't',
+      operation: 'dislike',
+      topic: 'Codex 转述',
+      note: '旧理由',
+    }) + '\n')
+    const before = readFileSync(ledger)
+    expect(store.readAll()[0]?.operation).toBe('dislike')
+    const result = store.append({ operation: 'dislike', topic: 'new' } as never)
+    expect(result.ok).toBe(false)
+    expect(readFileSync(ledger).equals(before)).toBe(true)
   })
 })
 
@@ -101,12 +122,15 @@ describe('folding (§10.1)', () => {
   it('原始事件不原地改写（append-only）', () => {
     const dir = tempDir()
     const store = new XFeedbackStore(dir)
-    store.append({ operation: 'like', url: 'https://x.com/u/1', now })
-    store.append({ operation: 'dislike', url: 'https://x.com/u/1', now })
+    const ledger = join(dir, 'feedback.jsonl')
+    writeFileSync(ledger, JSON.stringify({ schemaVersion: 1, id: 'legacy-like', createdAt: 't1', operation: 'like', canonicalUrl: 'https://x.com/u/1' }) + '\n')
+    const before = readFileSync(ledger)
+    store.append({ operation: 'save', url: 'https://x.com/u/1', now })
     const all = store.readAll()
     expect(all).toHaveLength(2)
     expect(all[0]!.operation).toBe('like')
-    expect(all[1]!.operation).toBe('dislike')
+    expect(all[1]!.operation).toBe('save')
+    expect(readFileSync(ledger).subarray(0, before.length).equals(before)).toBe(true)
   })
 
   it('损坏的单行读取时跳过并告警，不影响其余事件', () => {
@@ -139,8 +163,8 @@ describe('folding (§10.1)', () => {
     writeFileSync(ledger, original)
 
     const result = new XFeedbackStore(dir).append({
-      operation: 'dislike',
-      topic: '新主题',
+      operation: 'save',
+      url: 'https://x.com/u/new',
       now,
     })
 
@@ -158,13 +182,13 @@ describe('folding (§10.1)', () => {
 
     await Promise.all([
       Promise.resolve().then(() => first.append({
-        operation: 'dislike',
+        operation: 'save',
         url: 'https://x.com/u/1',
         now,
       })),
       Promise.resolve().then(() => second.append({
-        operation: 'dislike',
-        topic: 'Codex 纯转述',
+        operation: 'save',
+        url: 'https://x.com/topic',
         now,
       })),
       ...Array.from({ length: totalExtraEvents }, (_, index) => Promise.resolve().then(() => {
@@ -179,8 +203,8 @@ describe('folding (§10.1)', () => {
 
     const events = first.readAll()
     expect(events).toHaveLength(totalExtraEvents + 2)
-    expect(events.some(event => event.canonicalUrl === 'https://x.com/u/1' && event.operation === 'dislike')).toBe(true)
-    expect(events.some(event => event.topic === 'Codex 纯转述' && event.operation === 'dislike')).toBe(true)
+    expect(events.some(event => event.canonicalUrl === 'https://x.com/u/1' && event.operation === 'save')).toBe(true)
+    expect(events.some(event => event.canonicalUrl === 'https://x.com/topic' && event.operation === 'save')).toBe(true)
   })
 })
 
@@ -203,5 +227,26 @@ describe('saved list (§10.2)', () => {
     const store = new XFeedbackStore(tempDir())
     for (let i = 0; i < 5; i++) store.append({ operation: 'save', url: `https://x.com/u/${i}`, now })
     expect(store.listSaved(2)).toHaveLength(2)
+  })
+
+  it('后续旧 rating note 不能覆盖收藏 note，重新收藏会使用新 note', () => {
+    const dir = tempDir()
+    const store = new XFeedbackStore(dir)
+    store.append({ operation: 'save', url: 'https://x.com/u/1', title: '原标题', note: '收藏理由', now })
+    const ledger = join(dir, 'feedback.jsonl')
+    writeFileSync(ledger, `${readFileSync(ledger)}${JSON.stringify({
+      schemaVersion: 1,
+      id: 'legacy-rating-note',
+      createdAt: 't-rating',
+      operation: 'dislike',
+      canonicalUrl: 'https://x.com/u/1',
+      title: '旧标题',
+      note: '旧评价理由',
+    })}\n`, 'utf8')
+    expect(store.listSaved()[0]).toMatchObject({ note: '收藏理由', title: '原标题' })
+    store.append({ operation: 'unsave', url: 'https://x.com/u/1', now })
+    store.append({ operation: 'save', url: 'https://x.com/u/1', title: '新标题', now })
+    expect(store.listSaved()[0]).toMatchObject({ title: '新标题' })
+    expect(store.listSaved()[0]).not.toHaveProperty('note')
   })
 })

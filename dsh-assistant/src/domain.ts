@@ -62,7 +62,7 @@ export type WorkerControlState = 'none' | 'pause_requested' | 'resume_requested'
 export type SourceSurface = 'web' | 'telegram'
 
 /** Outbox message kinds (landing guide §6.2). */
-export type OutboxKind = 'check_in' | 'completed' | 'blocked' | 'missed_check_in' | 'progress'
+export type OutboxKind = 'check_in' | 'completed' | 'blocked' | 'missed_check_in' | 'progress' | 'monitor_event'
 
 /** Outbox lifecycle states (landing guide §6.2). */
 export type OutboxState = 'pending' | 'claimed' | 'delivered' | 'failed' | 'uncertain' | 'cancelled'
@@ -80,6 +80,49 @@ export const TITLE_MAX = 500
 export const TEXT_MAX = 5000
 export const CHECK_IN_MIN = 1
 export const CHECK_IN_MAX = 10080
+
+/**
+ * Monitor state is deliberately opaque to the store. It is bounded before
+ * persistence, but the domain does not interpret whether it is text or JSON.
+ * Event identities are stable opaque keys with a bounded UTF-8 representation;
+ * the worker prompt is responsible for choosing a non-sensitive identity.
+ */
+export const MONITOR_DIRECTION_MAX = TEXT_MAX
+export const MONITOR_CHECKPOINT_MAX = TEXT_MAX
+/** Maximum UTF-8 bytes for the opaque, non-secret event identity. */
+export const MONITOR_EVENT_KEY_MAX_BYTES = 512
+
+function validateOpaqueMonitorValue(value: unknown, field: string, max: number): string | undefined {
+  if (typeof value !== 'string') return `${field} must be a string.`
+  const trimmed = value.trim()
+  if (trimmed.length < 1) return `${field} must not be empty.`
+  if (trimmed.length > max) return `${field} must be at most ${max} characters.`
+  // SQLite TEXT can store NUL, but it makes logs, JSON, and protocol parsing
+  // ambiguous. Reject it at the pure boundary instead of relying on callers.
+  if (trimmed.includes('\u0000')) return `${field} must not contain NUL characters.`
+  return undefined
+}
+
+/** Validate a monitor's opaque direction text/JSON before persistence. */
+export function validateMonitorDirection(value: unknown): string | undefined {
+  return validateOpaqueMonitorValue(value, 'monitorDirection', MONITOR_DIRECTION_MAX)
+}
+
+/** Validate a monitor's opaque checkpoint text/JSON before persistence. */
+export function validateMonitorCheckpoint(value: unknown): string | undefined {
+  return validateOpaqueMonitorValue(value, 'monitorCheckpoint', MONITOR_CHECKPOINT_MAX)
+}
+
+/** Validate a stable opaque monitor event identity before persistence. */
+export function validateMonitorEventKey(value: unknown): string | undefined {
+  if (typeof value !== 'string') return 'eventKey must be a string.'
+  const trimmed = value.trim()
+  if (trimmed.length < 1) return 'eventKey must not be empty.'
+  if (trimmed.includes('\u0000')) return 'eventKey must not contain NUL characters.'
+  const bytes = new TextEncoder().encode(trimmed).byteLength
+  if (bytes > MONITOR_EVENT_KEY_MAX_BYTES) return `eventKey must be at most ${MONITOR_EVENT_KEY_MAX_BYTES} UTF-8 bytes.`
+  return undefined
+}
 
 /** Validate a commitment title; returns an English stable error or undefined. */
 export function validateTitle(value: unknown): string | undefined {
@@ -119,6 +162,8 @@ export type ToolErrorCode =
   | 'worker_control_failed'
   | 'persistence_failed'
   | 'delivery_uncertain'
+  | 'schedule_required'
+  | 'control_unavailable'
 
 /** One JSON-safe tool error value. */
 export interface ToolError {
@@ -130,6 +175,7 @@ export interface ToolError {
 export type UpdateAction =
   | 'pause'
   | 'resume'
+  | 'revise_monitor'
   | 'still_working'
   | 'block'
   | 'complete'
@@ -142,6 +188,9 @@ export type WorkerSettlement =
     readonly status: 'completed'
     readonly summary: string
     readonly evidence?: readonly string[]
+    /** Present only when a monitor round completed with a durable event. */
+    readonly eventKey?: string
+    readonly checkpoint?: string
   }
   | {
     readonly status: 'blocked'
@@ -203,7 +252,7 @@ function asStringArray(value: unknown): string[] | undefined {
  * Only the last non-empty line is inspected; the marker prefix must match
  * exactly and the payload must pass the strict schema.
  */
-export function parseWorkerResult(text: string): WorkerResultParse {
+export function parseWorkerResult(text: string, expectedKind?: ResponsibilityKind): WorkerResultParse {
   const body = stripProtocolLine(text)
   const line = lastNonEmptyLine(text)
   if (!line.startsWith(WORKER_RESULT_PREFIX)) {
@@ -229,9 +278,32 @@ export function parseWorkerResult(text: string): WorkerResultParse {
     if (parsed.evidence !== undefined && evidence === undefined) {
       return { kind: 'invalid', reason: 'evidence must be an array of strings', body }
     }
+    const eventKey = asString(parsed.eventKey)
+    const checkpoint = asString(parsed.checkpoint)
+    if ((eventKey === undefined) !== (checkpoint === undefined)) {
+      return { kind: 'invalid', reason: 'monitor event requires both eventKey and checkpoint', body }
+    }
+    if (expectedKind === 'delegated' && (eventKey !== undefined || checkpoint !== undefined)) {
+      return { kind: 'invalid', reason: 'delegated completion must not include monitor event fields', body }
+    }
+    if (expectedKind === 'monitor' && (eventKey === undefined || checkpoint === undefined)) {
+      return { kind: 'invalid', reason: 'monitor completion requires eventKey and checkpoint', body }
+    }
+    if (eventKey !== undefined) {
+      const eventError = validateMonitorEventKey(eventKey)
+      if (eventError !== undefined) return { kind: 'invalid', reason: eventError, body }
+      const checkpointError = validateMonitorCheckpoint(checkpoint)
+      if (checkpointError !== undefined) return { kind: 'invalid', reason: checkpointError, body }
+    }
     const settlement: WorkerSettlement = evidence !== undefined && evidence.length > 0
-      ? { status: 'completed', summary: summary.trim(), evidence }
-      : { status: 'completed', summary: summary.trim() }
+      ? {
+        status: 'completed', summary: summary.trim(), evidence,
+        ...eventKey === undefined ? {} : { eventKey: eventKey.trim(), checkpoint: checkpoint! },
+      }
+      : {
+        status: 'completed', summary: summary.trim(),
+        ...eventKey === undefined ? {} : { eventKey: eventKey.trim(), checkpoint: checkpoint! },
+      }
     return { kind: 'settlement', settlement, body }
   }
   if (status === 'blocked') {
@@ -261,9 +333,13 @@ export function parseWorkerResult(text: string): WorkerResultParse {
 export interface UpdateValidationInput {
   readonly action: UpdateAction
   readonly workOwner: WorkOwner
+  /** Optional for backwards-compatible callers; required by revise_monitor. */
+  readonly kind?: ResponsibilityKind
   readonly status: CommitmentStatus
   readonly mode: 'web' | 'telegram'
   readonly hasLiveWorker: boolean
+  /** The complete replacement monitor direction, only for revise_monitor. */
+  readonly direction?: string
 }
 
 export type UpdateValidation =
@@ -304,6 +380,31 @@ export function validateUpdate(input: UpdateValidationInput): UpdateValidation {
         return { ok: false, code: 'invalid_transition', message: `Cannot resume a ${status} commitment.` }
       }
       return { ok: true }
+    case 'revise_monitor': {
+      if (workOwner !== 'agent' || input.kind !== 'monitor') {
+        return {
+          ok: false,
+          code: 'wrong_work_owner',
+          message: 'revise_monitor applies only to Agent-owned monitor commitments.',
+        }
+      }
+      if (mode === 'web') {
+        return {
+          ok: false,
+          code: 'wrong_control_surface',
+          message: 'Agent-owned monitor commitments are controlled from Telegram.',
+        }
+      }
+      if (status === 'completed' || status === 'cancelled' || status === 'pending') {
+        return { ok: false, code: 'invalid_transition', message: `Cannot revise a ${status} monitor commitment.` }
+      }
+      if (input.direction === undefined) {
+        return { ok: false, code: 'invalid_transition', message: 'revise_monitor requires a non-empty direction.' }
+      }
+      const directionError = validateMonitorDirection(input.direction)
+      if (directionError !== undefined) return { ok: false, code: 'invalid_transition', message: directionError }
+      return { ok: true }
+    }
     case 'still_working':
       if (workOwner === 'agent') {
         return {

@@ -1,0 +1,296 @@
+/**
+ * Generic per-run environment boundary for unattended Agent jobs.
+ *
+ * dsh-cron owns the registry and the lifecycle seam; a provider owns the
+ * concrete prompt/tool setup.  This module deliberately has no knowledge of
+ * any provider's business domain.
+ */
+
+import type { Context } from '@deepseek-ai/cordis'
+
+/** Public Cordis service name for the context-owned registry. */
+export const CRON_AGENT_ENVIRONMENT_REGISTRY = 'cronAgentEnvironmentRegistry' as const
+
+export type CronAgentEnvironmentJobKind = 'agent' | 'command'
+export type CronAgentEnvironmentSessionMode = 'persistent' | 'per_run'
+export type CronAgentEnvironmentGate = 'forbidden' | 'present'
+
+/** The execution facts a provider may constrain. Omitted fields are unconstrained. */
+export interface CronAgentEnvironmentRequirements {
+  readonly jobKind?: CronAgentEnvironmentJobKind
+  readonly sessionMode?: CronAgentEnvironmentSessionMode
+  readonly gate?: CronAgentEnvironmentGate
+}
+
+/** Generic facts available before an Agent or command is started. */
+export interface CronAgentEnvironmentPrepareContext {
+  /** Exact persisted cron job id; providers must not infer it from a marker. */
+  readonly jobId: string
+  readonly jobKind: CronAgentEnvironmentJobKind
+  readonly sessionMode: CronAgentEnvironmentSessionMode
+  readonly gate: CronAgentEnvironmentGate
+  readonly runId: string
+}
+
+export type CronAgentEnvironmentSetup = (agent: unknown) => void | Promise<void>
+
+/**
+ * The bounded result that a provider may validate before cron delivers it.
+ * This deliberately mirrors only the generic terminal shape; dsh-cron does
+ * not know which provider owns the validation rules.
+ */
+export interface CronAgentEnvironmentOutcome {
+  readonly text: string
+  readonly error: string | undefined
+}
+
+export type CronAgentEnvironmentFinalize = (
+  outcome: CronAgentEnvironmentOutcome,
+) => void | Promise<void>
+
+/** A provider-created per-run lease. The registry adds its resolved marker. */
+export interface CronAgentEnvironmentLease {
+  /** Apply the exact provider setup to the newly-created Agent. */
+  readonly setupAgent: CronAgentEnvironmentSetup
+  /** Verify that the resulting Agent surface is exactly what the provider expects. */
+  readonly verifySurface: CronAgentEnvironmentSetup
+  /** Validate the terminal outcome before any success delivery is attempted. */
+  readonly finalizeOutcome?: CronAgentEnvironmentFinalize
+  /** Release all provider-owned per-run resources. */
+  readonly dispose: () => void | Promise<void>
+}
+
+/** The lease returned to the scheduler after successful provider preparation. */
+export interface ResolvedCronAgentEnvironmentLease extends CronAgentEnvironmentLease {
+  readonly marker: string
+}
+
+export interface CronAgentEnvironmentProvider {
+  /** Stable persisted marker, e.g. `x-feed/v1`; never inferred from a prompt. */
+  readonly marker: string
+  /** Generic job constraints checked before `prepare` is called. */
+  readonly requirements: CronAgentEnvironmentRequirements
+  /** Prepare a fresh lease for one claimed run. */
+  readonly prepare: (context: CronAgentEnvironmentPrepareContext) => Promise<CronAgentEnvironmentLease>
+}
+
+export type CronAgentEnvironmentErrorCode =
+  | 'missing_provider'
+  | 'duplicate_provider'
+  | 'requirements_mismatch'
+  | 'prepare_failed'
+  | 'surface_verification_failed'
+
+export interface CronAgentEnvironmentError {
+  readonly code: CronAgentEnvironmentErrorCode
+  readonly marker?: string
+  readonly message: string
+  readonly operation?: 'prepare' | 'setup' | 'verify'
+}
+
+export type CronAgentEnvironmentResolution =
+  | { readonly ok: true; readonly provider: CronAgentEnvironmentProvider }
+  | { readonly ok: false; readonly error: CronAgentEnvironmentError }
+
+export type CronAgentEnvironmentPrepareResult =
+  | { readonly ok: true; readonly lease: ResolvedCronAgentEnvironmentLease }
+  | { readonly ok: false; readonly error: CronAgentEnvironmentError }
+
+export type CronAgentEnvironmentOperationResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: CronAgentEnvironmentError }
+
+export interface CronAgentEnvironmentRegistry {
+  /** Add a provider and return an idempotent disposer for this registration. */
+  readonly register: (provider: CronAgentEnvironmentProvider) => () => void
+  /** Resolve a marker without a default-provider fallback. */
+  readonly resolve: (marker: string | undefined) => CronAgentEnvironmentResolution
+  /** Resolve, validate requirements, then prepare one provider lease. */
+  readonly prepare: (
+    marker: string | undefined,
+    context: CronAgentEnvironmentPrepareContext,
+  ) => Promise<CronAgentEnvironmentPrepareResult>
+  /** Run the exact Agent setup through the lease seam. */
+  readonly setup: (lease: ResolvedCronAgentEnvironmentLease, agent: unknown) => Promise<CronAgentEnvironmentOperationResult>
+  /** Verify the exact Agent surface through the lease seam. */
+  readonly verify: (lease: ResolvedCronAgentEnvironmentLease, agent: unknown) => Promise<CronAgentEnvironmentOperationResult>
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    readonly cronAgentEnvironmentRegistry: CronAgentEnvironmentRegistry
+  }
+}
+
+function error(
+  code: CronAgentEnvironmentErrorCode,
+  marker: string | undefined,
+  message: string,
+  operation?: CronAgentEnvironmentError['operation'],
+): CronAgentEnvironmentError {
+  return {
+    code,
+    ...(marker === undefined ? {} : { marker }),
+    message,
+    ...(operation === undefined ? {} : { operation }),
+  }
+}
+
+function matchesRequirements(
+  requirements: CronAgentEnvironmentRequirements,
+  context: CronAgentEnvironmentPrepareContext,
+): boolean {
+  return (requirements.jobKind === undefined || requirements.jobKind === context.jobKind)
+    && (requirements.sessionMode === undefined || requirements.sessionMode === context.sessionMode)
+    && (requirements.gate === undefined || requirements.gate === context.gate)
+}
+
+function operationFailure(
+  marker: string,
+  operation: 'setup' | 'verify',
+  cause: unknown,
+): CronAgentEnvironmentOperationResult {
+  const detail = cause instanceof Error ? cause.message : String(cause)
+  return {
+    ok: false,
+    error: error(
+      'surface_verification_failed',
+      marker,
+      `run environment ${operation} failed: ${detail}`,
+      operation,
+    ),
+  }
+}
+
+/** Create a generic provider registry. No provider is installed implicitly. */
+export function createCronAgentEnvironmentRegistry(
+  initialProviders: readonly CronAgentEnvironmentProvider[] = [],
+): CronAgentEnvironmentRegistry {
+  const providers = new Map<string, CronAgentEnvironmentProvider[]>()
+
+  const register = (provider: CronAgentEnvironmentProvider): (() => void) => {
+    const existing = providers.get(provider.marker)
+    if (existing === undefined) {
+      providers.set(provider.marker, [provider])
+    } else {
+      existing.push(provider)
+    }
+    let disposed = false
+    return () => {
+      if (disposed) return
+      disposed = true
+      const current = providers.get(provider.marker)
+      if (current === undefined) return
+      const index = current.indexOf(provider)
+      if (index >= 0) current.splice(index, 1)
+      if (current.length === 0) providers.delete(provider.marker)
+    }
+  }
+
+  for (const provider of initialProviders) register(provider)
+
+  const resolve = (marker: string | undefined): CronAgentEnvironmentResolution => {
+    if (marker === undefined || marker.trim() === '') {
+      return {
+        ok: false,
+        error: error('missing_provider', marker, 'an agent environment marker is required'),
+      }
+    }
+    const matches = providers.get(marker)
+    if (matches === undefined || matches.length === 0) {
+      return {
+        ok: false,
+        error: error('missing_provider', marker, `no agent environment provider is registered for ${marker}`),
+      }
+    }
+    if (matches.length !== 1) {
+      return {
+        ok: false,
+        error: error('duplicate_provider', marker, `multiple agent environment providers are registered for ${marker}`),
+      }
+    }
+    const [provider] = matches
+    if (provider === undefined) {
+      return {
+        ok: false,
+        error: error('missing_provider', marker, `no agent environment provider is registered for ${marker}`),
+      }
+    }
+    return { ok: true, provider }
+  }
+
+  const prepare = async (
+    marker: string | undefined,
+    context: CronAgentEnvironmentPrepareContext,
+  ): Promise<CronAgentEnvironmentPrepareResult> => {
+    const resolved = resolve(marker)
+    if (!resolved.ok) return resolved
+    if (!matchesRequirements(resolved.provider.requirements, context)) {
+      return {
+        ok: false,
+        error: error(
+          'requirements_mismatch',
+          resolved.provider.marker,
+          `agent environment requirements do not match run ${context.runId}`,
+        ),
+      }
+    }
+    try {
+      const lease = await resolved.provider.prepare(context)
+      return {
+        ok: true,
+        lease: { marker: resolved.provider.marker, ...lease },
+      }
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      return {
+        ok: false,
+        error: error(
+          'prepare_failed',
+          resolved.provider.marker,
+          `run environment prepare failed: ${detail}`,
+          'prepare',
+        ),
+      }
+    }
+  }
+
+  const setup = async (
+    lease: ResolvedCronAgentEnvironmentLease,
+    agent: unknown,
+  ): Promise<CronAgentEnvironmentOperationResult> => {
+    try {
+      await lease.setupAgent(agent)
+      return { ok: true }
+    } catch (cause) {
+      return operationFailure(lease.marker, 'setup', cause)
+    }
+  }
+
+  const verify = async (
+    lease: ResolvedCronAgentEnvironmentLease,
+    agent: unknown,
+  ): Promise<CronAgentEnvironmentOperationResult> => {
+    try {
+      await lease.verifySurface(agent)
+      return { ok: true }
+    } catch (cause) {
+      return operationFailure(lease.marker, 'verify', cause)
+    }
+  }
+
+  return { register, resolve, prepare, setup, verify }
+}
+
+/**
+ * Provide a registry in the current Cordis fiber. Cordis owns its lifetime;
+ * there is intentionally no process-global registry or hidden fallback.
+ */
+export function provideCronAgentEnvironmentRegistry(
+  ctx: Context,
+  initialProviders: readonly CronAgentEnvironmentProvider[] = [],
+): CronAgentEnvironmentRegistry {
+  const registry = createCronAgentEnvironmentRegistry(initialProviders)
+  ctx.provide(CRON_AGENT_ENVIRONMENT_REGISTRY, registry)
+  return registry
+}

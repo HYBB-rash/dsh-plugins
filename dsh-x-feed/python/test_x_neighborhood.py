@@ -3,6 +3,7 @@
 运行: python3 -m unittest test_x_neighborhood -v
 """
 import io
+import hashlib
 import json
 import os
 import sys
@@ -216,12 +217,14 @@ class TestComputeCandidates(unittest.TestCase):
             with open(apath, "w") as f:
                 json.dump({"羽毛球训练": "badminton"}, f, ensure_ascii=False)
             with open(spath, "w") as f:
-                json.dump({"topics": {"badminton": {"times": 12, "last_explored_ts": 900}},
+                json.dump({"topics": {"badminton": {"times": 12, "last_explored_ts": None}},
                            "cooldown_s": 3600}, f)
-            out = nb.compute_candidates(gpath, apath, spath, now=1000)
+            out = nb.compute_candidates(
+                gpath, apath, spath, now=1000,
+                root_surfaces=["ai-agent", "linux-oss", "fitness", "reading"])
             self.assertTrue(out["config_loaded"])
             topics = {c["topic"] for c in out["candidates"]}
-            self.assertNotIn("badminton", topics)
+            self.assertIn("badminton", topics)
             self.assertTrue(topics)
             for c in out["candidates"]:
                 self.assertLessEqual(c["hop"], 2)
@@ -249,6 +252,48 @@ class TestComputeCandidates(unittest.TestCase):
             data = json.loads(buf.getvalue().strip())
             self.assertIn("candidates", data)
 
+    def test_cli_candidates_requires_explicit_root_and_accepts_exact_or_alias_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gpath = os.path.join(tmp, "graph.json")
+            apath = os.path.join(tmp, "aliases.json")
+            spath = os.path.join(tmp, "state.json")
+            with open(gpath, "w") as f:
+                json.dump({
+                    "anchors": ["old-like-anchor"],
+                    "restricted": ["old-dislike-restricted"],
+                    "edges": [
+                        {"from": "safe-theme", "to": "safe-one", "hop": 99,
+                         "bridge": "old-model-summary-marker"},
+                        {"from": "safe-one", "to": "safe-two", "hop": 99,
+                         "bridge": "old-model-summary-marker"},
+                    ],
+                }, f)
+            with open(apath, "w") as f:
+                json.dump({"当前主题": "safe-theme"}, f, ensure_ascii=False)
+            with open(spath, "w") as f:
+                json.dump({"topics": {}}, f)
+
+            def run(*roots):
+                buf = io.StringIO()
+                argv = ["candidates", "--graph", gpath, "--aliases", apath,
+                        "--state", spath, "--now", "1000"]
+                for root in roots:
+                    argv.extend(["--root", root])
+                with redirect_stdout(buf):
+                    self.assertEqual(nb.main(argv), 0)
+                return json.loads(buf.getvalue().strip())
+
+            no_root = run()
+            self.assertEqual(no_root["candidates"], [])
+            exact_root = run("safe-theme")
+            self.assertEqual([c["topic"] for c in exact_root["candidates"]],
+                             ["safe-one", "safe-two"])
+            alias_root = run("当前主题")
+            self.assertEqual(alias_root["roots"], ["safe-theme"])
+            self.assertNotIn("old-like-anchor", json.dumps(alias_root, ensure_ascii=False))
+            self.assertNotIn("old-dislike-restricted", json.dumps(alias_root, ensure_ascii=False))
+            self.assertNotIn("old-model-summary-marker", json.dumps(alias_root, ensure_ascii=False))
+
     def test_cli_record(self):
         with tempfile.TemporaryDirectory() as tmp:
             spath = os.path.join(tmp, "state.json")
@@ -258,6 +303,81 @@ class TestComputeCandidates(unittest.TestCase):
                                 "--aliases", os.path.join(tmp, "no-aliases.json"), "--now", "1000"])
             self.assertEqual(code, 0)
             self.assertEqual(nb.explored_count(nb.load_wander_state(spath), "羽毛球训练"), 1)
+
+
+class TestAutomaticGraphSanitizer(unittest.TestCase):
+    """自动路径只使用安全拓扑与本轮显式 roots。"""
+
+    def test_automatic_path_drops_old_preference_fields_and_recomputes_hops(self):
+        graph = {
+            "anchors": ["old-like-anchor"],
+            "restricted": ["old-dislike-restricted"],
+            "edges": [
+                {"from": "safe-theme", "to": "safe-one", "hop": 99,
+                 "bridge": "old-model-summary-marker"},
+                {"from": "safe-one", "to": "safe-two", "hop": 99,
+                 "bridge": "old-model-summary-marker"},
+                {"from": "safe-theme", "to": "old-dislike-restricted", "hop": 1,
+                 "bridge": "old-model-summary-marker"},
+            ],
+        }
+        source_bytes = json.dumps(graph, ensure_ascii=False, sort_keys=True).encode()
+        source_hash = hashlib.sha256(source_bytes).hexdigest()
+        safe = nb.sanitize_graph(graph)
+        self.assertEqual(safe["anchors"], [])
+        self.assertEqual(safe["restricted"], [])
+        self.assertEqual(safe["edges"], [
+            {"from": "safe-theme", "to": "safe-one"},
+            {"from": "safe-one", "to": "safe-two"},
+            {"from": "safe-theme", "to": "old-dislike-restricted"},
+        ])
+        out = nb.novelty_rank(
+            ["safe-theme"], safe["edges"], [],
+            {"topics": {}}, now=1000, cooldown_s=3600)
+        by_topic = {item["topic"]: item for item in out["candidates"]}
+        self.assertEqual(by_topic["safe-one"]["hop"], 1)
+        self.assertEqual(by_topic["safe-two"]["hop"], 2)
+        self.assertEqual(by_topic["safe-one"]["bridge"], "safe-theme → safe-one")
+        self.assertIn("old-dislike-restricted", by_topic)
+        self.assertNotIn("old-model-summary-marker", json.dumps(out, ensure_ascii=False))
+        self.assertEqual(
+            hashlib.sha256(json.dumps(graph, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
+            source_hash,
+        )
+
+    def test_runtime_roots_require_exact_alias_and_graph_intersection(self):
+        edges = [{"from": "safe-theme", "to": "safe-one"}]
+        aliases = {"当前主题": "safe-theme", "模糊主题": "not-in-graph"}
+        self.assertEqual(
+            nb.runtime_roots(aliases, ["当前主题", "模糊主题"], edges),
+            ["safe-theme"],
+        )
+        self.assertEqual(nb.runtime_roots(aliases, ["不应模糊命中"], edges), [])
+
+    def test_compute_candidates_never_falls_back_to_raw_anchors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            graph_path = os.path.join(tmp, "graph.json")
+            state_path = os.path.join(tmp, "state.json")
+            with open(graph_path, "w") as handle:
+                json.dump({
+                    "anchors": ["old-like-anchor"],
+                    "restricted": ["old-dislike-restricted"],
+                    "edges": [{"from": "safe-theme", "to": "safe-one",
+                               "hop": 1, "bridge": "old-model-summary-marker"}],
+                }, handle)
+            with open(state_path, "w") as handle:
+                json.dump({"topics": {}, "cooldown_s": 3600}, handle)
+            no_roots = nb.compute_candidates(graph_path, None, state_path, now=1000)
+            self.assertEqual(no_roots["candidates"], [])
+            self.assertEqual(no_roots["roots"], [])
+            with_roots = nb.compute_candidates(
+                graph_path, None, state_path, now=1000,
+                root_surfaces=["safe-theme"])
+            self.assertEqual([c["topic"] for c in with_roots["candidates"]], ["safe-one"])
+            self.assertNotIn("old-like-anchor", json.dumps(with_roots, ensure_ascii=False))
+            self.assertNotIn("old-model-summary-marker", json.dumps(with_roots, ensure_ascii=False))
+            self.assertNotIn("old-dislike-restricted", json.dumps(with_roots, ensure_ascii=False))
+
 
 
 if __name__ == "__main__":

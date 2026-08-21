@@ -22,10 +22,13 @@ import {
   type ToolError,
   type UpdateAction,
   type WorkOwner,
+  type WorkerControlState,
 } from './domain.ts'
-import { AssistantStore, type CommitmentRow, type WriteResult } from './store.ts'
+import { AssistantStore, type CommitmentRow, type CronBindingRow, type OutboxRow, type WriteResult } from './store.ts'
 import { WorkerController, writeResultToToolError } from './worker.ts'
 import { queryWebTasks } from './observer.ts'
+import type { AssistantCronSchedule } from './cron-control-port.ts'
+import type { CronControlUseCase } from './cron-control.ts'
 
 /** The model-facing view of one commitment (§8.1). */
 export type CommitmentView = {
@@ -39,8 +42,43 @@ export type CommitmentView = {
   readonly result: string | null
   readonly progressSummary: string | null
   readonly progressAt: string | null
+  /** Bounded delivery/control facts plus opaque monitor facts; never includes event bodies or outbox text. */
+  readonly lastDeliveryState: string | null
+  readonly lastDeliveryError: string | null
+  readonly hasWorker: boolean
+  /** Bounded worker lifecycle control intent; pause/resume requests can coexist with an identity. */
+  readonly workerControlState: WorkerControlState
+  readonly monitorDesiredState: string | null
+  readonly monitorResumeState: string | null
+  readonly monitorDirection: string | null
+  readonly monitorCheckpoint: string | null
+  readonly monitorEventKey: string | null
+  readonly monitorProposedCheckpoint: string | null
+  readonly monitorEventDeliveryState: string | null
+  readonly monitorEventDeliveryError: string | null
+  /** Assistant-owned Cron facts; independent from worker progress and outbox delivery. */
+  readonly cronBinding: CronBindingView | null
   readonly controlSurface: 'web' | 'telegram'
   readonly revision: number
+}
+
+export type CronBindingView = {
+  readonly desiredState: string
+  readonly schedule: AssistantCronSchedule | null
+  readonly desiredCwd: string | null
+  readonly boundJobId: string | null
+  readonly controlError: string | null
+  readonly lastRun: {
+    readonly runId: string
+    readonly jobId: string
+    readonly scheduledFor: string
+    readonly finishedAt: string
+    readonly runStatus: string
+    readonly summary: string | null
+    readonly runError: string | null
+    readonly deliveryState: string
+    readonly deliveryError: string | null
+  } | null
 }
 
 /** The recent-closure view, for failed/uncertain deliveries (§8.1). */
@@ -84,9 +122,69 @@ export interface AssistantToolDeps {
   store: AssistantStore
   mode: 'web' | 'telegram'
   worker?: WorkerController
+  /** Formal assistant-owned Cron control; the manager client stays outside this module. */
+  cronControl?: CronControlUseCase
   now?: () => number
   abortInFlight?: (commitmentId: string) => void
   logger?: { warn(message: string): void }
+}
+
+function parseCronSchedule(value: unknown): AssistantCronSchedule | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const candidate = value as Record<string, unknown>
+  if (candidate.kind === 'cron' && typeof candidate.expr === 'string') {
+    const expr = candidate.expr.trim()
+    // The assistant owns the DTO boundary, so reject an obviously malformed
+    // cron shape before creating a commitment or making a manager RPC.  Field
+    // ranges and expression semantics remain the generic dsh-cron contract.
+    if (expr !== '' && expr.split(/\s+/).length === 5) return { kind: 'cron', expr }
+  }
+  if (candidate.kind === 'interval' && typeof candidate.minutes === 'number'
+    && Number.isSafeInteger(candidate.minutes) && candidate.minutes > 0) {
+    return { kind: 'interval', minutes: candidate.minutes }
+  }
+  if (candidate.kind === 'once' && typeof candidate.runAt === 'string') {
+    const runAt = candidate.runAt.trim()
+    if (runAt !== '' && Number.isFinite(Date.parse(runAt))) return { kind: 'once', runAt }
+  }
+  return undefined
+}
+
+function isToolErrorCode(value: string): value is ToolError['code'] {
+  switch (value) {
+    case 'current_commitment_exists':
+    case 'no_current_commitment':
+    case 'ambiguous_commitment':
+    case 'invalid_transition':
+    case 'wrong_work_owner':
+    case 'wrong_control_surface':
+    case 'worker_start_failed':
+    case 'worker_control_failed':
+    case 'persistence_failed':
+    case 'delivery_uncertain':
+    case 'schedule_required':
+    case 'control_unavailable':
+      return true
+    default:
+      return false
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function cronFailure(value: unknown): ToolError | undefined {
+  if (!isRecord(value)) return { code: 'control_unavailable', message: 'Cron control returned an invalid response.' }
+  if (value.ok === true) return undefined
+  if (value.ok !== false) return { code: 'control_unavailable', message: 'Cron control returned an invalid response.' }
+  const externalCode = value.code
+  return {
+    code: typeof externalCode === 'string' && isToolErrorCode(externalCode)
+      ? externalCode
+      : 'control_unavailable',
+    message: typeof value.message === 'string' ? value.message : 'Cron control operation failed.',
+  }
 }
 
 function iso(now: (() => number) | undefined): string {
@@ -98,7 +196,13 @@ function renderValue(_args: unknown, value: unknown): ContentBlock[] {
   return [{ type: 'text', text: JSON.stringify(value) }]
 }
 
-function toView(row: CommitmentRow, mode: 'web' | 'telegram'): CommitmentView {
+function toView(
+  row: CommitmentRow,
+  mode: 'web' | 'telegram',
+  latestMonitorEvent?: OutboxRow,
+  store?: AssistantStore,
+): CommitmentView {
+  const monitor = row.kind === 'monitor'
   return {
     id: row.id,
     title: row.title,
@@ -110,8 +214,51 @@ function toView(row: CommitmentRow, mode: 'web' | 'telegram'): CommitmentView {
     result: row.result,
     progressSummary: row.progressSummary,
     progressAt: row.progressAt,
+    lastDeliveryState: row.lastDeliveryState,
+    lastDeliveryError: row.lastDeliveryError,
+    hasWorker: row.workerSessionId !== null,
+    workerControlState: row.workerControlState,
+    monitorDesiredState: monitor ? row.monitorDesiredState : null,
+    monitorResumeState: monitor ? row.monitorResumeState : null,
+    monitorDirection: monitor ? row.monitorDirection : null,
+    monitorCheckpoint: monitor ? row.monitorCheckpoint : null,
+    monitorEventKey: monitor ? latestMonitorEvent?.monitorEventKey ?? null : null,
+    monitorProposedCheckpoint: monitor ? latestMonitorEvent?.monitorProposedCheckpoint ?? null : null,
+    monitorEventDeliveryState: monitor ? latestMonitorEvent?.state ?? null : null,
+    monitorEventDeliveryError: monitor ? latestMonitorEvent?.error ?? null : null,
+    cronBinding: monitor && store !== undefined ? toCronBindingView(store.getCronBinding(row.id)) : null,
     controlSurface: row.workOwner === 'agent' ? 'telegram' : mode,
     revision: row.revision,
+  }
+}
+
+function toCronBindingView(row: CronBindingRow | undefined): CronBindingView | null {
+  if (row === undefined) return null
+  let schedule: AssistantCronSchedule | null = null
+  try {
+    schedule = parseCronSchedule(JSON.parse(row.desiredScheduleJson)) ?? null
+  } catch {
+    schedule = null
+  }
+  return {
+    desiredState: row.desiredState,
+    schedule,
+    desiredCwd: row.desiredCwd,
+    boundJobId: row.boundJobId,
+    controlError: row.controlError,
+    lastRun: row.lastRunId === null || row.lastRunJobId === null || row.scheduledFor === null || row.finishedAt === null || row.runStatus === null || row.deliveryState === null
+      ? null
+      : {
+        runId: row.lastRunId,
+        jobId: row.lastRunJobId,
+        scheduledFor: row.scheduledFor,
+        finishedAt: row.finishedAt,
+        runStatus: row.runStatus,
+        summary: row.lastRunSummary,
+        runError: row.runError,
+        deliveryState: row.deliveryState,
+        deliveryError: row.deliveryError,
+      },
   }
 }
 
@@ -147,8 +294,10 @@ export function buildStatusOutput(store: AssistantStore, mode: 'web' | 'telegram
       || last.lastDeliveryState === 'failed'
       || last.lastDeliveryState === 'uncertain')
   return {
-    current: current === undefined ? null : toView(current, mode),
-    responsibilities: rows.map(row => toView(row, mode)),
+    current: current === undefined
+      ? null
+      : toView(current, mode, current.kind === 'monitor' ? store.getLatestMonitorEvent(current.id) : undefined, store),
+    responsibilities: rows.map(row => toView(row, mode, row.kind === 'monitor' ? store.getLatestMonitorEvent(row.id) : undefined, store)),
     totalOpen,
     truncated: totalOpen > rows.length,
     recentAgentClosures: mode === 'telegram'
@@ -233,6 +382,8 @@ function userReply(action: UpdateAction, row: CommitmentRow, nextContactAt: stri
       return `已取消：${row.title}。`
     case 'set_next_action':
       return `已更新下一步：${row.title}。`
+    case 'revise_monitor':
+      return `已更新监控方向：${row.title}。`
     default: {
       const exhaustive: never = action
       return `已更新：${row.title}。${String(exhaustive)}`
@@ -421,7 +572,7 @@ export function registerAssistantTools(
     })))
 
     // ── assistant_delegate_task (telegram only) ───────────────────────────
-    if (deps.mode === 'telegram' && deps.worker !== undefined) {
+    if (deps.mode === 'telegram' && (deps.worker !== undefined || deps.cronControl !== undefined)) {
       disposers.push(toolCtx.tools.register(defineTool({
         name: 'assistant_delegate_task',
         description:
@@ -429,6 +580,7 @@ export function registerAssistantTools(
           + 'child session and report completion or blockers. Use when the user explicitly asks you to do, '
           + 'look up, change, fix, or land something that continues past this turn. '
           + 'Do NOT use the generic subagent tool to bypass commitment state. '
+          + 'For kind=monitor, an explicit schedule is required and the Cron manager owns the clock; the prompt is persisted as the complete monitor direction. '
           + 'The worker runs in the background; this call returns quickly.',
         parameters: {
           title: { type: 'string', required: true, description: 'Short title the user sees for the delegated work.' },
@@ -443,6 +595,11 @@ export function registerAssistantTools(
             enum: ['delegated', 'monitor'],
             description: 'delegated for finite work; monitor for work that continues until the user cancels. Defaults to delegated.',
           },
+          schedule: {
+            type: 'json',
+            description: 'Required for a new monitor: {kind:"cron",expr:string}, {kind:"interval",minutes:number}, or {kind:"once",runAt:string}.',
+          },
+          cwd: { type: 'string', description: 'Optional working directory for Cron runs.' },
         },
         output: {
           schema: {
@@ -487,6 +644,50 @@ export function registerAssistantTools(
           if (kind !== 'delegated' && kind !== 'monitor') {
             return { code: 'invalid_transition', message: 'kind must be "delegated" or "monitor".' }
           }
+          if (kind === 'monitor') {
+            if (args.schedule === undefined) {
+              return { code: 'schedule_required', message: 'A new Cron monitor requires an explicit schedule.' }
+            }
+            const schedule = parseCronSchedule(args.schedule)
+            if (schedule === undefined) {
+              return { code: 'invalid_transition', message: 'schedule must be a valid Cron schedule object.' }
+            }
+            if (deps.cronControl === undefined) {
+              return { code: 'control_unavailable', message: 'Cron control is unavailable; the monitor was not started.' }
+            }
+            const cwd = args.cwd
+            if (cwd !== undefined && (typeof cwd !== 'string' || cwd.trim() === '')) {
+              return { code: 'invalid_transition', message: 'cwd must be a non-empty string when provided.' }
+            }
+            const created = deps.store.createAgentCommitment({
+              title: (args.title as string).trim(),
+              kind: 'monitor',
+              monitorDirection: prompt.trim(),
+              ...nextAction === undefined ? {} : { nextAction: nextAction as string },
+              sourceSurface: 'telegram',
+              now: iso(deps.now),
+            })
+            if (!created.ok) return errorValue(writeResultToToolError(created), created.current, deps.mode)
+            const control = await deps.cronControl.bindMonitor({
+              commitmentId: created.row.id,
+              schedule,
+              ...(cwd === undefined ? {} : { cwd: cwd.trim() }),
+            })
+            const controlError = cronFailure(control)
+            if (controlError !== undefined) {
+              const current = deps.store.getById(created.row.id)
+              return {
+                ...controlError,
+                ...current === undefined ? {} : { current: toView(current, deps.mode) },
+              }
+            }
+            const current = deps.store.getById(created.row.id) ?? created.row
+            const view = toView(current, deps.mode)
+            return { current: view, reply: renderDelegateAccepted({ title: view.title }) }
+          }
+          if (deps.worker === undefined) {
+            return { code: 'control_unavailable', message: 'No worker is available for delegated work.' }
+          }
           const out = await deps.worker!.delegate(exec.agent, {
             title: (args.title as string).trim(),
             prompt: prompt.trim(),
@@ -524,11 +725,13 @@ export function registerAssistantTools(
         action: {
           type: 'string',
           required: true,
-          enum: ['pause', 'resume', 'still_working', 'block', 'complete', 'cancel', 'set_next_action'],
+          enum: ['pause', 'resume', 'revise_monitor', 'still_working', 'block', 'complete', 'cancel', 'set_next_action'],
         },
         result: { type: 'string', description: 'Final result text for complete.' },
         reason: { type: 'string', description: 'Blocker reason for block.' },
-        nextAction: { type: 'string', description: 'Next step for set_next_action/resume direction/block.' },
+        nextAction: { type: 'string', description: 'Next step for set_next_action/block; it never replaces a monitor direction.' },
+        direction: { type: 'string', description: 'Complete replacement direction for revise_monitor only.' },
+        schedule: { type: 'json', description: 'Optional Cron schedule for resuming an unbound legacy monitor; bound monitors reuse the persisted schedule.' },
         checkInMinutes: { type: 'number', description: 'New check-in interval for resume/still_working.' },
       },
       output: {
@@ -562,10 +765,14 @@ export function registerAssistantTools(
       ): Promise<MutationOutput | AssistantToolError> {
         if (exec.agent === undefined) return internalError()
         const action = args.action
-        if (typeof action !== 'string' || !['pause', 'resume', 'still_working', 'block', 'complete', 'cancel', 'set_next_action'].includes(action)) {
+        if (typeof action !== 'string' || !['pause', 'resume', 'revise_monitor', 'still_working', 'block', 'complete', 'cancel', 'set_next_action'].includes(action)) {
           return { code: 'invalid_transition', message: 'action must be one of the documented actions.' }
         }
         const typedAction = action as UpdateAction
+        const direction = args.direction
+        if (typedAction === 'revise_monitor' && (typeof direction !== 'string' || direction.trim() === '')) {
+          return { code: 'invalid_transition', message: 'revise_monitor requires a non-empty direction.' }
+        }
         const checkInError = validateCheckInMinutes(args.checkInMinutes)
         if (checkInError !== undefined) {
           return { code: 'invalid_transition', message: checkInError }
@@ -576,9 +783,11 @@ export function registerAssistantTools(
         const validation = validateUpdate({
           action: typedAction,
           workOwner: current.workOwner,
+          kind: current.kind,
           status: current.status,
           mode: deps.mode,
           hasLiveWorker: current.workerSessionId !== null,
+          ...typedAction === 'revise_monitor' ? { direction: direction as string } : {},
         })
         if (!validation.ok) {
           return errorValue(validation, current, deps.mode)
@@ -593,6 +802,24 @@ export function registerAssistantTools(
         switch (typedAction) {
           case 'pause': {
             if (current.workOwner === 'agent') {
+              if (current.kind === 'monitor') {
+                if (deps.cronControl === undefined) {
+                  return { code: 'control_unavailable', message: 'Cron control is unavailable; the monitor was not paused.' }
+                }
+                const control = await deps.cronControl.pauseMonitor(current.id)
+                const controlError = cronFailure(control)
+                if (controlError !== undefined) {
+                  const latest = deps.store.getById(current.id)
+                  return {
+                    ...controlError,
+                    ...latest === undefined ? {} : { current: toView(latest, deps.mode) },
+                  }
+                }
+                const latest = deps.store.getById(current.id)
+                if (latest === undefined) return { code: 'persistence_failed', message: 'Monitor state disappeared after Cron pause.' }
+                return { current: toView(latest, deps.mode), reply: `已暂停监控：${latest.title}。` }
+              }
+              if (deps.worker === undefined) return { code: 'control_unavailable', message: 'No worker is available for delegated work.' }
               const out = deps.worker!.pause(current)
               if (!out.ok) return { code: out.code, message: out.message }
               return { current: toView(out.row, deps.mode), reply: userReply('pause', out.row, out.row.reminderDueAt) }
@@ -602,6 +829,48 @@ export function registerAssistantTools(
           }
           case 'resume': {
             if (current.workOwner === 'agent') {
+              if (current.kind === 'monitor') {
+                if (args.nextAction !== undefined) {
+                  return {
+                    code: 'invalid_transition',
+                    message: 'monitor resume uses the persisted direction; use revise_monitor to replace it.',
+                  }
+                }
+                // A legacy monitor without a durable binding has no safe
+                // schedule to infer.  Reject before consulting Cron or any
+                // worker path; an explicit schedule is the only rebind
+                // authority.  Bound monitors continue to reuse their stored
+                // schedule when the user omits this field.
+                if (args.schedule === undefined && deps.store.getCronBinding(current.id) === undefined) {
+                  return { code: 'schedule_required', message: 'The first legacy Cron resume requires an explicit schedule.' }
+                }
+                if (deps.cronControl === undefined) {
+                  return { code: 'control_unavailable', message: 'Cron control is unavailable; the monitor was not resumed.' }
+                }
+                let schedule: AssistantCronSchedule | undefined
+                if (args.schedule !== undefined) {
+                  schedule = parseCronSchedule(args.schedule)
+                  if (schedule === undefined) {
+                    return { code: 'invalid_transition', message: 'schedule must be a valid Cron schedule object.' }
+                  }
+                }
+                const control = await deps.cronControl.resumeMonitor({
+                  commitmentId: current.id,
+                  ...(schedule === undefined ? {} : { schedule }),
+                })
+                const controlError = cronFailure(control)
+                if (controlError !== undefined) {
+                  const latest = deps.store.getById(current.id)
+                  return {
+                    ...controlError,
+                    ...latest === undefined ? {} : { current: toView(latest, deps.mode) },
+                  }
+                }
+                const latest = deps.store.getById(current.id)
+                if (latest === undefined) return { code: 'persistence_failed', message: 'Monitor state disappeared after Cron resume.' }
+                return { current: toView(latest, deps.mode), reply: `已恢复监控：${latest.title}。后续轮次由 Cron 调度。` }
+              }
+              if (deps.worker === undefined) return { code: 'control_unavailable', message: 'No worker is available for delegated work.' }
               const out = await deps.worker!.resume(
                 current,
                 exec.agent,
@@ -609,7 +878,10 @@ export function registerAssistantTools(
                 exec.signal,
               )
               if (!out.ok) return { code: out.code, message: out.message }
-              return { current: toView(out.row, deps.mode), reply: userReply('resume', out.row, out.row.reminderDueAt) }
+              return {
+                current: toView(out.row, deps.mode),
+                reply: userReply('resume', out.row, out.row.reminderDueAt),
+              }
             }
             return finish(deps.store.resumeUser(
               current.id,
@@ -657,12 +929,53 @@ export function registerAssistantTools(
           }
           case 'cancel': {
             if (current.workOwner === 'agent') {
+              if (current.kind === 'monitor') {
+                if (deps.cronControl === undefined) {
+                  return { code: 'control_unavailable', message: 'Cron control is unavailable; the monitor was not cancelled.' }
+                }
+                const control = await deps.cronControl.cancelMonitor(current.id)
+                const controlError = cronFailure(control)
+                if (controlError !== undefined) {
+                  const latest = deps.store.getById(current.id)
+                  return {
+                    ...controlError,
+                    ...latest === undefined ? {} : { current: toView(latest, deps.mode) },
+                  }
+                }
+                const latest = deps.store.getById(current.id)
+                if (latest === undefined) return { code: 'persistence_failed', message: 'Monitor state disappeared after Cron cancel.' }
+                return { current: toView(latest, deps.mode), reply: `已取消监控：${latest.title}。` }
+              }
+              if (deps.worker === undefined) return { code: 'control_unavailable', message: 'No worker is available for delegated work.' }
               const out = deps.worker!.cancel(current)
               if (!out.ok) return { code: out.code, message: out.message }
               return { current: toView(out.row, deps.mode), reply: userReply('cancel', out.row, null) }
             }
             deps.abortInFlight?.(current.id)
             return finish(deps.store.cancel(current.id, current.revision))
+          }
+          case 'revise_monitor': {
+            if (current.workOwner !== 'agent' || current.kind !== 'monitor') {
+              return { code: 'wrong_work_owner', message: 'revise_monitor applies only to Agent-owned monitor commitments.' }
+            }
+            if (deps.cronControl === undefined) {
+              return { code: 'control_unavailable', message: 'Cron control is unavailable; the monitor direction was not changed.' }
+            }
+            const control = await deps.cronControl.reviseMonitor({ commitmentId: current.id, direction: (direction as string).trim() })
+            const controlError = cronFailure(control)
+            if (controlError !== undefined) {
+              const latest = deps.store.getById(current.id)
+              return {
+                ...controlError,
+                ...latest === undefined ? {} : { current: toView(latest, deps.mode) },
+              }
+            }
+            const latest = deps.store.getById(current.id)
+            if (latest === undefined) return { code: 'persistence_failed', message: 'Monitor state disappeared after Cron direction revision.' }
+            return {
+              current: toView(latest, deps.mode),
+              reply: `已更新监控方向：${latest.title}。后续轮次由 Cron 调度。`,
+            }
           }
           case 'set_next_action': {
             const nextAction = args.nextAction

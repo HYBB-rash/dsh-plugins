@@ -23,10 +23,15 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { createTelegramHttp } from '@deepseek-ai/dsh-telegram-gateway'
 import z from '@deepseek-ai/schemastery'
 import { boundText, formatLocalTime } from './domain.ts'
+import { createCronBoundMonitorRuntime } from './cron-bound-monitor.ts'
+import { createAssistantCronControlAdapterFromSocket } from './cron-control-adapter.ts'
+import { startAssistantCronControl } from './cron-composition.ts'
+import { createCronControlUseCase } from './cron-control.ts'
+import { reconcileCronBindings } from './cron-reconciliation.ts'
 import { OutboxPump } from './outbox.ts'
 import { ReminderRuntime } from './reminders.ts'
 import { AssistantStore, defaultStorePath } from './store.ts'
-import { registerAssistantTools, buildStatusOutput } from './tools.ts'
+import { registerAssistantTools, buildStatusOutput, type CronBindingView, type CommitmentView } from './tools.ts'
 import { WorkerController } from './worker.ts'
 import { WebTaskObserver } from './observer.ts'
 
@@ -145,6 +150,8 @@ export interface Config {
   telegramParentSessionId?: string
   /** Missed-reminder honesty threshold. Default 2 hours. */
   lateReminderAfterMs?: number
+  /** Explicit dsh-cron manager control socket; no implicit path is guessed. */
+  cronControlSocketPath?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -157,6 +164,7 @@ export const Config: z<Config> = z.object({
   subagentProvider: z.string().default('spawn'),
   telegramParentSessionId: z.string().default('session-telegram'),
   lateReminderAfterMs: z.number().step(1).min(0).default(2 * 60 * 60 * 1000),
+  cronControlSocketPath: z.string().default(''),
 })
 
 /** Resolve a config value or its credential reference (env-inherited first). */
@@ -182,6 +190,118 @@ function statusLabel(status: string): string {
 /** Per-item progress budget for the automatic prompt snapshot. */
 const PROMPT_PROGRESS_MAX = 400
 const PROMPT_CLOSED_TITLE_MAX = 160
+
+function boundedCronReason(value: unknown): string {
+  const text = value instanceof Error ? value.message : String(value)
+  return text.length > 400 ? `${text.slice(0, 399)}…` : text
+}
+
+function cronBindingPrompt(binding: CronBindingView): string {
+  const lastRun = binding.lastRun
+  const schedule = binding.schedule === null ? 'null' : boundText(JSON.stringify(binding.schedule), 400)
+  const desiredState = boundText(binding.desiredState, 32)
+  const desiredCwd = binding.desiredCwd === null ? 'null' : boundText(binding.desiredCwd, 160)
+  const boundJobId = binding.boundJobId === null ? 'null' : boundText(binding.boundJobId, 160)
+  const runStatus = lastRun === null ? 'null' : boundText(lastRun.runStatus, 32)
+  const deliveryState = lastRun === null ? 'null' : boundText(lastRun.deliveryState, 32)
+  const controlError = binding.controlError === null ? 'null' : boundText(binding.controlError, 400)
+  const summary = lastRun?.summary === null || lastRun?.summary === undefined
+    ? 'null'
+    : boundText(lastRun.summary, PROMPT_PROGRESS_MAX)
+  const runError = lastRun?.runError === null || lastRun?.runError === undefined
+    ? 'null'
+    : boundText(lastRun.runError, 400)
+  const deliveryError = lastRun?.deliveryError === null || lastRun?.deliveryError === undefined
+    ? 'null'
+    : boundText(lastRun.deliveryError, 400)
+  return [
+    `；Cron desiredState=${desiredState}`,
+    `；schedule=${schedule}`,
+    `；desiredCwd=${desiredCwd}`,
+    `；boundJobId=${boundJobId}`,
+    `；runStatus=${runStatus}`,
+    `；deliveryState=${deliveryState}`,
+    `；controlError=${controlError}`,
+    `；summary=${summary}`,
+    `；runError=${runError}`,
+    `；deliveryError=${deliveryError}`,
+  ].join('')
+}
+
+function monitorPromptFacts(item: CommitmentView): string {
+  if (item.kind !== 'monitor') return ''
+  return item.cronBinding === null ? '；需显式 schedule 绑定' : cronBindingPrompt(item.cronBinding)
+}
+
+/**
+ * Park open legacy monitors that have no assistant Cron binding. This
+ * composition-root compatibility step uses existing store lifecycle writes;
+ * it never invents a binding or starts a child. A complete stale worker
+ * identity is cleared through the existing pause/confirmation handshake.
+ */
+function parkUnboundLegacyMonitors(
+  store: AssistantStore,
+  logger?: { warn(message: string): void },
+): void {
+  const warn = (message: string): void => logger?.warn(`dsh-assistant: ${message}`)
+  const blocker = '未绑定 Cron：该 legacy monitor 尚未绑定 Cron，恢复需要显式 schedule'
+  const nextAction = '请提供显式 schedule 后再恢复'
+  for (const listed of store.listTelegramAgentResponsibilities(1_000)) {
+    if (listed.kind !== 'monitor' || store.getCronBinding(listed.id) !== undefined) continue
+    let current = store.getById(listed.id)
+    if (current === undefined) continue
+
+    const identity = current.workerSessionId !== null
+      && current.workerRunId !== null
+      && current.workerParentSessionId !== null
+      ? {
+        workerSessionId: current.workerSessionId,
+        workerRunId: current.workerRunId,
+        workerParentSessionId: current.workerParentSessionId,
+      }
+      : undefined
+    if (identity !== undefined) {
+      // normalizeAgentOnStartup parks a recoverable legacy child as paused;
+      // move it through the existing pause confirmation so all identity
+      // columns are cleared without creating an outbox event.
+      if (current.status !== 'active') {
+        const activated = store.setCommitmentStatus(current.id, 'active')
+        if (activated === undefined) {
+          warn(`could not prepare unbound monitor ${current.id} for worker cleanup`)
+          continue
+        }
+        current = activated
+      }
+      const requested = store.pauseAgent(current.id, current.revision)
+      if (!requested.ok) {
+        warn(`could not request cleanup for unbound monitor ${current.id}: ${requested.message}`)
+        continue
+      }
+      const confirmed = store.confirmMonitorPausedStop(current.id, requested.row.revision, identity)
+      if (!confirmed.ok) {
+        warn(`could not clear stale worker for unbound monitor ${current.id}: ${confirmed.message}`)
+        continue
+      }
+      current = confirmed.row
+    }
+
+    // `block()` is the durable user-visible blocker contract. A paused
+    // legacy row is first reopened through the existing status API so block()
+    // can record both the reason and the explicit schedule next action.
+    if (current.status === 'paused') {
+      const reopened = store.setCommitmentStatus(current.id, 'active')
+      if (reopened === undefined) {
+        warn(`could not prepare paused unbound monitor ${current.id} for blocking`)
+        continue
+      }
+      current = reopened
+    }
+    if (current.status === 'active' || current.status === 'pending') {
+      const blocked = store.block(current.id, current.revision, blocker, nextAction)
+      if (!blocked.ok) warn(`could not block unbound monitor ${current.id}: ${blocked.message}`)
+    }
+  }
+}
 
 function recentClosureDeliveryLabel(item: { status: string; lastDeliveryState: string | null }): string {
   if (item.status === 'cancelled') return '已取消，没有待等结果'
@@ -212,6 +332,8 @@ export const ASSISTANT_PERSONA = [
   'Telegram sends each complete assistant text that accompanies a tool call as an immediate, immutable user-visible message.',
   'Before calling tools, include user-visible text only when it is a complete, useful update that can stand on its own; omit trivial tool narration.',
   'Each later message must add progress, a correction, a result, or closure; do not mechanically repeat earlier messages in the final answer.',
+  'A cron-bound monitor is scheduled and awakened by dsh-cron. Its run-finished observation is a manager fact; it does not spawn a continuable child or enter the assistant reminder tick. Only an explicit pause or cancel stops the binding.',
+  'When a Cron monitor has no new observation or no change, Cron records success+silent; do not invent a synthetic event identity.',
 ].join('\n')
 
 export const STABLE_CONTRACT = [
@@ -232,7 +354,8 @@ export const STABLE_CONTRACT = [
   '- 不要先搜 Session 或长期记忆来恢复当前承诺；现状以 assistant_task_status 读取的持久化承诺为准。',
   '只有已有用户时间焦点时才拒绝第二个焦点并询问是否切换；Agent 委派和监控不得因此被拒绝。',
   '暂停、恢复、完成或取消时优先使用精确 commitmentId；多项候选仍无法唯一定位时先问用户，绝不按标题或最近一项猜。',
-  'monitor 表示持续到用户取消的监控；服务恢复会在安全确认后沿用同一 child，恢复失败要明确说目前未监控。',
+  'monitor 表示持续到用户明确暂停或取消的监控；cron-bound monitor 的时钟和唤醒由 dsh-cron 持有，assistant 只保存用户期望与 manager 回传的运行事实，不启动 continuable child，也不走 reminder tick。普通 delegated worker 仍沿用现有 worker 生命周期。',
+  'Cron 监控没有新观察或无更新时记为 success+silent，不要编造事件身份；只有 Cron 或明确的控制结果显示异常时才如实说明。',
   '只有工具或 worker lifecycle 确认状态变化后，才能声称已暂停、已恢复或已完成。',
   '回答用简短中文，先给结论；用户事情说「事情由你做，跟进由我负责」，Agent 事情说「事情和跟进都由我负责」。',
   '',
@@ -263,10 +386,10 @@ export function promptSectionText(store: AssistantStore, mode: 'web' | 'telegram
     const current = status.current
     if (status.responsibilities.length > 1) {
       const lines = status.responsibilities.map(item => {
-        const progress = item.progressSummary === null
-          ? ''
-          : `；最近进展：${boundText(item.progressSummary, PROMPT_PROGRESS_MAX)}`
-        return `- ${item.id} [${item.kind}/${statusLabel(item.status)}] ${item.title}${progress}`
+        const detail = item.kind === 'monitor'
+          ? monitorPromptFacts(item)
+          : item.progressSummary === null ? '' : `；最近进展：${boundText(item.progressSummary, PROMPT_PROGRESS_MAX)}`
+        return `- ${item.id} [${item.kind}/${statusLabel(item.status)}] ${item.title}${detail}`
       })
       if (status.truncated) lines.push(`- 另有 ${status.totalOpen - status.responsibilities.length} 项未注入；需要时调用 assistant_task_status。`)
       snapshot = `dsh-assistant 当前责任共 ${status.totalOpen} 项（必须按 id 定位）：\n${lines.join('\n')}`
@@ -277,7 +400,7 @@ export function promptSectionText(store: AssistantStore, mode: 'web' | 'telegram
         `dsh-assistant 当前承诺 ${current.id}（${current.kind}，revision ${current.revision}）：${current.title}；`,
         `工作归${current.workOwner === 'user' ? '用户' : 'Agent'}；`,
         `${statusLabel(current.status)}；`,
-        `下一步是${next}${when}。`,
+        `下一步是${next}${when}${monitorPromptFacts(current)}。`,
       ].join('')
     } else if (status.lastClosed !== null) {
       const closed = status.lastClosed
@@ -333,11 +456,42 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       logger: ctx.logger,
     })
 
+    let cronControlPort: import('./cron-control-port.ts').AssistantCronControlPort | undefined
+    const cronControlSocketPath = typeof config.cronControlSocketPath === 'string'
+      ? config.cronControlSocketPath.trim()
+      : ''
+    if (config.mode === 'telegram' && cronControlSocketPath !== '') {
+      try {
+        cronControlPort = createAssistantCronControlAdapterFromSocket({ socketPath: cronControlSocketPath })
+      } catch (error: unknown) {
+        ctx.logger.warn(`dsh-assistant: Cron control adapter unavailable: ${boundedCronReason(error)}`)
+      }
+    }
+    const cronControl = cronControlPort === undefined
+      ? undefined
+      : createCronControlUseCase({ store, controlPort: cronControlPort })
+    const cronMonitor = cronControlPort === undefined
+      ? undefined
+      : createCronBoundMonitorRuntime({ store, controlPort: cronControlPort })
+
     let reminders: ReminderRuntime | undefined
     const runtimes = new Map<Agent, () => void>()
     let stopping = false
-    let telegramStartupReady = false
     let telegramLifetime: AbortController | undefined
+    let disposeCronRunFinished: () => void = () => {}
+
+    if (cronMonitor !== undefined) {
+      disposeCronRunFinished = ctx.on('dsh-cron/run-finished', async event => {
+        try {
+          const result = await cronMonitor.handleRunFinished(event as unknown as Record<string, unknown>)
+          if (result.ok === false) {
+            ctx.logger.warn(`dsh-assistant: Cron run-finished observation unavailable: ${boundedCronReason(result.message ?? 'observation failed')}`)
+          }
+        } catch (error: unknown) {
+          ctx.logger.warn(`dsh-assistant: Cron run-finished observer failed: ${boundedCronReason(error)}`)
+        }
+      })
+    }
 
     /**
      * Whether this root is a qualified USER-INTERACTIVE root (验收返工 §4.1).
@@ -364,6 +518,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           store,
           mode: config.mode,
           ...config.mode === 'telegram' ? { worker } : {},
+          ...config.mode === 'telegram' && cronControl !== undefined ? { cronControl } : {},
           abortInFlight: commitmentId => reminders?.abortInFlight(commitmentId),
         })
         let disposePersona: () => void = () => {}
@@ -403,14 +558,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       }, 'dsh-assistant.root()'))
       if (config.mode === 'telegram') {
         disposers.push(worker.ensureInstalled(agent))
-        // Existing roots only install listeners during startup. Recovery runs
-        // exactly once after normalize below. A genuinely future fixed root
-        // may recover only after that startup phase has completed.
-        if (telegramStartupReady && telegramLifetime !== undefined) {
-          void worker.recoverMonitors(agent, telegramLifetime.signal).catch(error => {
-            ctx.logger.warn(`dsh-assistant: future-root monitor recovery failed: ${error instanceof Error ? error.message : String(error)}`)
-          })
-        }
       }
       let done = false
       runtimes.set(agent, () => {
@@ -462,13 +609,32 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         signal: lifetime.signal,
         logger: ctx.logger,
       })
+      // A previous process may have claimed an outbox row and died before
+      // recording its delivery result. Resolve that one-time uncertainty
+      // before normalize/recovery and before the existing reminder tick can
+      // claim a fresh monitor round; do not start another pump here.
+      store.markStaleClaimed()
       // A restart must not auto-rerun a leftover agent child (§11.5).
       store.normalizeAgentOnStartup()
-      const telegramRoot = ctx.agents.roots().find(agent => isQualifiedRoot(agent))
-      if (telegramRoot !== undefined) {
-        await worker.recoverMonitors(telegramRoot, lifetime.signal)
+      parkUnboundLegacyMonitors(store, ctx.logger)
+      if (cronControlPort === undefined) {
+        ctx.logger.warn('dsh-assistant: Cron control unavailable; explicit cronControlSocketPath is required')
+      } else {
+        const startup = await startAssistantCronControl({
+          controlPort: cronControlPort,
+          reconcileStartup: () => reconcileCronBindings({
+            store,
+            controlPort: cronControlPort!,
+            maxBindings: 100,
+            budgetMs: 30_000,
+          }),
+        })
+        if (startup.state === 'unavailable') {
+          ctx.logger.warn(`dsh-assistant: Cron startup unavailable${startup.reason === undefined ? '' : `: ${boundedCronReason(startup.reason)}`}`)
+        } else if (startup.reconciliationState === 'budget_exhausted') {
+          ctx.logger.warn(`dsh-assistant: Cron startup reconciliation budget exhausted after ${startup.processed} bindings${startup.reason === undefined ? '' : `: ${boundedCronReason(startup.reason)}`}`)
+        }
       }
-      telegramStartupReady = true
       reminders.start()
     }
 
@@ -476,6 +642,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       stopping = true
       worker.setStopping(true)
       telegramLifetime?.abort()
+      disposeCronRunFinished()
       stopCreated()
       // Safely park an active agent commitment BEFORE the child teardown's
       // late ends arrive, so they are never misreported as failures.

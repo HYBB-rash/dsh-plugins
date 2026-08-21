@@ -9,8 +9,9 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import {
   apply, chunkText, createOffsetStore, createTelegramHttp, formatMarkdownV2, runGateway, summarizeTurn,
-  TelegramApiError, type Config, type SendMessageOptions, type TelegramHttp, type TelegramUpdate,
+  isTelegramInboundEnvelope, TelegramApiError, type Config, type SendMessageOptions, type TelegramHttp, type TelegramUpdate,
 } from '../src/index.ts'
+import type { TelegramInboundEnvelope, TelegramInboundResult } from '../src/inbound-contract.ts'
 import {
   apply as applyInvariant,
   inject as invariantInject,
@@ -64,6 +65,7 @@ function gatewayConfig(overrides: Partial<Config> = {}): Config {
     pollTimeoutSeconds: 30,
     offsetDir: scratch ?? '',
     maxMessageChars: 4096,
+    requireInboundInterceptor: false,
     ...overrides,
   }
 }
@@ -73,6 +75,10 @@ function gatewayContext(options: {
   live?: boolean
   persisted?: boolean
   token?: string
+  inbound?: {
+    ready?: true
+    waterfall?: (envelope: TelegramInboundEnvelope, next: () => TelegramInboundResult | Promise<TelegramInboundResult>) => TelegramInboundResult | Promise<TelegramInboundResult>
+  }
 } = {}) {
   const dispose = vi.fn(async () => {})
   const agent = {
@@ -117,6 +123,10 @@ function gatewayContext(options: {
     on: vi.fn((event: string, handler: (session: unknown, event: SessionEvent) => void) => {
       sessionEventHandlers.set(event, handler)
       return vi.fn()
+    }),
+    bail: vi.fn((_event: string, _envelope: TelegramInboundEnvelope) => options.inbound?.ready),
+    waterfall: vi.fn((_event: string, envelope: TelegramInboundEnvelope, next: () => TelegramInboundResult | Promise<TelegramInboundResult>) => {
+      return options.inbound?.waterfall?.(envelope, next) ?? next()
     }),
     effect: async (setup: () => Promise<() => Promise<void>>) => {
       cleanup = await setup()
@@ -580,9 +590,171 @@ describe('invariant companion', () => {
     await expect(applyInvariant(ctx)).resolves.toBe(dispose)
     expect(register).toHaveBeenCalledWith('@deepseek-ai/dsh-telegram-gateway', expect.any(Function))
   })
+
+  it('publishes the inbound contract from the package root for declaration consumers', () => {
+    const declaration = readFileSync(new URL('../lib/types/index.d.ts', import.meta.url), 'utf8')
+    expect(declaration).toContain('inbound-contract')
+    expect(declaration).toContain('TelegramInboundEnvelope')
+    expect(isTelegramInboundEnvelope({
+      chat: { id: 42, type: 'private' },
+      message: { id: 7 },
+      currentText: 'hello',
+      signal: new AbortController().signal,
+    })).toBe(true)
+  })
 })
 
 describe('gateway lifecycle', () => {
+  it('fails closed when an inbound interceptor is required but not ready', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+    const harness = gatewayContext({ credentialValues: ['42'] })
+    const lifetime = new AbortController()
+    const sendMessage = vi.fn(async (_chatId: number, _text: string, _options?: SendMessageOptions) => ({ messageId: 1 }))
+    let polls = 0
+    const http: TelegramHttp = {
+      getMe: async () => ({ id: 1 }),
+      getUpdates: async () => {
+        if (polls++ === 0) {
+          return [{ update_id: 1, message: { message_id: 5, chat: { id: 42, type: 'private' }, text: 'go' } }]
+        }
+        lifetime.abort()
+        return []
+      },
+      sendMessage,
+    }
+
+    await runGateway(harness.ctx, gatewayConfig({ requireInboundInterceptor: true }), http, lifetime.signal)
+
+    expect(harness.agent.followup).not.toHaveBeenCalled()
+    expect(harness.ctx.bail).toHaveBeenCalledOnce()
+    expect(harness.ctx.waterfall).not.toHaveBeenCalled()
+    expect(sendMessage.mock.calls.map(([, text]) => text)).toEqual([
+      '✅ 已连接。你可以让我记住、跟进，或执行一件当前事情。',
+      'Inbound interceptor required',
+    ])
+  })
+
+  it('passes one ready inbound through the root with a transport-only envelope', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+    let seenEnvelope: TelegramInboundEnvelope | undefined
+    const harness = gatewayContext({
+      credentialValues: ['42'],
+      inbound: {
+        ready: true,
+        waterfall: (envelope, next) => {
+          seenEnvelope = envelope
+          return next()
+        },
+      },
+    })
+    const lifetime = new AbortController()
+    harness.agent.followup.mockImplementation(() => {
+      harness.agent.session.events = makeTurnEvents({ text: 'root result' })
+    })
+    let polls = 0
+    const http: TelegramHttp = {
+      getMe: async () => ({ id: 1 }),
+      getUpdates: async () => {
+        if (polls++ === 0) {
+          return [{
+            update_id: 1,
+            message: {
+              message_id: 5,
+              chat: { id: 42, type: 'private' },
+              text: '用户原文',
+              quote: { text: '选中的引用' },
+              reply_to_message: { message_id: 4, caption: '完整引用' },
+            },
+          }]
+        }
+        lifetime.abort()
+        return []
+      },
+      sendMessage: async () => ({ messageId: 1 }),
+    }
+
+    await runGateway(harness.ctx, gatewayConfig({ requireInboundInterceptor: true }), http, lifetime.signal)
+
+    expect(harness.agent.followup).toHaveBeenCalledOnce()
+    expect(seenEnvelope).toMatchObject({
+      chat: { id: 42, type: 'private' },
+      message: { id: 5 },
+      currentText: '用户原文',
+      reference: { messageId: 4, selectedText: '选中的引用', messageText: '完整引用' },
+    })
+    expect(seenEnvelope?.signal).toBeInstanceOf(AbortSignal)
+    expect(harness.ctx.bail).toHaveBeenCalledOnce()
+    expect(harness.ctx.waterfall).toHaveBeenCalledOnce()
+  })
+
+  it('finishes a handled inbound without entering the root', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+    const harness = gatewayContext({
+      credentialValues: ['42'],
+      inbound: { ready: true, waterfall: () => ({ kind: 'handled', finalText: '已处理' }) },
+    })
+    const lifetime = new AbortController()
+    const setReaction = vi.fn(async () => {})
+    const sendMessage = vi.fn(async (_chatId: number, _text: string, _options?: SendMessageOptions) => ({ messageId: 1 }))
+    let polls = 0
+    const http: TelegramHttp = {
+      getMe: async () => ({ id: 1 }),
+      getUpdates: async () => {
+        if (polls++ === 0) {
+          return [{ update_id: 1, message: { message_id: 5, chat: { id: 42, type: 'private' }, text: 'handled' } }]
+        }
+        lifetime.abort()
+        return []
+      },
+      sendMessage,
+      setReaction,
+      sendTyping: async () => {},
+    }
+
+    await runGateway(harness.ctx, gatewayConfig({ requireInboundInterceptor: true }), http, lifetime.signal)
+
+    expect(harness.agent.followup).not.toHaveBeenCalled()
+    expect(sendMessage.mock.calls.map(([, text]) => text)).toEqual([
+      '✅ 已连接。你可以让我记住、跟进，或执行一件当前事情。',
+      '已处理',
+    ])
+    expect(setReaction).toHaveBeenNthCalledWith(2, 42, 5, '👍', expect.any(AbortSignal))
+  })
+
+  it('fails a rejected inbound listener without entering the root or retrying terminal delivery', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+    const harness = gatewayContext({
+      credentialValues: ['42'],
+      inbound: { ready: true, waterfall: () => Promise.reject(new Error('listener broke')) },
+    })
+    const lifetime = new AbortController()
+    const setReaction = vi.fn(async () => {})
+    const sendMessage = vi.fn(async (_chatId: number, _text: string, _options?: SendMessageOptions) => ({ messageId: 1 }))
+    let polls = 0
+    const http: TelegramHttp = {
+      getMe: async () => ({ id: 1 }),
+      getUpdates: async () => {
+        if (polls++ === 0) {
+          return [{ update_id: 1, message: { message_id: 5, chat: { id: 42, type: 'private' }, text: 'failed' } }]
+        }
+        lifetime.abort()
+        return []
+      },
+      sendMessage,
+      setReaction,
+      sendTyping: async () => {},
+    }
+
+    await runGateway(harness.ctx, gatewayConfig({ requireInboundInterceptor: true }), http, lifetime.signal)
+
+    expect(harness.agent.followup).not.toHaveBeenCalled()
+    expect(sendMessage.mock.calls.map(([, text]) => text)).toEqual([
+      '✅ 已连接。你可以让我记住、跟进，或执行一件当前事情。',
+      'Inbound dispatch failed',
+    ])
+    expect(setReaction).toHaveBeenNthCalledWith(2, 42, 5, '👎', expect.any(AbortSignal))
+  })
+
   it('uses the credential-backed token and waits for Agent disposal', async () => {
     scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
     const harness = gatewayContext({ token: 'credential-token' })
@@ -882,6 +1054,33 @@ describe('gateway lifecycle', () => {
 
     await runGateway(harness.ctx, gatewayConfig(), http, lifetime.signal)
     expect(harness.agent.followup).not.toHaveBeenCalled()
+  })
+
+  it('closes one presentation lifecycle when disposal aborts the first idle wait', async () => {
+    vi.useFakeTimers()
+    scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+    const harness = gatewayContext({ credentialValues: ['42'] })
+    const lifetime = new AbortController()
+    const sendTyping = vi.fn(async () => {})
+    const setReaction = vi.fn(async () => {})
+    harness.agent.whenIdle.mockImplementationOnce(async () => {
+      lifetime.abort()
+    })
+    const http: TelegramHttp = {
+      getMe: async () => ({ id: 1 }),
+      getUpdates: async () => [
+        { update_id: 1, message: { message_id: 1, chat: { id: 42, type: 'private' }, text: 'go' } },
+      ],
+      sendMessage: async () => ({ messageId: 1 }),
+      sendTyping,
+      setReaction,
+    }
+
+    await runGateway(harness.ctx, gatewayConfig(), http, lifetime.signal)
+    await vi.advanceTimersByTimeAsync(4_001)
+
+    expect(sendTyping).toHaveBeenCalledOnce()
+    expect(setReaction).toHaveBeenLastCalledWith(42, 1, undefined, expect.any(AbortSignal))
   })
 
   it('stops a turn when followup aborts before the second idle wait', async () => {

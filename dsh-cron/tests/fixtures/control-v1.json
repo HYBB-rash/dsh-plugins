@@ -1,0 +1,107 @@
+{
+  "requests": [
+    {
+      "protocolVersion": 1,
+      "operation": "ensure-bound",
+      "spec": {
+        "externalRef": "external:placeholder",
+        "schedule": { "kind": "interval", "minutes": 5 },
+        "prompt": "placeholder prompt",
+        "deliver": "telegram",
+        "cwd": "placeholder-cwd",
+        "sessionMode": "per_run"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "operation": "replace-bound",
+      "spec": {
+        "externalRef": "external:placeholder",
+        "schedule": { "kind": "interval", "minutes": 5 },
+        "prompt": "placeholder prompt",
+        "deliver": "telegram",
+        "cwd": "placeholder-cwd",
+        "sessionMode": "per_run"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "operation": "delete-bound",
+      "externalRef": "external:placeholder"
+    },
+    {
+      "protocolVersion": 1,
+      "operation": "get-bound",
+      "externalRef": "external:placeholder"
+    }
+  ],
+  "health": {
+    "protocolVersion": 1,
+    "writer": "manager",
+    "ready": true
+  },
+  "noUpdateSnapshot": {
+    "runId": "run-placeholder",
+    "jobId": "job-placeholder",
+    "scheduledFor": "2026-08-18T00:00:00.000Z",
+    "finishedAt": "2026-08-18T00:00:01.000Z",
+    "runStatus": "success",
+    "deliveryState": "silent"
+  },
+  "successResponse": {
+    "protocolVersion": 1,
+    "ok": true,
+    "operation": "get-bound",
+    "snapshot": {
+      "externalRef": "external:placeholder",
+      "activeJob": {
+        "id": "cron-placeholder",
+        "externalRef": "external:placeholder",
+        "schedule": { "kind": "interval", "minutes": 5 },
+        "prompt": "placeholder prompt",
+        "deliver": "telegram",
+        "cwd": "placeholder-cwd",
+        "sessionMode": "per_run",
+        "createdAt": "2026-08-18T00:00:00.000Z"
+      },
+      "latestRun": {
+        "runId": "run-placeholder",
+        "jobId": "job-placeholder",
+        "scheduledFor": "2026-08-18T00:00:00.000Z",
+        "finishedAt": "2026-08-18T00:00:01.000Z",
+        "runStatus": "success",
+        "deliveryState": "silent"
+      }
+    }
+  },
+  "errorResponses": [
+    {
+      "protocolVersion": 1,
+      "ok": false,
+      "operation": "get-bound",
+      "errorCode": "invalid_request",
+      "message": "placeholder error"
+    },
+    {
+      "protocolVersion": 1,
+      "ok": false,
+      "operation": "ensure-bound",
+      "errorCode": "binding_conflict",
+      "message": "placeholder error"
+    },
+    {
+      "protocolVersion": 1,
+      "ok": false,
+      "operation": "replace-bound",
+      "errorCode": "persistence_uncertain",
+      "message": "placeholder error"
+    },
+    {
+      "protocolVersion": 1,
+      "ok": false,
+      "operation": "delete-bound",
+      "errorCode": "internal_error",
+      "message": "placeholder error"
+    }
+  ]
+}

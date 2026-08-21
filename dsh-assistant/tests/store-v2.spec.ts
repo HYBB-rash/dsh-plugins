@@ -8,8 +8,8 @@ import {
   ASSISTANT_APPLICATION_ID,
   ASSISTANT_SCHEMA_VERSION,
   AssistantStore,
-  migrateDatabaseV1ToV2,
 } from '../src/store.ts'
+import { migrateDatabaseToV3, migrateDatabaseToV4 } from '../src/migration.ts'
 
 const dirs: string[] = []
 const NOW = '2026-08-16T02:00:00.000Z'
@@ -61,15 +61,17 @@ function createV1(path: string): void {
   db.close()
 }
 
-describe('schema v2 and explicit v1 migration', () => {
-  it('creates only schema v2 for an empty database', () => {
+describe('current schema v4 and explicit legacy migration', () => {
+  it('creates schema v4 with the Cron binding projection for an empty database', () => {
     const path = tempPath()
     const store = new AssistantStore(path)
-    expect(ASSISTANT_SCHEMA_VERSION).toBe(2)
+    expect(ASSISTANT_SCHEMA_VERSION).toBe(4)
     expect(store.listOpen()).toEqual([])
     store.close()
     const db = new DatabaseSync(path)
-    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(2)
+    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(4)
+    expect(db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'assistant_cron_bindings'").get()).toMatchObject({ name: 'assistant_cron_bindings' })
+    expect(db.prepare("SELECT name FROM pragma_table_info('assistant_cron_bindings') WHERE name = 'desired_prompt'").all()).toHaveLength(0)
     db.close()
   })
 
@@ -84,8 +86,10 @@ describe('schema v2 and explicit v1 migration', () => {
   it('migrates v1 losslessly and maps owners without guessing monitor', () => {
     const path = tempPath()
     createV1(path)
-    const result = migrateDatabaseV1ToV2(path)
-    expect(result).toMatchObject({ commitments: 2, outbox: 1 })
+    const result = migrateDatabaseToV3(path)
+    expect(result).toMatchObject({ from: 1, to: 3, commitments: 2, outbox: 1 })
+    const v4 = migrateDatabaseToV4(path)
+    expect(v4).toMatchObject({ from: 3, to: 4, bindings: 0 })
     const store = new AssistantStore(path)
     expect(store.getById('u1')).toMatchObject({ kind: 'focus', workOwner: 'user', sourceSessionId: 'web-1' })
     expect(store.getById('a1')).toMatchObject({ kind: 'delegated', workOwner: 'agent', sourceSessionId: null })
@@ -103,7 +107,8 @@ describe('schema v2 and explicit v1 migration', () => {
       null, 'none', null, null, 'child-2', 'session-telegram', 'run-2', 'none', 'telegram', null, 1,
     )
     db.close()
-    expect(migrateDatabaseV1ToV2(path, { monitorId: 'a1' })).toMatchObject({ commitments: 3, outbox: 1 })
+    expect(migrateDatabaseToV3(path, { monitorId: 'a1' })).toMatchObject({ from: 1, to: 3, commitments: 3, outbox: 1 })
+    expect(migrateDatabaseToV4(path)).toMatchObject({ from: 3, to: 4, bindings: 0 })
     const store = new AssistantStore(path)
     expect(store.getById('a1')).toMatchObject({
       kind: 'monitor', workOwner: 'agent', monitorDesiredState: 'running', monitorResumeState: 'needed',
@@ -122,7 +127,7 @@ describe('schema v2 and explicit v1 migration', () => {
     it(`rejects a ${invalid.name} monitor override and rolls the whole migration back`, () => {
       const path = tempPath()
       createV1(path)
-      expect(() => migrateDatabaseV1ToV2(path, { monitorId: invalid.monitorId })).toThrow(invalid.message)
+      expect(() => migrateDatabaseToV3(path, { monitorId: invalid.monitorId })).toThrow(invalid.message)
       const after = new DatabaseSync(path)
       expect((after.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(1)
       expect((after.prepare('SELECT COUNT(*) AS n FROM commitments').get() as { n: number }).n).toBe(2)
@@ -142,7 +147,7 @@ describe('schema v2 and explicit v1 migration', () => {
       null, 'none', null, null, 'child-1', 'session-telegram', 'run-2', 'none', 'telegram', null, 1,
     )
     db.close()
-    expect(() => migrateDatabaseV1ToV2(path)).toThrow(/UNIQUE constraint failed: commitments.worker_session_id/)
+    expect(() => migrateDatabaseToV3(path)).toThrow(/UNIQUE constraint failed: commitments.worker_session_id/)
     const after = new DatabaseSync(path)
     expect((after.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(1)
     expect((after.prepare('SELECT COUNT(*) AS n FROM commitments').get() as { n: number }).n).toBe(3)
@@ -158,7 +163,7 @@ describe('multiple responsibilities', () => {
     expect(store.createUserCommitment({ title: 'focus', status: 'active', sourceSurface: 'web', now: NOW }).ok).toBe(true)
     expect(store.createAgentCommitment({ title: 'delegated one', kind: 'delegated', sourceSurface: 'telegram', now: NOW }).ok).toBe(true)
     expect(store.createAgentCommitment({ title: 'delegated two', kind: 'delegated', sourceSurface: 'telegram', now: NOW }).ok).toBe(true)
-    expect(store.createAgentCommitment({ title: 'monitor', kind: 'monitor', sourceSurface: 'telegram', now: NOW }).ok).toBe(true)
+    expect(store.createAgentCommitment({ title: 'monitor', kind: 'monitor', monitorDirection: 'watch-current', sourceSurface: 'telegram', now: NOW }).ok).toBe(true)
     expect(store.listOpen()).toHaveLength(4)
     expect(store.getOpenFocus()?.title).toBe('focus')
     expect(store.listTelegramAgentResponsibilities(10)).toHaveLength(3)
@@ -216,7 +221,7 @@ describe('multiple responsibilities', () => {
 
   it('parks and claims desired-running monitors for one cold resume epoch', () => {
     const store = new AssistantStore(tempPath())
-    const created = store.createAgentCommitment({ title: 'watch repo', kind: 'monitor', sourceSurface: 'telegram', now: NOW })
+    const created = store.createAgentCommitment({ title: 'watch repo', kind: 'monitor', monitorDirection: 'watch-current', sourceSurface: 'telegram', now: NOW })
     if (!created.ok) throw new Error('seed failed')
     const saved = store.saveWorkerIdentity(created.row.id, created.row.revision, {
       workerSessionId: 'child-monitor', workerRunId: 'run-1', workerParentSessionId: 'session-telegram',

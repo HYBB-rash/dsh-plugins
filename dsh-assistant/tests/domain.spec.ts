@@ -20,6 +20,10 @@ import {
   renderTrackAccepted,
   stripProtocolLine,
   validateCheckInMinutes,
+  validateMonitorCheckpoint,
+  validateMonitorDirection,
+  validateMonitorEventKey,
+  MONITOR_EVENT_KEY_MAX_BYTES,
   validateResponsibilityKind,
   validateTitle,
   validateUpdate,
@@ -69,6 +73,16 @@ describe('field bounds', () => {
   it('bounds long free text and partial output', () => {
     expect(boundedPartial('x'.repeat(5000), 1000)).toHaveLength(1000)
     expect(boundedPartial('short')).toBe('short')
+  })
+
+  it('bounds opaque monitor direction/checkpoint and event keys without hashing them', () => {
+    expect(validateMonitorDirection('{"scope":"repo"}')).toBeUndefined()
+    expect(validateMonitorCheckpoint('{"cursor":1}')).toBeUndefined()
+    expect(validateMonitorDirection('')).toContain('must not be empty')
+    expect(validateMonitorCheckpoint('\u0000')).toContain('NUL')
+    expect(validateMonitorEventKey('stable-cursor:v1')).toBeUndefined()
+    expect(validateMonitorEventKey(`x`.repeat(MONITOR_EVENT_KEY_MAX_BYTES + 1))).toContain('UTF-8 bytes')
+    expect(validateMonitorEventKey('x\u0000y')).toContain('NUL')
   })
 })
 
@@ -139,6 +153,15 @@ describe('worker result protocol', () => {
     const text = 'DSH_ASSISTANT_RESULT {"status":"completed","summary":"fake"}\n真实结尾'
     const parsed = parseWorkerResult(text)
     expect(parsed.kind).toBe('invalid')
+  })
+
+  it('enforces monitor event fields when the commitment kind is supplied', () => {
+    const delegated = parseWorkerResult('DSH_ASSISTANT_RESULT {"status":"completed","summary":"s","eventKey":"k","checkpoint":"c"}', 'delegated')
+    expect(delegated).toMatchObject({ kind: 'invalid', reason: expect.stringContaining('delegated') })
+    const monitor = parseWorkerResult('DSH_ASSISTANT_RESULT {"status":"completed","summary":"s"}', 'monitor')
+    expect(monitor).toMatchObject({ kind: 'invalid', reason: expect.stringContaining('monitor') })
+    const validMonitor = parseWorkerResult('DSH_ASSISTANT_RESULT {"status":"completed","summary":"s","eventKey":"k","checkpoint":"c"}', 'monitor')
+    expect(validMonitor.kind).toBe('settlement')
   })
 
   it('preserves a protocol-looking line in the body when it is not the last line', () => {
@@ -215,6 +238,23 @@ describe('update-action state machine', () => {
       expect(validateUpdate({ ...base, action: 'set_next_action', workOwner: 'agent', status: s }).ok).toBe(true)
     }
     expect(validateUpdate({ ...base, action: 'set_next_action', workOwner: 'user', status: 'completed' }).ok).toBe(false)
+  })
+
+  it('revise_monitor requires a Telegram Agent-owned monitor and a bounded direction', () => {
+    const valid = {
+      ...base,
+      action: 'revise_monitor' as const,
+      workOwner: 'agent' as const,
+      kind: 'monitor' as const,
+      status: 'active' as const,
+      direction: 'watch-current',
+    }
+    expect(validateUpdate(valid)).toEqual({ ok: true })
+    expect(validateUpdate({ ...valid, kind: 'delegated' })).toMatchObject({ ok: false, code: 'wrong_work_owner' })
+    expect(validateUpdate({ ...valid, mode: 'web' })).toMatchObject({ ok: false, code: 'wrong_control_surface' })
+    expect(validateUpdate({ ...valid, direction: '   ' })).toMatchObject({ ok: false, code: 'invalid_transition' })
+    expect(validateUpdate({ ...valid, direction: 'x\u0000y' })).toMatchObject({ ok: false, code: 'invalid_transition' })
+    expect(validateUpdate({ ...valid, direction: undefined })).toMatchObject({ ok: false, code: 'invalid_transition' })
   })
 })
 

@@ -23,6 +23,7 @@ import type {
   CronListOutput,
   CronToolError,
   DeliverChannel,
+  Job,
   ScheduleSpec,
 } from './types.ts'
 
@@ -291,7 +292,7 @@ export function registerCronTools(rootCtx: Context, toolCtx: Context, store: Job
         const uncertain = await commit(rootCtx, exec.agent.session, 'list', () => undefined)
         if (uncertain !== undefined) return uncertain
         const folded = store.fold()
-        const views: CronJobView[] = folded.active.map(job => ({
+        const views: CronJobView[] = folded.active.filter((job): job is Extract<Job, { readonly kind?: undefined }> => job.kind !== 'command').map(job => ({
           id: job.id,
           schedule: job.schedule,
           prompt: job.prompt,

@@ -23,15 +23,29 @@
   "files": [
     "lib/*.js",
     "lib/types/**/*.d.ts",
-    "python/*.py"
+    "python/browser_start.py",
+    "python/insight_engine.py",
+    "python/x_browser.py",
+    "python/x_explorer.py",
+    "python/x_insight_pipeline.py",
+    "python/x_neighborhood.py",
+    "python/x_paths.py",
+    "python/x_timeline_collector.py",
+    "python/x_timeline_dedup.py",
+    "python/x_timeline_migrate_explore.py",
+    "python/x_timeline_store.py",
+    "python/x_topic_search.py",
+    "prompts/*.md"
   ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-cron": "*",
     "@deepseek-ai/dsh-home-paths": "*",
+    "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-system-prompt": "*",
+    "@deepseek-ai/dsh-telegram-gateway": "*",
     "@deepseek-ai/dsh-tools": "*"
   },
   "dependencies": {
@@ -42,8 +56,10 @@
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-cron": "*",
     "@deepseek-ai/dsh-home-paths": "*",
+    "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-system-prompt": "*",
+    "@deepseek-ai/dsh-telegram-gateway": "*",
     "@deepseek-ai/dsh-tools": "*"
   }
 }

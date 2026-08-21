@@ -6,8 +6,12 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apply, X_FEED_CONTRACT } from '../src/index.ts'
+import { registerXFeedTools } from '../src/tools.ts'
 import { DeliveryReceipt } from '../src/receipt.ts'
 import { XFeedbackStore } from '../src/store.ts'
+import { mkdtempSync, existsSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 interface MockAgent {
   agent: {
@@ -111,6 +115,32 @@ afterEach(() => {
 })
 
 describe('root isolation (§10.3)', () => {
+  it('旧工具 rating 在执行器最前面稳定拒绝且零写入，save/unsave 仍可用', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-x-feed-tools-'))
+    try {
+      const store = new XFeedbackStore(dir)
+      const definitions: Array<{ name: string; execute?: (args: Record<string, unknown>) => Promise<unknown> }> = []
+      registerXFeedTools({
+        tools: { register: (definition: unknown) => {
+          definitions.push(definition as { name: string; execute?: (args: Record<string, unknown>) => Promise<unknown> })
+          return () => undefined
+        } },
+      }, { store, logger: { warn: () => undefined } })
+      const feedback = definitions.find(definition => definition.name === 'x_feed_record_feedback')!
+      const rejected = await feedback.execute!({ operation: 'dislike', url: 'https://x.com/u/1', note: '旧评价' })
+      expect(rejected).toMatchObject({ ok: false, code: 'rating_requires_clean_feedback' })
+      expect(existsSync(join(dir, 'feedback.jsonl'))).toBe(false)
+
+      const saved = await feedback.execute!({ operation: 'save', url: 'https://twitter.com/u/1?utm_source=test', title: '标题', note: '收藏理由' })
+      expect(saved).toMatchObject({ ok: true, event: { operation: 'save', canonicalUrl: 'https://x.com/u/1' } })
+      const unsaved = await feedback.execute!({ operation: 'unsave', url: 'https://x.com/u/1' })
+      expect(unsaved).toMatchObject({ ok: true, event: { operation: 'unsave' } })
+      expect(JSON.parse(readFileSync(join(dir, 'feedback.jsonl'), 'utf8').split('\n')[0]!).operation).toBe('save')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('session-telegram 看得到两项 x_feed_* 工具和合同', async () => {
     const store = new XFeedbackStore('/tmp/dsh-x-feed-isolation-a')
     const telegram = makeAgent('session-telegram', [], [])

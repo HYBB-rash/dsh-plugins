@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { createCronControlUseCase } from '../src/cron-control.ts'
 import { AssistantStore } from '../src/store.ts'
 import { registerAssistantTools, type AssistantToolError, type MutationOutput } from '../src/tools.ts'
 import { WorkerController, type SubagentsApi } from '../src/worker.ts'
@@ -36,7 +37,12 @@ interface ToolDef {
   description?: string
 }
 
-function register(store: AssistantStore, mode: 'web' | 'telegram', worker?: WorkerController) {
+function register(
+  store: AssistantStore,
+  mode: 'web' | 'telegram',
+  worker?: WorkerController,
+  cronControl?: ReturnType<typeof createCronControlUseCase>,
+) {
   const tools = new Map<string, ToolDef>()
   const toolCtx = {
     tools: {
@@ -48,8 +54,36 @@ function register(store: AssistantStore, mode: 'web' | 'telegram', worker?: Work
       },
     },
   }
-  const dispose = registerAssistantTools(toolCtx as never, { store, mode, worker, now: clock })
+  const dispose = registerAssistantTools(toolCtx as never, { store, mode, worker, cronControl, now: clock })
   return { tools, dispose }
+}
+
+function makeCronControl(store: AssistantStore, calls: string[]) {
+  const snapshot = (externalRef: string, activeJob: string | null) => ({
+    ok: true as const,
+    snapshot: {
+      externalRef,
+      activeJob: activeJob === null ? null : { id: activeJob },
+      latestRun: null,
+    },
+  })
+  const controlPort = {
+    ensureBound: async (spec: { externalRef: string }) => {
+      calls.push(`ensure:${spec.externalRef}`)
+      return snapshot(spec.externalRef, 'job-ensure')
+    },
+    replaceBound: async (spec: { externalRef: string }) => {
+      calls.push(`replace:${spec.externalRef}`)
+      return snapshot(spec.externalRef, 'job-replace')
+    },
+    deleteBound: async (externalRef: string) => {
+      calls.push(`delete:${externalRef}`)
+      return snapshot(externalRef, null)
+    },
+    getBound: async (externalRef: string) => snapshot(externalRef, null),
+    readiness: async () => ({ state: 'ready' as const }),
+  }
+  return createCronControlUseCase({ store, controlPort: controlPort as never, now: () => NOW })
 }
 
 function exec(agentId = 'session-telegram'): { agent: Agent; signal: AbortSignal } {
@@ -183,6 +217,21 @@ describe('assistant_task_status', () => {
     })
     const tgStatus = await tg.tools.get('assistant_task_status')!.execute({}, exec()) as { responsibilities: unknown[] }
     expect(tgStatus.responsibilities).toHaveLength(3)
+    const monitor = store.createAgentCommitment({
+      title: 'bounded monitor status', kind: 'monitor', monitorDirection: 'private direction',
+      sourceSurface: 'telegram', now: NOW,
+    })
+    if (!monitor.ok) throw new Error('monitor seed failed')
+    const monitorStatus = await tg.tools.get('assistant_task_status')!.execute({}, exec()) as {
+      responsibilities: Array<Record<string, unknown>>
+    }
+    const monitorView = monitorStatus.responsibilities.find(item => item.id === monitor.row.id)!
+    expect(monitorView).toMatchObject({
+      monitorDesiredState: 'running', monitorResumeState: 'none', hasWorker: false,
+      monitorDirection: 'private direction', monitorCheckpoint: null,
+      monitorEventKey: null, monitorProposedCheckpoint: null,
+      monitorEventDeliveryState: null, monitorEventDeliveryError: null,
+    })
     web.dispose(); tg.dispose(); store.close()
   })
 
@@ -243,7 +292,7 @@ describe('assistant_task_status', () => {
   it('keeps a bounded multi-item view of recent Agent closures while other work remains open', async () => {
     const store = new AssistantStore(join(tempDir(), 'recent-agent-closures.sqlite'))
     const monitor = store.createAgentCommitment({
-      title: '持续监控仓库', kind: 'monitor', sourceSurface: 'telegram', now: NOW,
+      title: '持续监控仓库', kind: 'monitor', monitorDirection: '持续观察该 workspace', sourceSurface: 'telegram', now: NOW,
     })
     if (!monitor.ok) throw new Error('monitor seed failed')
 
@@ -354,6 +403,192 @@ describe('assistant_task_status', () => {
     expect(status.description).toContain('bounded open responsibilities')
     expect(status.description).toContain('not the user\'s personal todo list')
     expect(status.description).toContain('workspace')
+    store.close()
+  })
+
+  it('shows bounded monitor facts and delivery failure without exposing event body', async () => {
+    const store = new AssistantStore(join(tempDir(), 'monitor-delivery-status.sqlite'))
+    const agent = fakeAgent()
+    const worker = makeWorker(agent, store)
+    const { tools } = register(store, 'telegram', worker)
+    const delegated = await worker.delegate(
+      agent as never,
+      { title: 'delivery status monitor', prompt: 'private full direction', kind: 'monitor' },
+      new AbortController().signal,
+    )
+    if (!delegated.ok) throw new Error('monitor delegation failed')
+    worker.onEnd({
+      id: SessionId('child-1'), runId: 'run-1', provider: 'spawn', local: true, stopReason: 'completed',
+      lastAssistantMessage: [{ type: 'text', text: '业务正文不应出现在 status\nDSH_ASSISTANT_RESULT {"status":"completed","summary":"事件摘要","eventKey":"status-event","checkpoint":"status-cp"}' }],
+    } as never)
+    const event = store.listPendingOutbox()[0]!
+    store.finishOutbox(event.id, 'failed', { error: 'HTTP 500' })
+    const status = await tools.get('assistant_task_status')!.execute({}, exec()) as {
+      current: Record<string, unknown>
+    }
+    expect(status.current).toMatchObject({
+      kind: 'monitor', status: 'active', lastDeliveryState: 'failed', lastDeliveryError: 'HTTP 500',
+      monitorDesiredState: 'running', hasWorker: false,
+      monitorDirection: 'private full direction', monitorCheckpoint: null,
+      monitorEventKey: 'status-event', monitorProposedCheckpoint: 'status-cp',
+      monitorEventDeliveryState: 'failed', monitorEventDeliveryError: 'HTTP 500',
+    })
+    expect(JSON.stringify(status.current)).not.toContain('业务正文')
+    store.close()
+  })
+
+  it.each([
+    ['success+silent without summary', {
+      runId: 'cron-run-success',
+      runStatus: 'success',
+      summary: undefined,
+      error: undefined,
+      deliveryState: 'silent',
+      deliveryError: undefined,
+    }],
+    ['error+failed with independent errors', {
+      runId: 'cron-run-error',
+      runStatus: 'error',
+      summary: 'Cron error summary',
+      error: 'Cron run failed',
+      deliveryState: 'failed',
+      deliveryError: 'Cron delivery failed',
+    }],
+  ])('exposes an independent Cron binding and latestRun in status for %s', async (_label, run) => {
+    const store = new AssistantStore(join(tempDir(), `cron-status-${run.runId}.sqlite`))
+    const created = store.createAgentCommitment({
+      title: 'bound Cron monitor', kind: 'monitor', monitorDirection: '完整 Cron 方向',
+      sourceSurface: 'telegram', now: NOW,
+    })
+    if (!created.ok) throw new Error('monitor seed failed')
+    const saved = store.saveWorkerIdentity(created.row.id, created.row.revision, {
+      workerSessionId: `legacy-status-child-${run.runId}`,
+      workerRunId: `legacy-status-worker-${run.runId}`,
+      workerParentSessionId: 'session-telegram',
+    })
+    if (!saved.ok) throw new Error('worker identity seed failed')
+    const active = store.markAgentActive(saved.row.id, saved.row.revision)
+    if (!active.ok) throw new Error('monitor activation failed')
+    const progress = store.recordWorkerProgress(
+      `legacy-status-child-${run.runId}`,
+      `legacy-status-progress-${run.runId}`,
+      'legacy progress must remain separate from Cron facts',
+      NOW,
+    )
+    if (!progress.inserted) throw new Error('legacy progress seed failed')
+    const afterProgress = store.getById(created.row.id)
+    if (afterProgress === undefined) throw new Error('monitor disappeared after progress')
+    const legacyEvent = store.settleMonitorEvent({
+      commitmentId: created.row.id,
+      expectedRevision: afterProgress.revision,
+      workerSessionId: `legacy-status-child-${run.runId}`,
+      workerRunId: `legacy-status-worker-${run.runId}`,
+      workerParentSessionId: 'session-telegram',
+      monitorResumeEpoch: afterProgress.monitorResumeEpoch,
+      eventKey: `legacy-event-${run.runId}`,
+      checkpoint: 'legacy-checkpoint',
+      summary: 'LEGACY-EVENT-SUMMARY-MUST-NOT-BE-CRON-FACT',
+      outboxText: 'LEGACY-EVENT-OUTBOX-MUST-NOT-BE-CRON-FACT',
+      now: NOW,
+    })
+    if (!legacyEvent.ok) throw new Error('legacy event seed failed')
+    store.finishOutbox(legacyEvent.outbox.id, 'failed', { error: 'legacy event delivery failed' })
+
+    const binding = store.createCronBinding({
+      commitmentId: created.row.id,
+      externalRef: `assistant:${created.row.id}`,
+      desiredScheduleJson: JSON.stringify({ kind: 'interval', minutes: 15 }),
+      desiredCwd: '/repo/cron-status',
+      desiredState: 'running',
+      boundJobId: 'cron-job-status',
+      updatedAt: NOW,
+    })
+    if (!binding.ok) throw new Error('Cron binding seed failed')
+    const observed = store.observeCronRunFinished({
+      commitmentId: created.row.id,
+      externalRef: `assistant:${created.row.id}`,
+      runId: run.runId,
+      jobId: 'cron-job-status',
+      scheduledFor: '2026-08-18T07:00:00.000Z',
+      finishedAt: '2026-08-18T07:00:03.000Z',
+      runStatus: run.runStatus,
+      ...(run.summary === undefined ? {} : { summary: run.summary }),
+      ...(run.error === undefined ? {} : { error: run.error }),
+      deliveryState: run.deliveryState,
+      ...(run.deliveryError === undefined ? {} : { deliveryError: run.deliveryError }),
+      now: NOW,
+    })
+    if (!observed.ok) throw new Error('Cron observation seed failed')
+    const controlError = store.recordCronControlError({
+      commitmentId: created.row.id,
+      externalRef: `assistant:${created.row.id}`,
+      code: 'control_unavailable',
+      error: 'Cron manager observation unavailable',
+    })
+    if (controlError === undefined) throw new Error('Cron control error seed failed')
+
+    const { tools } = register(store, 'telegram')
+    const status = await tools.get('assistant_task_status')!.execute({}, exec()) as {
+      current: Record<string, unknown>
+      responsibilities: Array<Record<string, unknown>>
+    }
+    const view = status.current ?? status.responsibilities.find(item => item.id === created.row.id)
+    expect(view).toMatchObject({
+      kind: 'monitor',
+      progressSummary: 'legacy progress must remain separate from Cron facts',
+      lastDeliveryState: 'failed',
+      lastDeliveryError: 'legacy event delivery failed',
+      cronBinding: {
+        desiredState: 'running',
+        schedule: { kind: 'interval', minutes: 15 },
+        desiredCwd: '/repo/cron-status',
+        boundJobId: 'cron-job-status',
+        controlError: 'Cron manager observation unavailable',
+        lastRun: {
+          runId: run.runId,
+          jobId: 'cron-job-status',
+          scheduledFor: '2026-08-18T07:00:00.000Z',
+          finishedAt: '2026-08-18T07:00:03.000Z',
+          runStatus: run.runStatus,
+          summary: run.summary ?? null,
+          runError: run.error ?? null,
+          deliveryState: run.deliveryState,
+          deliveryError: run.deliveryError ?? null,
+        },
+      },
+    })
+    expect(view).not.toHaveProperty('cronBinding.lastRun.eventKey')
+    expect(view).not.toHaveProperty('cronBinding.lastRun.checkpoint')
+    expect(view).not.toHaveProperty('cronBinding.lastRun.outboxText')
+    store.close()
+  })
+
+  it('shows a monitor pause request separately from a live worker after interrupt failure', async () => {
+    const store = new AssistantStore(join(tempDir(), 'monitor-interrupt-status.sqlite'))
+    const created = store.createAgentCommitment({
+      title: 'interrupt failure monitor', kind: 'monitor', monitorDirection: '新完整方向',
+      sourceSurface: 'telegram', now: NOW,
+    })
+    if (!created.ok) throw new Error('monitor seed failed')
+    const saved = store.saveWorkerIdentity(created.row.id, created.row.revision, {
+      workerSessionId: 'old-child', workerRunId: 'old-run', workerParentSessionId: 'session-telegram',
+    })
+    if (!saved.ok) throw new Error('identity seed failed')
+    const active = store.markAgentActive(saved.row.id, saved.row.revision)
+    if (!active.ok) throw new Error('active seed failed')
+    const paused = store.pauseAgent(active.row.id, active.row.revision)
+    if (!paused.ok) throw new Error('pause seed failed')
+    expect(paused.row.workerControlState).toBe('pause_requested')
+
+    const { tools } = register(store, 'telegram')
+    const status = await tools.get('assistant_task_status')!.execute({}, exec()) as {
+      current: Record<string, unknown>
+    }
+    expect(status.current).toMatchObject({
+      kind: 'monitor', status: 'paused', hasWorker: true,
+      monitorDirection: '新完整方向', monitorDesiredState: 'paused',
+      monitorResumeState: 'none', workerControlState: 'pause_requested',
+    })
     store.close()
   })
 })
@@ -512,6 +747,116 @@ describe('assistant_task_update (user route)', () => {
 })
 
 describe('assistant_task_update (agent route)', () => {
+  it('uses revise_monitor for a full direction replacement, not set_next_action', async () => {
+    const store = new AssistantStore(join(tempDir(), 'monitor-direction-update.sqlite'))
+    const agent = fakeAgent()
+    const worker = makeWorker(agent, store)
+    worker.ensureInstalled(agent)
+    const calls: string[] = []
+    const cronControl = makeCronControl(store, calls)
+    const { tools } = register(store, 'telegram', worker, cronControl)
+    const created = store.createAgentCommitment({
+      title: 'monitor', kind: 'monitor', monitorDirection: '旧完整方向', sourceSurface: 'telegram', now: NOW,
+    })
+    if (!created.ok) throw new Error('seed failed')
+    const active = store.markAgentActive(created.row.id, created.row.revision)
+    if (!active.ok) throw new Error('active failed')
+    const binding = store.createCronBinding({
+      commitmentId: created.row.id,
+      externalRef: `assistant:${created.row.id}`,
+      desiredScheduleJson: JSON.stringify({ kind: 'interval', minutes: 30 }),
+      desiredState: 'running',
+      updatedAt: NOW,
+    })
+    if (!binding.ok) throw new Error('binding failed')
+    const out = await tools.get('assistant_task_update')!.execute({
+      action: 'revise_monitor', commitmentId: created.row.id, direction: '新完整方向',
+    }, { agent, signal: new AbortController().signal }) as MutationOutput
+    expect(out.current).toMatchObject({ kind: 'monitor', status: 'active', hasWorker: false })
+    expect(calls).toEqual([`replace:assistant:${created.row.id}`])
+    expect(store.getById(created.row.id)).toMatchObject({
+      monitorDirection: '新完整方向',
+      nextAction: null,
+      workerControlState: 'none',
+      workerSessionId: null,
+    })
+    store.close()
+  })
+
+  it('keeps monitor set_next_action as a pure next-action update', async () => {
+    const store = new AssistantStore(join(tempDir(), 'monitor-next-action.sqlite'))
+    const agent = fakeAgent()
+    const subagents = fakeSubagents(agent) as SubagentsApi & {
+      interrupt: ReturnType<typeof vi.fn>
+      startContinuable: ReturnType<typeof vi.fn>
+    }
+    const worker = new WorkerController({
+      store,
+      mode: 'telegram',
+      subagents,
+      telegramParentSessionId: 'session-telegram',
+      now: clock,
+      logger: { warn: () => undefined },
+    })
+    worker.ensureInstalled(agent)
+    const { tools } = register(store, 'telegram', worker)
+    const created = store.createAgentCommitment({
+      title: 'monitor', kind: 'monitor', monitorDirection: '旧完整方向', sourceSurface: 'telegram', now: NOW,
+    })
+    if (!created.ok) throw new Error('seed failed')
+    const saved = store.saveWorkerIdentity(created.row.id, created.row.revision, {
+      workerSessionId: 'child-1', workerRunId: 'run-1', workerParentSessionId: 'session-telegram',
+    })
+    if (!saved.ok) throw new Error('save failed')
+    const active = store.markAgentActive(saved.row.id, saved.row.revision)
+    if (!active.ok) throw new Error('active failed')
+    const out = await tools.get('assistant_task_update')!.execute({
+      action: 'set_next_action', commitmentId: created.row.id, nextAction: '下一次先检查日志',
+    }, { agent, signal: new AbortController().signal }) as MutationOutput
+    expect(out.current).toMatchObject({ kind: 'monitor', status: 'active', hasWorker: true, nextAction: '下一次先检查日志' })
+    expect(store.getById(created.row.id)).toMatchObject({
+      monitorDirection: '旧完整方向', nextAction: '下一次先检查日志', workerControlState: 'none', workerSessionId: 'child-1',
+    })
+    expect(subagents.interrupt).not.toHaveBeenCalled()
+    expect(subagents.startContinuable).not.toHaveBeenCalled()
+    store.close()
+  })
+
+  it('saves a paused monitor direction without resuming or starting a worker', async () => {
+    const store = new AssistantStore(join(tempDir(), 'paused-monitor-direction.sqlite'))
+    const agent = fakeAgent()
+    const worker = makeWorker(agent, store)
+    worker.ensureInstalled(agent)
+    const calls: string[] = []
+    const cronControl = makeCronControl(store, calls)
+    const { tools } = register(store, 'telegram', worker, cronControl)
+    const created = store.createAgentCommitment({
+      title: 'paused monitor', kind: 'monitor', monitorDirection: '旧方向', sourceSurface: 'telegram', now: NOW,
+    })
+    if (!created.ok) throw new Error('seed failed')
+    const active = store.markAgentActive(created.row.id, created.row.revision)
+    if (!active.ok) throw new Error('active failed')
+    const binding = store.createCronBinding({
+      commitmentId: created.row.id,
+      externalRef: `assistant:${created.row.id}`,
+      desiredScheduleJson: JSON.stringify({ kind: 'interval', minutes: 30 }),
+      desiredState: 'paused',
+      updatedAt: NOW,
+    })
+    if (!binding.ok) throw new Error('binding failed')
+    const paused = store.pauseAgent(active.row.id, active.row.revision)
+    if (!paused.ok) throw new Error('pause failed')
+    const out = await tools.get('assistant_task_update')!.execute({
+      action: 'revise_monitor', commitmentId: created.row.id, direction: '新暂停方向',
+    }, { agent, signal: new AbortController().signal }) as MutationOutput
+    expect(out).toMatchObject({ current: { status: 'paused', hasWorker: false } })
+    expect(calls).toEqual([])
+    expect(store.getById(created.row.id)).toMatchObject({
+      monitorDirection: '新暂停方向', status: 'paused', monitorDesiredState: 'paused', monitorResumeState: 'none', workerSessionId: null,
+    })
+    store.close()
+  })
+
   it('complete on an agent commitment is rejected with wrong_work_owner', async () => {
     const store = new AssistantStore(join(tempDir(), 's.sqlite'))
     const agent = fakeAgent()

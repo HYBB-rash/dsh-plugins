@@ -2,7 +2,7 @@
 """x_neighborhood.py — 邻域漫游机械层(零模型调用, TDD 开发)。
 
 职责(用户 2026-08-14 定稿):
-- 机械动作全代码化: 兴趣图邻接(1–2 跳) / topic 同义归一 / 冷却与 explored count / 低熟悉优先排序
+- 机械动作全代码化: topology 邻接(1–2 跳) / topic 同义归一 / 冷却与 explored count / 低熟悉优先排序
 - 只输出「数据驱动候选 + 指标」(hop/bridge/cooldown/familiarity), 最终选题权永远在 AI
 - 数据全部来自可编辑 JSON, 领域层零硬编码画像; 禁区(restricted)可配置, 不写死在领域逻辑
 - 领域层纯函数无 IO; 基础设施层管文件读写/锁; 应用层编排 CLI
@@ -13,10 +13,13 @@
 - x_wander_state.json    {topics:{<canonical_id>:{last_explored_ts,times}}, cooldown_s}
 - x_wander_candidates.json  CLI 输出(供 AI 选题)
 
+自动路径只使用本轮显式 roots 与校验后的 edges.from/to；raw anchors/restricted/bridge
+保留在文件中供审计，不进入自动候选。
+
 用法:
   python3 x_neighborhood.py candidates [--graph data/x_interest_graph.json]
       [--aliases data/x_topic_aliases.json] [--state data/x_wander_state.json]
-      [--now <ts>] [--cooldown <s>] [--out <path>]
+      [--root <surface>]... [--now <ts>] [--cooldown <s>] [--out <path>]
   python3 x_neighborhood.py record --state <path> --topic <surface>
       [--aliases <path>] [--now <ts>]
 """
@@ -91,9 +94,54 @@ def familiarity(times, scale=5.0):
     return round(min(1.0, float(times) / scale), 2)
 
 
+def sanitize_edges(edges):
+    """保留 topology 的 from/to；忽略 hop 和 AI bridge 自由文本。"""
+    safe = []
+    seen = set()
+    for edge in edges or []:
+        if not isinstance(edge, dict):
+            continue
+        source = str(edge.get("from", "") or "").strip()
+        target = str(edge.get("to", "") or "").strip()
+        if not source or not target or (source, target) in seen:
+            continue
+        seen.add((source, target))
+        safe.append({"from": source, "to": target})
+    return safe
+
+
+def sanitize_graph(graph):
+    """把 raw graph 转成自动路径可用的 topology 视图，不修改原对象。"""
+    return {
+        "anchors": [],
+        "edges": sanitize_edges((graph or {}).get("edges", [])),
+        "restricted": [],
+    }
+
+
+def graph_nodes(edges):
+    """返回 topology 中所有精确节点，不推断同义词。"""
+    return {node for edge in edges or [] for node in (
+        edge.get("from", ""), edge.get("to", "")) if node}
+
+
+def runtime_roots(alias_map, surfaces, edges):
+    """从本轮主题精确得到 topology roots；没有模糊匹配或 raw anchor 回退。"""
+    nodes = graph_nodes(edges)
+    roots = []
+    for surface in surfaces or []:
+        canonical = canonical_topic(alias_map, surface)
+        if canonical in nodes and canonical not in roots:
+            roots.append(canonical)
+    return roots
+
+
 def novelty_rank(anchors, edges, restricted, ledger, now, cooldown_s,
                  recent_window_s=None, max_hops=MAX_HOPS):
-    """数据驱动邻域候选: 从兴趣锚点出发 BFS 1–2 跳, 输出候选+指标, 不做语义判断。
+    """从显式 roots 出发 BFS 1–2 跳，输出候选+指标，不做语义判断。
+
+    ``anchors`` 参数名为历史兼容名称，但调用者必须传入已经审核过的
+    runtime roots。restricted 只供纯机制调用者显式传入；自动路径传空列表。
 
     输出:
       candidates: 可漫游候选(冷却 ok 且非近期重复), 按 (hop, explored_count, last_ts) 升序 → 低熟悉优先
@@ -105,9 +153,8 @@ def novelty_rank(anchors, edges, restricted, ledger, now, cooldown_s,
     anchor_list = list(anchors or [])
     anchor_set = set(anchor_list)
 
-    # 无向邻接 + 边文本(桥梁解释由 AI 写入数据, 机械层只搬运)
+    # 无向 topology；不读取 edge.hop/edge.bridge，避免旧自由文本进入材料。
     adjacency = {}
-    edge_text = {}
     for e in (edges or []):
         if not isinstance(e, dict):
             continue
@@ -115,11 +162,8 @@ def novelty_rank(anchors, edges, restricted, ledger, now, cooldown_s,
         to = str(e.get("to", "") or "")
         if not frm or not to:
             continue
-        bridge = e.get("bridge", "")
         adjacency.setdefault(frm, []).append(to)
         adjacency.setdefault(to, []).append(frm)
-        edge_text.setdefault((frm, to), bridge)
-        edge_text.setdefault((to, frm), bridge)
 
     # BFS: 记录每个可达节点的最短 hop / 来源锚点 / 桥梁 / 经由节点
     best = {}
@@ -127,15 +171,16 @@ def novelty_rank(anchors, edges, restricted, ledger, now, cooldown_s,
         if anchor in restricted_set:
             continue
         seen = {anchor}
-        frontier = [(anchor, 0, None, "")]
+        frontier = [(anchor, 0, None)]
         while frontier:
-            node, hop, parent, bridge = frontier.pop(0)
+            node, hop, parent = frontier.pop(0)
             if hop > 0 and node not in anchor_set:
                 cur = best.get(node)
                 if cur is None or hop < cur["hop"]:
                     best[node] = {
                         "hop": hop, "from_anchor": anchor,
-                        "bridge": bridge, "via": parent,
+                        "bridge": f"{parent} → {node}" if parent else "",
+                        "via": parent,
                     }
             if hop >= max_hops:
                 continue
@@ -143,7 +188,7 @@ def novelty_rank(anchors, edges, restricted, ledger, now, cooldown_s,
                 if nxt in seen:
                     continue
                 seen.add(nxt)
-                frontier.append((nxt, hop + 1, node, edge_text.get((node, nxt), "")))
+                frontier.append((nxt, hop + 1, node))
 
     candidates, blocked = [], []
     for node in sorted(best):
@@ -211,7 +256,7 @@ def load_json_quiet(path, default):
 
 
 def load_graph(path):
-    """兴趣图: {anchors, edges, restricted}; 缺失 → 空图(安全默认, 不烧画像进代码)。"""
+    """读取 raw graph；自动路径必须先调用 sanitize_graph。"""
     data = load_json_quiet(path, {}) or {}
     return {
         "anchors": list(data.get("anchors") or []),
@@ -279,19 +324,29 @@ def record_exploration_for_surface(aliases_path, state_path, surface, now):
 
 # ---------- 应用层: 编排 ----------
 
-def compute_candidates(graph_path, aliases_path, state_path, now, cooldown_s=None):
-    """读三份数据文件 → 邻域候选 + 指标(机械层唯一对外编排入口)。"""
+def compute_candidates(graph_path, aliases_path, state_path, now, cooldown_s=None,
+                       root_surfaces=None, roots=None):
+    """读数据文件，使用显式 roots 计算安全 topology 邻域。
+
+    ``roots`` 是已经确定的 canonical roots；``root_surfaces`` 只通过 aliases
+    做精确归一。两者均为空时返回空候选，绝不回退到 raw anchors。
+    """
     graph = load_graph(graph_path)
+    safe_graph = sanitize_graph(graph)
     state = load_wander_state(state_path)
     cs = int(cooldown_s) if cooldown_s is not None else state["cooldown_s"]
-    result = novelty_rank(graph["anchors"], graph["edges"], graph["restricted"],
-                          state, now, cs)
+    aliases = load_aliases(aliases_path)
+    safe_roots = list(roots or [])
+    if roots is None:
+        safe_roots = runtime_roots(aliases, root_surfaces or [], safe_graph["edges"])
+    else:
+        safe_roots = [root for root in safe_roots if root in graph_nodes(safe_graph["edges"])]
+    result = novelty_rank(safe_roots, safe_graph["edges"], [], state, now, cs)
     result.update({
         "generated_ts": int(now),
         "config_loaded": bool(graph_path) and os.path.exists(graph_path),
         "cooldown_s": cs,
-        "anchors": graph["anchors"],
-        "restricted": graph["restricted"],
+        "roots": safe_roots,
     })
     return result
 
@@ -326,6 +381,7 @@ def main(argv=None):
     if cmd == "candidates":
         graph = aliases = state = out = None
         now = cooldown = None
+        roots = []
         i = 1
         while i < len(args):
             a = args[i]
@@ -341,11 +397,14 @@ def main(argv=None):
                 cooldown = int(args[i + 1]); i += 2
             elif a == "--out" and i + 1 < len(args):
                 out = args[i + 1]; i += 2
+            elif a == "--root" and i + 1 < len(args):
+                roots.append(args[i + 1]); i += 2
             else:
                 i += 1
         now = now if now is not None else int(__import__("time").time())
         result = compute_candidates(graph or DEFAULT_GRAPH, aliases or DEFAULT_ALIASES,
-                                    state or DEFAULT_STATE, now, cooldown)
+                                    state or DEFAULT_STATE, now, cooldown,
+                                    root_surfaces=roots)
         if out:
             _write_out(out, result)
         print(json.dumps(result, ensure_ascii=False))

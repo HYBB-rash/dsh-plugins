@@ -4,7 +4,7 @@
  * terminal cancels, and the restart catch-up with honest >2h wording.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -79,6 +79,55 @@ async function seedActiveUserTask(store: AssistantStore, title: string, checkInM
 }
 
 describe('due reminders', () => {
+  it('never schedules any monitor round; bound and unbound monitors stay outside focus reminders and outbox delivery', async () => {
+    const { store, runtime, sendMessage } = setup()
+    const unbound = store.createAgentCommitment({
+      title: 'unbound monitor',
+      kind: 'monitor',
+      monitorDirection: '只观察明确目标',
+      sourceSurface: 'telegram',
+      now: iso(START),
+    })
+    if (!unbound.ok) throw new Error('unbound monitor seed failed')
+    const unboundActive = store.markAgentActive(unbound.row.id, unbound.row.revision)
+    if (!unboundActive.ok) throw new Error('unbound monitor activation failed')
+    const blocked = store.setCommitmentStatus(unbound.row.id, 'blocked')
+    if (blocked === undefined) throw new Error('unbound monitor block failed')
+
+    const bound = store.createAgentCommitment({
+      title: 'bound monitor',
+      kind: 'monitor',
+      monitorDirection: '只观察另一个明确目标',
+      sourceSurface: 'telegram',
+      now: iso(START),
+    })
+    if (!bound.ok) throw new Error('bound monitor seed failed')
+    const boundActive = store.markAgentActive(bound.row.id, bound.row.revision)
+    if (!boundActive.ok) throw new Error('bound monitor activation failed')
+    const binding = store.createCronBinding({
+      commitmentId: bound.row.id,
+      externalRef: `assistant:${bound.row.id}`,
+      desiredScheduleJson: JSON.stringify({ kind: 'interval', minutes: 15 }),
+      desiredPrompt: '只观察另一个明确目标',
+      desiredState: 'running',
+      boundJobId: 'cron-reminder-bound-1',
+      updatedAt: iso(START),
+    })
+    if (!binding.ok) throw new Error('bound monitor binding failed')
+
+    await runtime.tick()
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(store.getById(unbound.row.id)).toMatchObject({ status: 'blocked', workerSessionId: null })
+    expect(store.getCronBinding(unbound.row.id)).toBeUndefined()
+    expect(store.getById(bound.row.id)).toMatchObject({ status: 'active', workerSessionId: null })
+    expect(store.getCronBinding(bound.row.id)).toMatchObject({
+      boundJobId: 'cron-reminder-bound-1', desiredState: 'running',
+    })
+    const source = readFileSync(new URL('../src/reminders.ts', import.meta.url), 'utf8')
+    expect(source).not.toMatch(/monitorTick|continueMonitors|startContinuable|followup/)
+    store.close()
+  })
+
   it('queues and delivers exactly one reminder when the clock passes the due time', async () => {
     const { store, runtime, sendMessage, clock } = setup()
     await seedActiveUserTask(store, '整理书桌', 2)

@@ -67,6 +67,15 @@ export class OutboxPump {
     for (const [id, controller] of this.inFlight) {
       const row = this.deps.store.getOutbox(id)
       if (row !== undefined && row.commitmentId === commitmentId) {
+        // A monitor event is already a durable hand-off from the just-finished
+        // round.  Pausing changes the desired continuation only; it must not
+        // abort the pending/in-flight event, because a successful delivery is
+        // what confirms its checkpoint.  Cancellation sets desired state to
+        // `none` and still aborts, producing the required uncertain terminal
+        // state without replay.
+        if (row.kind === 'monitor_event' && this.deps.store.getById(commitmentId)?.monitorDesiredState === 'paused') {
+          continue
+        }
         controller.abort(new Error('commitment state changed'))
       }
     }

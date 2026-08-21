@@ -19,14 +19,100 @@ export type ScheduleSpec =
 /** Delivery channel for a job's result. */
 export type DeliverChannel = 'telegram' | 'silent'
 
+/** Session lifetime persisted on a job; legacy rows default to persistent. */
+export type JobSessionMode = 'persistent' | 'per_run'
+
+/**
+ * Stable provider-owned marker for a bounded Agent environment.
+ *
+ * Markers are intentionally syntax-only in dsh-cron. A provider registry
+ * resolves the exact value later; cron never infers a provider from a prompt
+ * or from any X/feed-specific field.
+ */
+export type AgentEnvironmentMarker = string
+
+/** Canonical marker grammar: lower-kebab namespace followed by `/v<positive>`. */
+export const AGENT_ENVIRONMENT_MARKER_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*\/v[1-9][0-9]*$/
+
+/** Validate a persisted marker without trimming or normalizing it. */
+export function isCanonicalAgentEnvironmentMarker(value: unknown): value is AgentEnvironmentMarker {
+  return typeof value === 'string'
+    && value === value.trim()
+    && AGENT_ENVIRONMENT_MARKER_PATTERN.test(value)
+}
+
+/**
+ * An exact, shell-free command payload.  Command jobs are intentionally kept
+ * separate from agent prompts: the scheduler invokes this argv directly and
+ * never creates an Agent or asks a model to reproduce it.
+ */
+export interface CommandPayload {
+  readonly argv: readonly string[]
+  readonly timeoutSeconds: number
+  readonly outputMaxBytes: number
+}
+
+/**
+ * A narrow mechanical gate for an Agent job. The command runs first with the
+ * same cwd as the job: empty/whitespace stdout means "do not start an Agent",
+ * while non-empty stdout becomes bounded, untrusted input for one per-run
+ * Agent turn. Command failure is an execution error, never a silent decision.
+ */
+export interface CommandGate {
+  readonly kind: 'nonempty_stdout'
+  readonly command: CommandPayload
+}
+
+/**
+ * Per-job execution-failure notification policy. This throttles only the
+ * scheduler's error notice; it never retries the business command/Agent turn
+ * and it does not reinterpret a Telegram delivery failure as an execution
+ * failure.
+ */
+export interface FailureAlertPolicy {
+  /** First notice is eligible on this many consecutive execution errors. */
+  readonly after: number
+  /** Minimum time between durable notice claims for this job. */
+  readonly cooldownMinutes: number
+}
+
+/** Hard upper bounds for unattended direct commands. */
+export const MAX_COMMAND_TIMEOUT_SECONDS = 3_600
+export const MAX_COMMAND_OUTPUT_BYTES = 1_048_576
+export const MAX_FAILURE_ALERT_AFTER = 100
+export const MAX_FAILURE_ALERT_COOLDOWN_MINUTES = 10_080
+
+/** Delivery outcome kept orthogonal to the legacy run status field. */
+export type RunDeliveryState = 'delivered' | 'silent' | 'not_requested' | 'failed' | 'uncertain'
+
 /** One append-only line in jobs.jsonl. */
 export type JobLogEntry =
   | {
       readonly op: 'create'
+      /** Omitted by legacy rows; explicit undefined only documents the union. */
+      readonly kind?: undefined
       readonly id: string
       readonly schedule: ScheduleSpec
       readonly prompt: string
       readonly deliver: DeliverChannel
+      readonly externalRef?: string
+      readonly sessionMode?: JobSessionMode
+      readonly agentEnvironment?: AgentEnvironmentMarker
+      readonly gate?: CommandGate
+      readonly failureAlert?: FailureAlertPolicy
+      readonly cwd?: string
+      readonly createdAt: string
+    }
+  | {
+      readonly op: 'create'
+      /** Discriminant absent from all legacy agent rows. */
+      readonly kind: 'command'
+      readonly id: string
+      readonly schedule: ScheduleSpec
+      readonly command: CommandPayload
+      readonly deliver: DeliverChannel
+      readonly externalRef?: string
+      readonly failureAlert?: FailureAlertPolicy
       readonly cwd?: string
       readonly createdAt: string
     }
@@ -37,19 +123,60 @@ export type JobLogEntry =
     }
 
 /** A live job folded from the append-only job log. */
-export interface Job {
+export interface AgentJob {
+  /** Omitted by legacy JSON rows; keeps the Job union discriminated in TS. */
+  readonly kind?: undefined
   readonly id: string
+  readonly externalRef?: string
   readonly schedule: ScheduleSpec
   readonly prompt: string
   readonly deliver: DeliverChannel
+  readonly sessionMode: JobSessionMode
+  readonly agentEnvironment?: AgentEnvironmentMarker
+  readonly gate?: CommandGate
+  readonly failureAlert?: FailureAlertPolicy
   readonly cwd?: string
   readonly createdAt: string
+}
+
+/** A zero-model scheduled command. */
+export interface CommandJob {
+  readonly kind: 'command'
+  readonly id: string
+  readonly externalRef?: string
+  readonly schedule: ScheduleSpec
+  readonly command: CommandPayload
+  readonly deliver: DeliverChannel
+  readonly failureAlert?: FailureAlertPolicy
+  readonly cwd?: string
+  readonly createdAt: string
+}
+
+/** Every active job.  Legacy rows always materialize as AgentJob. */
+export type Job = AgentJob | CommandJob
+
+/** Structured replay evidence for a create row rejected by job validation. */
+export type JobLogValidationErrorCode =
+  | 'invalid_create'
+  | 'invalid_agent_environment_marker'
+  | 'agent_environment_requires_per_run'
+  | 'agent_environment_forbids_gate'
+  | 'agent_environment_not_allowed_on_command'
+
+export interface InvalidJobLogEntry {
+  /** One-based physical line number in jobs.jsonl. */
+  readonly line: number
+  readonly id?: string
+  readonly code: JobLogValidationErrorCode
+  readonly message: string
 }
 
 /** Folded view of the job log: active jobs plus every id ever seen. */
 export interface FoldedJobs {
   readonly active: readonly Job[]
   readonly seenIds: readonly string[]
+  /** Present only when one or more parsed create rows were isolated. */
+  readonly invalid?: readonly InvalidJobLogEntry[]
 }
 
 /** Terminal run status recorded in runs.jsonl. */
@@ -63,6 +190,8 @@ export interface RunRecord {
   readonly finishedAt: string
   readonly status: RunStatus
   readonly deliveredAt?: string
+  readonly deliveryState?: RunDeliveryState
+  readonly deliveryError?: string
   readonly error?: string
   readonly outputPreview?: string
 }
@@ -86,6 +215,19 @@ export interface RunClaimRecord {
   readonly nextRunAt?: string
 }
 
+/**
+ * Durable claim for one failure-alert attempt. It lands before Telegram is
+ * touched, so a scheduler restart or an ambiguous send cannot bypass the
+ * per-job cooldown and cause an immediate duplicate notice.
+ */
+export interface RunFailureAlertClaimRecord {
+  readonly schemaVersion: 2
+  readonly event: 'failure-alert-claim'
+  readonly runId: string
+  readonly jobId: string
+  readonly claimedAt: string
+}
+
 /** V2 terminal statuses, including the crash-audit `interrupted` marker. */
 export type RunFinishStatus = RunStatus | 'interrupted'
 
@@ -103,12 +245,17 @@ export interface RunFinishRecord {
   /** Re-anchored from the actual finish time (recurring), or absent (once). */
   readonly nextRunAt?: string
   readonly deliveredAt?: string
+  readonly deliveryState?: RunDeliveryState
+  readonly deliveryError?: string
   readonly error?: string
   readonly outputPreview?: string
 }
 
 /** Any V2 ledger event line. */
-export type RunEventRecord = RunClaimRecord | RunFinishRecord
+export type RunEventRecord = RunClaimRecord | RunFailureAlertClaimRecord | RunFinishRecord
+
+/** Every durable run line, including the legacy V1 terminal shape. */
+export type RunHistoryRecord = RunRecord | RunEventRecord
 
 /**
  * Generic terminal-outcome event emitted by the scheduler AFTER a finish
@@ -126,6 +273,8 @@ export interface CronRunFinishedEvent {
   readonly scheduledFor: string
   readonly status: RunFinishStatus
   readonly deliveredAt?: string
+  readonly deliveryState?: RunDeliveryState
+  readonly deliveryError?: string
   readonly error?: string
 }
 

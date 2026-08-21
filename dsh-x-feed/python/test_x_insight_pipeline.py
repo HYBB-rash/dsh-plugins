@@ -99,6 +99,116 @@ class TestBuildPackage(unittest.TestCase):
             pkg = pipe.build_package(tl, last, recent=30, cap_items=15)
             self.assertEqual(len(pkg["recent_items"]), 15)
 
+    def test_package_graph_material_uses_current_theme_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            timeline = os.path.join(tmp, "timeline.jsonl")
+            last = os.path.join(tmp, "last.json")
+            graph = os.path.join(tmp, "graph.json")
+            aliases = os.path.join(tmp, "aliases.json")
+            state = os.path.join(tmp, "state.json")
+            with open(timeline, "w") as handle:
+                handle.write(json.dumps({"id": "1", "url": "u1",
+                                         "text": "safe theme", "source": "x"}) + "\n")
+            with open(graph, "w") as handle:
+                json.dump({
+                    "anchors": ["old-like-anchor"],
+                    "restricted": ["old-dislike-restricted"],
+                    "edges": [{"from": "safe-theme", "to": "safe-one", "hop": 99,
+                               "bridge": "old-model-summary-marker"}],
+                }, handle)
+            with open(aliases, "w") as handle:
+                json.dump({"ai": "safe-theme"}, handle)
+            with open(state, "w") as handle:
+                json.dump({"topics": {}, "cooldown_s": 3600}, handle)
+            with unittest.mock.patch.object(
+                    pipe, "run_engine_analyze",
+                    return_value={"top_theme": "ai", "themes": {"ai": 1},
+                                  "candidates": [], "wander_suggested": False}):
+                package = pipe.build_package(
+                    timeline, last, current_items=[{"id": "1", "url": "u1",
+                                                   "text": "safe theme", "source": "x"}],
+                    shown_path=os.path.join(tmp, "shown.json"),
+                    graph_path=graph, aliases_path=aliases, state_path=state,
+                    wander_now=1000)
+            material = json.dumps(package, ensure_ascii=False)
+            self.assertIn("safe-one", material)
+            self.assertNotIn("old-like-anchor", material)
+            self.assertNotIn("old-dislike-restricted", material)
+            self.assertNotIn("old-model-summary-marker", material)
+            self.assertEqual(package["explore_candidates"][0]["hop"], 1)
+
+
+class TestAutomaticJudgmentIsolation(unittest.TestCase):
+    def test_legacy_files_are_not_read_or_emitted_by_main(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(tmp, exist_ok=True)
+            marker = "old-model-summary-marker"
+            with open(os.path.join(tmp, "legacy-x-preferences.md"), "w") as handle:
+                handle.write(marker)
+            with open(os.path.join(tmp, "feedback.jsonl"), "w") as handle:
+                handle.write(json.dumps({"schemaVersion": 1, "operation": "dislike",
+                                         "topic": marker}) + "\n")
+            with open(os.path.join(tmp, "trusted-facts.jsonl"), "w") as handle:
+                handle.write("trusted-fact-marker\n")
+            output = io.StringIO()
+            package_path = os.path.join(tmp, "package.json")
+            with unittest.mock.patch.object(pipe, "DATA", tmp), \
+                    unittest.mock.patch.object(pipe, "delivery_receipt_pending", return_value=False), \
+                    unittest.mock.patch.object(pipe, "pipeline_lock", return_value=contextlib.nullcontext()), \
+                    unittest.mock.patch.object(pipe, "build_package", return_value={
+                        "decision": {}, "recent_items": [], "delivery_id": "d", "ts": 1,
+                    }):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(pipe.main(["--no-collect", "--out", package_path]), 0)
+            with open(package_path) as handle:
+                rendered = output.getvalue() + handle.read()
+            self.assertNotIn(marker, rendered)
+            self.assertNotIn("feedback_context", rendered)
+            self.assertNotIn("trusted-fact-marker", rendered)
+
+    def test_error_entrypoints_do_not_emit_legacy_material(self):
+        marker = "old-model-summary-marker"
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "legacy-x-preferences.md"), "w") as handle:
+                handle.write(marker)
+            with open(os.path.join(tmp, "feedback.jsonl"), "w") as handle:
+                handle.write(json.dumps({"schemaVersion": 1, "operation": "like",
+                                         "topic": marker}) + "\n")
+            for pending, chrome, collector in (
+                (True, True, True),
+                (False, False, True),
+                (False, True, False),
+            ):
+                output = io.StringIO()
+                with unittest.mock.patch.object(pipe, "DATA", tmp), \
+                        unittest.mock.patch.object(pipe, "delivery_receipt_pending", return_value=pending), \
+                        unittest.mock.patch.object(pipe, "ensure_chrome", return_value=chrome), \
+                        unittest.mock.patch.object(pipe, "run_collector", return_value={
+                            "ok": collector, "err": "collector failed", "items": [],
+                        }), \
+                        unittest.mock.patch.object(pipe, "pipeline_lock", return_value=contextlib.nullcontext()):
+                    with contextlib.redirect_stdout(output):
+                        pipe.main(["--no-collect", "--out", os.path.join(tmp, "out.json")]
+                                  if pending else ["--out", os.path.join(tmp, "out.json")])
+                self.assertNotIn(marker, output.getvalue())
+                self.assertNotIn("feedback_context", output.getvalue())
+
+    def test_lock_error_does_not_emit_legacy_material(self):
+        marker = "old-model-summary-marker"
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "legacy-x-preferences.md"), "w") as handle:
+                handle.write(marker)
+            output = io.StringIO()
+            with unittest.mock.patch.object(pipe, "DATA", tmp), \
+                    unittest.mock.patch.object(pipe, "delivery_receipt_pending", return_value=False), \
+                    unittest.mock.patch.object(
+                        pipe, "pipeline_lock", side_effect=RuntimeError("lock failed")):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(
+                        pipe.main(["--no-collect", "--out", os.path.join(tmp, "out.json")]), 3)
+            self.assertNotIn(marker, output.getvalue())
+            self.assertNotIn("feedback_context", output.getvalue())
+
 
 class TestMain(unittest.TestCase):
     def test_main_writes_package_file(self):
@@ -111,110 +221,6 @@ class TestMain(unittest.TestCase):
             with open(out) as f:
                 data = json.load(f)
             self.assertIn("decision", data)
-
-
-class TestFeedbackContext(unittest.TestCase):
-    """每轮主 pipeline 都携带最新偏好和有效反馈，不靠长 Session 自己重读。"""
-
-    @staticmethod
-    def feedback_event(number, topic=None):
-        return {
-            "schemaVersion": 1,
-            "id": f"feedback-{number}",
-            "createdAt": f"2026-08-16T00:00:{number:02d}.000Z",
-            "operation": "dislike",
-            "topic": topic or f"topic-{number}",
-        }
-
-    def test_missing_preference_and_feedback_files_return_empty_structured_context(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(pipe.load_feedback_context(tmp), {
-                "legacy_preferences": "",
-                "recent_feedback": [],
-            })
-
-    def test_corrupt_feedback_lines_are_skipped_without_rewriting_source_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with open(os.path.join(tmp, "legacy-x-preferences.md"), "w") as f:
-                f.write("少发纯转述内容\n")
-            ledger = os.path.join(tmp, "feedback.jsonl")
-            valid = self.feedback_event(1)
-            raw = (
-                json.dumps(valid, ensure_ascii=False).encode("utf-8") + b"\n"
-                + b'{"broken"\n'
-                + b'{"operation":"like"}\n'
-            )
-            with open(ledger, "wb") as f:
-                f.write(raw)
-
-            context = pipe.load_feedback_context(tmp)
-
-            self.assertEqual(context["legacy_preferences"], "少发纯转述内容\n")
-            self.assertEqual(context["recent_feedback"], [valid])
-            with open(ledger, "rb") as f:
-                self.assertEqual(f.read(), raw)
-
-    def test_only_most_recent_200_valid_feedback_events_are_returned_without_rewrite(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ledger = os.path.join(tmp, "feedback.jsonl")
-            events = [self.feedback_event(number) for number in range(205)]
-            raw = "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events)
-            raw += '{"broken"\n'
-            with open(ledger, "w") as f:
-                f.write(raw)
-
-            context = pipe.load_feedback_context(tmp)
-
-            self.assertEqual(len(context["recent_feedback"]), 200)
-            self.assertEqual(context["recent_feedback"][0]["topic"], "topic-5")
-            self.assertEqual(context["recent_feedback"][-1]["topic"], "topic-204")
-            with open(ledger) as f:
-                self.assertEqual(f.read(), raw)
-
-    def test_second_main_pipeline_round_returns_feedback_added_after_first_round(self):
-        """同一进程中的第二轮必须重新从账本取得新增反馈并写入主输出。"""
-        with tempfile.TemporaryDirectory() as tmp:
-            with open(os.path.join(tmp, "legacy-x-preferences.md"), "w") as f:
-                f.write("保留有新增信息的内容\n")
-            ledger = os.path.join(tmp, "feedback.jsonl")
-            with open(ledger, "w") as f:
-                f.write(json.dumps(self.feedback_event(1), ensure_ascii=False) + "\n")
-
-            def run_round(name):
-                output = io.StringIO()
-                package_path = os.path.join(tmp, name)
-                with unittest.mock.patch.object(pipe, "DATA", tmp), \
-                     unittest.mock.patch.object(pipe, "delivery_receipt_pending", return_value=False), \
-                     unittest.mock.patch.object(pipe, "pipeline_lock", return_value=contextlib.nullcontext()), \
-                     unittest.mock.patch.object(
-                         pipe,
-                         "build_package",
-                         side_effect=lambda **_: {
-                             "decision": {},
-                             "recent_items": [],
-                             "delivery_id": f"delivery-{name}",
-                             "ts": 1,
-                         },
-                     ):
-                    with contextlib.redirect_stdout(output):
-                        self.assertEqual(pipe.main(["--no-collect", "--out", package_path]), 0)
-                return json.loads(output.getvalue().strip().splitlines()[-1]), json.load(open(package_path))
-
-            first_output, first_package = run_round("first.json")
-            with open(ledger, "a") as f:
-                f.write(json.dumps(self.feedback_event(2, "少发 Codex 纯转述"), ensure_ascii=False) + "\n")
-            second_output, second_package = run_round("second.json")
-
-            self.assertEqual(len(first_output["feedback_context"]["recent_feedback"]), 1)
-            self.assertEqual(len(second_output["feedback_context"]["recent_feedback"]), 2)
-            self.assertEqual(second_output["feedback_context"]["recent_feedback"][-1]["topic"], "少发 Codex 纯转述")
-            self.assertEqual(first_package["feedback_context"], first_output["feedback_context"])
-            self.assertEqual(second_package["feedback_context"], second_output["feedback_context"])
-
-
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestWanderSignals(unittest.TestCase):
     """漫游信号由代码算, 方向决策归 AI——管道输出 wander_suggested + candidates 即可"""
@@ -600,14 +606,19 @@ class TestWanderInPackage(unittest.TestCase):
                     ],
                 }, f, ensure_ascii=False)
             with open(aliases, "w") as f:
-                json.dump({"羽毛球": "badminton"}, f, ensure_ascii=False)
+                json.dump({"ai": "ai-agent", "fitness": "fitness", "羽毛球": "badminton"}, f, ensure_ascii=False)
             with open(state, "w") as f:
                 json.dump({"topics": {}, "cooldown_s": 3600}, f)
-            pkg = pipe.build_package(tl, last, recent=10, graph_path=graph,
-                                     aliases_path=aliases, state_path=state, wander_now=1000)
+            with unittest.mock.patch.object(
+                    pipe, "run_engine_analyze",
+                    return_value={"top_theme": "ai", "themes": {"ai": 1, "fitness": 1},
+                                  "candidates": [], "wander_suggested": True}):
+                pkg = pipe.build_package(
+                    tl, last, recent=10, graph_path=graph,
+                    aliases_path=aliases, state_path=state, wander_now=1000)
             self.assertIn("explore_candidates", pkg)
             topics = {c["topic"] for c in pkg["explore_candidates"]}
-            self.assertNotIn("badminton", topics)
+            self.assertIn("badminton", topics)
             self.assertIn("home-workout", topics)
             self.assertIn("agent-ux", topics)
             self.assertIn("human-supervision", topics)

@@ -11,16 +11,209 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type {
+  CommandGate,
+  CommandPayload,
+  FailureAlertPolicy,
   FoldedJobs,
+  InvalidJobLogEntry,
+  Job,
   JobLogEntry,
   RunClaimRecord,
+  RunFailureAlertClaimRecord,
   RunFinishRecord,
+  RunHistoryRecord,
   RunRecord,
+} from './types.ts'
+import {
+  MAX_COMMAND_OUTPUT_BYTES,
+  MAX_COMMAND_TIMEOUT_SECONDS,
+  MAX_FAILURE_ALERT_AFTER,
+  MAX_FAILURE_ALERT_COOLDOWN_MINUTES,
+  isCanonicalAgentEnvironmentMarker,
 } from './types.ts'
 
 /** Parse one strict JSON line; invalid lines are treated as a corrupt log. */
 function parseLine<T>(line: string): T {
   return JSON.parse(line) as T
+}
+
+type CreateJobEntry = Extract<JobLogEntry, { readonly op: 'create' }>
+
+type ParsedCreateJob =
+  | { readonly entry: CreateJobEntry }
+  | { readonly invalid: Omit<InvalidJobLogEntry, 'line'> }
+
+function isCommandPayload(value: unknown): value is CommandPayload {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const command = value as Record<string, unknown>
+  return Array.isArray(command.argv)
+    && command.argv.length > 0
+    && command.argv.every(arg => typeof arg === 'string' && arg.length > 0)
+    && typeof command.timeoutSeconds === 'number'
+    && Number.isSafeInteger(command.timeoutSeconds)
+    && command.timeoutSeconds >= 1
+    && command.timeoutSeconds <= MAX_COMMAND_TIMEOUT_SECONDS
+    && typeof command.outputMaxBytes === 'number'
+    && Number.isSafeInteger(command.outputMaxBytes)
+    && command.outputMaxBytes >= 1
+    && command.outputMaxBytes <= MAX_COMMAND_OUTPUT_BYTES
+}
+
+function isCommandGate(value: unknown): value is CommandGate {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const gate = value as Record<string, unknown>
+  return gate.kind === 'nonempty_stdout' && isCommandPayload(gate.command)
+}
+
+function isFailureAlertPolicy(value: unknown): value is FailureAlertPolicy {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const policy = value as Record<string, unknown>
+  return typeof policy.after === 'number'
+    && Number.isSafeInteger(policy.after)
+    && policy.after >= 1
+    && policy.after <= MAX_FAILURE_ALERT_AFTER
+    && typeof policy.cooldownMinutes === 'number'
+    && Number.isSafeInteger(policy.cooldownMinutes)
+    && policy.cooldownMinutes >= 1
+    && policy.cooldownMinutes <= MAX_FAILURE_ALERT_COOLDOWN_MINUTES
+}
+
+function invalidCreate(
+  code: InvalidJobLogEntry['code'],
+  message: string,
+  id?: string,
+): ParsedCreateJob {
+  return {
+    invalid: {
+      ...(id === undefined ? {} : { id }),
+      code,
+      message,
+    },
+  }
+}
+
+/** Validate one raw create row, including legacy defaults and marker rules. */
+function parseCreateJobWithFailure(raw: string): ParsedCreateJob | undefined {
+  const line = raw.trim()
+  if (line === '') return undefined
+  let value: unknown
+  try {
+    value = parseLine<unknown>(line)
+  } catch {
+    return undefined
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  if (record.op !== 'create') return undefined
+
+  const id = typeof record.id === 'string' && record.id.trim() !== '' ? record.id : undefined
+  if (id === undefined) return invalidCreate('invalid_create', 'create row requires a non-empty id.')
+  if (typeof record.schedule !== 'object' || record.schedule === null || Array.isArray(record.schedule)) {
+    return invalidCreate('invalid_create', 'create row requires a schedule object.', id)
+  }
+  if (record.deliver !== 'telegram' && record.deliver !== 'silent') {
+    return invalidCreate('invalid_create', 'create row has an invalid delivery channel.', id)
+  }
+  if (record.externalRef !== undefined && typeof record.externalRef !== 'string') {
+    return invalidCreate('invalid_create', 'create row externalRef must be a string.', id)
+  }
+  if (record.failureAlert !== undefined && !isFailureAlertPolicy(record.failureAlert)) {
+    return invalidCreate('invalid_create', 'create row failureAlert is invalid.', id)
+  }
+  if (record.failureAlert !== undefined && record.deliver !== 'telegram') {
+    return invalidCreate('invalid_create', 'failureAlert requires Telegram delivery.', id)
+  }
+
+  if (record.kind === 'command') {
+    if (record.agentEnvironment !== undefined) {
+      return invalidCreate(
+        'agent_environment_not_allowed_on_command',
+        'agentEnvironment is only valid on Agent jobs.',
+        id,
+      )
+    }
+    if (!isCommandPayload(record.command)) {
+      return invalidCreate('invalid_create', 'command job requires a bounded command payload.', id)
+    }
+    if (record.sessionMode !== undefined || record.gate !== undefined) {
+      return invalidCreate('invalid_create', 'command jobs cannot carry Agent session or gate fields.', id)
+    }
+    return { entry: record as unknown as Extract<CreateJobEntry, { readonly kind: 'command' }> }
+  }
+
+  if (record.kind !== undefined) return invalidCreate('invalid_create', 'create row has an invalid job kind.', id)
+  if (typeof record.prompt !== 'string' || record.prompt.trim() === '') {
+    return invalidCreate('invalid_create', 'Agent job requires a non-empty prompt.', id)
+  }
+  if (record.sessionMode !== undefined && record.sessionMode !== 'persistent' && record.sessionMode !== 'per_run') {
+    return invalidCreate('invalid_create', 'Agent job sessionMode is invalid.', id)
+  }
+  if (record.gate !== undefined && !isCommandGate(record.gate)) {
+    return invalidCreate('invalid_create', 'Agent job gate is invalid.', id)
+  }
+  if (record.gate !== undefined && record.sessionMode !== 'per_run') {
+    return invalidCreate('invalid_create', 'Agent command gates require an explicit per_run session.', id)
+  }
+  if (record.agentEnvironment !== undefined) {
+    if (!isCanonicalAgentEnvironmentMarker(record.agentEnvironment)) {
+      return invalidCreate(
+        'invalid_agent_environment_marker',
+        'agentEnvironment must be an exact canonical marker without surrounding whitespace.',
+        id,
+      )
+    }
+    if (record.sessionMode !== 'per_run') {
+      return invalidCreate(
+        'agent_environment_requires_per_run',
+        'agentEnvironment requires an explicit per_run session.',
+        id,
+      )
+    }
+    if (record.gate !== undefined) {
+      return invalidCreate(
+        'agent_environment_forbids_gate',
+        'agentEnvironment cannot be combined with a command gate.',
+        id,
+      )
+    }
+  }
+  return { entry: record as unknown as Extract<CreateJobEntry, { readonly kind?: undefined }> }
+}
+
+/** Validate one raw create row, ignoring structured invalid-row evidence. */
+function parseCreateJob(raw: string): CreateJobEntry | undefined {
+  const parsed = parseCreateJobWithFailure(raw)
+  return parsed !== undefined && 'entry' in parsed ? parsed.entry : undefined
+}
+
+/** Materialize a job view without dropping optional identity fields. */
+function materializeJob(entry: CreateJobEntry): Job {
+  if (entry.kind === 'command') {
+    return {
+      kind: 'command',
+      id: entry.id,
+      ...(entry.externalRef === undefined ? {} : { externalRef: entry.externalRef }),
+      schedule: entry.schedule,
+      command: entry.command,
+      deliver: entry.deliver,
+      ...(entry.failureAlert === undefined ? {} : { failureAlert: entry.failureAlert }),
+      ...(entry.cwd === undefined ? {} : { cwd: entry.cwd }),
+      createdAt: entry.createdAt,
+    }
+  }
+  return {
+    id: entry.id,
+    ...(entry.externalRef === undefined ? {} : { externalRef: entry.externalRef }),
+    schedule: entry.schedule,
+    prompt: entry.prompt,
+    deliver: entry.deliver,
+    sessionMode: entry.sessionMode ?? 'persistent',
+    ...(entry.agentEnvironment === undefined ? {} : { agentEnvironment: entry.agentEnvironment }),
+    ...(entry.gate === undefined ? {} : { gate: entry.gate }),
+    ...(entry.failureAlert === undefined ? {} : { failureAlert: entry.failureAlert }),
+    ...(entry.cwd === undefined ? {} : { cwd: entry.cwd }),
+    createdAt: entry.createdAt,
+  }
 }
 
 /**
@@ -29,38 +222,39 @@ function parseLine<T>(line: string): T {
  * create, so skipping preserves the last-writer intent of surviving lines).
  */
 export function foldJobLog(lines: readonly string[]): FoldedJobs {
-  const active = new Map<string, JobLogEntry & { readonly op: 'create' }>()
+  const active = new Map<string, CreateJobEntry>()
   const seenIds: string[] = []
-  for (const raw of lines) {
+  const invalid: InvalidJobLogEntry[] = []
+  for (const [index, raw] of lines.entries()) {
+    const parsedCreate = parseCreateJobWithFailure(raw)
+    if (parsedCreate !== undefined && 'invalid' in parsedCreate) {
+      invalid.push({ line: index + 1, ...parsedCreate.invalid })
+      continue
+    }
+    const entry = parsedCreate?.entry
+    if (entry !== undefined) {
+      if (!seenIds.includes(entry.id)) seenIds.push(entry.id)
+      active.set(entry.id, entry)
+      continue
+    }
     const line = raw.trim()
     if (line === '') continue
-    let entry: JobLogEntry
+    let parsed: JobLogEntry
     try {
-      entry = parseLine<JobLogEntry>(line)
+      parsed = parseLine<JobLogEntry>(line)
     } catch {
       continue
     }
-    if (typeof entry !== 'object' || entry === null || typeof entry.id !== 'string') continue
-    if (!seenIds.includes(entry.id)) seenIds.push(entry.id)
-    if (entry.op === 'create') {
-      if (typeof entry.prompt !== 'string' || entry.prompt.trim() === '') continue
-      if (typeof entry.schedule !== 'object' || entry.schedule === null) continue
-      if (entry.deliver !== 'telegram' && entry.deliver !== 'silent') continue
-      active.set(entry.id, entry)
-    } else if (entry.op === 'delete') {
-      active.delete(entry.id)
+    if (typeof parsed !== 'object' || parsed === null || typeof parsed.id !== 'string') continue
+    if (parsed.op === 'delete') {
+      if (!seenIds.includes(parsed.id)) seenIds.push(parsed.id)
+      active.delete(parsed.id)
     }
   }
   return {
-    active: [...active.values()].map(({ op: _op, ...job }) => ({
-      id: job.id,
-      schedule: job.schedule,
-      prompt: job.prompt,
-      deliver: job.deliver,
-      ...(job.cwd === undefined ? {} : { cwd: job.cwd }),
-      createdAt: job.createdAt,
-    })),
+    active: [...active.values()].map(materializeJob),
     seenIds: seenIds,
+    ...(invalid.length === 0 ? {} : { invalid }),
   }
 }
 
@@ -106,6 +300,20 @@ export class JobStore {
   fold(): FoldedJobs {
     return foldJobLog(this.store.readLines())
   }
+
+  /**
+   * Return every historical job row for one external binding, including rows
+   * whose ids were later tombstoned. This projection reads jobs.jsonl only;
+   * run history belongs to RunStore.
+   */
+  externalRefHistory(externalRef: string): readonly Job[] {
+    const history: Job[] = []
+    for (const raw of this.store.readLines()) {
+      const entry = parseCreateJob(raw)
+      if (entry !== undefined && entry.externalRef === externalRef) history.push(materializeJob(entry))
+    }
+    return history
+  }
 }
 
 /** Append-only run history store (scheduler writes). */
@@ -121,22 +329,44 @@ export class RunStore {
     this.store.append(record)
   }
 
-  /** Read every recorded run (absent file = empty). */
-  readAll(): RunRecord[] {
-    const records: RunRecord[] = []
+  /** Append a V1 or V2 history line when the caller already has its shape. */
+  appendEvent(record: RunHistoryRecord): void {
+    this.store.append(record)
+  }
+
+  /** Read every recorded V1/V2 line (absent file = empty). */
+  readAll(): RunHistoryRecord[] {
+    const records: RunHistoryRecord[] = []
     for (const raw of this.store.readLines()) {
       const line = raw.trim()
       if (line === '') continue
-      try {
-        const record = parseLine<RunRecord>(line)
-        if (typeof record === 'object' && record !== null && typeof record.jobId === 'string') {
-          records.push(record)
-        }
-      } catch {
-        // Corrupt run history lines are skipped; the audit trail is best-effort.
-      }
+      const parsed = parseRunLine(line)
+      if (
+        parsed.kind === 'v1'
+        || parsed.kind === 'claim'
+        || parsed.kind === 'failure-alert-claim'
+        || parsed.kind === 'finish'
+      ) records.push(parsed.record)
     }
     return records
+  }
+
+  /** Read history for a bounded set of jobs without changing the writer split. */
+  readForJobs(jobIds: ReadonlySet<string> | readonly string[]): RunHistoryRecord[] {
+    const wanted = jobIds instanceof Set ? jobIds : new Set(jobIds)
+    return this.readAll().filter(record => wanted.has(record.jobId))
+  }
+
+  /** Return the latest terminal run for one job, including legacy V1 rows. */
+  latestForJob(jobId: string): RunRecord | RunFinishRecord | undefined {
+    let latest: RunRecord | RunFinishRecord | undefined
+    for (const record of this.readAll()) {
+      if (record.jobId !== jobId || !('finishedAt' in record) || typeof record.finishedAt !== 'string') continue
+      if (latest === undefined || record.finishedAt >= latest.finishedAt) {
+        latest = record as RunRecord | RunFinishRecord
+      }
+    }
+    return latest
   }
 }
 
@@ -154,6 +384,7 @@ export function defaultStoreDir(dshHome: string): string {
 export type ParsedRunLine =
   | { readonly kind: 'v1'; readonly record: RunRecord }
   | { readonly kind: 'claim'; readonly record: RunClaimRecord }
+  | { readonly kind: 'failure-alert-claim'; readonly record: RunFailureAlertClaimRecord }
   | { readonly kind: 'finish'; readonly record: RunFinishRecord }
   | { readonly kind: 'skip' }
 
@@ -213,6 +444,17 @@ export function parseRunLine(raw: string): ParsedRunLine {
       ) {
         return { kind: 'finish', record: record as unknown as RunFinishRecord }
       }
+      if (
+        record.event === 'failure-alert-claim'
+        && isNonEmptyString(record.jobId)
+        && isNonEmptyString(record.runId)
+        && isValidTime(record.claimedAt)
+      ) {
+        return {
+          kind: 'failure-alert-claim',
+          record: record as unknown as RunFailureAlertClaimRecord,
+        }
+      }
     }
     // An explicit but unknown/unsupported version must not fall back to V1.
     return { kind: 'skip' }
@@ -232,6 +474,12 @@ export interface FoldedJobRuns {
   readonly interrupted: readonly RunClaimRecord[]
   /** Latest non-expired V1 terminal record's finishedAt (legacy anchor). */
   readonly legacyFinishedAt?: string
+  /** Consecutive business-execution errors; delivery failures are separate. */
+  readonly consecutiveExecutionErrors: number
+  /** Run ids whose failure-alert side effect was durably claimed. */
+  readonly failureAlertRunIds: ReadonlySet<string>
+  /** Latest durable alert claim, used as the restart-stable cooldown anchor. */
+  readonly lastFailureAlertClaimedAt?: string
 }
 
 /**
@@ -243,27 +491,46 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
   const settled = new Set<string>()
   const claims = new Map<string, RunClaimRecord>()
   const finishes = new Set<string>()
+  const failureAlertRunIds = new Set<string>()
   let anyRecord = false
   let nextRunAt: string | undefined
   let legacyFinishedAt: string | undefined
+  let consecutiveExecutionErrors = 0
+  let lastFailureAlertClaimedAt: string | undefined
+  const foldExecutionStatus = (status: string) => {
+    if (status === 'error') consecutiveExecutionErrors += 1
+    else if (status === 'success' || status === 'silent') consecutiveExecutionErrors = 0
+  }
   for (const raw of lines) {
     const parsed = parseRunLine(raw)
     if (parsed.kind === 'skip') continue
     if (parsed.record.jobId !== jobId) continue
-    anyRecord = true
     if (parsed.kind === 'v1') {
+      anyRecord = true
+      foldExecutionStatus(parsed.record.status)
       if (parsed.record.status !== 'expired') {
         const finished = parsed.record.finishedAt
         if (legacyFinishedAt === undefined || finished > legacyFinishedAt) legacyFinishedAt = finished
       }
       continue
     }
+    if (parsed.kind === 'failure-alert-claim') {
+      failureAlertRunIds.add(parsed.record.runId)
+      if (
+        lastFailureAlertClaimedAt === undefined
+        || Date.parse(parsed.record.claimedAt) > Date.parse(lastFailureAlertClaimedAt)
+      ) lastFailureAlertClaimedAt = parsed.record.claimedAt
+      continue
+    }
     if (parsed.kind === 'claim') {
+      anyRecord = true
       claims.set(parsed.record.runId, parsed.record)
       settled.add(parsed.record.runId)
       if (parsed.record.nextRunAt !== undefined) nextRunAt = parsed.record.nextRunAt
       continue
     }
+    anyRecord = true
+    if (!finishes.has(parsed.record.runId)) foldExecutionStatus(parsed.record.status)
     finishes.add(parsed.record.runId)
     settled.add(parsed.record.runId)
     if (parsed.record.nextRunAt !== undefined) nextRunAt = parsed.record.nextRunAt
@@ -278,6 +545,9 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
     ...(nextRunAt === undefined ? {} : { nextRunAt }),
     interrupted,
     ...(legacyFinishedAt === undefined ? {} : { legacyFinishedAt }),
+    consecutiveExecutionErrors,
+    failureAlertRunIds,
+    ...(lastFailureAlertClaimedAt === undefined ? {} : { lastFailureAlertClaimedAt }),
   }
 }
 
@@ -305,6 +575,17 @@ export class RunLedger {
    */
   claim(record: RunClaimRecord): 'claimed' | 'already_claimed' {
     if (this.foldJob(record.jobId).settledRunIds.has(record.runId)) return 'already_claimed'
+    this.store.append(record)
+    return 'claimed'
+  }
+
+  /**
+   * Claim one failure-alert side effect before Telegram is touched. The same
+   * run id is idempotent, and a failed append throws so the caller fails
+   * closed without sending.
+   */
+  claimFailureAlert(record: RunFailureAlertClaimRecord): 'claimed' | 'already_claimed' {
+    if (this.foldJob(record.jobId).failureAlertRunIds.has(record.runId)) return 'already_claimed'
     this.store.append(record)
     return 'claimed'
   }

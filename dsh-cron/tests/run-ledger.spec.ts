@@ -17,7 +17,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { RunLedger } from '../src/store.ts'
-import type { RunClaimRecord, RunFinishRecord, RunRecord } from '../src/types.ts'
+import type {
+  RunClaimRecord,
+  RunFailureAlertClaimRecord,
+  RunFinishRecord,
+  RunRecord,
+} from '../src/types.ts'
 
 const dirs: string[] = []
 
@@ -70,6 +75,19 @@ function finish(overrides: Partial<RunFinishRecord> = {}): RunFinishRecord {
   }
 }
 
+function failureAlertClaim(
+  overrides: Partial<RunFailureAlertClaimRecord> = {},
+): RunFailureAlertClaimRecord {
+  return {
+    schemaVersion: 2,
+    event: 'failure-alert-claim',
+    runId: RUN_ID,
+    jobId: 'cron-a',
+    claimedAt: '2026-08-14T10:00:21.000Z',
+    ...overrides,
+  }
+}
+
 function v1Record(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
     jobId: 'cron-a',
@@ -105,6 +123,31 @@ describe('RunLedger.claim', () => {
     writeFileSync(storePath, 'x', 'utf8')
     const ledger = new RunLedger(storePath)
     expect(() => ledger.claim(claim())).toThrow()
+  })
+})
+
+describe('RunLedger.claimFailureAlert', () => {
+  it('persists before the side effect, is idempotent by runId, and survives a new ledger instance', () => {
+    const dir = tempDir()
+    const record = failureAlertClaim()
+    const ledger = new RunLedger(dir)
+
+    expect(ledger.claimFailureAlert(record)).toBe('claimed')
+    expect(ledger.claimFailureAlert(record)).toBe('already_claimed')
+
+    const restarted = new RunLedger(dir)
+    expect(restarted.foldJob('cron-a').failureAlertRunIds.has(RUN_ID)).toBe(true)
+    expect(restarted.foldJob('cron-a').lastFailureAlertClaimedAt).toBe(record.claimedAt)
+    expect(rawLines(dir)).toHaveLength(1)
+  })
+
+  it('throws on append failure so no untracked Telegram side effect is authorized', () => {
+    const dir = tempDir()
+    const blocked = join(dir, 'blocked')
+    writeFileSync(blocked, 'x', 'utf8')
+    const ledger = new RunLedger(blocked)
+
+    expect(() => ledger.claimFailureAlert(failureAlertClaim())).toThrow()
   })
 })
 
@@ -182,6 +225,53 @@ describe('RunLedger.foldJob', () => {
     expect(ledger.foldJob('cron-b').anyRecord).toBe(true)
     expect(ledger.foldJob('cron-c').anyRecord).toBe(false)
   })
+
+  it('folds consecutive execution errors separately from delivery failures and success resets them', () => {
+    const dir = tempDir()
+    seed(dir, [
+      finish({ runId: 'run-1', status: 'error', finishedAt: '2026-08-14T10:00:00.000Z' }),
+      finish({ runId: 'run-2', status: 'error', finishedAt: '2026-08-14T10:01:00.000Z' }),
+      finish({
+        runId: 'run-3',
+        status: 'success',
+        deliveryState: 'failed',
+        deliveryError: 'telegram rejected',
+        finishedAt: '2026-08-14T10:02:00.000Z',
+      }),
+      finish({ runId: 'run-4', status: 'error', finishedAt: '2026-08-14T10:03:00.000Z' }),
+      finish({ runId: 'run-5', status: 'interrupted', finishedAt: '2026-08-14T10:04:00.000Z' }),
+      finish({ runId: 'run-6', status: 'expired', finishedAt: '2026-08-14T10:05:00.000Z' }),
+    ])
+
+    expect(new RunLedger(dir).foldJob('cron-a').consecutiveExecutionErrors).toBe(1)
+  })
+
+  it('uses the latest durable alert claim as cooldown state without settling the business run', () => {
+    const dir = tempDir()
+    seed(dir, [
+      claim({ runId: 'run-active' }),
+      failureAlertClaim({ runId: 'run-old', claimedAt: '2026-08-14T10:10:00.000Z' }),
+      failureAlertClaim({ runId: 'run-new', claimedAt: '2026-08-14T10:20:00.000Z' }),
+    ])
+
+    const folded = new RunLedger(dir).foldJob('cron-a')
+    expect(folded.lastFailureAlertClaimedAt).toBe('2026-08-14T10:20:00.000Z')
+    expect(folded.failureAlertRunIds).toEqual(new Set(['run-old', 'run-new']))
+    expect(folded.settledRunIds.has('run-old')).toBe(false)
+    expect(folded.interrupted).toHaveLength(1)
+  })
+
+  it('does not let an alert-only event settle a one-shot or become a business-run record', () => {
+    const dir = tempDir()
+    seed(dir, [failureAlertClaim({ runId: 'alert-only' })])
+
+    const folded = new RunLedger(dir).foldJob('cron-a')
+
+    expect(folded.anyRecord).toBe(false)
+    expect(folded.settledRunIds).toEqual(new Set())
+    expect(folded.interrupted).toEqual([])
+    expect(folded.failureAlertRunIds).toEqual(new Set(['alert-only']))
+  })
 })
 
 describe('RunLedger V2 strict validation', () => {
@@ -248,6 +338,8 @@ describe('RunLedger V2 strict validation', () => {
     seed(dir, [
       claim({ runId: '' }),
       claim({ sessionId: '' }),
+      failureAlertClaim({ runId: '' }),
+      failureAlertClaim({ claimedAt: 'not-a-date' }),
     ])
     const folded = new RunLedger(dir).foldJob('cron-a')
     expect(folded.anyRecord).toBe(false)

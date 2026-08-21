@@ -20,7 +20,6 @@ import tempfile
 import time
 import urllib.request
 import uuid
-from collections import deque
 from contextlib import contextmanager
 from urllib.parse import urlsplit, urlunsplit
 
@@ -41,8 +40,6 @@ EXPLORE_ITEMS = os.path.join(DATA, "x_explore_items.jsonl")
 WANDER_STATE = os.path.join(DATA, "x_wander_state.json")
 INTEREST_GRAPH = os.path.join(DATA, "x_interest_graph.json")
 TOPIC_ALIASES = os.path.join(DATA, "x_topic_aliases.json")
-MAX_RECENT_FEEDBACK = 200
-FEEDBACK_OPERATIONS = {"like", "dislike", "save", "unsave"}
 
 
 def canonical_url(url):
@@ -242,58 +239,6 @@ def recent_items(path, n=25):
     return items[-n:] if n > 0 else items
 
 
-def _valid_feedback_event(event):
-    """Return whether one JSONL object is a feedback event the model may use.
-
-    This is a read-only boundary: malformed or obsolete lines are ignored here
-    and remain untouched in the append-only ledger.
-    """
-    if not isinstance(event, dict):
-        return False
-    if event.get("schemaVersion") != 1:
-        return False
-    if event.get("operation") not in FEEDBACK_OPERATIONS:
-        return False
-    return any(str(event.get(field) or "").strip()
-               for field in ("canonicalUrl", "originalUrl", "topic"))
-
-
-def load_feedback_context(data_dir=None):
-    """Read the latest user feedback snapshot for one main-pipeline run.
-
-    The returned object is deliberately structured and is emitted in the main
-    pipeline's stdout JSON (and package), so a reused cron Session does not
-    have to remember a separate file-read step. Missing files produce empty
-    values. Invalid JSONL lines and invalid events are skipped, never repaired
-    or rewritten; only the most recent 200 valid events are retained.
-    """
-    root = data_dir if data_dir is not None else DATA
-    legacy_path = os.path.join(root, "legacy-x-preferences.md")
-    feedback_path = os.path.join(root, "feedback.jsonl")
-    try:
-        with open(legacy_path, encoding="utf-8", errors="replace") as handle:
-            legacy_preferences = handle.read()
-    except OSError:
-        legacy_preferences = ""
-
-    events = deque(maxlen=MAX_RECENT_FEEDBACK)
-    try:
-        with open(feedback_path, encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                try:
-                    event = json.loads(line)
-                except (TypeError, ValueError):
-                    continue
-                if _valid_feedback_event(event):
-                    events.append(event)
-    except OSError:
-        pass
-    return {
-        "legacy_preferences": legacy_preferences,
-        "recent_feedback": list(events),
-    }
-
-
 def mark_shown(shown_path, urls):
     """记录已展示的推文 URL(展示层去重, 避免重复推送)。"""
     import fcntl
@@ -418,7 +363,13 @@ def build_package(items_path=TIMELINE, last_path=LAST_THEME, recent=30, cap_item
     }
     if graph_path is not None:
         wnow = int(wander_now) if wander_now is not None else int(time.time())
-        cand = x_neighborhood.compute_candidates(graph_path, aliases_path, state_path, now=wnow)
+        root_surfaces = []
+        if decision.get("top_theme"):
+            root_surfaces.append(decision["top_theme"])
+        root_surfaces.extend((decision.get("themes") or {}).keys())
+        cand = x_neighborhood.compute_candidates(
+            graph_path, aliases_path, state_path, now=wnow,
+            root_surfaces=root_surfaces)
         pkg["explore_candidates"] = cand["candidates"]
         pkg["wander"] = {
             "config_loaded": cand["config_loaded"],
@@ -594,19 +545,12 @@ def main(argv=None):
         else:
             i += 1
 
-    # Each invocation exposes a structured feedback snapshot even when a
-    # fail-closed delivery guard prevents collection. Refresh it again just
-    # before package construction so selection sees feedback that arrived
-    # while this natural cron cycle was collecting.
-    feedback_context = load_feedback_context()
-
     # 未决投递保护(§7.3): 目标 package 仍是 prepared 时, 新一轮主 pipeline
     # 必须 fail closed——不打开浏览器、不收集、不修改 timeline/shown/package。
     if delivery_receipt_pending(out):
         print(json.dumps({
             "ok": False,
             "error_class": "delivery_receipt_pending",
-            "feedback_context": feedback_context,
         }, ensure_ascii=False))
         return 4
 
@@ -619,8 +563,7 @@ def main(argv=None):
                     print(json.dumps({"ok": False, "state": "CDP_READY",
                                       "error_class": "browser_unavailable",
                                       "retryable": True,
-                                      "detail": "Chrome/CDP did not become ready",
-                                      "feedback_context": feedback_context}, ensure_ascii=False))
+                                      "detail": "Chrome/CDP did not become ready"}, ensure_ascii=False))
                     return 2
                 if not batch_out:
                     collection_dir = os.path.join(DATA, "x_collections")
@@ -631,12 +574,10 @@ def main(argv=None):
                     print(json.dumps({
                         "ok": False,
                         "err": result.get("err", "collector failed"),
-                        "feedback_context": feedback_context,
                     }, ensure_ascii=False))
                     return 2
                 current_items = result.get("items", [])
 
-            feedback_context = load_feedback_context()
             pkg = build_package(
                 items_path=os.path.join(DATA, "x_timeline.jsonl"),
                 last_path=os.path.join(DATA, "x_last_theme.json"),
@@ -651,16 +592,14 @@ def main(argv=None):
             )
             pkg["collection_batch"] = batch_out
             pkg["collection_count"] = len(current_items) if current_items is not None else None
-            pkg["feedback_context"] = feedback_context
             _atomic_json_write(out, pkg)
             print(json.dumps({"ok": True, "out": out, "delivery_id": pkg["delivery_id"],
                               "collection_count": pkg["collection_count"],
-                              "selected_count": len(pkg["recent_items"]), "ts": pkg["ts"],
-                              "feedback_context": feedback_context}, ensure_ascii=False))
+                              "selected_count": len(pkg["recent_items"]), "ts": pkg["ts"]},
+                         ensure_ascii=False))
             return 0
     except RuntimeError as exc:
-        print(json.dumps({"ok": False, "err": str(exc),
-                          "feedback_context": feedback_context}, ensure_ascii=False))
+        print(json.dumps({"ok": False, "err": str(exc)}, ensure_ascii=False))
         return 3
 
 

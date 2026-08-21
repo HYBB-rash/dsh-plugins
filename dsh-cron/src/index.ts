@@ -21,14 +21,29 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import z from '@deepseek-ai/schemastery'
+import { join } from 'node:path'
 import { registerCronTools } from './manager.ts'
 import { JobStore, defaultStoreDir } from './store.ts'
+import { createControlService } from './control.ts'
+import { createControlRpcClient, createControlRpcServer } from './control-rpc.ts'
+import { provideCronAgentEnvironmentRegistry } from './run-environment.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'dsh-cron'
 
 /** Public terminal-outcome event contract (§8), see `types.ts`. */
 export type { CronRunFinishedEvent } from './types.ts'
+
+/** Public manager control contract, kept free of scheduler/gateway imports. */
+export * from './control-contract.ts'
+/** Local, offline maintenance port; it is not exposed through online RPC. */
+export { createMaintenanceControl } from './control.ts'
+export type { MaintenanceControlConfig } from './control.ts'
+/** Public Unix-socket client for the manager control contract. */
+export { createControlRpcClient }
+export type { ControlRpcClientConfig } from './control-rpc.ts'
+/** Public generic per-run environment port and fail-closed registry. */
+export * from './run-environment.ts'
 
 /** Services required by either role before activation. */
 export const inject = ['agents', 'sessions', 'tools', 'agentDefaultModel', 'credentials']
@@ -51,6 +66,8 @@ export interface Config {
   deliverOnError?: boolean
   /** Store directory override. Defaults to `$DSH_HOME/storages/dsh-cron`. */
   storeDir?: string
+  /** Unix socket override. Defaults to `<storeDir>/control.sock` in manager mode. */
+  controlSocketPath?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -62,6 +79,7 @@ export const Config: z<Config> = z.object({
   maxConcurrent: z.number().step(1).min(1).default(3),
   deliverOnError: z.boolean().default(true),
   storeDir: z.string().default(''),
+  controlSocketPath: z.string().default(''),
 })
 
 /** Resolve the store directory, defaulting under DSH_HOME. */
@@ -71,6 +89,13 @@ export function resolveStoreDir(config: Pick<Config, 'storeDir'>): string {
     : defaultStoreDir(resolveDshHome())
 }
 
+/** Resolve the manager control socket without changing scheduler paths. */
+export function resolveControlSocketPath(config: Pick<Config, 'storeDir' | 'controlSocketPath'>): string {
+  return config.controlSocketPath !== undefined && config.controlSocketPath !== ''
+    ? config.controlSocketPath
+    : join(resolveStoreDir(config), 'control.sock')
+}
+
 type OwnerCleanup = () => void | Promise<void>
 
 /**
@@ -78,9 +103,16 @@ type OwnerCleanup = () => void | Promise<void>
  * Mirrors the schedule package's per-root pattern — the tools mutate the
  * durable job log with a `sessions.flush` barrier before each append.
  */
-export function applyManager(ctx: Context, config: Config): void {
+export async function applyManager(ctx: Context, config: Config): Promise<void> {
   const storeDir = resolveStoreDir(config)
   const store = new JobStore(storeDir)
+  const control = createControlService({ storeDir })
+  const controlRpc = createControlRpcServer({
+    socketPath: resolveControlSocketPath(config),
+    control,
+    environment: 'production',
+  })
+  await controlRpc.listen()
   const runtimes = new Map<Agent, OwnerCleanup>()
   let stopping = false
 
@@ -102,6 +134,7 @@ export function applyManager(ctx: Context, config: Config): void {
       const cleanups = [...runtimes.values()]
       runtimes.clear()
       await Promise.allSettled(cleanups.map(cleanup => Promise.resolve(cleanup())))
+      await controlRpc.dispose()
     }
   }, 'dsh-cron.manager.lifecycle()')
 }
@@ -112,6 +145,7 @@ export function applyManager(ctx: Context, config: Config): void {
  * Telegram gateway package.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
+  provideCronAgentEnvironmentRegistry(ctx)
   if (config.mode === 'scheduler') {
     const { applyScheduler } = await import('./scheduler.ts')
     await applyScheduler(ctx, {
@@ -127,5 +161,5 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     })
     return
   }
-  applyManager(ctx, config)
+  await applyManager(ctx, config)
 }
