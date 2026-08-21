@@ -9,7 +9,7 @@ import {
   type CronAgentEnvironmentProvider,
 } from '../src/run-environment.ts'
 import { SchedulerRuntime, type SchedulerConfig } from '../src/scheduler.ts'
-import { JobStore } from '../src/store.ts'
+import { JobStore, RunLedger } from '../src/store.ts'
 import type { Job } from '../src/types.ts'
 
 const temporaryDirectories: string[] = []
@@ -45,6 +45,18 @@ function waitForRunRecords(directory: string, count: number): Promise<void> {
         reject(new Error(`timed out waiting for ${count} run finish records`))
         return
       }
+      setTimeout(poll, 10)
+    }
+    poll()
+  })
+}
+
+function waitForEvent(directory: string, event: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now()
+    const poll = () => {
+      if (readRunRecords(directory).some(record => record.event === event)) return resolve()
+      if (Date.now() - startedAt > 4_000) return reject(new Error(`timed out waiting for ${event}`))
       setTimeout(poll, 10)
     }
     poll()
@@ -298,6 +310,109 @@ describe('generic marked Agent run lifecycle acceptance', () => {
       expect(order.filter(step => step === 'finish')).toHaveLength(2)
     } finally {
       await runtime.dispose()
+    }
+  })
+
+  it('settles the exact run only after Telegram delivery and the durable finish event', async () => {
+    const directory = temporaryDirectory()
+    seedJob(directory, markedJob('marked-settlement'))
+    const order: string[] = []
+    const registry = createCronAgentEnvironmentRegistry([markedProvider(order, {
+      prepare: async () => ({
+        setupAgent: async () => { order.push('setup') },
+        verifySurface: async () => { order.push('verify') },
+        finalizeOutcome: async () => { order.push('finalize') },
+        settleRun: async event => {
+          order.push(`settle:${event.deliveryState}`)
+          expect(readRunRecords(directory).at(-1)).toMatchObject({
+            event: 'finish',
+            runId: event.runId,
+            deliveryState: 'delivered',
+          })
+        },
+        dispose: async () => { order.push('environment-dispose') },
+      }),
+    })])
+    const runtime = runMarkedJob(directory, registry, {
+      order,
+      agents: [],
+      createOptions: [],
+      delivered: [],
+      finish: () => { order.push('finish') },
+      driveTurn: async agent => {
+        agent.status = 'running'
+        return { text: 'settled body' }
+      },
+    })
+    try {
+      await waitForRunRecords(directory, 1)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(order.slice(-3)).toEqual(['deliver', 'finish', 'settle:delivered'])
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  it('replays an unacknowledged durable finish after restart without rerunning or redelivering', async () => {
+    const directory = temporaryDirectory()
+    const job = markedJob('marked-recovered-settlement')
+    seedJob(directory, job)
+    const scheduledFor = (job.schedule as { runAt: string }).runAt
+    const runId = `${job.id}@${scheduledFor}`
+    const ledger = new RunLedger(directory)
+    ledger.claim({
+      schemaVersion: 2,
+      event: 'claim',
+      runId,
+      jobId: job.id,
+      sessionId: 'session-recovered',
+      scheduledFor,
+      claimedAt: scheduledFor,
+    })
+    ledger.finish({
+      schemaVersion: 2,
+      event: 'finish',
+      runId,
+      jobId: job.id,
+      sessionId: 'session-recovered',
+      scheduledFor,
+      startedAt: scheduledFor,
+      finishedAt: new Date().toISOString(),
+      status: 'success',
+      deliveryState: 'delivered',
+      deliveredAt: new Date().toISOString(),
+    })
+
+    const recovered: string[] = []
+    const order: string[] = []
+    const registry = createCronAgentEnvironmentRegistry([markedProvider(order, {
+      settleRecoveredRun: async event => { recovered.push(event.runId) },
+    })])
+    const options = {
+      order,
+      agents: [] as RunAgent[],
+      createOptions: [] as Array<Record<string, unknown>>,
+      delivered: [] as string[],
+      finish: () => { order.push('finish') },
+    }
+    const first = runMarkedJob(directory, registry, options)
+    try {
+      await waitForEvent(directory, 'environment-settle')
+      expect(recovered).toEqual([runId])
+      expect(options.createOptions).toEqual([])
+      expect(options.delivered).toEqual([])
+      expect(order).not.toContain('finish')
+    } finally {
+      await first.dispose()
+    }
+
+    const second = runMarkedJob(directory, registry, options)
+    try {
+      await new Promise(resolve => setTimeout(resolve, 30))
+      expect(recovered).toEqual([runId])
+      expect(readRunRecords(directory).filter(record => record.event === 'environment-settle')).toHaveLength(1)
+    } finally {
+      await second.dispose()
     }
   })
 
