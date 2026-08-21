@@ -56,6 +56,14 @@ def canonical_url(value: Any) -> str:
     if host in {"twitter.com", "www.twitter.com", "mobile.twitter.com"}:
         host = "x.com"
     path = (parsed.path or "").rstrip("/")
+
+    # X exposes media/history views as suffixes on the status URL.  Once the
+    # host and path identify a numeric status, keep only that identity so
+    # every downstream consumer receives the provider's canonical URL.
+    ident = status_id(raw)
+    if host == "x.com" and "/status/" in path and ident:
+        prefix = path.split("/status/", 1)[0]
+        path = f"{prefix}/status/{ident}"
     if path.endswith("/analytics"):
         path = path[: -len("/analytics")].rstrip("/")
     return urlunsplit(("https", host, path, "", ""))

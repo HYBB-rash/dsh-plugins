@@ -5,6 +5,7 @@ Run from this directory with:
     python3 -m unittest test_x_timeline_dedup -v
 """
 import contextlib
+import copy
 import io
 import json
 import os
@@ -30,6 +31,56 @@ class TestIdentity(unittest.TestCase):
             dedup.canonical_url("https://x.com/user/status/123/analytics"),
             "https://x.com/user/status/123",
         )
+
+    def test_deduplicate_records_rebuilds_canonical_status_url_for_status_suffixes(self):
+        cases = [
+            (
+                "2090799874350735870/photo/1",
+                "https://x.com/rahul/status/2090799874350735870/photo/1",
+                "2090799874350735870",
+                "https://x.com/rahul/status/2090799874350735870",
+            ),
+            (
+                "123/photo/2",
+                "https://x.com/user/status/123/photo/2",
+                "123",
+                "https://x.com/user/status/123",
+            ),
+            (
+                "456/video/1",
+                "https://x.com/user/status/456/video/1",
+                "456",
+                "https://x.com/user/status/456",
+            ),
+            (
+                "789/history",
+                "https://x.com/user/status/789/history",
+                "789",
+                "https://x.com/user/status/789",
+            ),
+            (
+                "987/analytics",
+                "https://twitter.com/user/status/987/analytics?ref=timeline#top",
+                "987",
+                "https://x.com/user/status/987",
+            ),
+        ]
+        for raw_id, raw_url, expected_id, expected_url in cases:
+            with self.subTest(raw_url=raw_url):
+                records = [{"id": raw_id, "url": raw_url, "text": "candidate"}]
+                original = copy.deepcopy(records)
+                unique, report = dedup.deduplicate_records(records)
+                self.assertEqual(report["unique_records"], 1)
+                self.assertEqual(unique[0]["id"], expected_id)
+                self.assertEqual(unique[0]["url"], expected_url)
+                self.assertEqual(records, original)
+
+    def test_non_status_urls_keep_existing_fallback_normalization(self):
+        records = [{"id": "opaque", "url": "https://x.com/user/post?ref=timeline#top", "text": "candidate"}]
+        original = copy.deepcopy(records)
+        unique, _ = dedup.deduplicate_records(records)
+        self.assertEqual(unique[0]["url"], "https://x.com/user/post")
+        self.assertEqual(records, original)
 
 
 class TestDedupe(unittest.TestCase):
