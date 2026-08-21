@@ -130,6 +130,37 @@ describe('X cron two-call strict DTO contract', () => {
       .toMatchObject({ ok: false, code: 'summary-too-large' })
   })
 
+  it('accepts the real composer summary containing an inline plus sign', () => {
+    const summary = '一个用 GPT Image 2 + Minimax H3 组合的工作流示例：通过详细分镜脚本提示词，生成阳光客厅里胖橘猫与穿黄色背带裤 4 岁女孩追逐打闹的 15 秒写实多镜头序列，展示文生视频的多模态叙事能力。'
+    const result = validateComposerDto({
+      title: '从 2 万美元机器人到全球芯片荒：AI 超级周期的惊人胃口',
+      sections: [{ kind: 'wander', items: [{ itemId: 'item-1', summary }] }],
+    }, composerContext)
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        title: '从 2 万美元机器人到全球芯片荒：AI 超级周期的惊人胃口',
+        sections: [{ kind: 'wander', items: [{ itemId: 'item-1', summary }] }],
+      },
+    })
+  })
+
+  it('treats Markdown list and heading markers as forbidden only at line starts', () => {
+    for (const summary of ['A - B', 'A * B', 'A + B']) {
+      expect(validateComposerDto({
+        ...composer(),
+        sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary }] }],
+      }, composerContext)).toMatchObject({ ok: true })
+    }
+    for (const summary of ['- item', '  + item', '\n   * item', '# heading', '\n  ## heading']) {
+      expect(validateComposerDto({
+        ...composer(),
+        sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary }] }],
+      }, composerContext)).toMatchObject({ ok: false, code: 'forbidden-composer-content' })
+    }
+  })
+
   it('requires at least one section and at least one item in every present section', () => {
     expect(validateComposerDto({ title: '本轮洞察', sections: [] }, composerContext))
       .toMatchObject({ ok: false, code: 'empty-sections' })

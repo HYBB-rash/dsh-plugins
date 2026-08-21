@@ -5,6 +5,7 @@ import type { ToolSchema, UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   COMPOSER_SUMMARY_MAX_UTF8_BYTES,
+  isValidComposerPlainText,
   parseComposerDto,
   type ComposerDto,
   type ComposerSectionKind,
@@ -65,8 +66,6 @@ const MAX_ITEM_TEXT_BYTES = 1_200
 const MAX_FACT_TEXT_BYTES = 1_200
 const MAX_EXPLORATION_TEXT_BYTES = 1_200
 const MAX_MATERIAL_BYTES = 24_000
-const FORBIDDEN_URL = /(?:https?:\/\/|ftp:\/\/|www\.)/iu
-const FORBIDDEN_MARKDOWN = /!?(?:\[[^\]]*\]\([^)]*\)|`{1,3}|\*\*|__|^\s{0,3}#{1,6}\s|(?:^|\s)[*+-]\s)/mu
 
 export interface XFeedComposerSelectedItem {
   readonly itemId: string
@@ -224,7 +223,7 @@ function projectComposerSubmission(
       if (typeof itemId !== 'string' || !allowedItemIds.has(itemId)) {
         throw new XFeedComposerAgentError('invalid-submission', 'composer submission item is not in the allowlist')
       }
-      if (!boundedText(summary, COMPOSER_SUMMARY_MAX_UTF8_BYTES)) {
+      if (!isValidComposerPlainText(summary, COMPOSER_SUMMARY_MAX_UTF8_BYTES)) {
         throw new XFeedComposerAgentError('invalid-submission', 'composer submission item summary is invalid')
       }
       if (seenItems.has(itemId)) continue
@@ -245,7 +244,7 @@ function validateMaterial(value: XFeedComposerMaterial): XFeedComposerMaterial {
   const ids = new Set<string>()
   const selectedItems: XFeedComposerSelectedItem[] = []
   for (const item of value.selectedItems) {
-    if (!isRecord(item) || !hasExactKeys(item, ['itemId', 'title', 'summary']) || !boundedText(item.itemId, MAX_ITEM_TEXT_BYTES) || !boundedText(item.title, MAX_ITEM_TEXT_BYTES) || !boundedText(item.summary, MAX_ITEM_TEXT_BYTES)) throw new XFeedComposerAgentError('invalid-material', 'composer selected item is invalid or contains forbidden content')
+    if (!isRecord(item) || !hasExactKeys(item, ['itemId', 'title', 'summary']) || !isValidComposerPlainText(item.itemId, MAX_ITEM_TEXT_BYTES) || !isValidComposerPlainText(item.title, MAX_ITEM_TEXT_BYTES) || !isValidComposerPlainText(item.summary, MAX_ITEM_TEXT_BYTES)) throw new XFeedComposerAgentError('invalid-material', 'composer selected item is invalid or contains forbidden content')
     if (ids.has(item.itemId)) throw new XFeedComposerAgentError('invalid-material', 'composer selected item IDs must be unique')
     ids.add(item.itemId)
     selectedItems.push({ itemId: item.itemId, title: item.title, summary: item.summary })
@@ -257,7 +256,7 @@ function validateMaterial(value: XFeedComposerMaterial): XFeedComposerMaterial {
     if (!isRecord(fact) || !hasExactKeys(fact, ['targetId', 'summary'])) throw new XFeedComposerAgentError('invalid-material', 'composer fact is not an exact bounded target fact')
     const targetId = fact.targetId
     const summary = fact.summary
-    if (typeof targetId !== 'string' || typeof summary !== 'string' || !ids.has(targetId) || !boundedText(targetId, MAX_ITEM_TEXT_BYTES) || !boundedText(summary, MAX_FACT_TEXT_BYTES)) throw new XFeedComposerAgentError('invalid-material', 'composer fact is not an exact bounded target fact')
+    if (typeof targetId !== 'string' || typeof summary !== 'string' || !ids.has(targetId) || !isValidComposerPlainText(targetId, MAX_ITEM_TEXT_BYTES) || !isValidComposerPlainText(summary, MAX_FACT_TEXT_BYTES)) throw new XFeedComposerAgentError('invalid-material', 'composer fact is not an exact bounded target fact')
     facts.push({ targetId, summary })
   }
   if (!Array.isArray(value.allowedSectionKinds) || value.allowedSectionKinds.length === 0 || value.allowedSectionKinds.some(kind => !SECTION_KINDS.includes(kind)) || new Set(value.allowedSectionKinds).size !== value.allowedSectionKinds.length) throw new XFeedComposerAgentError('invalid-material', 'composer section allowlist is invalid')
@@ -281,14 +280,14 @@ function validateExploration(value: unknown): XFeedComposerExploration {
     const topicId = value.topicId
     const status = value.status
     const summary = value.summary
-    if (!hasExactKeys(value, ['kind', 'topicId', 'status', 'summary']) || typeof topicId !== 'string' || (status !== 'success' && status !== 'failed') || typeof summary !== 'string' || !boundedText(topicId, MAX_ITEM_TEXT_BYTES) || !boundedText(summary, MAX_EXPLORATION_TEXT_BYTES)) throw new XFeedComposerAgentError('invalid-material', 'search exploration state is invalid')
+    if (!hasExactKeys(value, ['kind', 'topicId', 'status', 'summary']) || typeof topicId !== 'string' || (status !== 'success' && status !== 'failed') || typeof summary !== 'string' || !isValidComposerPlainText(topicId, MAX_ITEM_TEXT_BYTES) || !isValidComposerPlainText(summary, MAX_EXPLORATION_TEXT_BYTES)) throw new XFeedComposerAgentError('invalid-material', 'search exploration state is invalid')
     return { kind: 'search', topicId, status, summary }
   }
   if (value.kind === 'explore') {
     const candidateId = value.candidateId
     const status = value.status
     const summary = value.summary
-    if (!hasExactKeys(value, ['kind', 'candidateId', 'status', 'summary']) || typeof candidateId !== 'string' || (status !== 'success' && status !== 'failed') || typeof summary !== 'string' || !boundedText(candidateId, MAX_ITEM_TEXT_BYTES) || !boundedText(summary, MAX_EXPLORATION_TEXT_BYTES)) throw new XFeedComposerAgentError('invalid-material', 'explore exploration state is invalid')
+    if (!hasExactKeys(value, ['kind', 'candidateId', 'status', 'summary']) || typeof candidateId !== 'string' || (status !== 'success' && status !== 'failed') || typeof summary !== 'string' || !isValidComposerPlainText(candidateId, MAX_ITEM_TEXT_BYTES) || !isValidComposerPlainText(summary, MAX_EXPLORATION_TEXT_BYTES)) throw new XFeedComposerAgentError('invalid-material', 'explore exploration state is invalid')
     return { kind: 'explore', candidateId, status, summary }
   }
   throw new XFeedComposerAgentError('invalid-material', 'composer exploration kind is unknown')
@@ -311,10 +310,6 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
   const actual = Object.keys(value).sort()
   const wanted = [...expected].sort()
   return actual.length === wanted.length && actual.every((key, index) => key === wanted[index])
-}
-
-function boundedText(value: unknown, maxBytes: number): value is string {
-  return typeof value === 'string' && value.trim() !== '' && !FORBIDDEN_URL.test(value) && !FORBIDDEN_MARKDOWN.test(value) && !/[\u0000-\u001f\u007f]/u.test(value) && Buffer.byteLength(value, 'utf8') <= maxBytes
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

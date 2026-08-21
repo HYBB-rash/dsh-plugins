@@ -171,6 +171,30 @@ describe('scheduler-owned X cron composer Agent surface', () => {
     }
   })
 
+  it('accepts the real composer summary with an inline plus sign in one wire', async () => {
+    const summary = '一个用 GPT Image 2 + Minimax H3 组合的工作流示例：通过详细分镜脚本提示词，生成阳光客厅里胖橘猫与穿黄色背带裤 4 岁女孩追逐打闹的 15 秒写实多镜头序列，展示文生视频的多模态叙事能力。'
+    const dto = {
+      title: '从 2 万美元机器人到全球芯片荒：AI 超级周期的惊人胃口',
+      sections: [{ kind: 'wander', items: [{ itemId: 'item-1', summary }] }],
+    }
+    const adapter = new WireAdapter([response(dto)])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+    const surface = new XFeedComposerAgentSurface({ material: { ...material, allowedSectionKinds: ['wander'] } })
+    const { handle, firstSeq } = await drive(ctx, surface)
+    try {
+      const summarized = summarizeTurn(handle.agent.session.events, firstSeq)
+      expect(summarized.text).toBe(JSON.stringify(dto))
+      expect(surface.finalizeOutcome(summarized)).toEqual(dto)
+      expect(surface.wires).toHaveLength(1)
+      expect(adapter.requests).toHaveLength(1)
+    } finally {
+      surface.dispose()
+      await ctx.sessions.flush(handle.agent.session)
+      await handle.dispose()
+    }
+  })
+
   it('keeps the first occurrence of an item across sections, drops empty sections, and preserves the raw DTO', async () => {
     const dto = {
       title: '本轮洞察',

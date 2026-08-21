@@ -140,7 +140,15 @@ function utf8Bytes(value: string): number {
 
 function containsUrlOrMarkdown(value: string): boolean {
   return /(?:https?:\/\/|ftp:\/\/|www\.)/iu.test(value)
-    || /!?(?:\[[^\]]*\]\([^)]*\)|`{1,3}|\*\*|__|^\s{0,3}#{1,6}\s|(?:^|\s)[*+-]\s)/mu.test(value)
+    || /!?(?:\[[^\]]*\]\([^)]*\)|`{1,3}|\*\*|__|(?:^|\n)[ \t]{0,3}#{1,6}[ \t]+|(?:^|\n)[ \t]{0,3}[*+-][ \t]+)/mu.test(value)
+}
+
+export function isValidComposerPlainText(value: unknown, maxBytes: number): value is string {
+  return typeof value === 'string'
+    && value.trim() !== ''
+    && utf8Bytes(value) <= maxBytes
+    && !containsUrlOrMarkdown(value)
+    && !/[\u0000-\u001f\u007f]/u.test(value)
 }
 
 function validateAllowlist(context: PlannerValidationContext | ComposerValidationContext): boolean {
@@ -242,7 +250,7 @@ export function validateComposerDto(value: unknown, context: ComposerValidationC
   const title = object.title
   if (typeof title !== 'string' || title.trim().length === 0) return failure('invalid-composer-title', 'composer title must be non-empty text')
   if (utf8Bytes(title) > COMPOSER_TITLE_MAX_UTF8_BYTES) return failure('composer-title-too-large', 'composer title exceeds its UTF-8 limit')
-  if (containsUrlOrMarkdown(title)) return failure('forbidden-composer-content', 'composer text must not contain URLs or Markdown')
+  if (!isValidComposerPlainText(title, COMPOSER_TITLE_MAX_UTF8_BYTES)) return failure('forbidden-composer-content', 'composer text must not contain URLs or Markdown')
 
   const sections = object.sections
   if (!Array.isArray(sections)) return failure('invalid-sections', 'composer sections must be an array')
@@ -273,7 +281,7 @@ export function validateComposerDto(value: unknown, context: ComposerValidationC
       const summary = item.summary
       if (typeof summary !== 'string' || summary.trim().length === 0) return failure('invalid-summary', 'composer summary must be non-empty text')
       if (utf8Bytes(summary) > COMPOSER_SUMMARY_MAX_UTF8_BYTES) return failure('summary-too-large', 'composer summary exceeds its UTF-8 limit')
-      if (containsUrlOrMarkdown(summary)) return failure('forbidden-composer-content', 'composer text must not contain URLs or Markdown')
+      if (!isValidComposerPlainText(summary, COMPOSER_SUMMARY_MAX_UTF8_BYTES)) return failure('forbidden-composer-content', 'composer text must not contain URLs or Markdown')
       copiedItems.push({ itemId, summary })
     }
     copiedSections.push({ kind: kind as ComposerSectionKind, items: copiedItems })
