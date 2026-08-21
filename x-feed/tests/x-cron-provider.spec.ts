@@ -435,6 +435,66 @@ describe('dsh-x-feed/v1 cron provider composition boundary', () => {
     }
   })
 
+  it('normalizes raw multiline candidate text before exactly one planner wire', async () => {
+    const { directory, candidateUrl, packagePath } = await emptyAlignedFactFixture()
+    const python = runner()
+    const rawPackage = {
+      allowed_topics: ['agentic systems'],
+      recent_items: [{
+        id: '1',
+        url: candidateUrl,
+        text: `第一行\n第二行\r\n  中文   内容\t尾部${' 中文'.repeat(600)}`,
+        topics: ['agentic systems'],
+      }],
+      selected_urls: [candidateUrl],
+      decision: { top_theme: 'agentic systems' },
+    }
+    const rawPackageJson = JSON.stringify(rawPackage)
+    const readFile = vi.fn(async (path: string) => {
+      if (path !== packagePath) throw new Error(`unexpected artifact read: ${path}`)
+      return rawPackageJson
+    })
+    const adapter = new TwoCallProviderAdapter()
+    const ctx = await finalHarness(adapter)
+    const provider = createXFeedCronEnvironmentProvider({
+      ctx,
+      cronJobId: 'cron-x',
+      dataDir: directory,
+      pythonBin: 'python3',
+      pipelinePath: '/pkg/python/x_insight_pipeline.py',
+      run: python.run,
+      readFile,
+    })
+
+    const lease = await provider.prepare({ jobId: 'cron-x', runId: 'cron-x@raw-multiline' })
+    try {
+      expect(lease).toHaveProperty('setupAgent')
+      expect(adapter.requests).toHaveLength(1)
+      const wireMessage = JSON.parse(JSON.stringify(adapter.requests[0]?.messages[0])) as {
+        content?: readonly { readonly type?: unknown; readonly text?: unknown }[]
+      }
+      const wireText = wireMessage.content?.find(block => block.type === 'text')?.text
+      if (typeof wireText !== 'string') throw new Error('planner request omitted its text material')
+      const plannerMaterial = JSON.parse(wireText.slice(wireText.indexOf('\n') + 1)) as {
+        candidates: readonly { readonly title: string; readonly summary: string }[]
+      }
+      const candidate = plannerMaterial.candidates[0]
+      if (candidate === undefined) throw new Error('planner request omitted its candidate')
+      for (const [field, maxBytes] of [['title', 320], ['summary', 1_200]] as const) {
+        const value = candidate[field]
+        expect(Buffer.byteLength(value, 'utf8')).toBeLessThanOrEqual(maxBytes)
+        expect(Buffer.from(value, 'utf8').toString('utf8')).toBe(value)
+        expect(value).not.toMatch(/[\u0000-\u001f\u007f]/u)
+        expect(value).not.toMatch(/https?:\/\/|ftp:\/\/|www\.|`|\*\*|__|\[[^\]]+\]\(/u)
+      }
+      expect(candidate.title).toContain('第一行 第二行 中文 内容 尾部')
+      expect(candidate.summary).toContain('第一行 第二行 中文 内容 尾部')
+      expect(JSON.stringify(rawPackage)).toBe(rawPackageJson)
+    } finally {
+      await lease.dispose?.()
+    }
+  })
+
   it.each([
     ['pre-prefixed', 'x-status:1'],
     ['non-digit', 'alice'],

@@ -294,7 +294,7 @@ function parseCandidate(value: unknown): XFeedDigestCandidateInput {
   }
   const id = `x-status:${identity.statusId}`
   const topics = parseTopicArray(value.topics ?? value.theme)
-  const content = value.text.trim().slice(0, 12_000)
+  const content = boundedPlainText(value.text, '', 12_000)
   const title = boundedPlainText(value.title, content, 320)
   const summary = boundedPlainText(value.summary, content, 1_200)
   return Object.freeze({ id, content, source: identity.canonicalUrl, topics, title, summary })
