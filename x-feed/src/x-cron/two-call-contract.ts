@@ -151,6 +151,18 @@ export function isValidComposerPlainText(value: unknown, maxBytes: number): valu
     && !/[\u0000-\u001f\u007f]/u.test(value)
 }
 
+export function truncateComposerPlainText(value: string, maxBytes: number): string {
+  let bytes = 0
+  let end = 0
+  for (const character of value) {
+    const characterBytes = utf8Bytes(character)
+    if (bytes + characterBytes > maxBytes) break
+    bytes += characterBytes
+    end += character.length
+  }
+  return value.slice(0, end)
+}
+
 function validateAllowlist(context: PlannerValidationContext | ComposerValidationContext): boolean {
   if ('candidateIds' in context) return validAllowlist(context.candidateIds) && validAllowlist(context.allowedTopicIds)
   return validAllowlist(context.itemIds)

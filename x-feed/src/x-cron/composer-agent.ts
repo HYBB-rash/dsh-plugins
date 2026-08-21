@@ -4,9 +4,11 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ToolSchema, UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
+  COMPOSER_TITLE_MAX_UTF8_BYTES,
   COMPOSER_SUMMARY_MAX_UTF8_BYTES,
   isValidComposerPlainText,
   parseComposerDto,
+  truncateComposerPlainText,
   type ComposerDto,
   type ComposerSectionKind,
   type TwoCallContractCode,
@@ -195,6 +197,9 @@ function projectComposerSubmission(
   if (!Array.isArray(value.sections)) {
     throw new XFeedComposerAgentError('invalid-submission', 'composer submission sections must be an array')
   }
+  if (!isValidComposerPlainText(value.title, Number.POSITIVE_INFINITY)) {
+    throw new XFeedComposerAgentError('invalid-submission', 'composer submission title is invalid')
+  }
 
   const allowedItemIds = new Set(itemIds)
   const seenItems = new Set<string>()
@@ -223,19 +228,19 @@ function projectComposerSubmission(
       if (typeof itemId !== 'string' || !allowedItemIds.has(itemId)) {
         throw new XFeedComposerAgentError('invalid-submission', 'composer submission item is not in the allowlist')
       }
-      if (!isValidComposerPlainText(summary, COMPOSER_SUMMARY_MAX_UTF8_BYTES)) {
+      if (!isValidComposerPlainText(summary, Number.POSITIVE_INFINITY)) {
         throw new XFeedComposerAgentError('invalid-submission', 'composer submission item summary is invalid')
       }
       if (seenItems.has(itemId)) continue
       seenItems.add(itemId)
-      items.push({ itemId, summary })
+      items.push({ itemId, summary: truncateComposerPlainText(summary, COMPOSER_SUMMARY_MAX_UTF8_BYTES) })
     }
     if (items.length > 0) sections.push({ kind: kind as ComposerSectionKind, items })
   }
   if (sections.length === 0) {
     throw new XFeedComposerAgentError('invalid-submission', 'composer submission has no items after projection')
   }
-  return { title: value.title, sections }
+  return { title: truncateComposerPlainText(value.title, COMPOSER_TITLE_MAX_UTF8_BYTES), sections }
 }
 
 function validateMaterial(value: XFeedComposerMaterial): XFeedComposerMaterial {

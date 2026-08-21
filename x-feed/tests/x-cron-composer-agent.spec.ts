@@ -195,6 +195,39 @@ describe('scheduler-owned X cron composer Agent surface', () => {
     }
   })
 
+  it('UTF8-safely bounds an over-limit summary before strict DTO parsing', async () => {
+    const rawSummary = '中'.repeat(135) + 'ab'
+    expect(new TextEncoder().encode(rawSummary).byteLength).toBe(407)
+    const rawTitle = '中'.repeat(55) + 'ab'
+    expect(new TextEncoder().encode(rawTitle).byteLength).toBe(167)
+    const dto = {
+      title: rawTitle,
+      sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary: rawSummary }] }],
+    }
+    const original = structuredClone(dto)
+    const projected = {
+      title: '中'.repeat(53),
+      sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary: '中'.repeat(133) }] }],
+    }
+    const adapter = new WireAdapter([response(dto)])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+    const surface = new XFeedComposerAgentSurface({ material })
+    const { handle, firstSeq } = await drive(ctx, surface)
+    try {
+      const summarized = summarizeTurn(handle.agent.session.events, firstSeq)
+      expect(summarized.text).toBe(JSON.stringify(projected))
+      expect(surface.finalizeOutcome(summarized)).toEqual(projected)
+      expect(dto).toEqual(original)
+      expect(surface.wires).toHaveLength(1)
+      expect(adapter.requests).toHaveLength(1)
+    } finally {
+      surface.dispose()
+      await ctx.sessions.flush(handle.agent.session)
+      await handle.dispose()
+    }
+  })
+
   it('keeps the first occurrence of an item across sections, drops empty sections, and preserves the raw DTO', async () => {
     const dto = {
       title: '本轮洞察',
@@ -298,6 +331,14 @@ describe('scheduler-owned X cron composer Agent surface', () => {
     await expectRejectedDto({
       title: '本轮洞察',
       sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary: 'https://example.com' }] }],
+    })
+    await expectRejectedDto({
+      title: '本轮洞察',
+      sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary: '内容\n- 列表' }] }],
+    })
+    await expectRejectedDto({
+      title: '本轮洞察',
+      sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary: '含\u0000控制' }] }],
     })
     await expectRejectedDto({
       title: '本轮洞察',
