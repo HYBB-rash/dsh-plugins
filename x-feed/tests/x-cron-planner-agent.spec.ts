@@ -11,6 +11,7 @@ import {
   PLANNER_SYSTEM_PROMPT,
   SUBMIT_X_CRON_PLANNER,
   SUBMIT_X_CRON_PLANNER_SCHEMA,
+  projectPlannerSubmission,
   runXCronPlanner,
   type XCronPlannerRequest,
 } from '../src/x-cron/planner-agent.ts'
@@ -88,6 +89,104 @@ describe('one-shot X cron planner Agent', () => {
     expect(adapter.requests[0]?.system).toBe(PLANNER_SYSTEM_PROMPT)
     expect(adapter.requests[0]?.tools?.[0]).toEqual(SUBMIT_X_CRON_PLANNER_SCHEMA)
     expect(JSON.stringify(adapter.requests[0])).not.toMatch(/https?:\/\/|`|\*\*|\[[^\]]+\]\(/u)
+  })
+
+  it('projects the real three-key explore submission before strict parsing', async () => {
+    const adapter = new WireAdapter([response({
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration: { kind: 'explore', topicId: 'stale-union-field', candidateId: 'candidate-1' },
+    })])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+
+    await expect(runXCronPlanner(ctx, request)).resolves.toMatchObject({
+      dto: {
+        selectedCandidateIds: ['candidate-1'],
+        themeId: 'theme-1',
+        exploration: { kind: 'explore', candidateId: 'candidate-1' },
+      },
+    })
+    expect(adapter.requests).toHaveLength(1)
+  })
+
+  it('projects the symmetric three-key search submission before strict parsing', async () => {
+    const adapter = new WireAdapter([response({
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration: { kind: 'search', topicId: 'topic-1', candidateId: 'stale-union-field' },
+    })])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+
+    await expect(runXCronPlanner(ctx, request)).resolves.toMatchObject({
+      dto: {
+        selectedCandidateIds: ['candidate-1'],
+        themeId: 'theme-1',
+        exploration: { kind: 'search', topicId: 'topic-1' },
+      },
+    })
+    expect(adapter.requests).toHaveLength(1)
+  })
+
+  it('keeps strict rejection for none, unknown keys, and unsafe union remnants', async () => {
+    const submissions = [
+      { kind: 'none', topicId: 'topic-1' },
+      { kind: 'none', candidateId: 'candidate-1' },
+      { kind: 'explore', candidateId: 'candidate-1', url: 'https://x.com/status/1' },
+      { kind: 'explore', candidateId: 'candidate-1', query: 'plain query' },
+      { kind: 'search', topicId: 'topic-1', instructions: 'plain instructions' },
+      { kind: 'explore', candidateId: 'candidate-1', topicId: 'https://x.com/status/1' },
+      { kind: 'search', topicId: 'topic-1', candidateId: '[link](https://x.com/1)' },
+      { kind: 'explore', candidateId: 'candidate-1', topicId: '\u0001' },
+      { kind: 'search', topicId: 'topic-1', candidateId: { value: 'candidate-1' } },
+    ]
+    const adapter = new WireAdapter(submissions.map((exploration, index) => response({
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration,
+    }, `invalid-${index}`)))
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+
+    for (const _submission of submissions) {
+      await expect(runXCronPlanner(ctx, request)).rejects.toThrow(/invalid|unexpected|URL|Markdown/u)
+    }
+    expect(adapter.requests).toHaveLength(submissions.length)
+  })
+
+  it('keeps unknown top-level submission keys visible to the strict parser', async () => {
+    const adapter = new WireAdapter([response({
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration: { kind: 'none' },
+      unexpected: 'leak',
+    })])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+
+    await expect(runXCronPlanner(ctx, request)).rejects.toThrow(/unknown|invalid/u)
+    expect(adapter.requests).toHaveLength(1)
+  })
+
+  it('projects into new objects without mutating the raw submission', () => {
+    const raw = {
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration: { kind: 'explore', topicId: 'stale-union-field', candidateId: 'candidate-1' },
+    }
+    const before = structuredClone(raw)
+
+    const projected = projectPlannerSubmission(raw)
+
+    expect(raw).toEqual(before)
+    expect(projected).not.toBe(raw)
+    expect((projected as typeof raw).exploration).not.toBe(raw.exploration)
+    expect(projected).toEqual({
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration: { kind: 'explore', candidateId: 'candidate-1' },
+    })
   })
 
   it('rejects an empty candidate set without a model request', async () => {

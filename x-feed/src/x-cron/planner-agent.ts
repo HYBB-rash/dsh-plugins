@@ -99,6 +99,35 @@ export class XCronPlannerAgentError extends Error {
   }
 }
 
+/**
+ * Remove only the known opposite branch field emitted by the current tool
+ * schema. Unknown fields stay visible to the strict DTO parser, and unsafe
+ * remnants stay visible too, so projection cannot turn untrusted text into a
+ * valid DTO by accident.
+ */
+export function projectPlannerSubmission(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  const exploration = value.exploration
+  if (!isRecord(exploration)) return { ...value }
+
+  const oppositeKey = exploration.kind === 'explore'
+    ? 'topicId'
+    : exploration.kind === 'search'
+      ? 'candidateId'
+      : undefined
+  const projectedExploration: Record<string, unknown> = { ...exploration }
+  if (oppositeKey !== undefined
+    && Object.prototype.hasOwnProperty.call(exploration, oppositeKey)
+    && isSafeUnionResidual(exploration[oppositeKey])) {
+    delete projectedExploration[oppositeKey]
+  }
+  return { ...value, exploration: projectedExploration }
+}
+
+function isSafeUnionResidual(value: unknown): value is string {
+  return boundedPlainText(value, MAX_ID_UTF8_BYTES)
+}
+
 /** Run one fresh planner Agent and return only its validated DTO. */
 export async function runXCronPlanner(
   ctx: Context,
@@ -129,7 +158,7 @@ export async function runXCronPlanner(
     ...(options.modelSelection === undefined ? {} : { modelSelection: options.modelSelection }),
     ...(options.defaultModelSelection === undefined ? {} : { defaultModelSelection: options.defaultModelSelection }),
     parseSubmission: (value, exec) => {
-      const validated = parsePlannerDto(JSON.stringify(value), context)
+      const validated = parsePlannerDto(JSON.stringify(projectPlannerSubmission(value)), context)
       if (!validated.ok) {
         try {
           exec.agent?.cancel({ kind: 'hook', reason: `invalid planner DTO: ${validated.code}` })
