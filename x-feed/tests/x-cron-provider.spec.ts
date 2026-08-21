@@ -496,6 +496,130 @@ describe('dsh-x-feed/v1 cron provider composition boundary', () => {
   })
 
   it.each([
+    ['bare schemes separated by whitespace', 'http://\nhttps:// ftp:// www.'],
+    ['complete URL', 'https://x.com/alice/status/99'],
+    ['scheme followed by punctuation', 'http://, https://. ftp://! www.)'],
+  ] as const)('removes %s while preserving ordinary http text', async (_label, marker) => {
+    const { directory, candidateUrl, packagePath } = await emptyAlignedFactFixture()
+    const python = runner()
+    const rawPackage = {
+      allowed_topics: ['agentic systems'],
+      recent_items: [{
+        id: '1',
+        url: candidateUrl,
+        text: `ordinary http text ${marker} remains useful`,
+        topics: ['agentic systems'],
+      }],
+      selected_urls: [candidateUrl],
+      decision: { top_theme: 'agentic systems' },
+    }
+    const rawPackageJson = JSON.stringify(rawPackage)
+    const readFile = vi.fn(async (path: string) => {
+      if (path !== packagePath) throw new Error(`unexpected artifact read: ${path}`)
+      return rawPackageJson
+    })
+    const adapter = new TwoCallProviderAdapter()
+    const ctx = await finalHarness(adapter)
+    const provider = createXFeedCronEnvironmentProvider({
+      ctx,
+      cronJobId: 'cron-x',
+      dataDir: directory,
+      pythonBin: 'python3',
+      pipelinePath: '/pkg/python/x_insight_pipeline.py',
+      run: python.run,
+      readFile,
+    })
+
+    const lease = await provider.prepare({ jobId: 'cron-x', runId: `cron-x/url-${_label}` })
+    try {
+      expect(lease).toHaveProperty('setupAgent')
+      expect(adapter.requests).toHaveLength(1)
+      const wireMessage = JSON.parse(JSON.stringify(adapter.requests[0]?.messages[0])) as {
+        content?: readonly { readonly type?: unknown; readonly text?: unknown }[]
+      }
+      const wireText = wireMessage.content?.find(block => block.type === 'text')?.text
+      if (typeof wireText !== 'string') throw new Error('planner request omitted its text material')
+      const plannerMaterial = JSON.parse(wireText.slice(wireText.indexOf('\n') + 1)) as {
+        candidates: readonly { readonly title: string; readonly summary: string }[]
+      }
+      const candidate = plannerMaterial.candidates[0]
+      if (candidate === undefined) throw new Error('planner request omitted its candidate')
+      for (const value of [candidate.title, candidate.summary]) {
+        expect(value).not.toMatch(/(?:https?:\/\/|ftp:\/\/|www\.)/iu)
+        expect(value).not.toMatch(/[\u0000-\u001f\u007f]/u)
+      }
+      expect(candidate.title).toContain('ordinary http text')
+      expect(candidate.summary).toContain('ordinary http text')
+      expect(JSON.stringify(rawPackage)).toBe(rawPackageJson)
+    } finally {
+      await lease.dispose?.()
+    }
+  })
+
+  it('keeps all 20 parsed candidates inside the strict planner text bounds without mutating raw JSON', async () => {
+    const { directory, candidateUrl, packagePath } = await emptyAlignedFactFixture()
+    const python = runner()
+    const rawPackage = {
+      allowed_topics: ['agentic systems'],
+      recent_items: Array.from({ length: 20 }, (_, index) => ({
+        id: String(index + 1),
+        url: `https://x.com/alice/status/${index + 1}`,
+        text: `candidate ${index + 1}: ordinary http text http://\nhttps:// ftp:// www. https://x.com/alice/status/99 http://,`,
+        topics: ['agentic systems'],
+        title: `title ${index + 1}: ordinary http text http://`,
+        summary: `summary ${index + 1}: ordinary http text https://`,
+      })),
+      selected_urls: [candidateUrl],
+      decision: { top_theme: 'agentic systems' },
+    }
+    const rawPackageJson = JSON.stringify(rawPackage)
+    const readFile = vi.fn(async (path: string) => {
+      if (path !== packagePath) throw new Error(`unexpected artifact read: ${path}`)
+      return rawPackageJson
+    })
+    const adapter = new TwoCallProviderAdapter()
+    const ctx = await finalHarness(adapter)
+    const provider = createXFeedCronEnvironmentProvider({
+      ctx,
+      cronJobId: 'cron-x',
+      dataDir: directory,
+      pythonBin: 'python3',
+      pipelinePath: '/pkg/python/x_insight_pipeline.py',
+      run: python.run,
+      readFile,
+    })
+
+    const lease = await provider.prepare({ jobId: 'cron-x', runId: 'cron-x/twenty-candidates' })
+    try {
+      expect(lease).toHaveProperty('setupAgent')
+      expect(adapter.requests).toHaveLength(1)
+      const wireMessage = JSON.parse(JSON.stringify(adapter.requests[0]?.messages[0])) as {
+        content?: readonly { readonly type?: unknown; readonly text?: unknown }[]
+      }
+      const wireText = wireMessage.content?.find(block => block.type === 'text')?.text
+      if (typeof wireText !== 'string') throw new Error('planner request omitted its text material')
+      const plannerMaterial = JSON.parse(wireText.slice(wireText.indexOf('\n') + 1)) as {
+        candidates: readonly { readonly id: string; readonly title: string; readonly summary: string }[]
+      }
+      expect(plannerMaterial.candidates).toHaveLength(20)
+      for (const candidate of plannerMaterial.candidates) {
+        for (const [value, maxBytes] of [[candidate.title, 320], [candidate.summary, 1_200]] as const) {
+          expect(typeof value).toBe('string')
+          expect(value).toBe(value.trim())
+          expect(value).not.toBe('')
+          expect(Buffer.byteLength(value, 'utf8')).toBeLessThanOrEqual(maxBytes)
+          expect(value).not.toMatch(/(?:https?:\/\/|ftp:\/\/|www\.)/iu)
+          expect(value).not.toMatch(/!?(?:\[[^\]]*\]\([^)]*\)|`{1,3}|\*\*|__|^\s{0,3}#{1,6}\s|(?:^|\s)[*+-]\s)/mu)
+          expect(value).not.toMatch(/[\u0000-\u001f\u007f]/u)
+        }
+      }
+      expect(JSON.stringify(rawPackage)).toBe(rawPackageJson)
+    } finally {
+      await lease.dispose?.()
+    }
+  })
+
+  it.each([
     ['pre-prefixed', 'x-status:1'],
     ['non-digit', 'alice'],
     ['leading-zero', '01'],

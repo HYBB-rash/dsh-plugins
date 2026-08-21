@@ -352,7 +352,7 @@ function parseUrls(value: unknown, name: string): readonly string[] {
 function boundedPlainText(value: unknown, fallback: string, maxBytes: number): string {
   const source = typeof value === 'string' && value.trim() !== '' ? value : fallback
   const cleaned = source
-    .replace(/(?:https?:\/\/|ftp:\/\/|www\.)[^\s<>()]+/giu, ' ')
+    .replace(/(?:https?:\/\/|ftp:\/\/|www\.)[^\s<>()]*/giu, ' ')
     .replace(/!?(?:\[[^\]]*\]\([^)]*\)|`{1,3}|\*\*|__)/gu, ' ')
     .replace(/(?:^|\s)[#>*+-]+\s/gu, ' ')
     .replace(/[\u0000-\u001f\u007f]/gu, ' ')
