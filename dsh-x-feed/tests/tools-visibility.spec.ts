@@ -74,13 +74,24 @@ function makeCtx(agents: MockAgent[], store: XFeedbackStore): Harness {
   const createdHandlers: Harness['createdHandlers'] = []
   const runFinishedHandlers: Harness['runFinishedHandlers'] = []
   const cleanups: Harness['cleanups'] = []
+  const providers = new Map<string, unknown>()
+  const effect = async (cb: () => unknown) => {
+    const cleanup = await cb()
+    cleanups.push(typeof cleanup === 'function' ? cleanup : () => undefined)
+    return cleanup
+  }
   const ctx = {
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    get: () => undefined,
-    effect: async (cb: () => unknown) => {
-      const cleanup = await cb()
-      cleanups.push(typeof cleanup === 'function' ? cleanup : () => undefined)
-      return cleanup
+    effect,
+    get: (name: string) => providers.get(name),
+    inject: (
+      dependencies: readonly string[],
+      callback: (providerCtx: { get: (name: string) => unknown; effect: typeof effect }) => unknown,
+    ) => {
+      if (dependencies.every(dependency => providers.has(dependency))) {
+        return callback({ get: (name: string) => providers.get(name), effect })
+      }
+      return undefined
     },
     on: (name: string, handler: unknown) => {
       const handlers = name === 'agent/created'

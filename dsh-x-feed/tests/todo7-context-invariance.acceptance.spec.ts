@@ -202,12 +202,19 @@ describe('TODO7-B context invariance across bounded fact projection and fresh cr
     expect([...largeRounds, ...smallRounds].every(round => round.createdSessions.length >= 2)).toBe(true)
     expect(JSON.stringify(largeRounds[1]!.finalWires)).not.toContain(LEGACY_MARKER)
     expect(JSON.stringify(largeRounds[1]!.assessmentWires)).not.toContain(LEGACY_MARKER)
-    for (const marker of [FIRST_ROUND_ASSISTANT_MARKER, FIRST_ROUND_TOOL_RESULT_MARKER, FIRST_ROUND_REASONING_MARKER, OLD_SESSION_MARKER]) {
+    for (const marker of [FIRST_ROUND_ASSISTANT_MARKER, FIRST_ROUND_REASONING_MARKER, OLD_SESSION_MARKER]) {
       expect(JSON.stringify(largeRounds[1]!.finalWires)).not.toContain(marker)
       expect(JSON.stringify(largeRounds[1]!.assessmentWires)).not.toContain(marker)
       expect(largeRounds[0]!.firstRoundSessionEvents).toContain(marker)
       expect(largeRounds[1]!.firstRoundSessionEvents).not.toContain(marker)
     }
+    expect(JSON.stringify(largeRounds[0]!.finalWires)).not.toContain(FIRST_ROUND_TOOL_RESULT_MARKER)
+    expect(JSON.stringify(largeRounds[1]!.finalWires)).not.toContain(FIRST_ROUND_TOOL_RESULT_MARKER)
+    expect(JSON.stringify(largeRounds[0]!.assessmentWires)).not.toContain(FIRST_ROUND_TOOL_RESULT_MARKER)
+    expect(JSON.stringify(largeRounds[1]!.assessmentWires)).not.toContain(FIRST_ROUND_TOOL_RESULT_MARKER)
+    expect(largeRounds[0]!.firstRoundSessionEvents).not.toContain(FIRST_ROUND_TOOL_RESULT_MARKER)
+    expect(largeRounds[1]!.firstRoundSessionEvents).not.toContain(FIRST_ROUND_TOOL_RESULT_MARKER)
+    expect(largeRounds[0]!.firstRoundSessionEvents).toContain('\\"ok\\":true,\\"prepared\\":true,\\"urlCount\\":1')
     expect(largeRounds[0]!.firstRoundSessionEvents).toContain('tool-call')
 
     expect(new XFeedbackStore(small.directory).readAll().some(event => event.note === LEGACY_MARKER)).toBe(true)
@@ -311,7 +318,7 @@ async function runRound(
       exploreCandidate: async () => ({ title: 'candidate', body: 'body', urls: [] }),
       setTheme: async theme => ({ theme }),
       prepareDelivery: async () => firstRound
-        ? { ok: true, prepared: 1, marker: FIRST_ROUND_TOOL_RESULT_MARKER }
+        ? { ok: true, preparedUrls: [CANDIDATE.source], text: FIRST_ROUND_FINAL_TEXT, marker: FIRST_ROUND_TOOL_RESULT_MARKER }
         : { ok: true, prepared: 1 },
     },
     projection: { project: async () => projected.view, lookup: projected.lookup },

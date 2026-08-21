@@ -35,6 +35,7 @@ export const X_CRON_FINAL_SYSTEM_PROMPT = [
   '最终回复必须是完整 Rich Markdown：第一行以「📦 X 洞察」开始，标题后空一行；每个出现的 ⭐、🌊、🔄、🎯、📌 小节前空一行；小节内容必须是连续的 `- ` 列表，每个列表项恰好包含一个当前 run URL。',
   '在最终回复前必须且只能成功调用一次 x_feed_prepare_delivery，传入与最终正文完全相同的 text 和其中实际使用的 URL 集合。该工具不发送 Telegram，也不标记 shown。',
   '调用 prepare 成功后，只输出同一份 text，不要添加解释、前后缀或第二份总结。',
+  '正常工作流应尽量在 8 个 model requests 内完成，并在同一 model request 中批量发起独立工具调用以覆盖最多 20 个候选；当前 run 的硬上限是 16 个 model requests。',
 ].join('\n')
 
 export const X_CRON_FINAL_PROJECT_TOOL = 'x_feed_project_candidate_facts'
@@ -42,6 +43,66 @@ export const X_CRON_FINAL_LOOKUP_TOOL = 'x_feed_lookup_fact_ticket'
 
 const MAX_MATERIAL_UTF8_BYTES = 24_000
 const MAX_WIRE_UTF8_BYTES = 96_000
+const MAX_MODEL_REQUESTS = 16
+
+export type XFeedModelResultPartition = 'optional' | 'fact' | 'control'
+export type XFeedModelResultBudgetSnapshot = {
+  readonly optional: number
+  readonly fact: number
+  readonly control: number
+  readonly total: number
+}
+
+const MODEL_RESULT_LIMITS: Readonly<Record<XFeedModelResultPartition, number>> = {
+  optional: 7_000,
+  fact: 16_000,
+  control: 1_000,
+}
+const MODEL_RESULT_BUDGET_FAILURE: XFeedRunToolFailure = Object.freeze({
+  ok: false,
+  code: 'tool-result-budget-exhausted',
+  message: 'This model-result partition has exhausted its byte budget.',
+})
+
+/** Synchronous, run-local byte ledger for final model-visible tool results. */
+export class XFeedModelResultBudget {
+  readonly #used: Record<XFeedModelResultPartition, number> = { optional: 0, fact: 0, control: 0 }
+  readonly #exhausted = new Set<XFeedModelResultPartition>()
+
+  admit(partition: XFeedModelResultPartition, result: XFeedRunToolResult): XFeedRunToolResult {
+    if (this.#exhausted.has(partition)) return MODEL_RESULT_BUDGET_FAILURE
+    const bytes = Buffer.byteLength(JSON.stringify(result), 'utf8')
+    if (bytes <= this.remaining(partition) && this.snapshot().total + bytes <= 24_000) {
+      this.#used[partition] += bytes
+      return result
+    }
+    this.#exhausted.add(partition)
+    const failureBytes = Buffer.byteLength(JSON.stringify(MODEL_RESULT_BUDGET_FAILURE), 'utf8')
+    if (failureBytes <= this.remaining(partition) && this.snapshot().total + failureBytes <= 24_000) {
+      this.#used[partition] += failureBytes
+    }
+    return MODEL_RESULT_BUDGET_FAILURE
+  }
+
+  canInvoke(partition: XFeedModelResultPartition): boolean {
+    return !this.#exhausted.has(partition)
+      && this.remaining(partition) > 0
+      && this.snapshot().total < 24_000
+  }
+
+  snapshot(): XFeedModelResultBudgetSnapshot {
+    return {
+      optional: this.#used.optional,
+      fact: this.#used.fact,
+      control: this.#used.control,
+      total: this.#used.optional + this.#used.fact + this.#used.control,
+    }
+  }
+
+  private remaining(partition: XFeedModelResultPartition): number {
+    return MODEL_RESULT_LIMITS[partition] - this.#used[partition]
+  }
+}
 
 export interface XFeedFinalCandidate extends CandidateDescriptor {
   readonly topics: readonly string[]
@@ -91,10 +152,22 @@ export class XFeedFinalAgentSurface {
   prepareFailed = false
   private disposeCapture: (() => void) | undefined
   private materialPreStepCount = 0
+  private readonly searchedTopics = new Set<string>()
+  private readonly exploredCandidates = new Set<string>()
+  private readonly projectedCandidates = new Set<string>()
+  private readonly issuedTickets = new Set<string>()
+  private readonly lookedUpTickets = new Set<string>()
+  private themeAttempts = 0
+  private themeSucceeded = false
+  private themeInFlight = false
+  private prepareLocked = false
+  private prepareInFlight = false
 
   readonly #material: XFeedFinalAgentMaterial
   readonly #runTools: XFeedRunToolPort
   readonly #projection: XFeedFinalProjectionPort
+  /** One result ledger belongs to exactly one final Agent run. */
+  readonly resultBudget = new XFeedModelResultBudget()
   readonly #tools: readonly ToolDefinition[]
 
   constructor(options: XFeedFinalAgentOptions) {
@@ -103,10 +176,12 @@ export class XFeedFinalAgentSurface {
     this.materialText = serializeMaterial(this.#material)
     this.#runTools = options.runTools
     this.#projection = options.projection
+    const trackedProjection = this.createTrackedProjectionPort()
+    const runTools = createXFeedRunTools(this.createTrackedRunPort())
     this.#tools = Object.freeze([
-      ...createXFeedRunTools(this.createTrackedRunPort()),
-      createProjectionTool(this.#projection),
-      createLookupTool(this.#projection),
+      ...runTools.map(tool => this.guardRunToolResult(tool)),
+      createProjectionTool(trackedProjection, this.resultBudget, view => this.issueProjectionTickets(view)),
+      createLookupTool(trackedProjection, this.resultBudget),
     ])
     this.toolNames = Object.freeze(this.#tools.map(tool => tool.name))
   }
@@ -147,7 +222,11 @@ export class XFeedFinalAgentSurface {
   capture(ctx: Context, sessionId: string): void {
     if (this.disposeCapture !== undefined) throw new Error('X final wire capture is already installed')
     this.disposeCapture = ctx.on('llm/stream', (request, next) => {
-      if (request.sessionId === sessionId) this.wires.push(projectWireRequest(request))
+      if (request.sessionId === sessionId) {
+        const wire = projectWireRequest(request)
+        this.wires.push(wire)
+        this.validateWire(wire)
+      }
       return next()
     })
   }
@@ -176,8 +255,8 @@ export class XFeedFinalAgentSurface {
     if (this.materialPreStepCount < 1) throw new Error('X final Agent did not install a run-material message')
     if (this.wires.length === 0) throw new Error('X final Agent produced no captured LLM wire')
     for (const wire of this.wires) this.validateWire(wire)
-    if (this.prepareAttempts !== 1 || this.prepared.length !== 1 || this.prepareFailed) {
-      throw new Error('X final Agent must have exactly one successful prepare-delivery call')
+    if ((this.prepareAttempts !== 1 && this.prepareAttempts !== 2) || this.prepared.length !== 1 || this.prepareFailed) {
+      throw new Error('X final Agent must have exactly one successful prepare-delivery call and at most one invalid-output correction')
     }
     const prepared = this.prepared[0]!
     if (outcome.text !== prepared.text) {
@@ -200,32 +279,150 @@ export class XFeedFinalAgentSurface {
 
   private createTrackedRunPort(): XFeedRunToolPort {
     return {
-      searchTopic: (topic, signal) => this.#runTools.searchTopic(topic, signal),
-      exploreCandidate: (candidateId, signal) => this.#runTools.exploreCandidate(candidateId, signal),
-      setTheme: (theme, signal) => this.#runTools.setTheme(theme, signal),
-      prepareDelivery: async (text, urls, signal) => {
-        this.prepareAttempts += 1
-        if (this.prepareAttempts !== 1) {
-          this.prepareFailed = true
-          return failure('duplicate-prepare', 'This X run accepts exactly one prepare-delivery call.')
+      searchTopic: (topic, signal) => {
+        if (!this.#material.allowedTopics.includes(topic)) {
+          return Promise.resolve(failure('topic-not-allowlisted', 'Topic is not allowlisted for this X run.'))
         }
+        if (this.searchedTopics.has(topic)) {
+          return Promise.resolve(failure('topic-already-used', 'This X run accepts one search per topic.'))
+        }
+        this.searchedTopics.add(topic)
+        return this.#runTools.searchTopic(topic, signal)
+      },
+      exploreCandidate: (candidateId, signal) => {
+        if (!this.#material.candidates.some(candidate => candidate.id === candidateId)) {
+          return Promise.resolve(failure('candidate-not-allowlisted', 'Candidate is not allowlisted for this X run.'))
+        }
+        if (this.exploredCandidates.has(candidateId)) {
+          return Promise.resolve(failure('candidate-already-used', 'This X run accepts one explore per candidate.'))
+        }
+        this.exploredCandidates.add(candidateId)
+        return this.#runTools.exploreCandidate(candidateId, signal)
+      },
+      setTheme: (theme, signal) => {
+        if (!this.#material.allowedTopics.includes(theme)) {
+          return Promise.resolve(failure('theme-not-allowlisted', 'Theme is not allowlisted for this X run.'))
+        }
+        if (this.themeInFlight) {
+          return Promise.resolve(failure('theme-in-flight', 'A theme attempt is already in flight for this X run.'))
+        }
+        if (this.themeSucceeded || this.themeAttempts >= 2) {
+          return Promise.resolve(failure('theme-locked', 'This X run accepts at most two theme attempts and one success.'))
+        }
+        this.themeAttempts += 1
+        this.themeInFlight = true
+        return (async () => {
+          try {
+            const result = await this.#runTools.setTheme(theme, signal)
+            if (!isFailure(result)) this.themeSucceeded = true
+            return result
+          } finally {
+            this.themeInFlight = false
+          }
+        })()
+      },
+      prepareDelivery: async (text, urls, signal) => {
+        if (this.prepareLocked || this.prepareInFlight) {
+          this.prepareFailed = true
+          this.prepareLocked = true
+          return failure('prepare-locked', 'This X run no longer accepts prepare-delivery calls.')
+        }
+        this.prepareAttempts += 1
+        this.prepareInFlight = true
         try {
           const value = await this.#runTools.prepareDelivery(text, urls, signal)
           if (isFailure(value)) {
-            this.prepareFailed = true
+            if (value.code !== 'invalid-output' || this.prepareAttempts >= 2) {
+              this.prepareFailed = true
+              this.prepareLocked = true
+            }
             return value
           }
           this.prepared.push(Object.freeze({ text, urls: Object.freeze([...urls]) }))
+          this.prepareLocked = true
           return value
         } catch (error) {
+          if (isInvalidOutputError(error)) {
+            const invalidFailure = failure('invalid-output', boundedErrorMessage(error.message))
+            if (this.prepareAttempts >= 2) {
+              this.prepareFailed = true
+              this.prepareLocked = true
+            }
+            return invalidFailure
+          }
           this.prepareFailed = true
+          this.prepareLocked = true
           throw error
+        } finally {
+          this.prepareInFlight = false
         }
       },
     }
   }
 
+  /**
+   * Charge only the already-projected, model-visible result. The guard lives
+   * outside the tracked port so an exhausted budget cannot consume a P7b
+   * attempt, and so projectors remain the single source of the DTO shape.
+   */
+  private guardRunToolResult(tool: ToolDefinition): ToolDefinition {
+    const partition = tool.name === 'x_feed_set_run_theme' || tool.name === 'x_feed_prepare_delivery'
+      ? 'control' as const
+      : 'optional' as const
+    const budget = this.resultBudget
+    return {
+      ...tool,
+      async execute(args: unknown, exec: ToolRunContext): Promise<XFeedRunToolResult> {
+        if (!budget.canInvoke(partition)) {
+          return budget.admit(partition, MODEL_RESULT_BUDGET_FAILURE)
+        }
+        let result: XFeedRunToolResult
+        try {
+          result = await tool.execute(args, exec) as XFeedRunToolResult
+        } catch (error) {
+          if (error instanceof ToolArgsError) throw error
+          result = runToolFailure(error)
+        }
+        return budget.admit(partition, result)
+      },
+    }
+  }
+
+  private createTrackedProjectionPort(): XFeedFinalProjectionPort {
+    return {
+      project: async candidateId => {
+        if (!this.#material.candidates.some(candidate => candidate.id === candidateId)) {
+          return failure('candidate-not-allowlisted', 'Candidate is not allowlisted for this X run.')
+        }
+        if (this.projectedCandidates.has(candidateId)) {
+          return failure('candidate-already-used', 'This X run accepts one projection per candidate.')
+        }
+        this.projectedCandidates.add(candidateId)
+        const result = await this.#projection.project(candidateId)
+        return result
+      },
+      lookup: ticketId => {
+        if (!this.issuedTickets.has(ticketId)) {
+          return failure('ticket-not-allowlisted', 'Ticket is not signed by the current run projection.')
+        }
+        if (this.lookedUpTickets.has(ticketId)) {
+          return failure('ticket-already-used', 'This X run accepts one lookup per ticket.')
+        }
+        this.lookedUpTickets.add(ticketId)
+        return this.#projection.lookup(ticketId)
+      },
+    }
+  }
+
+  /** Tickets become capabilities only after the complete DTO was admitted. */
+  private issueProjectionTickets(view: ProjectionView): void {
+    for (const ticket of view.tickets) this.issuedTickets.add(ticket.ticketId)
+  }
+
   private validateWire(wire: XFeedFinalWireRequest): void {
+    if (this.wires.length > MAX_MODEL_REQUESTS) {
+      throw new Error(`X final Agent exceeded the ${MAX_MODEL_REQUESTS}-request model budget`)
+    }
     if (wire.system !== X_CRON_FINAL_SYSTEM_PROMPT || !sameToolNames(wire.tools, this.toolNames)) {
       throw new Error('X final LLM wire contains a contaminated system or tool surface')
     }
@@ -247,7 +444,11 @@ export class XFeedFinalAgentSurface {
   }
 }
 
-function createProjectionTool(projection: XFeedFinalProjectionPort): ToolDefinition {
+function createProjectionTool(
+  projection: XFeedFinalProjectionPort,
+  budget: XFeedModelResultBudget,
+  onAccepted: (view: ProjectionView) => void,
+): ToolDefinition {
   const parameters: JsonSchemaNode = {
     type: 'object',
     properties: { candidateId: { type: 'string' } },
@@ -255,13 +456,16 @@ function createProjectionTool(projection: XFeedFinalProjectionPort): ToolDefinit
     additionalProperties: false,
   }
   return strictTool(X_CRON_FINAL_PROJECT_TOOL, 'Project the current candidate through the exact TODO5 fact projection.', parameters, async (args) => {
+    if (!budget.canInvoke('fact')) return MODEL_RESULT_BUDGET_FAILURE
     const result = await projection.project(args.candidateId as string)
-    if (isFailure(result)) return result
-    return { ok: true, result: projectView(result) }
+    const projected = projectProjectionResult(result)
+    const admitted = budget.admit('fact', projected)
+    if (admitted === projected && !isFailure(projected)) onAccepted(result as ProjectionView)
+    return admitted
   })
 }
 
-function createLookupTool(projection: XFeedFinalProjectionPort): ToolDefinition {
+function createLookupTool(projection: XFeedFinalProjectionPort, budget: XFeedModelResultBudget): ToolDefinition {
   const parameters: JsonSchemaNode = {
     type: 'object',
     properties: { ticketId: { type: 'string' } },
@@ -269,9 +473,37 @@ function createLookupTool(projection: XFeedFinalProjectionPort): ToolDefinition 
     additionalProperties: false,
   }
   return strictTool(X_CRON_FINAL_LOOKUP_TOOL, 'Lookup one exact ticket previously issued by the current candidate projection.', parameters, async (args) => {
+    if (!budget.canInvoke('fact')) return MODEL_RESULT_BUDGET_FAILURE
     const result = projection.lookup(args.ticketId as string)
-    return isFailure(result) ? result : { ok: true, result }
+    return budget.admit('fact', projectLookupResult(result))
   })
+}
+
+function projectProjectionResult(result: ProjectionView | XFeedRunToolFailure): XFeedRunToolResult {
+  if (isFailure(result)) return result
+  if (isProjectionView(result)) return { ok: true, result: projectView(result) }
+  return projectionFailure(result)
+}
+
+function projectLookupResult(result: LookupResult | XFeedRunToolFailure): XFeedRunToolResult {
+  if (isFailure(result)) return result
+  if (result.kind === 'lookup-success') return { ok: true, result }
+  return { ok: false, code: result.code, message: result.message }
+}
+
+function isProjectionView(value: unknown): value is ProjectionView {
+  return typeof value === 'object'
+    && value !== null
+    && Array.isArray((value as { facts?: unknown }).facts)
+    && Array.isArray((value as { tickets?: unknown }).tickets)
+}
+
+function projectionFailure(value: unknown): XFeedRunToolFailure {
+  const candidate = value as { readonly code?: unknown; readonly message?: unknown }
+  return failure(
+    typeof candidate.code === 'string' ? candidate.code : 'projection-failed',
+    typeof candidate.message === 'string' ? candidate.message : 'Fact projection failed.',
+  )
 }
 
 function strictTool(
@@ -354,4 +586,37 @@ function isFailure(value: unknown): value is XFeedRunToolFailure {
 
 function failure(code: string, message: string): XFeedRunToolFailure {
   return { ok: false, code, message }
+}
+
+function runToolFailure(error: unknown): XFeedRunToolFailure {
+  const candidate = error as { readonly code?: unknown; readonly message?: unknown }
+  return failure(
+    typeof candidate.code === 'string' ? candidate.code : 'run-failed',
+    candidate.message instanceof Error
+      ? candidate.message.message
+      : typeof candidate.message === 'string' ? candidate.message : String(error),
+  )
+}
+
+function isInvalidOutputError(value: unknown): value is { readonly code: 'invalid-output'; readonly message: string } {
+  return typeof value === 'object'
+    && value !== null
+    && 'code' in value
+    && (value as { code?: unknown }).code === 'invalid-output'
+    && 'message' in value
+    && typeof (value as { message?: unknown }).message === 'string'
+}
+
+function boundedErrorMessage(message: string): string {
+  const maxBytes = 256
+  if (Buffer.byteLength(message, 'utf8') <= maxBytes) return message
+  let result = ''
+  let bytes = 0
+  for (const character of message) {
+    const size = Buffer.byteLength(character, 'utf8')
+    if (bytes + size > maxBytes) break
+    result += character
+    bytes += size
+  }
+  return result
 }

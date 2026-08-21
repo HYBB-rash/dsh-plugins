@@ -17,18 +17,29 @@ afterEach(() => {
 
 function makeCtx(logs: { info: string[]; warn: string[]; error: string[] }) {
   const cleanups: Array<() => unknown> = []
+  const providers = new Map<string, unknown>()
   const on = vi.fn(() => () => undefined)
+  const effect = async (cb: () => unknown) => {
+    const cleanup = await cb()
+    cleanups.push(typeof cleanup === 'function' ? cleanup : () => undefined)
+    return cleanup
+  }
   return {
     logger: {
       info: (m: string) => logs.info.push(m),
       warn: (m: string) => logs.warn.push(m),
       error: (m: string) => logs.error.push(m),
     },
-    get: () => undefined,
-    effect: async (cb: () => unknown) => {
-      const cleanup = await cb()
-      cleanups.push(typeof cleanup === 'function' ? cleanup : () => undefined)
-      return cleanup
+    effect,
+    get: (name: string) => providers.get(name),
+    inject: (
+      dependencies: readonly string[],
+      callback: (providerCtx: { get: (name: string) => unknown; effect: typeof effect }) => unknown,
+    ) => {
+      if (dependencies.every(dependency => providers.has(dependency))) {
+        return callback({ get: (name: string) => providers.get(name), effect })
+      }
+      return undefined
     },
     on,
     agents: { roots: () => [] },
