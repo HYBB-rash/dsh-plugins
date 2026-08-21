@@ -56,6 +56,7 @@ import type {
   RunDeliveryState,
   RunFinishRecord,
   RunFinishStatus,
+  RunTrigger,
 } from './types.ts'
 
 /** Largest delay that Node timers represent without clamping. */
@@ -431,6 +432,34 @@ export interface SchedulerRuntimeDeps {
   runCommand?: RunCommand
 }
 
+/** Request accepted by the scheduler's explicit manual-run boundary. */
+export interface RunNowRequest {
+  readonly jobId: string
+  readonly requestKey: string
+}
+
+/** Stable result codes returned before or at manual claim acceptance. */
+export type RunNowResult =
+  | { readonly ok: true; readonly runId: string; readonly alreadyAccepted?: false }
+  | { readonly ok: true; readonly runId: string; readonly alreadyAccepted: true }
+  | {
+      readonly ok: false
+      readonly code: 'invalid_request' | 'job_not_found' | 'invalid_job' | 'job_active' | 'claim_failed' | 'scheduler_unavailable'
+    }
+
+/** Narrow port exposed to a transport that wants to trigger one job now. */
+export interface RunNowPort {
+  runNow(request: RunNowRequest): Promise<RunNowResult>
+}
+
+/** The trigger identity carried through one complete execution. */
+interface ExecutionSpec {
+  readonly trigger?: RunTrigger
+  readonly runId?: string
+  /** Notify a caller after the durable claim has landed. */
+  readonly onClaim?: (result: 'accepted' | 'already_accepted' | 'claim_failed') => void
+}
+
 /** In-memory scheduling state for one active job. */
 interface JobState {
   readonly job: Job
@@ -487,7 +516,7 @@ export interface SchedulerConfig {
  * One process-local, disposable view of the durable job log.
  * Rebuildable from jobs.jsonl + runs.jsonl, so re-mount is safe.
  */
-export class SchedulerRuntime {
+export class SchedulerRuntime implements RunNowPort {
   private readonly stop = Promise.withResolvers<void>()
   private timer: ReturnType<typeof setTimeout> | undefined
   private run: Promise<void> | undefined
@@ -496,6 +525,10 @@ export class SchedulerRuntime {
   private faulted = false
   private disposal: Promise<void> | undefined
   private readonly jobs = new Map<string, JobState>()
+  /** One explicit manual run may reserve a job until its execution settles. */
+  private readonly inFlightByJob = new Map<string, string>()
+  /** Manual executions remain owned by this runtime until their background promise settles. */
+  private readonly manualBackgrounds = new Set<Promise<void>>()
   private readonly handles = new Map<string, AgentHandle>()
   private readonly jobStore: JobStore
   private readonly ledger: RunLedger
@@ -522,6 +555,69 @@ export class SchedulerRuntime {
   }
 
   private readonly deliverOnError: boolean
+
+  /** Trigger one active job without consuming its natural schedule. */
+  async runNow(request: RunNowRequest): Promise<RunNowResult> {
+    if (this.stopping || this.faulted || this.signal.aborted) {
+      return { ok: false, code: 'scheduler_unavailable' }
+    }
+    if (
+      request === null
+      || typeof request !== 'object'
+      || typeof request.jobId !== 'string'
+      || request.jobId.length === 0
+      || typeof request.requestKey !== 'string'
+      || request.requestKey.length === 0
+    ) {
+      return { ok: false, code: 'invalid_request' }
+    }
+
+    const runId = `manual:${request.jobId}:${createHash('sha256').update(request.requestKey, 'utf8').digest('hex')}`
+    const foldedRuns = this.ledger.foldJob(request.jobId)
+    if (foldedRuns.settledRunIds.has(runId)) {
+      return { ok: true, alreadyAccepted: true, runId }
+    }
+
+    const foldedJobs = this.jobStore.fold()
+    if (foldedJobs.invalid?.some(entry => entry.id === request.jobId)) {
+      return { ok: false, code: 'invalid_job' }
+    }
+    const job = foldedJobs.active.find(entry => entry.id === request.jobId)
+    if (job === undefined) return { ok: false, code: 'job_not_found' }
+
+    const inFlight = this.inFlightByJob.get(job.id)
+    if (inFlight !== undefined) {
+      if (inFlight === runId) return { ok: true, alreadyAccepted: true, runId }
+      return { ok: false, code: 'job_active' }
+    }
+
+    this.inFlightByJob.set(job.id, runId)
+    const state: JobState = {
+      job,
+      nextRunAt: this.rebuildNextRun(job, foldedRuns),
+    }
+    const claim = Promise.withResolvers<'accepted' | 'already_accepted' | 'claim_failed'>()
+    const background = this.semaphore.run(() => this.executeJob(state, Date.now(), {
+      trigger: 'manual',
+      runId,
+      onClaim: result => claim.resolve(result),
+    }))
+    this.manualBackgrounds.add(background)
+    void background.catch(error => {
+      this.ctx.logger.error(
+        `dsh-cron: manual run ${runId} failed before claim acknowledgement: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      claim.resolve('claim_failed')
+    }).finally(() => {
+      if (this.inFlightByJob.get(job.id) === runId) this.inFlightByJob.delete(job.id)
+      this.manualBackgrounds.delete(background)
+      this.requestDrive()
+    })
+    const claimResult = await claim.promise
+    if (claimResult === 'accepted') return { ok: true, runId }
+    if (claimResult === 'already_accepted') return { ok: true, alreadyAccepted: true, runId }
+    return { ok: false, code: 'claim_failed' }
+  }
 
   /** Begin the first preflight and timer derivation. */
   start(): void {
@@ -554,8 +650,11 @@ export class SchedulerRuntime {
       this.clearTimer()
       this.stop.resolve()
       if (this.run !== undefined) await Promise.allSettled([this.run])
+      if (this.manualBackgrounds.size > 0) await Promise.allSettled([...this.manualBackgrounds])
       await Promise.allSettled([...this.handles.values()].map(handle => handle.dispose()))
       this.handles.clear()
+      this.inFlightByJob.clear()
+      this.manualBackgrounds.clear()
     })())
   }
 
@@ -655,6 +754,7 @@ export class SchedulerRuntime {
     for (const job of folded.active) {
       const runs = this.ledger.foldJob(job.id)
       for (const orphan of runs.interrupted) {
+        if (this.inFlightByJob.get(job.id) === orphan.runId) continue
         this.ctx.logger.error(
           `dsh-cron: run ${orphan.runId} was interrupted before finishing; marking interrupted (never re-run)`,
         )
@@ -666,9 +766,12 @@ export class SchedulerRuntime {
           Date.parse(orphan.claimedAt),
           Date.now(),
           {
+            ...(orphan.trigger === undefined ? {} : { trigger: orphan.trigger }),
             deliveryState: 'uncertain',
             deliveryError: 'scheduler interrupted before finishing',
-            ...(orphan.nextRunAt === undefined ? {} : { nextRunAt: Date.parse(orphan.nextRunAt) }),
+            ...(orphan.trigger === 'manual' || orphan.nextRunAt === undefined
+              ? {}
+              : { nextRunAt: Date.parse(orphan.nextRunAt) }),
           },
         )
         if (finished !== undefined) void this.emitRunFinished(finished)
@@ -715,6 +818,7 @@ export class SchedulerRuntime {
     startedAt: number,
     finishedAt: number,
     extra: {
+      trigger?: RunTrigger
       nextRunAt?: number
       deliveredAt?: string
       deliveryState?: SchedulerDeliveryState
@@ -733,6 +837,7 @@ export class SchedulerRuntime {
       startedAt: new Date(startedAt).toISOString(),
       finishedAt: new Date(finishedAt).toISOString(),
       status,
+      ...(extra.trigger === undefined ? {} : { trigger: extra.trigger }),
       ...(extra.nextRunAt === undefined ? {} : { nextRunAt: new Date(extra.nextRunAt).toISOString() }),
       deliveryState: extra.deliveryState ?? 'not_requested',
       ...(extra.deliveredAt === undefined ? {} : { deliveredAt: extra.deliveredAt }),
@@ -791,17 +896,20 @@ export class SchedulerRuntime {
     const due: Array<{ state: JobState; scheduledFor: number }> = []
     for (const state of this.jobs.values()) {
       if (state.nextRunAt === undefined || state.nextRunAt > now) continue
+      if (this.inFlightByJob.has(state.job.id)) continue
       // A failed claim append backs off in-process without moving nextRunAt;
       // the original scheduledFor and runId stay stable for the retry.
       if (state.claimRetryNotBefore !== undefined && now < state.claimRetryNotBefore) continue
       const scheduledFor = state.nextRunAt
+      const scheduledRunId = SchedulerRuntime.runIdOf(state.job.id, scheduledFor)
+      this.inFlightByJob.set(state.job.id, scheduledRunId)
       if (state.job.schedule.kind === 'once') {
         if (now - scheduledFor > ONESHOT_GRACE_MS) {
           // Expired one-shots have no external side effect: a finish is
           // enough, no claim is required and none may be re-run.
           const finished = this.appendFinish(
             state.job,
-            SchedulerRuntime.runIdOf(state.job.id, scheduledFor),
+            scheduledRunId,
             scheduledFor,
             'expired',
             scheduledFor,
@@ -809,6 +917,7 @@ export class SchedulerRuntime {
           )
           state.nextRunAt = undefined
           if (finished !== undefined) await this.emitRunFinished(finished)
+          this.releaseInFlight(state.job.id, scheduledRunId)
           continue
         }
         due.push({ state, scheduledFor })
@@ -828,7 +937,13 @@ export class SchedulerRuntime {
     }
 
     if (due.length > 0) {
-      await Promise.all(due.map(entry => this.semaphore.run(() => this.executeJob(entry.state, entry.scheduledFor))))
+      await Promise.all(due.map(entry => this.semaphore.run(async () => {
+        try {
+          await this.executeJob(entry.state, entry.scheduledFor)
+        } finally {
+          this.releaseInFlight(entry.state.job.id, SchedulerRuntime.runIdOf(entry.state.job.id, entry.scheduledFor))
+        }
+      })))
     }
 
     // Re-arm to the nearest future run, honoring claim backoff so a job with
@@ -836,6 +951,7 @@ export class SchedulerRuntime {
     let target: number | undefined
     for (const state of this.jobs.values()) {
       if (state.nextRunAt === undefined) continue
+      if (this.inFlightByJob.has(state.job.id)) continue
       if (state.nextRunAt <= Date.now()) {
         if (state.claimRetryNotBefore !== undefined && state.claimRetryNotBefore > Date.now()) {
           if (target === undefined || state.claimRetryNotBefore < target) target = state.claimRetryNotBefore
@@ -847,6 +963,13 @@ export class SchedulerRuntime {
       if (target === undefined || state.nextRunAt < target) target = state.nextRunAt
     }
     if (target !== undefined) this.arm(target, Date.now())
+  }
+
+  /** Release one local reservation and re-drive retained natural due work. */
+  private releaseInFlight(jobId: string, runId: string): void {
+    if (this.inFlightByJob.get(jobId) !== runId) return
+    this.inFlightByJob.delete(jobId)
+    this.requestDrive()
   }
 
   /** Resolve and prepare a marked environment after the durable run claim. */
@@ -988,6 +1111,21 @@ export class SchedulerRuntime {
     }
   }
 
+  /** Notify a manual caller without allowing its resolver to alter execution. */
+  private notifyClaim(
+    execution: ExecutionSpec,
+    result: 'accepted' | 'already_accepted' | 'claim_failed',
+    runId: string,
+  ): void {
+    try {
+      execution.onClaim?.(result)
+    } catch (error) {
+      this.ctx.logger.warn(
+        `dsh-cron: onClaim callback failed for ${runId}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+
   /**
    * Execute one due trigger. Order is fixed by the V1.1 contract:
    *   1. derive the stable runId and the crash-recovery nextRunAt;
@@ -996,10 +1134,16 @@ export class SchedulerRuntime {
    *      skipped and the ledger's recovery anchor is adopted;
    *   4. only then acquire the agent, drive the turn, deliver, and finish.
    */
-  private async executeJob(state: JobState, scheduledFor: number): Promise<void> {
+  private async executeJob(
+    state: JobState,
+    scheduledFor: number,
+    execution: ExecutionSpec = { trigger: 'scheduled' },
+  ): Promise<void> {
     const { job } = state
-    const runId = SchedulerRuntime.runIdOf(job.id, scheduledFor)
-    const crashFallback = job.schedule.kind === 'once'
+    const trigger = execution.trigger ?? 'scheduled'
+    const manual = trigger === 'manual'
+    const runId = execution.runId ?? SchedulerRuntime.runIdOf(job.id, scheduledFor)
+    const crashFallback = manual || job.schedule.kind === 'once'
       ? undefined
       : nextRunAfter(job.schedule, Date.now())
 
@@ -1008,6 +1152,7 @@ export class SchedulerRuntime {
       claimed = this.ledger.claim({
         schemaVersion: 2,
         event: 'claim',
+        trigger,
         runId,
         jobId: job.id,
         sessionId: this.sessionIdForRun(job, runId),
@@ -1023,17 +1168,28 @@ export class SchedulerRuntime {
       this.ctx.logger.error(
         `dsh-cron: claim failed for ${runId}, run skipped: ${error instanceof Error ? error.message : String(error)}`,
       )
+      this.notifyClaim(execution, 'claim_failed', runId)
       return
     }
     if (!claimed) {
       this.ctx.logger.warn(`dsh-cron: ${runId} already claimed; skipping this trigger`)
-      const folded = this.ledger.foldJob(job.id)
-      state.nextRunAt = folded.nextRunAt === undefined ? undefined : Date.parse(folded.nextRunAt)
+      this.notifyClaim(execution, 'already_accepted', runId)
+      if (!manual) {
+        const folded = this.ledger.foldJob(job.id)
+        state.nextRunAt = folded.nextRunAt === undefined ? undefined : Date.parse(folded.nextRunAt)
+      }
       return
     }
+    // The claim is durable before the caller is released to observe
+    // acceptance. A callback failure must not turn an accepted run into an
+    // execution failure or prevent the actual job body from running.
+    this.notifyClaim(execution, 'accepted', runId)
     // The claim landed: clear any backoff and adopt the crash-recovery anchor.
     delete state.claimRetryNotBefore
-    if (job.schedule.kind === 'once') {
+    if (manual) {
+      // Manual runs consume no scheduled occurrence and therefore must not
+      // mutate the in-memory schedule anchor.
+    } else if (job.schedule.kind === 'once') {
       state.nextRunAt = undefined
     } else if (crashFallback !== undefined) {
       state.nextRunAt = crashFallback
@@ -1102,15 +1258,17 @@ export class SchedulerRuntime {
     finishedAt = Date.now()
 
     // Re-anchor the next run off the actual finish time (Hermes mark_job_run).
-    const finishedNextRunAt = job.schedule.kind === 'once'
+    const finishedNextRunAt = manual || job.schedule.kind === 'once'
       ? undefined
       : nextRunAfter(job.schedule, finishedAt)
-    if (finishedNextRunAt !== undefined) state.nextRunAt = finishedNextRunAt
+    if (!manual && finishedNextRunAt !== undefined) state.nextRunAt = finishedNextRunAt
 
-    const nextRunExtra = finishedNextRunAt === undefined ? {} : { nextRunAt: finishedNextRunAt }
+    const nextRunExtra = manual || finishedNextRunAt === undefined ? {} : { nextRunAt: finishedNextRunAt }
+    const triggerExtra = { trigger }
     const errorText = executionError ?? outcome?.error
     if (this.signal.aborted) {
       const finished = this.appendFinish(job, runId, scheduledFor, 'interrupted', startedAt, finishedAt, {
+        ...triggerExtra,
         ...nextRunExtra,
         deliveryState: 'uncertain',
         deliveryError: boundedDeliveryError(errorText ?? 'scheduler interrupted before completion'),
@@ -1163,6 +1321,7 @@ export class SchedulerRuntime {
         }
       }
       const finished = this.appendFinish(job, runId, scheduledFor, 'error', startedAt, finishedAt, {
+        ...triggerExtra,
         ...nextRunExtra,
         error: errorText,
         deliveryState: delivery.state,
@@ -1177,6 +1336,7 @@ export class SchedulerRuntime {
     if (job.deliver === 'silent' || text.trim() === '') {
       // Empty output is a successful execution with no requested delivery.
       const finished = this.appendFinish(job, runId, scheduledFor, 'success', startedAt, finishedAt, {
+        ...triggerExtra,
         ...nextRunExtra,
         deliveryState: 'silent',
       })
@@ -1186,6 +1346,7 @@ export class SchedulerRuntime {
 
     const delivery = await this.attemptDelivery(text)
     const finished = this.appendFinish(job, runId, scheduledFor, 'success', startedAt, finishedAt, {
+      ...triggerExtra,
       ...nextRunExtra,
       deliveryState: delivery.state,
       ...(delivery.deliveredAt === undefined ? {} : { deliveredAt: delivery.deliveredAt }),
@@ -1202,7 +1363,11 @@ export class SchedulerRuntime {
  * @param ctx - plugin context carrying core services.
  * @param config - validated scheduler configuration.
  */
-export async function applyScheduler(ctx: Context, config: SchedulerConfig): Promise<void> {
+export async function applyScheduler(
+  ctx: Context,
+  config: SchedulerConfig,
+  composition: { readonly installRunNow?: (port: RunNowPort) => void | (() => void) } = {},
+): Promise<void> {
   await ctx.effect(async () => {
     const token = await resolveSecret(ctx, config.token, config.tokenRef)
     if (token === undefined || token === '') {
@@ -1224,10 +1389,12 @@ export async function applyScheduler(ctx: Context, config: SchedulerConfig): Pro
     const lifetime = new AbortController()
     const runtime = new SchedulerRuntime(ctx, config, http, chatId, lifetime.signal)
     runtime.start()
+    const disposeRunNow = composition.installRunNow?.(runtime)
     const pollTimer = setInterval(() => runtime.requestDrive(), config.pollIntervalMs)
     ctx.logger.info(`dsh-cron: scheduler started (poll ${config.pollIntervalMs}ms, maxConcurrent ${config.maxConcurrent})`)
 
     return async () => {
+      disposeRunNow?.()
       clearInterval(pollTimer)
       lifetime.abort(new Error('dsh-cron scheduler disposed'))
       await runtime.dispose()

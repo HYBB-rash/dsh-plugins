@@ -182,6 +182,9 @@ export interface FoldedJobs {
 /** Terminal run status recorded in runs.jsonl. */
 export type RunStatus = 'success' | 'error' | 'silent' | 'expired'
 
+/** V2 execution trigger; omitted on old rows means the natural schedule. */
+export type RunTrigger = 'scheduled' | 'manual'
+
 /** One append-only line in runs.jsonl. */
 export interface RunRecord {
   readonly jobId: string
@@ -204,6 +207,8 @@ export interface RunRecord {
 export interface RunClaimRecord {
   readonly schemaVersion: 2
   readonly event: 'claim'
+  /** Omitted on legacy V2 rows; parse/fold treats it as `scheduled`. */
+  readonly trigger?: RunTrigger
   /** Stable per trigger point, `jobId@<scheduledFor ISO>`; rebuild-stable. */
   readonly runId: string
   readonly jobId: string
@@ -235,6 +240,8 @@ export type RunFinishStatus = RunStatus | 'interrupted'
 export interface RunFinishRecord {
   readonly schemaVersion: 2
   readonly event: 'finish'
+  /** Omitted on legacy V2 rows; parse/fold treats it as `scheduled`. */
+  readonly trigger?: RunTrigger
   readonly runId: string
   readonly jobId: string
   readonly sessionId: string

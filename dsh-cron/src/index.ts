@@ -27,6 +27,7 @@ import { JobStore, defaultStoreDir } from './store.ts'
 import { createControlService } from './control.ts'
 import { createControlRpcClient, createControlRpcServer } from './control-rpc.ts'
 import { provideCronAgentEnvironmentRegistry } from './run-environment.ts'
+import { installRunNowTools } from './run-now-tool.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'dsh-cron'
@@ -158,6 +159,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       pollIntervalMs: config.pollIntervalMs ?? 10_000,
       maxConcurrent: config.maxConcurrent ?? 3,
       deliverOnError: config.deliverOnError ?? true,
+    }, {
+      installRunNow: port => installRunNowTools(ctx, port, 'session-telegram'),
     })
     return
   }

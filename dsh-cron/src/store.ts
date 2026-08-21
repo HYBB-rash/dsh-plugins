@@ -23,6 +23,7 @@ import type {
   RunFinishRecord,
   RunHistoryRecord,
   RunRecord,
+  RunTrigger,
 } from './types.ts'
 import {
   MAX_COMMAND_OUTPUT_BYTES,
@@ -390,6 +391,7 @@ export type ParsedRunLine =
 
 /** V2 finish statuses that are valid ledger events. */
 const VALID_FINISH_STATUSES = new Set(['success', 'error', 'silent', 'expired', 'interrupted'])
+const VALID_RUN_TRIGGERS = new Set<RunTrigger>(['scheduled', 'manual'])
 
 /** Whether a value is a non-empty string that Date can parse. */
 function isValidTime(value: unknown): value is string {
@@ -399,6 +401,14 @@ function isValidTime(value: unknown): value is string {
 /** Whether a value is a non-empty string (whitespace-only counts as empty). */
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== ''
+}
+
+function isValidRunTrigger(value: unknown): value is RunTrigger {
+  return value === undefined || (typeof value === 'string' && VALID_RUN_TRIGGERS.has(value as RunTrigger))
+}
+
+function isManualRun(record: RunClaimRecord | RunFinishRecord): boolean {
+  return record.trigger === 'manual'
 }
 
 /** Parse one raw runs.jsonl line. */
@@ -426,6 +436,8 @@ export function parseRunLine(raw: string): ParsedRunLine {
         && isNonEmptyString(record.sessionId)
         && isValidTime(record.scheduledFor)
         && isValidTime(record.claimedAt)
+        && isValidRunTrigger(record.trigger)
+        && (record.trigger !== 'manual' || record.nextRunAt === undefined)
         && (record.nextRunAt === undefined || isValidTime(record.nextRunAt))
       ) {
         return { kind: 'claim', record: record as unknown as RunClaimRecord }
@@ -440,6 +452,8 @@ export function parseRunLine(raw: string): ParsedRunLine {
         && isValidTime(record.finishedAt)
         && typeof record.status === 'string'
         && VALID_FINISH_STATUSES.has(record.status)
+        && isValidRunTrigger(record.trigger)
+        && (record.trigger !== 'manual' || record.nextRunAt === undefined)
         && (record.nextRunAt === undefined || isValidTime(record.nextRunAt))
       ) {
         return { kind: 'finish', record: record as unknown as RunFinishRecord }
@@ -466,7 +480,7 @@ export function parseRunLine(raw: string): ParsedRunLine {
 export interface FoldedJobRuns {
   /** Every runId that is claimed or finished — never re-dispatch these. */
   readonly settledRunIds: ReadonlySet<string>
-  /** Whether any V1 or V2 record exists for the job (once-settled check). */
+  /** Whether natural scheduled/legacy evidence consumed the job (once-settled check). */
   readonly anyRecord: boolean
   /** Recovery nextRunAt (ISO) from the latest V2 claim/finish, if any. */
   readonly nextRunAt?: string
@@ -523,17 +537,19 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
       continue
     }
     if (parsed.kind === 'claim') {
-      anyRecord = true
       claims.set(parsed.record.runId, parsed.record)
       settled.add(parsed.record.runId)
-      if (parsed.record.nextRunAt !== undefined) nextRunAt = parsed.record.nextRunAt
+      if (!isManualRun(parsed.record)) {
+        anyRecord = true
+        if (parsed.record.nextRunAt !== undefined) nextRunAt = parsed.record.nextRunAt
+      }
       continue
     }
-    anyRecord = true
+    if (!isManualRun(parsed.record)) anyRecord = true
     if (!finishes.has(parsed.record.runId)) foldExecutionStatus(parsed.record.status)
     finishes.add(parsed.record.runId)
     settled.add(parsed.record.runId)
-    if (parsed.record.nextRunAt !== undefined) nextRunAt = parsed.record.nextRunAt
+    if (!isManualRun(parsed.record) && parsed.record.nextRunAt !== undefined) nextRunAt = parsed.record.nextRunAt
   }
   const interrupted: RunClaimRecord[] = []
   for (const [runId, claimRecord] of claims) {

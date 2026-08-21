@@ -75,6 +75,24 @@ function finish(overrides: Partial<RunFinishRecord> = {}): RunFinishRecord {
   }
 }
 
+function manualClaim(overrides: Partial<RunClaimRecord> = {}): RunClaimRecord {
+  return {
+    ...claim(),
+    runId: 'manual:cron-a:request-1',
+    trigger: 'manual',
+    ...overrides,
+  }
+}
+
+function manualFinish(overrides: Partial<RunFinishRecord> = {}): RunFinishRecord {
+  return {
+    ...finish(),
+    runId: 'manual:cron-a:request-1',
+    trigger: 'manual',
+    ...overrides,
+  }
+}
+
 function failureAlertClaim(
   overrides: Partial<RunFailureAlertClaimRecord> = {},
 ): RunFailureAlertClaimRecord {
@@ -272,6 +290,33 @@ describe('RunLedger.foldJob', () => {
     expect(folded.interrupted).toEqual([])
     expect(folded.failureAlertRunIds).toEqual(new Set(['alert-only']))
   })
+
+  it('manual claim participates in idempotency and orphan audit but not once schedule consumption', () => {
+    const dir = tempDir()
+    const ledger = new RunLedger(dir)
+    const record = manualClaim()
+
+    expect(ledger.claim(record)).toBe('claimed')
+    expect(ledger.claim(record)).toBe('already_claimed')
+
+    const folded = ledger.foldJob('cron-a')
+    expect(folded.anyRecord).toBe(false)
+    expect(folded.settledRunIds.has(record.runId)).toBe(true)
+    expect(folded.interrupted).toEqual([record])
+    expect(folded.nextRunAt).toBeUndefined()
+  })
+
+  it('manual finish participates in settled/error statistics without advancing the schedule', () => {
+    const dir = tempDir()
+    seed(dir, [manualClaim(), manualFinish({ status: 'error' })])
+
+    const folded = new RunLedger(dir).foldJob('cron-a')
+    expect(folded.anyRecord).toBe(false)
+    expect(folded.settledRunIds.has('manual:cron-a:request-1')).toBe(true)
+    expect(folded.interrupted).toEqual([])
+    expect(folded.consecutiveExecutionErrors).toBe(1)
+    expect(folded.nextRunAt).toBeUndefined()
+  })
 })
 
 describe('RunLedger V2 strict validation', () => {
@@ -356,5 +401,22 @@ describe('RunLedger V2 strict validation', () => {
     expect(folded.legacyFinishedAt).toBe('2026-08-14T09:00:10.000Z')
     expect(folded.nextRunAt).toBe('2026-08-14T10:05:00.000Z')
     expect(folded.anyRecord).toBe(true)
+  })
+
+  it('rejects manual nextRunAt and unknown trigger values fail closed', () => {
+    const dir = tempDir()
+    seed(dir, [
+      manualClaim({ nextRunAt: '2026-08-14T10:05:00.000Z' }),
+      manualFinish({ nextRunAt: '2026-08-14T10:05:20.000Z' }),
+      { ...claim({ runId: 'unknown-trigger-claim' }), trigger: 'future' },
+      { ...finish({ runId: 'unknown-trigger-finish' }), trigger: 'future' },
+    ])
+
+    const folded = new RunLedger(dir).foldJob('cron-a')
+    expect(folded.anyRecord).toBe(false)
+    expect(folded.settledRunIds).toEqual(new Set())
+    expect(folded.interrupted).toEqual([])
+    expect(folded.nextRunAt).toBeUndefined()
+    expect(folded.consecutiveExecutionErrors).toBe(0)
   })
 })

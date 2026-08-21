@@ -16,6 +16,18 @@ import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+
+vi.mock('@deepseek-ai/dsh-telegram-gateway', async importOriginal => {
+  const actual = await importOriginal<typeof import('@deepseek-ai/dsh-telegram-gateway')>()
+  return {
+    ...actual,
+    createTelegramHttp: () => ({
+      getMe: async () => ({ id: 1, username: 'test' }),
+      sendMessage: async () => ({ message_id: 1 }),
+    }),
+  }
+})
+
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TelegramApiError } from '@deepseek-ai/dsh-telegram-gateway'
 import { createControlService } from '../src/control.ts'
@@ -24,7 +36,7 @@ import {
   createCronAgentEnvironmentRegistry,
   type CronAgentEnvironmentProvider,
 } from '../src/run-environment.ts'
-import { AgentRunLease, SchedulerRuntime, type SchedulerConfig } from '../src/scheduler.ts'
+import { AgentRunLease, applyScheduler, SchedulerRuntime, type SchedulerConfig } from '../src/scheduler.ts'
 import { JobStore, RunLedger } from '../src/store.ts'
 import type { Job } from '../src/types.ts'
 
@@ -61,6 +73,44 @@ function makeConfig(dir: string): SchedulerConfig {
     deliverOnError: true,
   }
 }
+
+it('scheduler composition removes run-now before aborting its runtime', async () => {
+  const disposeOrder: string[] = []
+  let pluginDispose: (() => Promise<void>) | undefined
+  let runtimeSignal: AbortSignal | undefined
+  const ctx = {
+    get: () => undefined,
+    logger: {
+      info: () => undefined,
+      warn: () => undefined,
+      error: () => undefined,
+    },
+    effect: async (factory: () => Promise<() => Promise<void>>) => {
+      const cleanup = await factory()
+      pluginDispose = async () => { await cleanup() }
+      return pluginDispose
+    },
+  }
+
+  await applyScheduler(ctx as never, {
+    ...makeConfig(tempDir()),
+    token: 'token',
+    chatId: '1',
+  }, {
+    installRunNow: port => {
+      runtimeSignal = (port as SchedulerRuntime & { signal?: AbortSignal }).signal
+      return () => {
+        expect(runtimeSignal?.aborted).toBe(false)
+        disposeOrder.push('uninstall')
+      }
+    },
+  })
+
+  expect(pluginDispose).toBeTypeOf('function')
+  await pluginDispose?.()
+  expect(disposeOrder).toEqual(['uninstall'])
+  expect(runtimeSignal?.aborted).toBe(true)
+})
 
 const fakeAgent = {
   session: { seq: 0, events: [] },
@@ -248,6 +298,321 @@ function onceJob(runAtAgoMs: number): Job {
 }
 
 describe('claim ordering', () => {
+  it('reserves scheduled jobs before the semaphore queue so runNow rejects a pending sibling', async () => {
+    const dir = tempDir()
+    const firstJob = { ...dueIntervalJob(60, 60 * 60_000 + 1_000), id: 'scheduled-active' }
+    const pendingJob = { ...dueIntervalJob(60, 60 * 60_000 + 1_000), id: 'scheduled-pending' }
+    seedJob(dir, firstJob)
+    seedJob(dir, pendingJob)
+    const started = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let driveCalls = 0
+    const controller = new AbortController()
+    const runtime = new SchedulerRuntime(
+      fakeCtx([]),
+      { ...makeConfig(dir), maxConcurrent: 1 },
+      {} as never,
+      0,
+      controller.signal,
+      {
+        driveTurn: async () => {
+          driveCalls++
+          started.resolve()
+          await release.promise
+          return { text: '' }
+        },
+        deliverText: async () => undefined,
+      },
+    )
+    runtime.start()
+    const manualResult = runtime.runNow({ jobId: pendingJob.id, requestKey: 'pending-manual' })
+    const observed = await Promise.race([
+      manualResult,
+      new Promise(resolve => setTimeout(() => resolve('timed out'), 100)),
+    ])
+    expect(observed).toMatchObject({ ok: false, code: 'job_active' })
+    await started.promise
+    expect(readLines(dir).filter(line => line.includes('"event":"claim"'))).toHaveLength(1)
+    release.resolve()
+    await manualResult
+    await runtime.dispose()
+  })
+
+  it('manual active run blocks natural due work, then completion wakes the retained natural occurrence', async () => {
+    const dir = tempDir()
+    const job = { ...dueIntervalJob(60, 60 * 60_000 + 1_000), id: 'manual-blocks-natural' }
+    seedJob(dir, job)
+    const started = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let driveCalls = 0
+    const controller = new AbortController()
+    const runtime = new SchedulerRuntime(
+      fakeCtx([]),
+      makeConfig(dir),
+      {} as never,
+      0,
+      controller.signal,
+      {
+        driveTurn: async () => {
+          driveCalls++
+          started.resolve()
+          if (driveCalls === 1) await release.promise
+          return { text: '' }
+        },
+        deliverText: async () => undefined,
+      },
+    )
+    const manualResult = runtime.runNow({ jobId: job.id, requestKey: 'manual-first' })
+    await started.promise
+    await expect(manualResult).resolves.toMatchObject({ ok: true })
+    runtime.requestDrive()
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(readLines(dir).filter(line => line.includes('"event":"claim"'))).toHaveLength(1)
+    expect(readLines(dir).some(line => line.includes('"status":"interrupted"'))).toBe(false)
+    release.resolve()
+    await waitFor(() => readLines(dir).filter(line => line.includes('"event":"claim"')).length === 2)
+    expect(driveCalls).toBe(2)
+    await runtime.dispose()
+  })
+
+  it('dispose waits for an aborted manual background and rejects new runNow requests', async () => {
+    const dir = tempDir()
+    const job = { ...dueIntervalJob(60, 60 * 60_000 + 1_000), id: 'manual-dispose' }
+    seedJob(dir, job)
+    const started = Promise.withResolvers<void>()
+    const controller = new AbortController()
+    const runtime = new SchedulerRuntime(
+      fakeCtx([]),
+      makeConfig(dir),
+      {} as never,
+      0,
+      controller.signal,
+      {
+        driveTurn: async (_agent, _prompt, _sessions, signal) => {
+          started.resolve()
+          await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+          return undefined
+        },
+        deliverText: async () => undefined,
+      },
+    )
+    const accepted = runtime.runNow({ jobId: job.id, requestKey: 'dispose-me' })
+    await started.promise
+    await expect(accepted).resolves.toMatchObject({ ok: true })
+    controller.abort()
+    const disposing = runtime.dispose()
+    await expect(disposing).resolves.toBeUndefined()
+    await expect(runtime.runNow({ jobId: job.id, requestKey: 'after-dispose' })).resolves.toMatchObject({
+      ok: false,
+      code: 'scheduler_unavailable',
+    })
+  })
+
+  it('runNow accepts one manual claim without advancing the natural schedule', async () => {
+    const dir = tempDir()
+    const job: Job = {
+      id: 'manual-accepted',
+      schedule: { kind: 'interval', minutes: 60 },
+      prompt: 'manual prompt',
+      deliver: 'silent',
+      createdAt: nowIso(),
+    }
+    seedJob(dir, job)
+    const { runtime } = newRuntime(dir, {
+      driveTurn: async () => ({ text: '' }),
+    })
+
+    const result = runtime.runNow({ jobId: job.id, requestKey: 'request-1' })
+    await expect(result).resolves.toMatchObject({ ok: true, runId: expect.any(String) })
+    await waitFor(() => readLines(dir).filter(line => line.includes('"event":"finish"')).length === 1)
+
+    const lines = readLines(dir).map(line => JSON.parse(line) as Record<string, unknown>)
+    const claims = lines.filter(line => line.event === 'claim')
+    expect(claims).toHaveLength(1)
+    expect(claims[0]).toMatchObject({ trigger: 'manual', jobId: job.id })
+    expect(claims[0]).not.toHaveProperty('nextRunAt')
+    expect(new RunLedger(dir).foldJob(job.id).nextRunAt).toBeUndefined()
+    await runtime.dispose()
+  })
+
+  it('runNow retries the same request key as already accepted without a second claim', async () => {
+    const dir = tempDir()
+    const job: Job = {
+      id: 'manual-idempotent',
+      schedule: { kind: 'interval', minutes: 60 },
+      prompt: 'manual prompt',
+      deliver: 'silent',
+      createdAt: nowIso(),
+    }
+    seedJob(dir, job)
+    const { runtime } = newRuntime(dir, { driveTurn: async () => ({ text: '' }) })
+
+    const runNow = runtime.runNow.bind(runtime)
+    const first = await runNow({ jobId: job.id, requestKey: 'same-key' })
+    await waitFor(() => readLines(dir).filter(line => line.includes('"event":"finish"')).length === 1)
+    const retry = await runNow({ jobId: job.id, requestKey: 'same-key' })
+
+    expect(first).toMatchObject({ ok: true })
+    expect(retry).toMatchObject({ ok: true, alreadyAccepted: true, runId: first.runId })
+    expect(readLines(dir).filter(line => line.includes('"event":"claim"'))).toHaveLength(1)
+    await runtime.dispose()
+  })
+
+  it('runNow treats a claim race that returns already_claimed as already accepted', async () => {
+    const dir = tempDir()
+    const job: Job = {
+      id: 'manual-claim-race',
+      schedule: { kind: 'interval', minutes: 60 },
+      prompt: 'manual prompt',
+      deliver: 'silent',
+      createdAt: nowIso(),
+    }
+    seedJob(dir, job)
+    let driveCalls = 0
+    const { runtime } = newRuntime(dir, {
+      driveTurn: async () => {
+        driveCalls++
+        return { text: '' }
+      },
+    })
+    const ledger = (runtime as unknown as { ledger: RunLedger }).ledger
+    vi.spyOn(ledger, 'claim').mockReturnValueOnce('already_claimed')
+
+    const requestKey = 'racy-key'
+    const runId = `manual:${job.id}:${createHash('sha256').update(requestKey, 'utf8').digest('hex')}`
+    const result = await runtime.runNow({ jobId: job.id, requestKey })
+
+    expect(result).toEqual({ ok: true, alreadyAccepted: true, runId })
+    expect(driveCalls).toBe(0)
+    await runtime.dispose()
+  })
+
+  it('runNow rejects a different request key while the target job is active without a claim', async () => {
+    const dir = tempDir()
+    const job: Job = {
+      id: 'manual-active',
+      schedule: { kind: 'interval', minutes: 60 },
+      prompt: 'manual prompt',
+      deliver: 'silent',
+      createdAt: nowIso(),
+    }
+    seedJob(dir, job)
+    const started = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const { runtime } = newRuntime(dir, {
+      driveTurn: async () => {
+        started.resolve()
+        await release.promise
+        return { text: '' }
+      },
+    })
+
+    const runNow = runtime.runNow.bind(runtime)
+    const first = await runNow({ jobId: job.id, requestKey: 'first-key' })
+    await started.promise
+    const second = await runNow({ jobId: job.id, requestKey: 'second-key' })
+
+    expect(first).toMatchObject({ ok: true })
+    expect(second).toMatchObject({ ok: false, code: 'job_active' })
+    expect(readLines(dir).filter(line => line.includes('"event":"claim"'))).toHaveLength(1)
+    release.resolve()
+    await runtime.dispose()
+  })
+
+  it('manual already-claimed and orphan recovery preserve manual schedule boundaries', async () => {
+    const dir = tempDir()
+    const job: Job = {
+      id: 'manual-boundary',
+      schedule: { kind: 'interval', minutes: 60 },
+      prompt: 'manual prompt',
+      deliver: 'silent',
+      createdAt: nowIso(),
+    }
+    seedJob(dir, job)
+    const ledger = new RunLedger(dir)
+    const scheduledNextRunAt = new Date(Date.now() + 60 * 60_000).toISOString()
+    ledger.claim({
+      schemaVersion: 2,
+      event: 'claim',
+      trigger: 'scheduled',
+      runId: 'scheduled-anchor',
+      jobId: job.id,
+      sessionId: 'scheduled-session',
+      scheduledFor: nowIso(),
+      claimedAt: nowIso(),
+      nextRunAt: scheduledNextRunAt,
+    })
+    const manualRunId = 'manual:manual-boundary:already-claimed'
+    ledger.claim({
+      schemaVersion: 2,
+      event: 'claim',
+      trigger: 'manual',
+      runId: manualRunId,
+      jobId: job.id,
+      sessionId: 'manual-session',
+      scheduledFor: nowIso(),
+      claimedAt: nowIso(),
+    })
+
+    const controller = new AbortController()
+    const runtime = new SchedulerRuntime(
+      fakeCtx([], []),
+      makeConfig(dir),
+      {} as never,
+      0,
+      controller.signal,
+      { driveTurn: async () => ({ text: 'must not execute' }) },
+    )
+    const state = { job, nextRunAt: Date.now() + 5 * 60_000 }
+    const expectedNextRunAt = state.nextRunAt
+    await (runtime as unknown as {
+      executeJob(
+        state: typeof state,
+        scheduledFor: number,
+        execution: { trigger: 'manual'; runId: string },
+      ): Promise<void>
+    }).executeJob(state, Date.now(), { trigger: 'manual', runId: manualRunId })
+    expect(state.nextRunAt).toBe(expectedNextRunAt)
+    await runtime.dispose()
+
+    const orphanDir = tempDir()
+    const orphanJob: Job = {
+      id: 'manual-orphan-boundary',
+      schedule: { kind: 'interval', minutes: 60 },
+      prompt: 'manual orphan prompt',
+      deliver: 'silent',
+      createdAt: nowIso(),
+    }
+    seedJob(orphanDir, orphanJob)
+    const orphanRunId = 'manual:manual-orphan-boundary:orphan'
+    new RunLedger(orphanDir).claim({
+      schemaVersion: 2,
+      event: 'claim',
+      trigger: 'manual',
+      runId: orphanRunId,
+      jobId: orphanJob.id,
+      sessionId: 'manual-orphan-session',
+      scheduledFor: nowIso(),
+      claimedAt: nowIso(),
+    })
+    const orphanRuntime = newRuntime(orphanDir, {
+      driveTurn: async () => { throw new Error('manual orphan must not execute') },
+    }).runtime
+    await waitFor(() => readLines(orphanDir).some(line => {
+      const record = JSON.parse(line) as Record<string, unknown>
+      return record.event === 'finish' && record.runId === orphanRunId
+    }))
+    const orphanFinish = JSON.parse(readLines(orphanDir).at(-1)!) as Record<string, unknown>
+    expect(orphanFinish).toMatchObject({
+      event: 'finish',
+      runId: orphanRunId,
+      trigger: 'manual',
+      status: 'interrupted',
+    })
+    expect(orphanFinish).not.toHaveProperty('nextRunAt')
+    await orphanRuntime.dispose()
+  })
+
   it('persists the claim before any Agent or Telegram side effect', async () => {
     const dir = tempDir()
     seedJob(dir, dueIntervalJob(10, 10 * 60_000 + 1_000))
