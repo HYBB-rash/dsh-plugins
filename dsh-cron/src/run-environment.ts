@@ -7,6 +7,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { CronRunFinishedEvent } from './types.ts'
 
 /** Public Cordis service name for the context-owned registry. */
 export const CRON_AGENT_ENVIRONMENT_REGISTRY = 'cronAgentEnvironmentRegistry' as const
@@ -48,6 +49,15 @@ export type CronAgentEnvironmentFinalize = (
   outcome: CronAgentEnvironmentOutcome,
 ) => void | Promise<void>
 
+/**
+ * Optional per-run terminal hook. The scheduler calls it only after the
+ * terminal finish record is durable and Telegram delivery is final. Hook
+ * failure is observable but can never rewrite the run or re-send Telegram.
+ */
+export type CronAgentEnvironmentSettle = (
+  event: CronRunFinishedEvent,
+) => void | Promise<void>
+
 /** A provider-created per-run lease. The registry adds its resolved marker. */
 export interface CronAgentEnvironmentLease {
   /** Apply the exact provider setup to the newly-created Agent. */
@@ -56,6 +66,8 @@ export interface CronAgentEnvironmentLease {
   readonly verifySurface: CronAgentEnvironmentSetup
   /** Validate the terminal outcome before any success delivery is attempted. */
   readonly finalizeOutcome?: CronAgentEnvironmentFinalize
+  /** Commit provider-owned state from the durable, final delivery receipt. */
+  readonly settleRun?: CronAgentEnvironmentSettle
   /** Release all provider-owned per-run resources. */
   readonly dispose: () => void | Promise<void>
 }
@@ -72,6 +84,8 @@ export interface CronAgentEnvironmentProvider {
   readonly requirements: CronAgentEnvironmentRequirements
   /** Prepare a fresh lease for one claimed run. */
   readonly prepare: (context: CronAgentEnvironmentPrepareContext) => Promise<CronAgentEnvironmentLease>
+  /** Idempotently settle a durable finish whose live lease was lost to a crash. */
+  readonly settleRecoveredRun?: CronAgentEnvironmentSettle
 }
 
 export type CronAgentEnvironmentErrorCode =
@@ -80,12 +94,13 @@ export type CronAgentEnvironmentErrorCode =
   | 'requirements_mismatch'
   | 'prepare_failed'
   | 'surface_verification_failed'
+  | 'settlement_failed'
 
 export interface CronAgentEnvironmentError {
   readonly code: CronAgentEnvironmentErrorCode
   readonly marker?: string
   readonly message: string
-  readonly operation?: 'prepare' | 'setup' | 'verify'
+  readonly operation?: 'prepare' | 'setup' | 'verify' | 'settle'
 }
 
 export type CronAgentEnvironmentResolution =
@@ -114,6 +129,11 @@ export interface CronAgentEnvironmentRegistry {
   readonly setup: (lease: ResolvedCronAgentEnvironmentLease, agent: unknown) => Promise<CronAgentEnvironmentOperationResult>
   /** Verify the exact Agent surface through the lease seam. */
   readonly verify: (lease: ResolvedCronAgentEnvironmentLease, agent: unknown) => Promise<CronAgentEnvironmentOperationResult>
+  /** Replay one unacknowledged durable finish through its provider. */
+  readonly settleRecovered: (
+    marker: string | undefined,
+    event: CronRunFinishedEvent,
+  ) => Promise<CronAgentEnvironmentOperationResult>
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -279,7 +299,31 @@ export function createCronAgentEnvironmentRegistry(
     }
   }
 
-  return { register, resolve, prepare, setup, verify }
+  const settleRecovered = async (
+    marker: string | undefined,
+    event: CronRunFinishedEvent,
+  ): Promise<CronAgentEnvironmentOperationResult> => {
+    const resolved = resolve(marker)
+    if (!resolved.ok) return resolved
+    if (resolved.provider.settleRecoveredRun === undefined) return { ok: true }
+    try {
+      await resolved.provider.settleRecoveredRun(event)
+      return { ok: true }
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      return {
+        ok: false,
+        error: error(
+          'settlement_failed',
+          resolved.provider.marker,
+          `run environment settlement failed: ${detail}`,
+          'settle',
+        ),
+      }
+    }
+  }
+
+  return { register, resolve, prepare, setup, verify, settleRecovered }
 }
 
 /**

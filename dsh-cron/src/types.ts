@@ -233,6 +233,15 @@ export interface RunFailureAlertClaimRecord {
   readonly claimedAt: string
 }
 
+/** Durable acknowledgement written only after a business environment settles. */
+export interface RunEnvironmentSettleRecord {
+  readonly schemaVersion: 2
+  readonly event: 'environment-settle'
+  readonly runId: string
+  readonly jobId: string
+  readonly settledAt: string
+}
+
 /** V2 terminal statuses, including the crash-audit `interrupted` marker. */
 export type RunFinishStatus = RunStatus | 'interrupted'
 
@@ -259,15 +268,19 @@ export interface RunFinishRecord {
 }
 
 /** Any V2 ledger event line. */
-export type RunEventRecord = RunClaimRecord | RunFailureAlertClaimRecord | RunFinishRecord
+export type RunEventRecord =
+  | RunClaimRecord
+  | RunFailureAlertClaimRecord
+  | RunFinishRecord
+  | RunEnvironmentSettleRecord
 
 /** Every durable run line, including the legacy V1 terminal shape. */
 export type RunHistoryRecord = RunRecord | RunEventRecord
 
 /**
  * Generic terminal-outcome event emitted by the scheduler AFTER a finish
- * append has truly persisted (§8). Observers (e.g. dsh-x-feed's delivery
- * receipt) may act on it, but the cron success/error and the Telegram
+ * append has truly persisted (§8). A matching environment settlement
+ * callback may act on it, but the cron success/error and the Telegram
  * delivery are already final and must not be reverted or re-sent.
  *
  * The event deliberately excludes the cron prompt, the model's full output,

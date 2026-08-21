@@ -19,6 +19,7 @@ import type {
   Job,
   JobLogEntry,
   RunClaimRecord,
+  RunEnvironmentSettleRecord,
   RunFailureAlertClaimRecord,
   RunFinishRecord,
   RunHistoryRecord,
@@ -387,6 +388,7 @@ export type ParsedRunLine =
   | { readonly kind: 'claim'; readonly record: RunClaimRecord }
   | { readonly kind: 'failure-alert-claim'; readonly record: RunFailureAlertClaimRecord }
   | { readonly kind: 'finish'; readonly record: RunFinishRecord }
+  | { readonly kind: 'environment-settle'; readonly record: RunEnvironmentSettleRecord }
   | { readonly kind: 'skip' }
 
 /** V2 finish statuses that are valid ledger events. */
@@ -469,6 +471,17 @@ export function parseRunLine(raw: string): ParsedRunLine {
           record: record as unknown as RunFailureAlertClaimRecord,
         }
       }
+      if (
+        record.event === 'environment-settle'
+        && isNonEmptyString(record.jobId)
+        && isNonEmptyString(record.runId)
+        && isValidTime(record.settledAt)
+      ) {
+        return {
+          kind: 'environment-settle',
+          record: record as unknown as RunEnvironmentSettleRecord,
+        }
+      }
     }
     // An explicit but unknown/unsupported version must not fall back to V1.
     return { kind: 'skip' }
@@ -486,6 +499,8 @@ export interface FoldedJobRuns {
   readonly nextRunAt?: string
   /** Claims without a finish — interrupted audit, never re-executed. */
   readonly interrupted: readonly RunClaimRecord[]
+  /** Durable finishes whose business environment has not acknowledged settlement. */
+  readonly unsettledFinishes: readonly RunFinishRecord[]
   /** Latest non-expired V1 terminal record's finishedAt (legacy anchor). */
   readonly legacyFinishedAt?: string
   /** Consecutive business-execution errors; delivery failures are separate. */
@@ -505,6 +520,8 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
   const settled = new Set<string>()
   const claims = new Map<string, RunClaimRecord>()
   const finishes = new Set<string>()
+  const finishRecords = new Map<string, RunFinishRecord>()
+  const environmentSettled = new Set<string>()
   const failureAlertRunIds = new Set<string>()
   let anyRecord = false
   let nextRunAt: string | undefined
@@ -536,6 +553,10 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
       ) lastFailureAlertClaimedAt = parsed.record.claimedAt
       continue
     }
+    if (parsed.kind === 'environment-settle') {
+      environmentSettled.add(parsed.record.runId)
+      continue
+    }
     if (parsed.kind === 'claim') {
       claims.set(parsed.record.runId, parsed.record)
       settled.add(parsed.record.runId)
@@ -548,6 +569,7 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
     if (!isManualRun(parsed.record)) anyRecord = true
     if (!finishes.has(parsed.record.runId)) foldExecutionStatus(parsed.record.status)
     finishes.add(parsed.record.runId)
+    finishRecords.set(parsed.record.runId, parsed.record)
     settled.add(parsed.record.runId)
     if (!isManualRun(parsed.record) && parsed.record.nextRunAt !== undefined) nextRunAt = parsed.record.nextRunAt
   }
@@ -555,11 +577,15 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
   for (const [runId, claimRecord] of claims) {
     if (!finishes.has(runId)) interrupted.push(claimRecord)
   }
+  const unsettledFinishes = [...finishRecords.entries()]
+    .filter(([runId]) => !environmentSettled.has(runId))
+    .map(([, record]) => record)
   return {
     settledRunIds: settled,
     anyRecord,
     ...(nextRunAt === undefined ? {} : { nextRunAt }),
     interrupted,
+    unsettledFinishes,
     ...(legacyFinishedAt === undefined ? {} : { legacyFinishedAt }),
     consecutiveExecutionErrors,
     failureAlertRunIds,
@@ -608,6 +634,11 @@ export class RunLedger {
 
   /** Append one V2 finish event. I/O failures throw. */
   finish(record: RunFinishRecord): void {
+    this.store.append(record)
+  }
+
+  /** Acknowledge one idempotent environment settlement after it succeeds. */
+  environmentSettled(record: RunEnvironmentSettleRecord): void {
     this.store.append(record)
   }
 }

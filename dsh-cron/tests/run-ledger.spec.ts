@@ -197,6 +197,15 @@ describe('RunLedger.foldJob', () => {
     const folded = ledger.foldJob('cron-a')
     expect(folded.nextRunAt).toBe('2026-08-14T10:05:20.000Z')
     expect(folded.interrupted).toEqual([])
+    expect(folded.unsettledFinishes).toHaveLength(1)
+    ledger.environmentSettled({
+      schemaVersion: 2,
+      event: 'environment-settle',
+      jobId: 'cron-a',
+      runId: RUN_ID,
+      settledAt: '2026-08-14T10:05:21.000Z',
+    })
+    expect(ledger.foldJob('cron-a').unsettledFinishes).toEqual([])
   })
 
   it('surfaces an orphan claim as interrupted but keeps it settled', () => {

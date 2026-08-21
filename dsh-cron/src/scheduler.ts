@@ -45,6 +45,7 @@ import {
   type CronAgentEnvironmentOutcome,
   type CronAgentEnvironmentPrepareContext,
   type CronAgentEnvironmentRegistry,
+  type CronAgentEnvironmentSettle,
   type ResolvedCronAgentEnvironmentLease,
 } from './run-environment.ts'
 import { JobStore, RunLedger, type FoldedJobRuns } from './store.ts'
@@ -474,6 +475,8 @@ interface JobState {
    * runId) is untouched — only the retry cadence is throttled.
    */
   claimRetryNotBefore?: number
+  /** Backoff while an unacknowledged business settlement cannot be recovered. */
+  settlementRetryNotBefore?: number
 }
 
 /** Fixed in-process delay before retrying a failed claim append. */
@@ -716,7 +719,7 @@ export class SchedulerRuntime implements RunNowPort {
   }
 
   /** Synchronize the in-memory view with the durable job log. */
-  private reload(): void {
+  private async reload(): Promise<void> {
     const folded = this.jobStore.fold()
     const activeIds = new Set(folded.active.map(job => job.id))
     const invalidById = new Map<string, string>()
@@ -774,8 +777,20 @@ export class SchedulerRuntime implements RunNowPort {
               : { nextRunAt: Date.parse(orphan.nextRunAt) }),
           },
         )
-        if (finished !== undefined) void this.emitRunFinished(finished)
+        if (finished !== undefined) await this.emitRunFinished(finished)
       }
+    }
+    for (const job of folded.active) {
+      if (job.kind === 'command' || job.agentEnvironment === undefined) continue
+      const state = this.jobs.get(job.id)
+      if (state === undefined) continue
+      const unsettled = this.ledger.foldJob(job.id).unsettledFinishes
+      let recovered = true
+      for (const finish of unsettled) {
+        if (!await this.settleRecoveredFinish(job, finish)) recovered = false
+      }
+      if (recovered) delete state.settlementRetryNotBefore
+      else state.settlementRetryNotBefore = Date.now() + CLAIM_RETRY_DELAY_MS
     }
     for (const id of [...this.jobs.keys()]) {
       if (activeIds.has(id)) continue
@@ -886,12 +901,90 @@ export class SchedulerRuntime implements RunNowPort {
     }
   }
 
+  /** Emit the public event, then let the exact per-run environment settle it. */
+  private async settleFinishedRun(
+    record: RunFinishRecord,
+    settleRun: CronAgentEnvironmentSettle | undefined,
+  ): Promise<void> {
+    await this.emitRunFinished(record)
+    if (settleRun === undefined) return
+    const event: CronRunFinishedEvent = {
+      jobId: record.jobId,
+      runId: record.runId,
+      sessionId: record.sessionId,
+      scheduledFor: record.scheduledFor,
+      status: record.status,
+      deliveryState: record.deliveryState ?? 'not_requested',
+      ...(record.deliveredAt === undefined ? {} : { deliveredAt: record.deliveredAt }),
+      ...(record.deliveryError === undefined ? {} : { deliveryError: record.deliveryError }),
+      ...(record.error === undefined ? {} : { error: record.error }),
+    }
+    try {
+      await settleRun(event)
+      this.acknowledgeEnvironmentSettlement(record)
+    } catch (error) {
+      this.ctx.logger.warn(
+        `dsh-cron: prepared-delivery settlement failed for ${record.runId}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+
+  /** Persist the acknowledgement after an idempotent settlement succeeds. */
+  private acknowledgeEnvironmentSettlement(record: RunFinishRecord): void {
+    this.ledger.environmentSettled({
+      schemaVersion: 2,
+      event: 'environment-settle',
+      jobId: record.jobId,
+      runId: record.runId,
+      settledAt: new Date().toISOString(),
+    })
+  }
+
+  /** Replay an unacknowledged finish through the registered business provider. */
+  private async settleRecoveredFinish(job: Job, record: RunFinishRecord): Promise<boolean> {
+    if (job.kind === 'command' || job.agentEnvironment === undefined) return true
+    let registry: CronAgentEnvironmentRegistry | undefined
+    try {
+      registry = this.ctx.get(CRON_AGENT_ENVIRONMENT_REGISTRY)
+    } catch (error) {
+      this.ctx.logger.warn(`dsh-cron: settlement registry unavailable for ${record.runId}: ${errorMessage(error)}`)
+      return false
+    }
+    if (registry === undefined) {
+      this.ctx.logger.warn(`dsh-cron: settlement registry unavailable for ${record.runId}`)
+      return false
+    }
+    const event: CronRunFinishedEvent = {
+      jobId: record.jobId,
+      runId: record.runId,
+      sessionId: record.sessionId,
+      scheduledFor: record.scheduledFor,
+      status: record.status,
+      deliveryState: record.deliveryState ?? 'not_requested',
+      ...(record.deliveredAt === undefined ? {} : { deliveredAt: record.deliveredAt }),
+      ...(record.deliveryError === undefined ? {} : { deliveryError: record.deliveryError }),
+      ...(record.error === undefined ? {} : { error: record.error }),
+    }
+    const result = await registry.settleRecovered(job.agentEnvironment, event)
+    if (!result.ok) {
+      this.ctx.logger.warn(`dsh-cron: recovered settlement failed for ${record.runId}: ${result.error.message}`)
+      return false
+    }
+    try {
+      this.acknowledgeEnvironmentSettlement(record)
+      return true
+    } catch (error) {
+      this.ctx.logger.warn(`dsh-cron: settlement acknowledgement failed for ${record.runId}: ${errorMessage(error)}`)
+      return false
+    }
+  }
+
   /** One full drive: reload, decide due jobs, execute, re-arm. */
   private async driveOnce(): Promise<void> {
     this.clearTimer()
     if (!this.isRunnable()) return
     const now = Date.now()
-    this.reload()
+    await this.reload()
 
     const due: Array<{ state: JobState; scheduledFor: number }> = []
     for (const state of this.jobs.values()) {
@@ -900,6 +993,7 @@ export class SchedulerRuntime implements RunNowPort {
       // A failed claim append backs off in-process without moving nextRunAt;
       // the original scheduledFor and runId stay stable for the retry.
       if (state.claimRetryNotBefore !== undefined && now < state.claimRetryNotBefore) continue
+      if (state.settlementRetryNotBefore !== undefined && now < state.settlementRetryNotBefore) continue
       const scheduledFor = state.nextRunAt
       const scheduledRunId = SchedulerRuntime.runIdOf(state.job.id, scheduledFor)
       this.inFlightByJob.set(state.job.id, scheduledRunId)
@@ -953,8 +1047,12 @@ export class SchedulerRuntime implements RunNowPort {
       if (state.nextRunAt === undefined) continue
       if (this.inFlightByJob.has(state.job.id)) continue
       if (state.nextRunAt <= Date.now()) {
-        if (state.claimRetryNotBefore !== undefined && state.claimRetryNotBefore > Date.now()) {
-          if (target === undefined || state.claimRetryNotBefore < target) target = state.claimRetryNotBefore
+        const retryNotBefore = Math.max(
+          state.claimRetryNotBefore ?? 0,
+          state.settlementRetryNotBefore ?? 0,
+        )
+        if (retryNotBefore > Date.now()) {
+          if (target === undefined || retryNotBefore < target) target = retryNotBefore
           continue
         }
         target = Date.now()
@@ -1200,11 +1298,13 @@ export class SchedulerRuntime implements RunNowPort {
     let outcome: TurnOutcome | undefined
     let executionError: string | undefined
     let runLease: AgentRunLease | undefined
+    let settleRun: CronAgentEnvironmentSettle | undefined
     try {
       if (state.invalidError !== undefined) {
         throw new SchedulerExecutionError('invalid_replay_evidence', state.invalidError)
       }
       const preparedEnvironment = await this.prepareAgentEnvironment(job, runId)
+      settleRun = preparedEnvironment?.lease.settleRun
       if (job.kind === 'command') {
         outcome = await this.runCommand(job, this.signal)
       } else {
@@ -1274,7 +1374,7 @@ export class SchedulerRuntime implements RunNowPort {
         deliveryError: boundedDeliveryError(errorText ?? 'scheduler interrupted before completion'),
         ...(errorText === undefined ? {} : { error: errorText }),
       })
-      if (finished !== undefined) await this.emitRunFinished(finished)
+      if (finished !== undefined) await this.settleFinishedRun(finished, settleRun)
       return
     }
 
@@ -1328,7 +1428,7 @@ export class SchedulerRuntime implements RunNowPort {
         ...(delivery.deliveredAt === undefined ? {} : { deliveredAt: delivery.deliveredAt }),
         ...(delivery.error === undefined ? {} : { deliveryError: delivery.error }),
       })
-      if (finished !== undefined) await this.emitRunFinished(finished)
+      if (finished !== undefined) await this.settleFinishedRun(finished, settleRun)
       return
     }
 
@@ -1340,7 +1440,7 @@ export class SchedulerRuntime implements RunNowPort {
         ...nextRunExtra,
         deliveryState: 'silent',
       })
-      if (finished !== undefined) await this.emitRunFinished(finished)
+      if (finished !== undefined) await this.settleFinishedRun(finished, settleRun)
       return
     }
 
@@ -1353,7 +1453,7 @@ export class SchedulerRuntime implements RunNowPort {
       ...(delivery.error === undefined ? {} : { deliveryError: delivery.error }),
       outputPreview: text.length > 200 ? `${text.slice(0, 200)}…` : text,
     })
-    if (finished !== undefined) await this.emitRunFinished(finished)
+    if (finished !== undefined) await this.settleFinishedRun(finished, settleRun)
   }
 }
 

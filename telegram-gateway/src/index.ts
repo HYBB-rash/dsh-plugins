@@ -60,6 +60,7 @@ import {
   type TelegramHttp,
   type TelegramUpdate,
 } from './telegram-contract.ts'
+import { loadTelegramExtensions, type TelegramExtensionConfig } from './extensions.ts'
 
 // Shared transport contract re-exported so existing consumers (dsh-assistant,
 // tests) keep importing these names from the package entry.
@@ -92,6 +93,8 @@ export {
   type TelegramInboundWaterfallEvent,
 } from './inbound-contract.ts'
 
+export * from './extensions.ts'
+
 /** Stable Cordis plugin name. */
 export const name = 'telegram-gateway'
 
@@ -123,6 +126,8 @@ export interface Config {
   maxMessageChars: number
   /** Require a ready inbound interceptor before dispatching messages. Defaults to false. */
   requireInboundInterceptor: boolean
+  /** Trusted business adapters loaded at the Telegram edge. */
+  extensions?: TelegramExtensionConfig[]
 }
 
 export const Config: z<Config> = z.object({
@@ -135,6 +140,10 @@ export const Config: z<Config> = z.object({
   offsetDir: z.string().default(''),
   maxMessageChars: z.number().step(1).min(1).max(4096).default(4096),
   requireInboundInterceptor: z.boolean().default(false),
+  extensions: z.array(z.object({
+    modulePath: z.string(),
+    configJson: z.string(),
+  })).default([]),
 })
 
 /**
@@ -629,6 +638,7 @@ export async function apply(
       throw new Error('telegram-gateway: TELEGRAM_BOT_TOKEN is required (config token or credential reference)')
     }
     const http = (internals.createHttp ?? createTelegramHttp)(config.apiBaseUrl, token)
+    const extensionDisposers = await loadTelegramExtensions(ctx, config.extensions ?? [])
     const lifetime = new AbortController()
     const ready = Promise.withResolvers<void>()
     let readyObserved = false
@@ -650,12 +660,14 @@ export async function apply(
     } catch (error) {
       lifetime.abort(error)
       await running
+      await Promise.allSettled(extensionDisposers.reverse().map(dispose => Promise.resolve(dispose())))
       throw error
     }
 
     return async () => {
       lifetime.abort(new Error('telegram-gateway disposed'))
       await running
+      await Promise.allSettled(extensionDisposers.reverse().map(dispose => Promise.resolve(dispose())))
     }
   }, 'telegram-gateway.run()')
 }

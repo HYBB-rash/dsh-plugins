@@ -28,6 +28,13 @@ import { createControlService } from './control.ts'
 import { createControlRpcClient, createControlRpcServer } from './control-rpc.ts'
 import { provideCronAgentEnvironmentRegistry } from './run-environment.ts'
 import { installRunNowTools } from './run-now-tool.ts'
+import {
+  createPreparedDeliveryEnvironmentProvider,
+} from './prepared-delivery.ts'
+import {
+  loadCronEnvironmentModules,
+  type CronEnvironmentModuleConfig,
+} from './environment-modules.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'dsh-cron'
@@ -45,6 +52,10 @@ export { createControlRpcClient }
 export type { ControlRpcClientConfig } from './control-rpc.ts'
 /** Public generic per-run environment port and fail-closed registry. */
 export * from './run-environment.ts'
+/** Generic prepare -> deliver -> settle environment. */
+export * from './prepared-delivery.ts'
+/** Trusted operator module boundary for business-owned run environments. */
+export * from './environment-modules.ts'
 
 /** Services required by either role before activation. */
 export const inject = ['agents', 'sessions', 'tools', 'agentDefaultModel', 'credentials']
@@ -69,6 +80,18 @@ export interface Config {
   storeDir?: string
   /** Unix socket override. Defaults to `<storeDir>/control.sock` in manager mode. */
   controlSocketPath?: string
+  /** Operator-owned prepared-delivery bindings for restricted per-run jobs. */
+  preparedDeliveryBindings?: Array<{
+    jobId: string
+    driver: {
+      argv: string[]
+      timeoutSeconds: number
+      outputMaxBytes: number
+    }
+    cwd?: string
+  }>
+  /** Trusted business modules that provide bounded Agent environments. */
+  environmentModules?: CronEnvironmentModuleConfig[]
 }
 
 export const Config: z<Config> = z.object({
@@ -81,6 +104,19 @@ export const Config: z<Config> = z.object({
   deliverOnError: z.boolean().default(true),
   storeDir: z.string().default(''),
   controlSocketPath: z.string().default(''),
+  preparedDeliveryBindings: z.array(z.object({
+    jobId: z.string(),
+    driver: z.object({
+      argv: z.array(z.string()),
+      timeoutSeconds: z.number().step(1).min(1).max(3_600),
+      outputMaxBytes: z.number().step(1).min(1).max(1_048_576),
+    }),
+    cwd: z.string(),
+  })).default([]),
+  environmentModules: z.array(z.object({
+    modulePath: z.string(),
+    configJson: z.string(),
+  })).default([]),
 })
 
 /** Resolve the store directory, defaulting under DSH_HOME. */
@@ -146,7 +182,24 @@ export async function applyManager(ctx: Context, config: Config): Promise<void> 
  * Telegram gateway package.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
-  provideCronAgentEnvironmentRegistry(ctx)
+  const registry = provideCronAgentEnvironmentRegistry(ctx)
+  const preparedDeliveryBindings = config.preparedDeliveryBindings ?? []
+  if (preparedDeliveryBindings.length > 0) {
+    ctx.effect(
+      () => registry.register(createPreparedDeliveryEnvironmentProvider({ bindings: preparedDeliveryBindings })),
+      'dsh-cron.prepared-delivery-provider()',
+    )
+  }
+  const environmentModules = config.environmentModules ?? []
+  if (environmentModules.length > 0) {
+    const providers = await loadCronEnvironmentModules(ctx, environmentModules)
+    for (const provider of providers) {
+      ctx.effect(
+        () => registry.register(provider),
+        `dsh-cron.environment-module(${provider.marker})`,
+      )
+    }
+  }
   if (config.mode === 'scheduler') {
     const { applyScheduler } = await import('./scheduler.ts')
     await applyScheduler(ctx, {
