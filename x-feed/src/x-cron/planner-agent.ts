@@ -100,15 +100,26 @@ export class XCronPlannerAgentError extends Error {
 }
 
 /**
- * Remove only the known opposite branch field emitted by the current tool
- * schema. Unknown fields stay visible to the strict DTO parser, and unsafe
- * remnants stay visible too, so projection cannot turn untrusted text into a
- * valid DTO by accident.
+ * Canonicalize the known union shapes emitted by the current tool schema.
+ * Unknown fields stay visible to the strict DTO parser, and unsafe remnants
+ * stay visible too, so projection cannot turn untrusted text into a valid DTO
+ * by accident.
  */
 export function projectPlannerSubmission(value: unknown): unknown {
   if (!isRecord(value)) return value
   const exploration = value.exploration
   if (!isRecord(exploration)) return { ...value }
+
+  if (exploration.kind === 'explore'
+    && hasExactKeys(exploration, ['kind', 'topicId'])
+    && isSafeUnionResidual(exploration.topicId)) {
+    return { ...value, exploration: { kind: 'search', topicId: exploration.topicId } }
+  }
+  if (exploration.kind === 'search'
+    && hasExactKeys(exploration, ['kind', 'candidateId'])
+    && isSafeUnionResidual(exploration.candidateId)) {
+    return { ...value, exploration: { kind: 'explore', candidateId: exploration.candidateId } }
+  }
 
   const oppositeKey = exploration.kind === 'explore'
     ? 'topicId'

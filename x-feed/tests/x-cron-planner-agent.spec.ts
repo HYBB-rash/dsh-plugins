@@ -129,6 +129,59 @@ describe('one-shot X cron planner Agent', () => {
     expect(adapter.requests).toHaveLength(1)
   })
 
+  it('canonicalizes a topic-only explore submission to search with one request', async () => {
+    const adapter = new WireAdapter([response({
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration: { kind: 'explore', topicId: 'crypto' },
+    })])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+    const canonicalRequest = { ...request, allowedTopics: ['topic-1', 'crypto'] }
+
+    await expect(runXCronPlanner(ctx, canonicalRequest)).resolves.toMatchObject({
+      dto: { exploration: { kind: 'search', topicId: 'crypto' } },
+    })
+    expect(adapter.requests).toHaveLength(1)
+  })
+
+  it('canonicalizes a candidate-only search submission to explore with one request', async () => {
+    const adapter = new WireAdapter([response({
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration: { kind: 'search', candidateId: 'candidate-1' },
+    })])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+
+    await expect(runXCronPlanner(ctx, request)).resolves.toMatchObject({
+      dto: { exploration: { kind: 'explore', candidateId: 'candidate-1' } },
+    })
+    expect(adapter.requests).toHaveLength(1)
+  })
+
+  it('rejects a non-none exploration without a target and rejects canonicalized targets outside their allowlists', async () => {
+    const submissions = [
+      { kind: 'search' },
+      { kind: 'explore' },
+      { kind: 'explore', url: 'https://x.com/status/1' },
+      { kind: 'explore', topicId: 'outside-topic' },
+      { kind: 'search', candidateId: 'outside-candidate' },
+    ]
+    const adapter = new WireAdapter(submissions.map((exploration, index) => response({
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration,
+    }, `canonical-invalid-${index}`)))
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+
+    for (const _submission of submissions) {
+      await expect(runXCronPlanner(ctx, request)).rejects.toThrow(/invalid|unknown|allowlist|unexpected/u)
+    }
+    expect(adapter.requests).toHaveLength(submissions.length)
+  })
+
   it('keeps strict rejection for none, unknown keys, and unsafe union remnants', async () => {
     const submissions = [
       { kind: 'none', topicId: 'topic-1' },
@@ -186,6 +239,20 @@ describe('one-shot X cron planner Agent', () => {
       selectedCandidateIds: ['candidate-1'],
       themeId: 'theme-1',
       exploration: { kind: 'explore', candidateId: 'candidate-1' },
+    })
+
+    const canonicalRaw = {
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration: { kind: 'explore', topicId: 'topic-1' },
+    }
+    const canonicalBefore = structuredClone(canonicalRaw)
+    const canonicalProjected = projectPlannerSubmission(canonicalRaw)
+    expect(canonicalRaw).toEqual(canonicalBefore)
+    expect(canonicalProjected).toEqual({
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration: { kind: 'search', topicId: 'topic-1' },
     })
   })
 
