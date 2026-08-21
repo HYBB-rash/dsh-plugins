@@ -1566,6 +1566,134 @@ function markedProvider(
 }
 
 describe('marked Agent environment and run lease lifecycle', () => {
+  it('records a prepared generic skip as success without creating an Agent or delivering', async () => {
+    const dir = tempDir()
+    seedJob(dir, markedAgentJob('marked-prepared-skip', { deliver: 'telegram' }))
+    const order: string[] = []
+    const registry = createCronAgentEnvironmentRegistry([markedProvider(order, {
+      prepare: async () => {
+        order.push('prepare')
+        return {
+          kind: 'skip',
+          outcome: { text: undefined, error: undefined },
+        } as never
+      },
+    })])
+    const ctx = orderedEnvironmentCtx(order, registry)
+    const delivered: string[] = []
+    let driveCalls = 0
+    const runtime = new SchedulerRuntime(
+      ctx,
+      makeConfig(dir),
+      {} as never,
+      0,
+      new AbortController().signal,
+      {
+        driveTurn: async () => { driveCalls++; return { text: 'must-not-drive' } },
+        deliverText: async (_http, _chatId, text) => { delivered.push(text) },
+      },
+    )
+    runtime.start()
+    try {
+      await waitFor(() => readLines(dir).some(line => JSON.parse(line).event === 'finish'))
+      expect(lastFinish(dir)).toMatchObject({ status: 'success', deliveryState: 'not_requested' })
+      expect(JSON.parse(readLines(dir)[0]!)).toMatchObject({ event: 'claim' })
+      expect(order).toEqual(['prepare'])
+      expect(driveCalls).toBe(0)
+      expect(delivered).toEqual([])
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  it('keeps a manual prepared skip on the same run without changing nextRunAt', async () => {
+    const dir = tempDir()
+    const job = markedAgentJob('marked-manual-prepared-skip', {
+      schedule: { kind: 'interval', minutes: 60 },
+      deliver: 'telegram',
+    })
+    seedJob(dir, job)
+    const order: string[] = []
+    const registry = createCronAgentEnvironmentRegistry([markedProvider(order, {
+      prepare: async () => {
+        order.push('prepare')
+        return { kind: 'skip', outcome: { text: undefined, error: undefined } } as never
+      },
+    })])
+    const ctx = orderedEnvironmentCtx(order, registry)
+    const delivered: string[] = []
+    const runtime = new SchedulerRuntime(
+      ctx,
+      makeConfig(dir),
+      {} as never,
+      0,
+      new AbortController().signal,
+      { deliverText: async (_http, _chatId, text) => { delivered.push(text) } },
+    )
+    try {
+      runtime.start()
+      const states = (runtime as unknown as {
+        jobs: Map<string, { nextRunAt: number | undefined }>
+      }).jobs
+      await waitFor(() => states.has(job.id))
+      const nextRunBefore = states.get(job.id)?.nextRunAt
+      const first = await runtime.runNow({ jobId: job.id, requestKey: 'manual-skip-once' })
+      expect(first).toMatchObject({ ok: true, runId: expect.any(String) })
+      await waitFor(() => readLines(dir).some(line => JSON.parse(line).event === 'finish'))
+      const nextRunAfter = states.get(job.id)?.nextRunAt
+      const second = await runtime.runNow({ jobId: job.id, requestKey: 'manual-skip-once' })
+      expect(second).toMatchObject({ ok: true, alreadyAccepted: true, runId: first.ok ? first.runId : '' })
+      expect(lastFinish(dir)).toMatchObject({
+        trigger: 'manual',
+        status: 'success',
+        deliveryState: 'not_requested',
+      })
+      expect(lastFinish(dir)).not.toHaveProperty('nextRunAt')
+      expect(nextRunAfter).toBe(nextRunBefore)
+      expect(order).toEqual(['prepare'])
+      expect(delivered).toEqual([])
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  it('fails closed for an invalid generic skip without Agent or delivery', async () => {
+    const dir = tempDir()
+    seedJob(dir, markedAgentJob('marked-invalid-prepared-skip', { deliver: 'telegram' }))
+    const order: string[] = []
+    const registry = createCronAgentEnvironmentRegistry([markedProvider(order, {
+      prepare: async () => {
+        order.push('prepare')
+        return { kind: 'skip', outcome: { text: 'must be undefined', error: undefined } } as never
+      },
+    })])
+    const ctx = orderedEnvironmentCtx(order, registry)
+    const delivered: string[] = []
+    let driveCalls = 0
+    const runtime = new SchedulerRuntime(
+      ctx,
+      { ...makeConfig(dir), deliverOnError: false },
+      {} as never,
+      0,
+      new AbortController().signal,
+      {
+        driveTurn: async () => { driveCalls++; return { text: 'must-not-drive' } },
+        deliverText: async (_http, _chatId, text) => { delivered.push(text) },
+      },
+    )
+    runtime.start()
+    try {
+      await waitFor(() => readLines(dir).some(line => JSON.parse(line).event === 'finish'))
+      expect(lastFinish(dir)).toMatchObject({ status: 'error', deliveryState: 'not_requested' })
+      expect(String(lastFinish(dir).error)).toContain('invalid skip')
+      expect(order).toEqual(['prepare'])
+      expect(driveCalls).toBe(0)
+      expect(delivered).toEqual([])
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
   it('resolves and prepares only after claim, then verifies before drive and closes in order', async () => {
     const dir = tempDir()
     seedJob(dir, markedAgentJob('marked-lifecycle'))
@@ -1654,6 +1782,108 @@ describe('marked Agent environment and run lease lifecycle', () => {
         status: 'success',
         deliveryState: 'delivered',
       })
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  it('uses one valid finalizer transform for the subsequent delivery', async () => {
+    const dir = tempDir()
+    seedJob(dir, markedAgentJob('marked-finalize-transform', { deliver: 'telegram' }))
+    const order: string[] = []
+    const finalizeOutcome = vi.fn(async outcome => {
+      order.push(`finalize:${outcome.text}`)
+      return { text: `${outcome.text}-transformed`, error: outcome.error }
+    })
+    const registry = createCronAgentEnvironmentRegistry([markedProvider(order, {
+      prepare: async () => ({
+        setupAgent: async () => { order.push('setup') },
+        verifySurface: async () => { order.push('verify') },
+        finalizeOutcome,
+        dispose: async () => { order.push('environment-dispose') },
+      }),
+    })])
+    const ctx = orderedEnvironmentCtx(order, registry)
+    const delivered: string[] = []
+    const runtime = new SchedulerRuntime(
+      ctx,
+      makeConfig(dir),
+      {} as never,
+      0,
+      new AbortController().signal,
+      {
+        driveTurn: async agent => {
+          agent.status = 'idle'
+          order.push('drive')
+          return { text: 'raw-output', error: undefined }
+        },
+        deliverText: async (_http, _chatId, text) => {
+          order.push('deliver')
+          delivered.push(text)
+          return { state: 'delivered', messageId: 1 }
+        },
+      },
+    )
+    runtime.start()
+    try {
+      await waitFor(() => readLines(dir).some(line => JSON.parse(line).event === 'finish'))
+      expect(finalizeOutcome).toHaveBeenCalledOnce()
+      expect(delivered).toEqual(['raw-output-transformed'])
+      expect(order.indexOf('finalize:raw-output')).toBeGreaterThan(order.indexOf('drive'))
+      expect(order.indexOf('finalize:raw-output')).toBeLessThan(order.indexOf('environment-dispose'))
+      expect(order.indexOf('environment-dispose')).toBeLessThan(order.indexOf('deliver'))
+      expect(lastFinish(dir)).toMatchObject({
+        status: 'success',
+        deliveryState: 'delivered',
+        outputPreview: 'raw-output-transformed',
+      })
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  it('fails closed on an invalid finalizer result without any delivery', async () => {
+    const dir = tempDir()
+    seedJob(dir, markedAgentJob('marked-finalize-invalid', { deliver: 'telegram' }))
+    const order: string[] = []
+    const finalizeOutcome = vi.fn(async () => ({
+      text: 42 as unknown as string,
+      error: undefined,
+    }))
+    const registry = createCronAgentEnvironmentRegistry([markedProvider(order, {
+      prepare: async () => ({
+        setupAgent: async () => { order.push('setup') },
+        verifySurface: async () => { order.push('verify') },
+        finalizeOutcome,
+        dispose: async () => { order.push('environment-dispose') },
+      }),
+    })])
+    const ctx = orderedEnvironmentCtx(order, registry)
+    const delivered: string[] = []
+    const runtime = new SchedulerRuntime(
+      ctx,
+      makeConfig(dir),
+      {} as never,
+      0,
+      new AbortController().signal,
+      {
+        driveTurn: async agent => {
+          agent.status = 'idle'
+          return { text: 'raw-output', error: undefined }
+        },
+        deliverText: async (_http, _chatId, text) => {
+          delivered.push(text)
+          return { state: 'delivered', messageId: 1 }
+        },
+      },
+    )
+    runtime.start()
+    try {
+      await waitFor(() => readLines(dir).some(line => JSON.parse(line).event === 'finish'))
+      expect(finalizeOutcome).toHaveBeenCalledOnce()
+      expect(delivered).toEqual([])
+      expect(lastFinish(dir)).toMatchObject({ status: 'error', deliveryState: 'not_requested' })
+      expect(String(lastFinish(dir).error)).toContain('invalid outcome')
     } finally {
       await runtime.dispose()
     }

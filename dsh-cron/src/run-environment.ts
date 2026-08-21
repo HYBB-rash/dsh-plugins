@@ -47,7 +47,7 @@ export interface CronAgentEnvironmentOutcome {
 
 export type CronAgentEnvironmentFinalize = (
   outcome: CronAgentEnvironmentOutcome,
-) => void | Promise<void>
+) => void | CronAgentEnvironmentOutcome | Promise<void | CronAgentEnvironmentOutcome>
 
 /**
  * Optional per-run terminal hook. The scheduler calls it only after the
@@ -64,13 +64,24 @@ export interface CronAgentEnvironmentLease {
   readonly setupAgent: CronAgentEnvironmentSetup
   /** Verify that the resulting Agent surface is exactly what the provider expects. */
   readonly verifySurface: CronAgentEnvironmentSetup
-  /** Validate the terminal outcome before any success delivery is attempted. */
+  /** Validate or transform the terminal outcome before any delivery is attempted. */
   readonly finalizeOutcome?: CronAgentEnvironmentFinalize
   /** Commit provider-owned state from the durable, final delivery receipt. */
   readonly settleRun?: CronAgentEnvironmentSettle
   /** Release all provider-owned per-run resources. */
   readonly dispose: () => void | Promise<void>
 }
+
+/** A provider may complete a claimed run without creating an Agent. */
+export interface CronAgentEnvironmentSkip {
+  readonly kind: 'skip'
+  readonly outcome: {
+    readonly text: undefined
+    readonly error: undefined
+  }
+}
+
+export type CronAgentEnvironmentPrepareValue = CronAgentEnvironmentLease | CronAgentEnvironmentSkip
 
 /** The lease returned to the scheduler after successful provider preparation. */
 export interface ResolvedCronAgentEnvironmentLease extends CronAgentEnvironmentLease {
@@ -83,7 +94,7 @@ export interface CronAgentEnvironmentProvider {
   /** Generic job constraints checked before `prepare` is called. */
   readonly requirements: CronAgentEnvironmentRequirements
   /** Prepare a fresh lease for one claimed run. */
-  readonly prepare: (context: CronAgentEnvironmentPrepareContext) => Promise<CronAgentEnvironmentLease>
+  readonly prepare: (context: CronAgentEnvironmentPrepareContext) => Promise<CronAgentEnvironmentPrepareValue>
   /** Idempotently settle a durable finish whose live lease was lost to a crash. */
   readonly settleRecoveredRun?: CronAgentEnvironmentSettle
 }
@@ -109,6 +120,7 @@ export type CronAgentEnvironmentResolution =
 
 export type CronAgentEnvironmentPrepareResult =
   | { readonly ok: true; readonly lease: ResolvedCronAgentEnvironmentLease }
+  | { readonly ok: true; readonly skip: CronAgentEnvironmentSkip }
   | { readonly ok: false; readonly error: CronAgentEnvironmentError }
 
 export type CronAgentEnvironmentOperationResult =
@@ -180,6 +192,21 @@ function operationFailure(
       operation,
     ),
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).length === keys.length && keys.every(key => Object.prototype.hasOwnProperty.call(value, key))
+}
+
+function isValidSkip(value: unknown): value is CronAgentEnvironmentSkip {
+  if (!isRecord(value) || Array.isArray(value) || !hasExactKeys(value, ['kind', 'outcome'])) return false
+  if (!isRecord(value.outcome) || Array.isArray(value.outcome) || !hasExactKeys(value.outcome, ['text', 'error'])) return false
+  if (value.kind !== 'skip') return false
+  return value.outcome.text === undefined && value.outcome.error === undefined
 }
 
 /** Create a generic provider registry. No provider is installed implicitly. */
@@ -256,10 +283,19 @@ export function createCronAgentEnvironmentRegistry(
       }
     }
     try {
-      const lease = await resolved.provider.prepare(context)
+      const prepared = await resolved.provider.prepare(context)
+      if (isRecord(prepared) && prepared.kind === 'skip') {
+        if (!isValidSkip(prepared)) {
+          throw new Error('run environment prepare returned an invalid skip result')
+        }
+        return { ok: true, skip: prepared }
+      }
       return {
         ok: true,
-        lease: { marker: resolved.provider.marker, ...lease },
+        lease: {
+          marker: resolved.provider.marker,
+          ...(prepared as CronAgentEnvironmentLease),
+        },
       }
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message : String(cause)

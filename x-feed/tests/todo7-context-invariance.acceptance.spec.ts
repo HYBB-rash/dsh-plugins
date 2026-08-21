@@ -13,109 +13,87 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { summarizeTurn } from '@deepseek-ai/dsh-telegram-gateway'
 import { afterEach, describe, expect, it } from 'vitest'
-import {
-  createFactProjectionPreflight,
-  type CandidateDescriptor,
-  type LookupResult,
-  type ProjectionBudget,
-  type ProjectionView,
-  type ReadyFactProjectionSession,
-} from '../src/fact-projection/index.ts'
+import { type CandidateDescriptor, type ProjectionBudget } from '../src/fact-projection/index.ts'
+import { createXFeedCronEnvironmentProvider } from '../src/index.ts'
 import { FileNavigationSnapshotStore } from '../src/navigation/file-navigation-snapshot-store.ts'
 import { XFeedbackStore } from '../src/store.ts'
 import { createTrustedFact } from '../src/trusted-facts/model.ts'
 import type { NavigationItem, NavigationSnapshot } from '../src/trusted-facts/navigation-contract.ts'
 import { FileTrustedFactRepository } from '../src/x-feedback/trusted-fact-repository.ts'
-import { createCandidateFactAssessmentPort, SUBMIT_X_CRON_ASSESSMENT } from '../src/x-cron/assessment-agent.ts'
-import {
-  XFeedFinalAgentSurface,
-  X_CRON_FINAL_LOOKUP_TOOL,
-  X_CRON_FINAL_PROJECT_TOOL,
-} from '../src/x-cron/final-agent.ts'
+import { SUBMIT_X_CRON_COMPOSER } from '../src/x-cron/composer-agent.ts'
+import { SUBMIT_X_CRON_PLANNER } from '../src/x-cron/planner-agent.ts'
+import { runWithExecFile, type PythonCommandRequest, type PythonCommandResult } from '../src/x-cron/python-ports.ts'
 
 const MODEL_SELECTION = { provider: 'wire-test', model: 'wire-model' } as const
+const PIPELINE_PATH = join(new URL('.', import.meta.url).pathname, '../python/x_insight_pipeline.py')
 const CANDIDATE: CandidateDescriptor = {
-  id: 'target:current-candidate',
+  id: 'x-status:1',
   content: '当前候选正文',
   source: 'https://x.com/alice/status/1',
 }
-const BUDGET: ProjectionBudget = {
-  maxInlineFacts: 2,
-  maxLookupTickets: 2,
-  maxSerializedBytes: 16_000,
-}
+const BUDGET: ProjectionBudget = { maxInlineFacts: 2, maxLookupTickets: 2, maxSerializedBytes: 16_000 }
 const LEGACY_MARKER = 'TODO7-B-LEGACY-MARKER-MUST-NOT-CROSS'
-const FIRST_ROUND_ASSISTANT_MARKER = 'TODO7-B-FIRST-ROUND-ASSISTANT-MARKER'
-const FIRST_ROUND_TOOL_RESULT_MARKER = 'TODO7-B-FIRST-ROUND-TOOL-RESULT-MARKER'
-const FIRST_ROUND_REASONING_MARKER = 'TODO7-B-FIRST-ROUND-REASONING-MARKER'
+const FIRST_ROUND_MARKER = 'TODO7-B-FIRST-ROUND-MARKER'
 const OLD_SESSION_MARKER = 'TODO7-B-OLD-SESSION-MARKER-MUST-NOT-CROSS'
-const FINAL_TEXT = `📦 X 洞察\n\n⭐ 当前候选\n- ${CANDIDATE.content} (${CANDIDATE.source})`
-const FIRST_ROUND_FINAL_TEXT = `📦 X 洞察\n\n⭐ 当前候选\n- ${CANDIDATE.content} ${FIRST_ROUND_ASSISTANT_MARKER} (${CANDIDATE.source})`
-
 const directories: string[] = []
 const contexts: Context[] = []
 
 type Scenario = {
   readonly directory: string
   readonly navigation: NavigationSnapshot
-  readonly projectionSession: ReadyFactProjectionSession
-  readonly assessment: ReturnType<typeof createCandidateFactAssessmentPort>
-  readonly projected: ProjectionView
-  readonly lookup: (ticketId: string) => LookupResult
   readonly legacyLedgerPath: string
-  readonly legacyLedgerBytes: Buffer
   readonly legacyLedgerHash: string
   readonly legacyNoiseSizes: Readonly<Record<string, number>>
   readonly legacyNoiseBytes: number
 }
 
 type RoundEvidence = {
-  readonly assessmentWires: readonly GenerateOptions[]
-  readonly finalWires: readonly GenerateOptions[]
-  readonly finalSessionId: string
-  readonly assessmentSessionIds: readonly string[]
-  readonly createdSessions: readonly { id: string; seedLength?: number; parentSession?: string }[]
+  readonly plannerWires: readonly GenerateOptions[]
+  readonly composerWires: readonly GenerateOptions[]
+  readonly sessionId: string
+  readonly sessionEvents: string
 }
 
 class InvarianceAdapter extends LlmAdapter {
-  readonly assessmentRequests: GenerateOptions[] = []
-  readonly finalRequests: GenerateOptions[] = []
-  private readonly finalSteps = new Map<string, number>()
-  private readonly finalRounds = new Map<string, number>()
-  private finalSessionOrder = 0
+  readonly requests: GenerateOptions[] = []
+  readonly plannerRequests: GenerateOptions[] = []
+  readonly composerRequests: GenerateOptions[] = []
+  private readonly plannerSteps = new Map<string, number>()
+  private readonly composerSteps = new Map<string, number>()
 
   override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
     return Promise.resolve({ provider, id: model, name: model })
   }
 
   override async *stream(request: GenerateOptions): AsyncIterable<StreamChunk> {
-    if (request.system?.includes('assessment Agent') === true) {
-      this.assessmentRequests.push(request)
-      yield* assessmentResponse(request)
-      return
+    this.requests.push(request)
+    if (/assessment Agent|run-tools|x_feed_prepare_delivery|x_feed_set_run_theme|一次性的 X 洞察投递 Agent/u.test(request.system ?? '')) {
+      throw new Error('TODO7-B received a forbidden legacy cron model surface')
     }
-    this.finalRequests.push(request)
     const sessionId = String(request.sessionId ?? '')
-    const step = (this.finalSteps.get(sessionId) ?? 0) + 1
-    this.finalSteps.set(sessionId, step)
-    if (step === 1) this.finalRounds.set(sessionId, this.finalSessionOrder++)
-    const firstRound = this.finalRounds.get(sessionId) === 0
-    if (step === 1) {
-      yield* toolCall('project-call', X_CRON_FINAL_PROJECT_TOOL, { candidateId: CANDIDATE.id }, false)
+    const firstRound = JSON.stringify(request.messages).includes(FIRST_ROUND_MARKER)
+    if (request.system?.includes('planner Agent') === true || request.tools?.some(tool => tool.name === SUBMIT_X_CRON_PLANNER) === true) {
+      const step = (this.plannerSteps.get(sessionId) ?? 0) + 1
+      this.plannerSteps.set(sessionId, step)
+      if (step !== 1) throw new Error('TODO7-B planner wire called more than once')
+      this.plannerRequests.push(request)
+      yield* toolCall('planner-call', SUBMIT_X_CRON_PLANNER, {
+        selectedCandidateIds: [CANDIDATE.id], themeId: 'agentic systems', exploration: { kind: 'none' },
+      }, firstRound)
       return
     }
-    if (step === 2) {
-      yield* toolCall('lookup-call', X_CRON_FINAL_LOOKUP_TOOL, { ticketId: extractTicketId(request) }, false)
+    if (request.system?.includes('composer Agent') === true || request.tools?.some(tool => tool.name === SUBMIT_X_CRON_COMPOSER) === true) {
+      const step = (this.composerSteps.get(sessionId) ?? 0) + 1
+      this.composerSteps.set(sessionId, step)
+      if (step !== 1) throw new Error('TODO7-B composer wire called more than once')
+      this.composerRequests.push(request)
+      yield* toolCall('composer-call', SUBMIT_X_CRON_COMPOSER, {
+        title: 'provider title',
+        sections: [{ kind: 'highlight', items: [{ itemId: `item:${CANDIDATE.id}`, summary: CANDIDATE.content }] }],
+      }, firstRound)
       return
     }
-    if (step === 3) {
-      yield* toolCall('prepare-call', 'x_feed_prepare_delivery', {
-        text: firstRound ? FIRST_ROUND_FINAL_TEXT : FINAL_TEXT,
-        urls: [CANDIDATE.source],
-      }, false)
-      return
-    }
-    yield* textResponse(firstRound ? FIRST_ROUND_FINAL_TEXT : FINAL_TEXT, firstRound)
+    throw new Error('TODO7-B received an unexpected model surface')
   }
 }
 
@@ -125,108 +103,62 @@ describe('TODO7-B context invariance across bounded fact projection and fresh cr
     await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true })))
   })
 
-  it('keeps model-visible material and bytes invariant from 2 to 200 facts, isolates two fresh rounds, and ignores legacy noise', async () => {
+  it('keeps planner/composer wire bytes invariant from 2 to 200 facts across fresh two-call rounds', async () => {
     const smallAdapter = new InvarianceAdapter()
     const largeAdapter = new InvarianceAdapter()
     const smallContext = await createHarness(smallAdapter)
     const largeContext = await createHarness(largeAdapter)
-    const small = await createScenario(2, smallContext, smallAdapter)
-    const large = await createScenario(200, largeContext, largeAdapter)
+    const small = await createScenario(2)
+    const large = await createScenario(200)
+    const smallRounds = [await runRound(smallContext, small, smallAdapter, 'round-1'), await runRound(smallContext, small, smallAdapter, 'round-2')]
+    const largeRounds = [await runRound(largeContext, large, largeAdapter, 'round-1'), await runRound(largeContext, large, largeAdapter, 'round-2')]
 
-    const smallRounds = [
-      await runRound(smallContext, small, smallAdapter, 'small-1'),
-      await runRound(smallContext, small, smallAdapter, 'small-2'),
-    ]
-    const largeRounds = [
-      await runRound(largeContext, large, largeAdapter, 'large-1'),
-      await runRound(largeContext, large, largeAdapter, 'large-2'),
-    ]
-
-    expect(small.projected.serializedBytes).toEqual(large.projected.serializedBytes)
-    expect(small.projected.facts).toHaveLength(1)
-    expect(small.projected.tickets).toHaveLength(1)
-    expect(large.projected.facts).toEqual(small.projected.facts)
-    expect(large.projected.tickets).toEqual(small.projected.tickets)
+    expect(small.navigation.items).toHaveLength(2)
+    expect(large.navigation.items).toHaveLength(200)
     expect(large.legacyNoiseSizes['legacy-x-preferences.md']).toBeGreaterThan(small.legacyNoiseSizes['legacy-x-preferences.md']!)
     expect(large.legacyNoiseSizes['x_interest_graph.json']).toBeGreaterThan(small.legacyNoiseSizes['x_interest_graph.json']!)
     expect(large.legacyNoiseSizes['x_raw_history.jsonl']).toBeGreaterThan(small.legacyNoiseSizes['x_raw_history.jsonl']!)
     expect(large.legacyNoiseBytes).toBeGreaterThan(small.legacyNoiseBytes)
-
-    expect(smallRounds[0]!.assessmentWires).toHaveLength(1)
-    expect(smallRounds[1]!.assessmentWires).toHaveLength(1)
-    expect(largeRounds[0]!.assessmentWires).toHaveLength(1)
-    expect(largeRounds[1]!.assessmentWires).toHaveLength(1)
-    expect(largeRounds[0]!.assessmentWires[0]!.messages).toEqual(smallRounds[0]!.assessmentWires[0]!.messages)
-    expect(largeRounds[0]!.assessmentWires[0]!.system).toBe(smallRounds[0]!.assessmentWires[0]!.system)
-    expect(largeRounds[0]!.assessmentWires[0]!.tools).toEqual(smallRounds[0]!.assessmentWires[0]!.tools)
-    expect(largeRounds[0]!.assessmentWires[0]!.provider).toBe(smallRounds[0]!.assessmentWires[0]!.provider)
-    expect(largeRounds[0]!.assessmentWires[0]!.model).toBe(smallRounds[0]!.assessmentWires[0]!.model)
-    expect(normalizedWireBytes(largeRounds[0]!.assessmentWires[0]!)).toEqual(normalizedWireBytes(smallRounds[0]!.assessmentWires[0]!))
-    expect(requestByteLengths(largeRounds[0]!.assessmentWires)).toEqual(requestByteLengths(smallRounds[0]!.assessmentWires))
-    expect(totalRequestBytes(largeRounds[0]!.assessmentWires)).toBe(totalRequestBytes(smallRounds[0]!.assessmentWires))
-
-    expect(largeRounds[0]!.finalWires).toHaveLength(smallRounds[0]!.finalWires.length)
-    for (let index = 0; index < smallRounds[0]!.finalWires.length; index += 1) {
-      const smallWire = smallRounds[0]!.finalWires[index]!
-      const largeWire = largeRounds[0]!.finalWires[index]!
-      expect(normalizedWireBytes(largeWire)).toEqual(normalizedWireBytes(smallWire))
-      expect(requestByteLength(largeWire)).toBe(requestByteLength(smallWire))
-      expect(largeWire.provider).toBe(smallWire.provider)
-      expect(largeWire.model).toBe(smallWire.model)
-      expect(largeWire.system).toBe(smallWire.system)
-      expect(largeWire.tools).toEqual(smallWire.tools)
+    expect(smallAdapter.requests).toHaveLength(4)
+    expect(largeAdapter.requests).toHaveLength(4)
+    for (const adapter of [smallAdapter, largeAdapter]) {
+      expect(adapter.plannerRequests).toHaveLength(2)
+      expect(adapter.composerRequests).toHaveLength(2)
+      expect(adapter.requests.some(request => /assessment Agent|run-tools|x_feed_prepare_delivery|x_feed_set_run_theme|一次性的 X 洞察投递 Agent/u.test(request.system ?? ''))).toBe(false)
     }
-    expect(totalRequestBytes(largeRounds[0]!.finalWires)).toBe(totalRequestBytes(smallRounds[0]!.finalWires))
-    expect(requestByteLengths(largeRounds[0]!.finalWires)).toEqual(requestByteLengths(smallRounds[0]!.finalWires))
-    expect(totalRequestBytes(largeRounds[1]!.assessmentWires)).toBe(totalRequestBytes(smallRounds[1]!.assessmentWires))
-    expect(requestByteLengths(largeRounds[1]!.assessmentWires)).toEqual(requestByteLengths(smallRounds[1]!.assessmentWires))
-    expect(totalRequestBytes(largeRounds[1]!.finalWires)).toBe(totalRequestBytes(smallRounds[1]!.finalWires))
-    expect(requestByteLengths(largeRounds[1]!.finalWires)).toEqual(requestByteLengths(smallRounds[1]!.finalWires))
-
-    for (const round of [...smallRounds, ...largeRounds]) {
-      expect(round.assessmentWires).toHaveLength(1)
-      expect(round.finalWires).toHaveLength(4)
-      expect(JSON.stringify(round.assessmentWires)).not.toContain(LEGACY_MARKER)
-      expect(JSON.stringify(round.finalWires)).toContain('真正相关事实 1')
-      expect(JSON.stringify(round.finalWires)).toContain('真正相关事实 2')
-      expect(JSON.stringify(round.finalWires)).not.toContain('显式无关事实')
-      expect(JSON.stringify(round.finalWires)).not.toContain(LEGACY_MARKER)
+    for (let index = 0; index < 2; index += 1) {
+      const smallRound = smallRounds[index]!
+      const largeRound = largeRounds[index]!
+      expect(smallRound.plannerWires).toHaveLength(1)
+      expect(smallRound.composerWires).toHaveLength(1)
+      expect(largeRound.plannerWires).toHaveLength(1)
+      expect(largeRound.composerWires).toHaveLength(1)
+      expect(normalizedWireBytes(largeRound.plannerWires[0]!)).toEqual(normalizedWireBytes(smallRound.plannerWires[0]!))
+      expect(normalizedWireBytes(largeRound.composerWires[0]!)).toEqual(normalizedWireBytes(smallRound.composerWires[0]!))
+      expect(smallRound.plannerWires[0]!.sessionId).not.toBe(smallRound.composerWires[0]!.sessionId)
+      expect(largeRound.plannerWires[0]!.sessionId).not.toBe(largeRound.composerWires[0]!.sessionId)
+      expect(JSON.stringify([...smallRound.plannerWires, ...smallRound.composerWires])).not.toContain(LEGACY_MARKER)
+      expect(JSON.stringify([...largeRound.plannerWires, ...largeRound.composerWires])).not.toContain(LEGACY_MARKER)
     }
-
-    expect(largeRounds[0]!.assessmentSessionIds).toHaveLength(1)
-    expect(largeRounds[1]!.assessmentSessionIds).toHaveLength(1)
-    expect(largeRounds[1]!.assessmentSessionIds[0]).not.toBe(largeRounds[0]!.assessmentSessionIds[0])
-    expect(largeRounds[1]!.finalSessionId).not.toBe(largeRounds[0]!.finalSessionId)
-    expect([...largeRounds, ...smallRounds].flatMap(round => round.createdSessions)
-      .every(session => session.seedLength === undefined && session.parentSession === undefined)).toBe(true)
-    expect([...largeRounds, ...smallRounds].every(round => round.createdSessions.length >= 2)).toBe(true)
-    expect(JSON.stringify(largeRounds[1]!.finalWires)).not.toContain(LEGACY_MARKER)
-    expect(JSON.stringify(largeRounds[1]!.assessmentWires)).not.toContain(LEGACY_MARKER)
-    for (const marker of [FIRST_ROUND_ASSISTANT_MARKER, FIRST_ROUND_REASONING_MARKER, OLD_SESSION_MARKER]) {
-      expect(JSON.stringify(largeRounds[1]!.finalWires)).not.toContain(marker)
-      expect(JSON.stringify(largeRounds[1]!.assessmentWires)).not.toContain(marker)
-      expect(largeRounds[0]!.firstRoundSessionEvents).toContain(marker)
-      expect(largeRounds[1]!.firstRoundSessionEvents).not.toContain(marker)
+    expect(smallRounds[1]!.sessionId).not.toBe(smallRounds[0]!.sessionId)
+    expect(largeRounds[1]!.sessionId).not.toBe(largeRounds[0]!.sessionId)
+    for (const round of [smallRounds[1]!, largeRounds[1]!]) {
+      const wire = JSON.stringify([...round.plannerWires, ...round.composerWires])
+      expect(wire).not.toContain(FIRST_ROUND_MARKER)
+      expect(wire).not.toContain(OLD_SESSION_MARKER)
     }
-    expect(JSON.stringify(largeRounds[0]!.finalWires)).not.toContain(FIRST_ROUND_TOOL_RESULT_MARKER)
-    expect(JSON.stringify(largeRounds[1]!.finalWires)).not.toContain(FIRST_ROUND_TOOL_RESULT_MARKER)
-    expect(JSON.stringify(largeRounds[0]!.assessmentWires)).not.toContain(FIRST_ROUND_TOOL_RESULT_MARKER)
-    expect(JSON.stringify(largeRounds[1]!.assessmentWires)).not.toContain(FIRST_ROUND_TOOL_RESULT_MARKER)
-    expect(largeRounds[0]!.firstRoundSessionEvents).not.toContain(FIRST_ROUND_TOOL_RESULT_MARKER)
-    expect(largeRounds[1]!.firstRoundSessionEvents).not.toContain(FIRST_ROUND_TOOL_RESULT_MARKER)
-    expect(largeRounds[0]!.firstRoundSessionEvents).toContain('\\"ok\\":true,\\"prepared\\":true,\\"urlCount\\":1')
-    expect(largeRounds[0]!.firstRoundSessionEvents).toContain('tool-call')
-
+    expect(smallRounds[0]!.sessionEvents).toContain(FIRST_ROUND_MARKER)
+    expect(smallRounds[1]!.sessionEvents).not.toContain(FIRST_ROUND_MARKER)
+    expect(largeRounds[0]!.sessionEvents).toContain(FIRST_ROUND_MARKER)
+    expect(largeRounds[1]!.sessionEvents).not.toContain(FIRST_ROUND_MARKER)
     expect(new XFeedbackStore(small.directory).readAll().some(event => event.note === LEGACY_MARKER)).toBe(true)
     expect(new XFeedbackStore(large.directory).readAll().some(event => event.note === LEGACY_MARKER)).toBe(true)
-    expect(JSON.stringify(small.projected)).not.toContain(LEGACY_MARKER)
-    expect(JSON.stringify(large.projected)).not.toContain(LEGACY_MARKER)
     expect(sha256(await readFile(small.legacyLedgerPath))).toBe(small.legacyLedgerHash)
     expect(sha256(await readFile(large.legacyLedgerPath))).toBe(large.legacyLedgerHash)
   })
 })
 
-async function createScenario(factCount: number, context: Context, adapter: InvarianceAdapter): Promise<Scenario> {
+async function createScenario(factCount: number): Promise<Scenario> {
   const directory = await mkdtemp(join(tmpdir(), `dsh-x-feed-todo7-b-${factCount}-`))
   directories.push(directory)
   seedLegacyFiles(directory, factCount === 2 ? 1 : 100)
@@ -260,102 +192,53 @@ async function createScenario(factCount: number, context: Context, adapter: Inva
   }))
   const navigation: NavigationSnapshot = { schemaVersion: 1, sourceRevision: factSnapshot.sourceRevision, items }
   new FileNavigationSnapshotStore(directory).replace(navigation)
-  const assessment = createCandidateFactAssessmentPort(context, navigation, { modelSelection: MODEL_SELECTION })
-  const preflight = createFactProjectionPreflight(directory, BUDGET, assessment)
-  if (preflight.kind !== 'ready') throw new Error(`projection preflight failed: ${preflight.code}`)
-  const firstPrime = await assessment.prime({ candidate: CANDIDATE, navigation: navigation.items, budget: BUDGET })
-  const projected = preflight.session.project(CANDIDATE, firstPrime.assessment)
-  if (projected.kind !== 'ready') throw new Error(`projection failed: ${projected.code}`)
   const ledger = Buffer.from(readFileSync(join(directory, 'feedback.jsonl')))
   const legacyNoiseSizes = readLegacyNoiseSizes(directory)
-  adapter.assessmentRequests.length = 0
   return {
-    directory,
-    navigation,
-    projectionSession: preflight.session,
-    assessment,
-    projected: projected.view,
-    lookup: projected.lookup,
-    legacyLedgerBytes: ledger,
-    legacyLedgerHash: sha256(ledger),
-    legacyLedgerPath: join(directory, 'feedback.jsonl'),
-    legacyNoiseSizes,
-    legacyNoiseBytes: Object.values(legacyNoiseSizes).reduce((total, size) => total + size, 0),
+    directory, navigation, legacyLedgerPath: join(directory, 'feedback.jsonl'), legacyLedgerHash: sha256(ledger),
+    legacyNoiseSizes, legacyNoiseBytes: Object.values(legacyNoiseSizes).reduce((total, size) => total + size, 0),
   }
 }
 
-async function runRound(
-  context: Context,
-  scenario: Scenario,
-  adapter: InvarianceAdapter,
-  label: string,
-): Promise<RoundEvidence & { readonly firstRoundSessionEvents: string }> {
-  const beforeAssessment = adapter.assessmentRequests.length
-  const beforeFinal = adapter.finalRequests.length
-  const createdSessions: RoundEvidence['createdSessions'][number][] = []
-  const offCreated = context.on('session/created', session => {
-    const id = String(session.id)
-    if (id.includes('todo7-b') || id.includes('x-assessment')) {
-      createdSessions.push({
-        id,
-        ...(session.header.seedLength === undefined ? {} : { seedLength: session.header.seedLength }),
-        ...(session.header.parentSession === undefined ? {} : { parentSession: session.header.parentSession }),
-      })
-    }
-  })
-  const prime = await scenario.assessment.prime({ candidate: CANDIDATE, navigation: scenario.navigation.items, budget: BUDGET })
-  expect(prime.recall.locatorIds).toHaveLength(2)
-  expect(prime.recall.navigation).toHaveLength(2)
-  expect(prime.segments).toHaveLength(1)
-  const projected = scenario.projectionSession.project(CANDIDATE, prime.assessment)
-  if (projected.kind !== 'ready') throw new Error(`round projection failed: ${projected.code}`)
-  expect(projected.view.serializedBytes).toEqual(scenario.projected.serializedBytes)
-  const firstRound = label.endsWith('-1')
-  const finalSurface = new XFeedFinalAgentSurface({
-    material: { runId: `run-${label}`, allowedTopics: ['current-candidate'], candidates: [{ ...CANDIDATE, topics: ['current-candidate'] }] },
-    runTools: {
-      searchTopic: async () => ({ items: [] }),
-      exploreCandidate: async () => ({ title: 'candidate', body: 'body', urls: [] }),
-      setTheme: async theme => ({ theme }),
-      prepareDelivery: async () => firstRound
-        ? { ok: true, preparedUrls: [CANDIDATE.source], text: FIRST_ROUND_FINAL_TEXT, marker: FIRST_ROUND_TOOL_RESULT_MARKER }
-        : { ok: true, prepared: 1 },
+async function runRound(context: Context, scenario: Scenario, adapter: InvarianceAdapter, label: string): Promise<RoundEvidence> {
+  seedCronPackage(scenario.directory)
+  const beforePlanner = adapter.plannerRequests.length
+  const beforeComposer = adapter.composerRequests.length
+  const pythonCalls: PythonCommandRequest[] = []
+  const provider = createXFeedCronEnvironmentProvider({
+    ctx: context, cronJobId: 'cron-x-todo7-b', dataDir: scenario.directory, pythonBin: 'python3', pipelinePath: PIPELINE_PATH,
+    run: async (request: PythonCommandRequest): Promise<PythonCommandResult> => {
+      pythonCalls.push(request)
+      if (request.args.includes('prepare-delivery')) return runWithExecFile(request)
+      return { stdout: '{"ok":true}\n', stderr: '', exitCode: 0 }
     },
-    projection: { project: async () => projected.view, lookup: projected.lookup },
+    readFile: async path => readFile(path, 'utf8'), projectionBudget: BUDGET,
   })
-  const sessionId = SessionId(`session-todo7-b-final-${label}`)
-  const assessmentSessionIds: string[] = []
+  const lease = await provider.prepare({ jobId: 'cron-x-todo7-b', runId: `cron-x-todo7-b@${label}`, jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' })
+  const sessionId = SessionId(`session-todo7-b-${label}`)
   const handle = await context.agents.create({
-    sessionId,
-    agentOptions: MODEL_SELECTION,
-    setup: agentContext => {
-      installModelSelection(agentContext, { current: MODEL_SELECTION, assembled: undefined })
-      finalSurface.setupAgent(agentContext)
-    },
+    sessionId, agentOptions: MODEL_SELECTION,
+    setup: agentContext => { installModelSelection(agentContext, { current: MODEL_SELECTION, assembled: undefined }); lease.setupAgent(agentContext) },
   })
   try {
-    finalSurface.capture(context, sessionId)
-    await finalSurface.verifySurface(handle.agent)
+    await lease.verifySurface(handle.agent)
     const firstSeq = handle.agent.session.seq
-    handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: '执行当前 X run' }], source: { kind: 'plugin', plugin: 'dsh-cron' } }))
+    const text = label.endsWith('round-1') ? `执行当前 X run ${FIRST_ROUND_MARKER} ${OLD_SESSION_MARKER}` : '执行当前 X run'
+    handle.agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'dsh-cron' } }))
     await handle.agent.whenIdle()
     const outcome = summarizeTurn(handle.agent.session.events, firstSeq)
-    finalSurface.finalizeOutcome(outcome)
-    const finalRequests = adapter.finalRequests.slice(beforeFinal)
-    const assessmentRequests = adapter.assessmentRequests.slice(beforeAssessment)
-    assessmentSessionIds.push(...assessmentRequests.map(request => String(request.sessionId)))
+    const finalized = await lease.finalizeOutcome?.(outcome) as { readonly text: string; readonly error: string | undefined } | undefined
+    expect(outcome.error).toBeUndefined()
+    expect(outcome.text).toContain('provider title')
+    expect(finalized?.error).toBeUndefined()
+    expect(pythonCalls.filter(request => request.args.includes('prepare-delivery'))).toHaveLength(1)
     return {
-      assessmentWires: assessmentRequests,
-      finalWires: finalRequests,
-      finalSessionId: String(sessionId),
-      assessmentSessionIds,
-      createdSessions,
-      firstRoundSessionEvents: JSON.stringify(handle.agent.session.events),
+      plannerWires: adapter.plannerRequests.slice(beforePlanner), composerWires: adapter.composerRequests.slice(beforeComposer),
+      sessionId: String(sessionId), sessionEvents: JSON.stringify(handle.agent.session.events),
     }
   } finally {
-    offCreated()
-    finalSurface.dispose()
     await handle.dispose()
+    await lease.dispose()
   }
 }
 
@@ -365,6 +248,15 @@ function seedLegacyFiles(directory: string, noiseMultiplier: number): void {
   writeFileSync(join(directory, 'legacy-x-preferences.md'), noise)
   writeFileSync(join(directory, 'x_interest_graph.json'), JSON.stringify({ marker: noise }))
   writeFileSync(join(directory, 'x_raw_history.jsonl'), `${noise}\n`)
+  seedCronPackage(directory)
+}
+
+function seedCronPackage(directory: string): void {
+  writeFileSync(join(directory, 'x_insight_package.json'), JSON.stringify({
+    allowed_topics: ['agentic systems'], recent_items: [{ id: '1', url: CANDIDATE.source, text: CANDIDATE.content, topics: ['agentic systems'] }],
+    selected_urls: [CANDIDATE.source], decision: { top_theme: 'agentic systems' }, feedback_context: LEGACY_MARKER.repeat(20),
+    preferences: { marker: LEGACY_MARKER }, graph: { marker: LEGACY_MARKER }, raw_history: [LEGACY_MARKER],
+  }))
 }
 
 function readLegacyNoiseSizes(directory: string): Readonly<Record<string, number>> {
@@ -374,33 +266,15 @@ function readLegacyNoiseSizes(directory: string): Readonly<Record<string, number
 
 async function createHarness(adapter: InvarianceAdapter): Promise<Context> {
   const context = new Context()
-  await context.plugin(LlmRuntime)
-  await context.plugin(SessionStore)
-  await context.plugin(SystemPrompt)
-  await context.plugin(ToolRuntime)
-  await context.plugin(AgentRegistry)
-  await context.plugin(AgentDefaultModelConfig, MODEL_SELECTION)
-  await context.plugin(AgentLoop, { agents: [] })
-  context.llm.registerAdapter(['wire-test'], adapter)
-  contexts.push(context)
-  return context
-}
-
-function assessmentResponse(request: GenerateOptions): StreamChunk[] {
-  const message = request.messages[0]?.content[0]
-  if (message?.type !== 'text') throw new Error('assessment request omitted its material')
-  const material = JSON.parse(message.text.slice(message.text.indexOf('\n') + 1)) as { navigation: readonly { locator: { locatorId: string } }[] }
-  return toolCall('assessment-call', SUBMIT_X_CRON_ASSESSMENT, {
-    decisions: material.navigation.map((item, index) => ({ locatorId: item.locator.locatorId, relevance: 'high', essentiality: index === 0 ? 'inline_priority' : 'lookup_only', priority: index + 1, reason: '当前候选与该事实明确相关' })),
-  }, false)
+  await context.plugin(LlmRuntime); await context.plugin(SessionStore); await context.plugin(SystemPrompt); await context.plugin(ToolRuntime)
+  await context.plugin(AgentRegistry); await context.plugin(AgentDefaultModelConfig, MODEL_SELECTION); await context.plugin(AgentLoop, { agents: [] })
+  context.llm.registerAdapter(['wire-test'], adapter); contexts.push(context); return context
 }
 
 function toolCall(id: string, name: string, value: unknown, withReasoning: boolean): StreamChunk[] {
-  const callId = CallId(id)
-  const argumentsText = JSON.stringify(value)
-  const blocks: StreamChunk[] = []
+  const callId = CallId(id); const argumentsText = JSON.stringify(value); const blocks: StreamChunk[] = []
   if (withReasoning) {
-    const marker = `${FIRST_ROUND_REASONING_MARKER} ${OLD_SESSION_MARKER}`
+    const marker = `${FIRST_ROUND_MARKER} ${OLD_SESSION_MARKER}`
     blocks.push({ type: 'block-start', index: 0, blockType: 'reasoning' }, { type: 'reasoning-delta', index: 0, text: marker }, { type: 'block-end', index: 0, block: { type: 'reasoning', text: marker } })
   }
   const index = withReasoning ? 1 : 0
@@ -408,34 +282,14 @@ function toolCall(id: string, name: string, value: unknown, withReasoning: boole
   return blocks
 }
 
-function textResponse(text: string, withReasoning: boolean): StreamChunk[] {
-  const blocks: StreamChunk[] = []
-  if (withReasoning) {
-    const marker = `${FIRST_ROUND_REASONING_MARKER} ${OLD_SESSION_MARKER}`
-    blocks.push({ type: 'block-start', index: 0, blockType: 'reasoning' }, { type: 'reasoning-delta', index: 0, text: marker }, { type: 'block-end', index: 0, block: { type: 'reasoning', text: marker } })
-  }
-  const index = withReasoning ? 1 : 0
-  blocks.push({ type: 'block-start', index, blockType: 'text' }, { type: 'text-delta', index, text }, { type: 'block-end', index, block: { type: 'text', text } }, { type: 'finish', reason: { kind: 'stop' } })
-  return blocks
-}
-
-function extractTicketId(request: GenerateOptions): string {
-  const match = /"ticketId":"([^"]+)"/u.exec(JSON.stringify(request.messages).replaceAll('\\"', '"'))
-  if (match?.[1] === undefined) throw new Error('final request omitted projection ticket')
-  return match[1]
-}
-
 function normalizedWireBytes(request: GenerateOptions): Buffer {
-  return Buffer.from(JSON.stringify(normalizeWire({ provider: request.provider, model: request.model, messages: request.messages, system: request.system, tools: request.tools })), 'utf8')
+  return Buffer.from(JSON.stringify(normalizeWire(request)), 'utf8')
 }
 
-// Keep every model-facing value and array order. Only fresh-lineage controls are
-// removed: request sessionId, message/call/tool-call ids, and block ids.
 function normalizeWire(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(normalizeWire)
   if (value === null || typeof value !== 'object') return value
-  const record = value as Record<string, unknown>
-  const output: Record<string, unknown> = {}
+  const record = value as Record<string, unknown>; const output: Record<string, unknown> = {}
   for (const [key, child] of Object.entries(record)) {
     if (key === 'sessionId' || key === 'messageId' || key === 'callId' || key === 'toolCallId') continue
     if (key === 'id' && (Object.hasOwn(record, 'role') || record.type === 'tool-call' || record.type === 'tool-result')) continue
@@ -444,18 +298,4 @@ function normalizeWire(value: unknown): unknown {
   return output
 }
 
-function requestByteLength(request: GenerateOptions): number {
-  return Buffer.byteLength(JSON.stringify({ provider: request.provider, model: request.model, messages: request.messages, system: request.system, tools: request.tools }), 'utf8')
-}
-
-function requestByteLengths(requests: readonly GenerateOptions[]): readonly number[] {
-  return requests.map(requestByteLength)
-}
-
-function totalRequestBytes(requests: readonly GenerateOptions[]): number {
-  return requestByteLengths(requests).reduce((total, length) => total + length, 0)
-}
-
-function sha256(value: Uint8Array): string {
-  return createHash('sha256').update(value).digest('hex')
-}
+function sha256(value: Uint8Array): string { return createHash('sha256').update(value).digest('hex') }

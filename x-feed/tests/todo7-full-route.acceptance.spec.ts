@@ -35,12 +35,11 @@ import {
 } from '../src/x-feedback/clean-prompt.ts'
 import { runCleanFeedback } from '../src/x-feedback/clean-agent.ts'
 import {
-  SUBMIT_X_CRON_ASSESSMENT,
-} from '../src/x-cron/assessment-agent.ts'
+  SUBMIT_X_CRON_PLANNER,
+} from '../src/x-cron/planner-agent.ts'
 import {
-  X_CRON_FINAL_LOOKUP_TOOL,
-  X_CRON_FINAL_PROJECT_TOOL,
-} from '../src/x-cron/final-agent.ts'
+  SUBMIT_X_CRON_COMPOSER,
+} from '../src/x-cron/composer-agent.ts'
 import { runWithExecFile, type PythonCommandRequest, type PythonCommandResult } from '../src/x-cron/python-ports.ts'
 
 const PYTHON_BIN = 'python3'
@@ -50,7 +49,7 @@ const CANDIDATE_URL = 'https://x.com/alice/status/1'
 const CANDIDATE_ID = 'x-status:1'
 const OLD_MATERIAL_MARKER = 'TODO7-OLD-MATERIAL-MARKER-never-enters-model'
 const ROOT_HISTORY_MARKER = 'TODO7-ORDINARY-TELEGRAM-HISTORY-MARKER'
-const FINAL_TEXT = `📦 X 洞察\n\n⭐ 当前候选\n- 当前候选正文 (${CANDIDATE_URL})`
+const FINAL_TEXT = `📦 X 洞察 provider title\n\n⭐ 高优先级\n- 当前候选正文 (${CANDIDATE_URL})`
 
 const temporaryDirectories: string[] = []
 const contexts: Context[] = []
@@ -147,7 +146,7 @@ describe('TODO7 本机全链路 characterization acceptance', () => {
     expect(store.readAll()).toHaveLength(2)
   })
 
-  it('rebuilds navigation, pins one snapshot, runs assessment/project/lookup/final, and confirms shown once', async () => {
+  it('rebuilds navigation, runs planner/composer in two calls, and confirms shown once', async () => {
     const directory = await temporaryDirectory()
     const legacyLedger = await seedLegacyRatingLedger(directory)
     const adapter = new FullRouteWireAdapter()
@@ -161,6 +160,7 @@ describe('TODO7 本机全链路 characterization acceptance', () => {
     expect(navigation.sourceRevision).toBe(new FileTrustedFactRepository(directory).readLocatedSnapshot().sourceRevision)
 
     await seedLegacyCronMaterials(directory)
+    await writeFile(join(directory, 'x_last_theme.json'), JSON.stringify({ theme: 'old-theme' }), 'utf8')
     const pythonCalls: PythonCommandRequest[] = []
     const packagePath = join(directory, 'x_insight_package.json')
     const packageMaterial = await readJson(packagePath)
@@ -189,7 +189,7 @@ describe('TODO7 本机全链路 characterization acceptance', () => {
     })
 
     const handle = await harness.agents.create({
-      sessionId: 'session-todo7-final' as SessionId,
+      sessionId: 'session-todo7-composer' as SessionId,
       agentOptions: MODEL_SELECTION,
       setup: agentContext => {
         installModelSelection(agentContext, { current: MODEL_SELECTION, assembled: undefined })
@@ -197,6 +197,7 @@ describe('TODO7 本机全链路 characterization acceptance', () => {
       },
     })
     let outcome: ReturnType<typeof summarizeTurn>
+    let finalized: { readonly text: string; readonly error: string | undefined }
     try {
       await lease.verifySurface(handle.agent)
       const firstSeq = handle.agent.session.seq
@@ -206,23 +207,26 @@ describe('TODO7 本机全链路 characterization acceptance', () => {
       }))
       await handle.agent.whenIdle()
       outcome = summarizeTurn(handle.agent.session.events, firstSeq)
-      lease.finalizeOutcome?.(outcome)
+      finalized = await lease.finalizeOutcome?.(outcome) as { readonly text: string; readonly error: string | undefined }
     } finally {
       await handle.dispose()
       await lease.dispose()
     }
 
-    expect(outcome!.text).toBe(FINAL_TEXT)
+    expect(outcome!.text).toContain('provider title')
     expect(outcome!.error).toBeUndefined()
-    expect(adapter.assessmentRequests).toHaveLength(1)
-    expect(JSON.stringify(adapter.assessmentRequests)).toContain(navigation.items[0]!.locator.locatorId)
-    expect(adapter.finalRequests).toHaveLength(4)
-    expect(new Set(adapter.finalRequests.map(request => request.sessionId)).size).toBe(1)
-    expect(adapter.finalRequests.some(request => JSON.stringify(request).includes('lookup-success'))).toBe(true)
-    expect(adapter.finalRequests.some(request => JSON.stringify(request).includes('当前论证清楚。'))).toBe(true)
-    expect(JSON.stringify(adapter.assessmentRequests)).not.toContain(OLD_MATERIAL_MARKER)
-    expect(JSON.stringify(adapter.finalRequests)).not.toContain(OLD_MATERIAL_MARKER)
-    expect(JSON.stringify(adapter.finalRequests)).not.toContain('legacy-x-preferences')
+    expect(finalized!.text).toBe(FINAL_TEXT)
+    expect(adapter.requests).toHaveLength(3)
+    expect(adapter.requests.filter(request => request.system === CLEAN_FEEDBACK_SYSTEM_PROMPT)).toHaveLength(1)
+    expect(adapter.plannerRequests.length + adapter.composerRequests.length).toBe(2)
+    expect(adapter.plannerRequests).toHaveLength(1)
+    expect(adapter.composerRequests).toHaveLength(1)
+    expect(new Set([...adapter.plannerRequests, ...adapter.composerRequests].map(request => request.sessionId)).size).toBe(2)
+    expect(adapter.plannerRequests[0]?.tools?.map(tool => tool.name)).toEqual([SUBMIT_X_CRON_PLANNER])
+    expect(adapter.composerRequests[0]?.tools?.map(tool => tool.name)).toEqual([SUBMIT_X_CRON_COMPOSER])
+    expect(JSON.stringify([...adapter.plannerRequests, ...adapter.composerRequests])).not.toContain(OLD_MATERIAL_MARKER)
+    expect(JSON.stringify([...adapter.plannerRequests, ...adapter.composerRequests])).not.toContain('legacy-x-preferences')
+    expect(JSON.stringify([...adapter.plannerRequests, ...adapter.composerRequests])).not.toMatch(/analysis|assessment|final|run-tools|x_feed_prepare_delivery|x_feed_set_run_theme/u)
     expect(new XFeedbackStore(directory).readAll().some(event => event.note === OLD_MATERIAL_MARKER)).toBe(true)
     expect(sha256(await readFile(legacyLedger.path))).toBe(legacyLedger.hash)
     expect(pythonCalls.filter(request => request.args.includes('prepare-delivery'))).toHaveLength(1)
@@ -230,7 +234,9 @@ describe('TODO7 本机全链路 characterization acceptance', () => {
 
     const prepared = await readJson(packagePath)
     expect(prepared.delivery_status).toBe('prepared')
+    expect(prepared.pending_theme).toBe('agentic systems')
     expect(existsSync(join(directory, 'x_shown.json'))).toBe(false)
+    expect((await readJson(join(directory, 'x_last_theme.json'))).theme).toBe('old-theme')
 
     const receipt = new DeliveryReceipt({
       cronJobId: 'cron-x-todo7',
@@ -244,11 +250,13 @@ describe('TODO7 本机全链路 characterization acceptance', () => {
     expect(await receipt.handle(event)).toMatchObject({ ok: true, confirmStatus: 'delivered' })
     const shownAfterDelivery = await readJson(join(directory, 'x_shown.json'))
     expect(shownAfterDelivery.urls).toEqual([CANDIDATE_URL])
+    expect((await readJson(join(directory, 'x_last_theme.json'))).theme).toBe('agentic systems')
     const shownHash = sha256(await readFile(join(directory, 'x_shown.json')))
 
     expect(await receipt.handle(event)).toMatchObject({ ok: true })
     expect(sha256(await readFile(join(directory, 'x_shown.json')))).toBe(shownHash)
     expect((await readJson(packagePath)).delivery_status).toBe('delivered')
+    expect((await readJson(packagePath)).pending_theme).toBeUndefined()
   })
 
   it('does not write shown for a prepared run that receives a failed terminal event', async () => {
@@ -300,9 +308,8 @@ class ScriptedWireAdapter extends LlmAdapter {
 
 class FullRouteWireAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
-  readonly assessmentRequests: GenerateOptions[] = []
-  readonly finalRequests: GenerateOptions[] = []
-  private readonly finalSteps = new Map<string, number>()
+  readonly plannerRequests: GenerateOptions[] = []
+  readonly composerRequests: GenerateOptions[] = []
   private feedbackDone = false
 
   override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
@@ -323,32 +330,31 @@ class FullRouteWireAdapter extends LlmAdapter {
       })(request)) yield chunk
       return
     }
-    if (request.system?.includes('assessment Agent') === true) {
-      this.assessmentRequests.push(request)
-      for (const chunk of assessmentToolCall(request)) yield chunk
+    if (/assessment|final|run-tool|x_feed_prepare_delivery|x_feed_set_run_theme/u.test(request.system ?? '')) {
+      throw new Error('TODO7 received a forbidden legacy cron model surface')
+    }
+    if (request.system?.includes('planner Agent') === true) {
+      if (this.plannerRequests.length > 0) throw new Error('TODO7 planner wire called more than once')
+      this.plannerRequests.push(request)
+      for (const chunk of toolCall('planner-1', SUBMIT_X_CRON_PLANNER, {
+        selectedCandidateIds: [CANDIDATE_ID],
+        themeId: 'agentic systems',
+        exploration: { kind: 'none' },
+      })) yield chunk
       return
     }
-    if (request.system?.includes('一次性的 X 洞察投递 Agent') === true) {
-      this.finalRequests.push(request)
-      for (const chunk of this.finalToolStep(request)) yield chunk
+    if (request.system?.includes('composer Agent') === true) {
+      if (this.composerRequests.length > 0) throw new Error('TODO7 composer wire called more than once')
+      this.composerRequests.push(request)
+      for (const chunk of toolCall('composer-1', SUBMIT_X_CRON_COMPOSER, {
+        title: 'provider title',
+        sections: [{ kind: 'highlight', items: [{ itemId: `item:${CANDIDATE_ID}`, summary: '当前候选正文' }] }],
+      })) yield chunk
       return
     }
     throw new Error('TODO7 received an unexpected model surface')
   }
 
-  private finalToolStep(request: GenerateOptions): StreamChunk[] {
-    const sessionId = request.sessionId === undefined ? '' : String(request.sessionId)
-    if (sessionId === '') throw new Error('TODO7 final wire omitted session id')
-    const step = (this.finalSteps.get(sessionId) ?? 0) + 1
-    this.finalSteps.set(sessionId, step)
-    if (step === 1) return toolCall('project-1', X_CRON_FINAL_PROJECT_TOOL, { candidateId: CANDIDATE_ID })
-    if (step === 2) return toolCall('lookup-1', X_CRON_FINAL_LOOKUP_TOOL, { ticketId: extractTicketId(request) })
-    if (step === 3) return toolCall('prepare-1', 'x_feed_prepare_delivery', {
-      text: FINAL_TEXT,
-      urls: [CANDIDATE_URL],
-    })
-    return textReply(FINAL_TEXT)
-  }
 }
 
 function createFeedbackRoute(directory: string, harness: Context): {
@@ -433,24 +439,6 @@ function feedbackToolCall(value: unknown): WireScript {
   return () => toolCall('feedback-1', SUBMIT_X_FEEDBACK_INTERPRETATION, value)
 }
 
-function assessmentToolCall(request: GenerateOptions): StreamChunk[] {
-  const message = request.messages[0]?.content[0]
-  if (message?.type !== 'text') throw new Error('assessment wire omitted its JSON material')
-  const jsonStart = message.text.indexOf('\n')
-  const material = JSON.parse(message.text.slice(jsonStart + 1)) as {
-    readonly navigation: readonly { readonly locator: { readonly locatorId: string } }[]
-  }
-  return toolCall('assessment-1', SUBMIT_X_CRON_ASSESSMENT, {
-    decisions: material.navigation.map((item, index) => ({
-      locatorId: item.locator.locatorId,
-      relevance: 'high',
-      essentiality: 'lookup_only',
-      priority: index + 1,
-      reason: '当前候选与该事实来源一致。',
-    })),
-  })
-}
-
 function toolCall(id: string, name: string, value: unknown): StreamChunk[] {
   const callId = CallId(id)
   const argumentsText = JSON.stringify(value)
@@ -469,12 +457,6 @@ function textReply(text: string): StreamChunk[] {
     { type: 'block-end', index: 0, block: { type: 'text', text } },
     { type: 'finish', reason: { kind: 'stop' } },
   ]
-}
-
-function extractTicketId(request: GenerateOptions): string {
-  const match = /"ticketId":"([^"]+)"/u.exec(JSON.stringify(request.messages).replaceAll('\\"', '"'))
-  if (match?.[1] === undefined) throw new Error('final wire omitted the exact projection ticket')
-  return match[1]
 }
 
 function telegramEnvelope(currentText: string): TelegramInboundEnvelope {
@@ -524,7 +506,7 @@ function cronFinishedEvent(partial: Partial<CronRunFinishedEvent> = {}): CronRun
   return {
     jobId: 'cron-x-todo7',
     runId: 'cron-x-todo7@run-1',
-    sessionId: 'session-todo7-final',
+    sessionId: 'session-todo7-composer',
     scheduledFor: '2026-08-21T00:00:00.000Z',
     status: 'success',
     ...partial,

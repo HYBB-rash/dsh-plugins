@@ -423,56 +423,85 @@ def record_delivery(package_path, shown_path, urls, allow_out_of_package=False):
     return {"ok": True, "marked": len(accepted), "rejected": rejected}
 
 
-def prepare_delivery(package_path, urls, cron_job_id=None, now=None):
+def prepare_delivery(package_path, urls, cron_job_id=None, now=None,
+                     pending_theme=None):
     """在最终回复前暂存拟投递 URL；不写 shown，等待 cron 真实投递回执。
 
     AI 语义层是选题最终决策者：草稿实际采用的 URL 无论是否在 selected_urls，
     一律计入 pending_urls（否则该 URL 永不登记 shown，下一轮重复投递）。
     """
+    if pending_theme is not None and (
+            not isinstance(pending_theme, str)
+            or pending_theme.strip() != pending_theme
+            or not pending_theme
+            or len(pending_theme) > 128):
+        return {"ok": False, "marked": 0, "reason": "invalid_pending_theme"}
     if not package_path or not os.path.exists(package_path):
         return {"ok": False, "marked": 0, "reason": "package_not_found"}
-    package = json.load(open(package_path))
-    pending, seen = [], set()
-    for url in (urls or []):
-        if not url:
-            continue
-        canonical = canonical_url(url)
-        if canonical not in seen:
-            pending.append(url)
-            seen.add(canonical)
-    package["pending_urls"] = pending
-    package["delivery_status"] = "prepared"
-    package["prepared_at"] = int(time.time() if now is None else now)
-    if cron_job_id:
-        package["delivery_cron_job_id"] = cron_job_id
-    _atomic_json_write(package_path, package)
+    lock_path = os.path.join(os.path.dirname(os.path.abspath(package_path)),
+                             ".x_insight_pipeline.lock")
+    with pipeline_lock(lock_path):
+        package = json.load(open(package_path))
+        pending, seen = [], set()
+        for url in (urls or []):
+            if not url:
+                continue
+            canonical = canonical_url(url)
+            if canonical not in seen:
+                pending.append(url)
+                seen.add(canonical)
+        package["pending_urls"] = pending
+        if pending_theme is None:
+            package.pop("pending_theme", None)
+        else:
+            package["pending_theme"] = pending_theme
+        package["delivery_status"] = "prepared"
+        package["prepared_at"] = int(time.time() if now is None else now)
+        if cron_job_id:
+            package["delivery_cron_job_id"] = cron_job_id
+        _atomic_json_write(package_path, package)
     return {"ok": True, "prepared": len(pending), "rejected": []}
 
 
 def confirm_prepared_delivery(package_path, shown_path, delivery_status,
-                              cron_job_id=None):
+                              cron_job_id=None, last_theme_path=None):
     """消费 cron 回执：仅 delivered 才登记 pending_urls；其他状态只标失败。"""
     if not package_path or not os.path.exists(package_path):
         return {"ok": True, "noop": True, "reason": "package_not_found"}
-    package = json.load(open(package_path))
-    if package.get("delivery_status") != "prepared":
-        return {"ok": True, "noop": True, "reason": "not_prepared"}
-    expected_job = package.get("delivery_cron_job_id")
-    if expected_job and cron_job_id and expected_job != cron_job_id:
-        return {"ok": True, "noop": True, "reason": "cron_job_mismatch"}
-    pending = package.get("pending_urls") or []
-    if delivery_status != "delivered":
-        return mark_failed(package_path)
-    if pending:
-        # pending_urls 是 agent 草稿实际采用的 URL（prepare 阶段已登记），
-        # 回执 delivered 后全部登记 shown，不再受 selected_urls 白名单限制。
-        return record_delivery(package_path, shown_path, pending,
-                               allow_out_of_package=True)
-    package["delivery_status"] = "delivered"
-    package["delivered_at"] = int(time.time())
-    package.pop("pending_urls", None)
-    _atomic_json_write(package_path, package)
-    return {"ok": True, "marked": 0, "rejected": []}
+    lock_path = os.path.join(os.path.dirname(os.path.abspath(package_path)),
+                             ".x_insight_pipeline.lock")
+    with pipeline_lock(lock_path):
+        package = json.load(open(package_path))
+        if package.get("delivery_status") != "prepared":
+            return {"ok": True, "noop": True, "reason": "not_prepared"}
+        expected_job = package.get("delivery_cron_job_id")
+        if expected_job and cron_job_id and expected_job != cron_job_id:
+            return {"ok": True, "noop": True, "reason": "cron_job_mismatch"}
+        pending = package.get("pending_urls") or []
+        if delivery_status != "delivered":
+            package["delivery_status"] = "failed"
+            package["failed_at"] = int(time.time())
+            package.pop("pending_urls", None)
+            package.pop("pending_theme", None)
+            _atomic_json_write(package_path, package)
+            return {"ok": True, "status": "failed"}
+        if pending:
+            # pending_urls 是 agent 草稿实际采用的 URL（prepare 阶段已登记），
+            # 回执 delivered 后全部登记 shown，不再受 selected_urls 白名单限制。
+            mark_shown(shown_path, pending)
+        pending_theme = package.get("pending_theme")
+        if pending_theme:
+            theme_path = last_theme_path or os.path.join(
+                os.path.dirname(os.path.abspath(package_path)), "x_last_theme.json")
+            _atomic_json_write(theme_path, {"theme": pending_theme})
+        delivered = list(dict.fromkeys(package.get("delivered_urls", []) + pending))
+        package["delivered_urls"] = delivered
+        package["delivery_status"] = "delivered"
+        package["delivered_at"] = int(time.time())
+        package.pop("pending_urls", None)
+        package.pop("pending_theme", None)
+        _atomic_json_write(package_path, package)
+        return {"ok": True, "marked": len(pending), "rejected": []}
 
 
 def mark_failed(package_path):
@@ -482,6 +511,7 @@ def mark_failed(package_path):
         package["delivery_status"] = "failed"
         package["failed_at"] = int(time.time())
         package.pop("pending_urls", None)
+        package.pop("pending_theme", None)
         _atomic_json_write(package_path, package)
     return {"ok": True, "status": "failed"}
 
@@ -687,6 +717,8 @@ def _verify_delivery_cli(args):
 def _prepare_delivery_cli(args):
     package_path = None
     cron_job_id = None
+    pending_theme = None
+    last_theme_path = None
     urls = []
     i = 1
     while i < len(args):
@@ -694,13 +726,22 @@ def _prepare_delivery_cli(args):
             package_path = args[i + 1]; i += 2
         elif args[i] == "--cron-job-id" and i + 1 < len(args):
             cron_job_id = args[i + 1]; i += 2
+        elif args[i] == "--pending-theme" and i + 1 < len(args):
+            pending_theme = args[i + 1]; i += 2
+        elif args[i] == "--last-theme" and i + 1 < len(args):
+            last_theme_path = args[i + 1]; i += 2
         elif args[i] in ("--url", "--urls"):
             i += 1
             while i < len(args) and not args[i].startswith("--"):
                 urls.append(args[i]); i += 1
         else:
             i += 1
-    result = prepare_delivery(package_path, urls, cron_job_id=cron_job_id)
+    # last_theme_path is intentionally accepted at the CLI boundary so the
+    # prepare/confirm commands carry one explicit run-local state path; prepare
+    # itself never writes it.
+    _ = last_theme_path
+    result = prepare_delivery(package_path, urls, cron_job_id=cron_job_id,
+                              pending_theme=pending_theme)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result.get("ok") else 1
 
@@ -709,6 +750,7 @@ def _confirm_prepared_cli(args):
     package_path = None
     shown_path = DEFAULT_SHOWN
     cron_job_id = None
+    last_theme_path = None
     status = "unknown"
     i = 1
     while i < len(args):
@@ -718,12 +760,18 @@ def _confirm_prepared_cli(args):
             shown_path = args[i + 1]; i += 2
         elif args[i] == "--cron-job-id" and i + 1 < len(args):
             cron_job_id = args[i + 1]; i += 2
+        elif args[i] == "--last-theme" and i + 1 < len(args):
+            last_theme_path = args[i + 1]; i += 2
         elif args[i] == "--status" and i + 1 < len(args):
             status = args[i + 1]; i += 2
         else:
             i += 1
+    if last_theme_path is None and package_path:
+        last_theme_path = os.path.join(
+            os.path.dirname(os.path.abspath(package_path)), "x_last_theme.json")
     result = confirm_prepared_delivery(
-        package_path, shown_path, status, cron_job_id=cron_job_id)
+        package_path, shown_path, status, cron_job_id=cron_job_id,
+        last_theme_path=last_theme_path)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result.get("ok") else 1
 

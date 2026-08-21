@@ -4,24 +4,34 @@ import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {
+  CronAgentEnvironmentSkip,
   CronAgentEnvironmentLease,
   CronAgentEnvironmentProvider,
   CronAgentEnvironmentRequirements,
 } from '@deepseek-ai/dsh-cron'
 import {
   createBoundFactProjectionPreflight,
+  type CandidateDescriptor,
+  type CandidateFactAssessment,
   type ProjectionBudget,
-  type ProjectionView,
+  type ProjectionFailure,
+  type ReadyFactProjectionSession,
 } from '../fact-projection/index.ts'
+import { createExactTargetAssessment } from './exact-target-facts.ts'
 import {
-  createCandidateFactAssessmentPort,
-} from './assessment-agent.ts'
+  XFeedComposerAgentSurface,
+  type XFeedComposerFact,
+} from './composer-agent.ts'
+import { runXCronPlanner } from './planner-agent.ts'
 import {
-  XFeedFinalAgentSurface,
-  type XFeedFinalAgentMaterial,
-  type XFeedFinalCandidate,
-  type XFeedFinalProjectionPort,
-} from './final-agent.ts'
+  generateXDigest,
+  type GenerateXDigestPorts,
+  type XFeedDigestCandidateInput,
+  type XFeedExploreResult,
+  type XFeedSearchResult,
+} from './generate-x-digest.ts'
+import { itemIdFor } from './current-run-item-registry.ts'
+import { parseXStatusIdentity } from './x-status-identity.ts'
 import {
   createXFeedPythonPorts,
   type PythonCommandRunner,
@@ -29,7 +39,6 @@ import {
   type XFeedInsightPackage,
   type XFeedRunCapabilities,
 } from './python-ports.ts'
-import type { XFeedRunToolFailure } from './run-tools.ts'
 
 export const X_CRON_AGENT_ENVIRONMENT_MARKER = 'dsh-x-feed/v1'
 
@@ -81,33 +90,25 @@ export function createXFeedCronEnvironmentProvider(
 async function prepareXFeedRun(
   options: XFeedCronProviderOptions,
   context: { readonly jobId: string; readonly runId: string },
-): Promise<CronAgentEnvironmentLease> {
+): Promise<CronAgentEnvironmentLease | CronAgentEnvironmentSkip> {
   if (context.jobId !== options.cronJobId) {
     throw new Error(`X cron provider job id mismatch: expected ${options.cronJobId}, got ${context.jobId}`)
   }
 
   const budget = options.projectionBudget ?? DEFAULT_PROJECTION_BUDGET
 
-  // This is intentionally the first host operation. Its binder is called only
-  // after the projection layer has pinned and validated the exact facts and
-  // navigation snapshot, so readiness and every later prime share one source.
-  let capturedAssessment: ReturnType<typeof createCandidateFactAssessmentPort> | undefined
-  const preflight = createBoundFactProjectionPreflight(
-    options.dataDir,
-    budget,
-    navigation => {
-      const assessment = createCandidateFactAssessmentPort(options.ctx, navigation)
-      capturedAssessment = assessment
-      return assessment
-    },
-  )
+  // Readiness is deliberately mechanical. No assessment Agent exists on this
+  // path; the same file readers are pinned before any Python action starts.
+  let exactAssessment: ((candidate: CandidateDescriptor) => CandidateFactAssessment | ProjectionFailure) | undefined
+  const preflight = createBoundFactProjectionPreflight(options.dataDir, budget, navigation => {
+    exactAssessment = candidate => createExactTargetAssessment({ candidate, navigation })
+    return { checkReadiness: () => ({ ready: true as const }) }
+  })
   if (preflight.kind !== 'ready') {
     throw new Error(`X cron preflight ${preflight.kind}: ${preflight.code}: ${preflight.message}`)
   }
-  if (capturedAssessment === undefined) {
-    throw new Error('X cron preflight completed without its pinned assessment port')
-  }
-  const assessment = capturedAssessment
+  if (exactAssessment === undefined) throw new Error('X cron preflight completed without its exact-target assessment binder')
+  const projectionSession = preflight.session
 
   const runPart = safeRunPart(context.runId)
   const runDir = join(options.dataDir, '.runs', runPart)
@@ -133,55 +134,29 @@ async function prepareXFeedRun(
     const basePorts = createPythonPorts(options, baseCapabilities)
     const insightPackage = await basePorts.runPipeline()
     const parsed = parseInsightPackage(insightPackage, baseCapabilities)
+    if (parsed.candidates.length === 0) {
+      return { kind: 'skip', outcome: { text: undefined, error: undefined } }
+    }
 
     const capabilities = createCapabilities(parsed.capabilities)
     const ports = createPythonPorts(options, capabilities)
-    const projections = new Map<string, ProjectionEntry>()
-    for (const candidate of parsed.candidates) {
-      // TODO5's assessment/project contract intentionally accepts the exact
-      // three-field CandidateDescriptor only. Topics stay in the bounded
-      // final material/capability allowlist and never become assessment keys.
-      const assessmentCandidate = {
-        id: candidate.id,
-        content: candidate.content,
-        source: candidate.source,
-      } as const
-      const request = {
-        candidate: assessmentCandidate,
-        navigation: assessment.navigation.items,
-        budget,
-      } as const
-      const prime = await assessment.prime(request)
-      const projected = preflight.session.project(assessmentCandidate, prime.assessment)
-      if (projected.kind !== 'ready') {
-        throw new Error(`X cron candidate projection failed for ${candidate.id}: ${projected.code}: ${projected.message}`)
-      }
-      if (projections.has(candidate.id)) throw new Error(`X cron candidate projection id is duplicated: ${candidate.id}`)
-      projections.set(candidate.id, { view: projected.view, lookup: projected.lookup })
+    const servicePorts: GenerateXDigestPorts = {
+      plan: async request => (await runXCronPlanner(options.ctx, request)).dto,
+      search: async topic => normalizeSearchResult(await ports.searchTopic(topic)),
+      explore: async candidateId => normalizeExploreResult(await ports.exploreCandidate(candidateId)),
+      projectFacts: item => projectExactTargetFacts(item, projectionSession, exactAssessment!),
+      prepareDelivery: (text, urls, prepareOptions) => ports.prepareDelivery(text, urls, prepareOptions),
     }
-
-    const projection: XFeedFinalProjectionPort = {
-      project: async candidateId => {
-        const entry = projections.get(candidateId)
-        return entry === undefined
-          ? failure('candidate-not-allowlisted', 'Candidate is not in the current run projection allowlist.')
-          : entry.view
-      },
-      lookup: ticketId => {
-        for (const entry of projections.values()) {
-          const result = entry.lookup(ticketId)
-          if (result.kind !== 'lookup-failure' || result.code !== 'ticket_not_found') return result
-        }
-        return failure('ticket-not-allowlisted', 'Ticket is not signed by the current run projection.')
-      },
-    }
-
-    const material: XFeedFinalAgentMaterial = {
-      runId: runPart,
-      allowedTopics: parsed.allowedTopics,
+    const generated = await generateXDigest({
       candidates: parsed.candidates,
-    }
-    const surface = new XFeedFinalAgentSurface({ material, runTools: ports, projection })
+      allowedThemes: parsed.allowedThemes,
+      allowedTopics: parsed.allowedTopics,
+      allowlistedExploreIds: parsed.allowlistedExploreIds,
+      mechanicalSignals: parsed.mechanicalSignals,
+      ports: servicePorts,
+    })
+    if (generated.kind === 'skip') return generated
+    const surface = new XFeedComposerAgentSurface({ material: generated.composerMaterial })
     return {
       setupAgent: agentCtx => surface.setupAgent(agentCtx as Context),
       verifySurface: async agent => {
@@ -193,7 +168,7 @@ async function prepareXFeedRun(
         surface.capture(options.ctx, actualSessionId)
         await surface.verifySurface(actualAgent)
       },
-      finalizeOutcome: outcome => surface.finalizeOutcome(outcome),
+      finalizeOutcome: async outcome => generated.finalize(surface.finalizeOutcome(outcome)),
       dispose: () => surface.dispose(),
     }
   } catch (error) {
@@ -204,15 +179,13 @@ async function prepareXFeedRun(
   }
 }
 
-interface ProjectionEntry {
-  readonly view: ProjectionView
-  readonly lookup: (ticketId: string) => import('../fact-projection/contracts.ts').LookupResult
-}
-
 interface ParsedPackage {
   readonly capabilities: XFeedRunCapabilities
+  readonly allowedThemes: readonly string[]
   readonly allowedTopics: readonly string[]
-  readonly candidates: readonly XFeedFinalCandidate[]
+  readonly allowlistedExploreIds: readonly string[]
+  readonly mechanicalSignals: Readonly<Record<string, boolean | number | string>>
+  readonly candidates: readonly XFeedDigestCandidateInput[]
 }
 
 function createPythonPorts(options: XFeedCronProviderOptions, capabilities: XFeedRunCapabilities) {
@@ -252,7 +225,7 @@ function parseInsightPackage(value: XFeedInsightPackage, base: XFeedRunCapabilit
   if (!isRecord(value) || !Array.isArray(value.recent_items)) {
     throw new Error('X insight package must contain a bounded recent_items array')
   }
-  const candidates: XFeedFinalCandidate[] = []
+  const candidates: XFeedDigestCandidateInput[] = []
   const seenIds = new Set<string>()
   for (const raw of value.recent_items) {
     const candidate = parseCandidate(raw)
@@ -261,10 +234,32 @@ function parseInsightPackage(value: XFeedInsightPackage, base: XFeedRunCapabilit
     candidates.push(candidate)
     if (candidates.length > 20) throw new Error('X insight package exceeds the 20-candidate run bound')
   }
+  if (candidates.length === 0) {
+    return {
+      capabilities: { ...base, allowedTopics: [], candidates: {}, preparedUrls: [] },
+      allowedThemes: [],
+      allowedTopics: [],
+      allowlistedExploreIds: [],
+      mechanicalSignals: { candidateCount: 0 },
+      candidates: Object.freeze([]),
+    }
+  }
   const decision = isRecord(value.decision) ? value.decision : {}
-  const allowedTopics = collectTopics(value, decision, candidates)
+  const candidateTopics = candidates.flatMap(candidate => candidate.topics)
+  const allowedThemes = collectAllowlist(
+    value.allowed_themes ?? value.allowedThemes ?? value.allowed_topics ?? decision.allowed_themes ?? decision.top_theme,
+    candidateTopics,
+  )
+  const allowedTopics = collectAllowlist(
+    value.allowed_topics ?? value.allowedTopics ?? decision.allowed_topics ?? candidateTopics,
+    allowedThemes,
+  )
+  if (allowedThemes.length === 0 || allowedTopics.length === 0) {
+    throw new Error('X insight package does not expose a bounded theme/topic allowlist')
+  }
   const selectedUrls = parseUrls(value.selected_urls, 'selected_urls')
   const preparedUrls = [...new Set([...selectedUrls, ...candidates.map(candidate => candidate.source)])]
+  const mechanicalSignals = collectMechanicalSignals(decision, candidates.length)
   const capabilities: XFeedRunCapabilities = {
     ...base,
     allowedTopics,
@@ -275,37 +270,39 @@ function parseInsightPackage(value: XFeedInsightPackage, base: XFeedRunCapabilit
     }])),
     preparedUrls,
   }
-  return { capabilities, allowedTopics, candidates: Object.freeze(candidates) }
+  return {
+    capabilities,
+    allowedThemes,
+    allowedTopics,
+    allowlistedExploreIds: Object.freeze(candidates.map(candidate => candidate.id)),
+    mechanicalSignals,
+    candidates: Object.freeze(candidates),
+  }
 }
 
-function parseCandidate(value: unknown): XFeedFinalCandidate {
+function parseCandidate(value: unknown): XFeedDigestCandidateInput {
   if (!isRecord(value) || typeof value.id !== 'string' || value.id === ''
     || typeof value.url !== 'string' || typeof value.text !== 'string' || value.text.trim() === '') {
     throw new Error('X insight package contains a candidate without reliable id, text, or canonical URL')
   }
-  const source = canonicalStatusUrl(value.url)
-  if (source === undefined) throw new Error(`X insight package candidate URL is not a canonical X status URL: ${value.url}`)
+  const identity = parseXStatusIdentity(value.url)
+  if (identity === undefined) throw new Error(`X insight package candidate URL is not a canonical X status URL: ${value.url}`)
   const rawId = value.id
   if (/[^\x20-\x7e]/u.test(rawId) || /[\u0000-\u001f\u007f]/u.test(rawId)) throw new Error('X insight package candidate id is not canonical')
-  const statusId = /\/status\/([1-9]\d*)$/u.exec(source)?.[1]
-  if (statusId === undefined || !/^[1-9]\d*$/u.test(rawId) || rawId !== statusId) {
+  if (!/^[1-9]\d*$/u.test(rawId) || rawId !== identity.statusId) {
     throw new Error('X insight package candidate id is not a reliable canonical status id')
   }
-  const id = `x-status:${statusId}`
+  const id = `x-status:${identity.statusId}`
   const topics = parseTopicArray(value.topics ?? value.theme)
-  return Object.freeze({ id, content: value.text.trim().slice(0, 8_000), source, topics })
+  const content = value.text.trim().slice(0, 12_000)
+  const title = boundedPlainText(value.title, content, 320)
+  const summary = boundedPlainText(value.summary, content, 1_200)
+  return Object.freeze({ id, content, source: identity.canonicalUrl, topics, title, summary })
 }
 
-function collectTopics(
-  value: XFeedInsightPackage,
-  decision: Record<string, unknown>,
-  candidates: readonly XFeedFinalCandidate[],
-): readonly string[] {
-  const values: unknown[] = []
-  if (Array.isArray(value.allowed_topics)) values.push(...value.allowed_topics)
-  if (typeof decision.top_theme === 'string') values.push(decision.top_theme)
-  if (isRecord(decision.themes)) values.push(...Object.keys(decision.themes))
-  for (const candidate of candidates) values.push(...candidate.topics)
+function collectAllowlist(primary: unknown, fallback: readonly string[]): readonly string[] {
+  const values: unknown[] = Array.isArray(primary) ? [...primary] : primary === undefined ? [] : [primary]
+  values.push(...fallback)
   const topics: string[] = []
   const seen = new Set<string>()
   for (const item of values) {
@@ -316,6 +313,18 @@ function collectTopics(
     if (topics.length >= 50) break
   }
   return Object.freeze(topics)
+}
+
+function collectMechanicalSignals(
+  decision: Record<string, unknown>,
+  candidateCount: number,
+): Readonly<Record<string, boolean | number | string>> {
+  const signals: Record<string, boolean | number | string> = { candidateCount }
+  for (const key of ['wander_suggested', 'flooded', 'recent_count'] as const) {
+    const value = decision[key]
+    if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) signals[key] = value
+  }
+  return Object.freeze(signals)
 }
 
 function parseTopicArray(value: unknown): readonly string[] {
@@ -331,26 +340,80 @@ function parseUrls(value: unknown, name: string): readonly string[] {
   const seen = new Set<string>()
   for (const item of value) {
     if (typeof item !== 'string') throw new Error(`X insight package ${name} contains a non-string URL`)
-    const canonical = canonicalStatusUrl(item)
-    if (canonical === undefined) throw new Error(`X insight package ${name} contains a non-canonical URL: ${item}`)
-    if (seen.has(canonical)) throw new Error(`X insight package ${name} contains duplicate URL: ${canonical}`)
-    seen.add(canonical)
-    urls.push(canonical)
+    const identity = parseXStatusIdentity(item)
+    if (identity === undefined) throw new Error(`X insight package ${name} contains a non-canonical URL: ${item}`)
+    if (seen.has(identity.canonicalUrl)) throw new Error(`X insight package ${name} contains duplicate URL: ${identity.canonicalUrl}`)
+    seen.add(identity.canonicalUrl)
+    urls.push(identity.canonicalUrl)
   }
   return Object.freeze(urls)
 }
 
-function canonicalStatusUrl(value: string): string | undefined {
-  const match = /^https:\/\/(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})\/status\/([1-9]\d*)$/u.exec(value.trim())
-  return match === null ? undefined : `https://x.com/${match[1]!.toLowerCase()}/status/${match[2]}`
+function boundedPlainText(value: unknown, fallback: string, maxBytes: number): string {
+  const source = typeof value === 'string' && value.trim() !== '' ? value : fallback
+  const cleaned = source
+    .replace(/(?:https?:\/\/|ftp:\/\/|www\.)[^\s<>()]+/giu, ' ')
+    .replace(/!?(?:\[[^\]]*\]\([^)]*\)|`{1,3}|\*\*|__)/gu, ' ')
+    .replace(/(?:^|\s)[#>*+-]+\s/gu, ' ')
+    .replace(/[\u0000-\u001f\u007f]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  if (cleaned === '') throw new Error('X insight package candidate has no representable planner text')
+  return boundUtf8(cleaned, maxBytes)
+}
+
+function boundUtf8(value: string, maxBytes: number): string {
+  let result = ''
+  let bytes = 0
+  for (const character of value) {
+    const size = Buffer.byteLength(character, 'utf8')
+    if (bytes + size > maxBytes) break
+    result += character
+    bytes += size
+  }
+  return result.trim()
+}
+
+function normalizeSearchResult(value: XFeedInsightPackage): XFeedSearchResult {
+  if (!isRecord(value) || !Array.isArray(value.items)) throw new Error('X topic search result is invalid')
+  const items = value.items.map(item => {
+    const candidate = parseCandidate(item)
+    return { id: candidate.id, source: candidate.source, content: candidate.content, topics: candidate.topics }
+  })
+  const summary = boundedPlainText(value.summary, 'topic search result', 1_200)
+  return { items, summary }
+}
+
+function normalizeExploreResult(value: XFeedInsightPackage): XFeedExploreResult {
+  if (!isRecord(value) || typeof value.body !== 'string') throw new Error('X exploration result is invalid')
+  const content = boundedPlainText(value.body, '', 12_000)
+  const summary = boundedPlainText(value.title, content, 1_200)
+  return { content, topics: parseTopicArray(value.topics), summary }
+}
+
+function projectExactTargetFacts(
+  item: CandidateDescriptor,
+  session: ReadyFactProjectionSession,
+  assessmentFactory: (candidate: CandidateDescriptor) => CandidateFactAssessment | ProjectionFailure,
+): { readonly facts: readonly XFeedComposerFact[]; readonly audit: { readonly policyId: 'x-cron-exact-target'; readonly policyVersion: '1'; readonly matchedLocatorCount: number } } {
+  const candidate = { id: item.id, content: item.content, source: item.source }
+  const assessment = assessmentFactory(candidate)
+  if ('kind' in assessment) throw new Error(`X cron exact-target assessment failed: ${assessment.message}`)
+  const projected = session.project(candidate, assessment)
+  if (projected.kind !== 'ready') throw new Error(`X cron exact-target projection failed: ${projected.message}`)
+  const inlineFacts = projected.view.facts.map(fact => ({
+    targetId: itemIdFor(item.id),
+    summary: boundedPlainText(fact.reason, fact.target.id, 1_200),
+  }))
+  const matchedLocatorCount = assessment.audit.decisions.filter(decision => decision.relevance === 'high').length
+  return {
+    facts: Object.freeze(inlineFacts),
+    audit: { policyId: 'x-cron-exact-target', policyVersion: '1', matchedLocatorCount },
+  }
 }
 
 function safeRunPart(runId: string): string {
   return `run-${createHash('sha256').update(runId, 'utf8').digest('hex').slice(0, 32)}`
-}
-
-function failure(code: string, message: string): XFeedRunToolFailure {
-  return { ok: false, code, message }
 }
 
 function isRecord(value: unknown): value is Record<string, any> {

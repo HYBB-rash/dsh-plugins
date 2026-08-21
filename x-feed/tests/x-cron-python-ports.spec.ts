@@ -136,16 +136,43 @@ describe('X cron Python ports', () => {
       '📦 X 洞察', '', '⭐ 高优先级',
       '- 采用内容 (https://x.com/alice/status/1)',
     ].join('\n')
-    await ports.prepareDelivery(deliveryText, ['https://x.com/alice/status/1'])
+    await ports.prepareDelivery(deliveryText, ['https://x.com/alice/status/1'], { themeId: 'agentic systems' })
     expect(runner.requests[0]!.args).toEqual([
       '/pkg/python/x_insight_pipeline.py', 'prepare-delivery',
       '--package', capabilities.packagePath,
       '--cron-job-id', 'cron-x',
+      '--pending-theme', 'agentic systems',
+      '--last-theme', `${capabilities.dataDir}/x_last_theme.json`,
       '--urls', 'https://x.com/alice/status/1',
     ])
     expect(runner.requests[0]!.args).not.toEqual(expect.arrayContaining(['mark-shown', 'confirm-prepared', 'mark-delivered']))
-    await expect(ports.prepareDelivery(deliveryText, ['https://x.com/not-current/status/2']))
+    await expect(ports.prepareDelivery(deliveryText, ['https://x.com/not-current/status/2'], { themeId: 'agentic systems' }))
       .rejects.toMatchObject({ code: 'capability-denied' })
+  })
+
+  it('keeps the legacy signal call unchanged even when the run has multiple topics', async () => {
+    const runner = makeRunner()
+    const ports = createXFeedPythonPorts({
+      pythonBin: '/usr/bin/python3',
+      pythonDirectory: '/pkg/python',
+      pipelinePath: '/pkg/python/x_insight_pipeline.py',
+      topicSearchPath: '/pkg/python/x_topic_search.py',
+      explorerPath: '/pkg/python/x_explorer.py',
+      capabilities: {
+        ...capabilities,
+        allowedTopics: ['agentic systems', 'other-topic'],
+      },
+      run: runner.run,
+    })
+    const deliveryText = [
+      '📦 X 洞察', '', '⭐ 高优先级',
+      '- 采用内容 (https://x.com/alice/status/1)',
+    ].join('\n')
+    const signal = new AbortController().signal
+    await ports.prepareDelivery(deliveryText, ['https://x.com/alice/status/1'], signal)
+    expect(runner.requests[0]!.signal).toBe(signal)
+    expect(runner.requests[0]!.args).not.toContain('--pending-theme')
+    expect(runner.requests[0]!.args).not.toContain('--last-theme')
   })
 
   it('reads only fixed bounded JSONL/TXT artifacts and extends delivery allowlist from status URLs', async () => {
@@ -171,7 +198,7 @@ describe('X cron Python ports', () => {
       '📦 X 洞察', '', '⭐ 高优先级',
       '- 采用内容 (https://x.com/bob/status/2)',
     ].join('\n')
-    await expect(ports.prepareDelivery(deliveryText, ['https://x.com/bob/status/2'])).resolves.toMatchObject({ ok: true })
+    await expect(ports.prepareDelivery(deliveryText, ['https://x.com/bob/status/2'], { themeId: 'agentic systems' })).resolves.toMatchObject({ ok: true })
     expect(readFile).toHaveBeenCalledWith(capabilities.topicSearchOutputPath, expect.anything())
     expect(readFile).toHaveBeenCalledWith('/tmp/x-feed-run-001/x_explore/candidate-1.txt', expect.anything())
   })

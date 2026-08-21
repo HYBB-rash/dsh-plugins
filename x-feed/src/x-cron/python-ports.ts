@@ -107,6 +107,13 @@ export interface XFeedPreparedArtifact {
   readonly [key: string]: unknown
 }
 
+export interface XFeedPrepareDeliveryOptions {
+  readonly themeId: string
+  readonly signal?: AbortSignal
+}
+
+type PrepareDeliveryCallOptions = XFeedPrepareDeliveryOptions | AbortSignal
+
 const DEFAULT_TIMEOUT_MS = 300_000
 const DEFAULT_MAX_STDOUT_BYTES = 256 * 1024
 const DEFAULT_MAX_ARTIFACT_BYTES = 256 * 1024
@@ -238,12 +245,17 @@ function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values)]
 }
 
+function isPrepareDeliveryOptions(value: PrepareDeliveryCallOptions): value is XFeedPrepareDeliveryOptions {
+  return typeof value === 'object' && value !== null && 'themeId' in value
+}
+
 export interface XFeedPythonPorts {
   readonly capabilities: XFeedRunCapabilities
   runPipeline(signal?: AbortSignal): Promise<XFeedInsightPackage>
   searchTopic(topic: string, signal?: AbortSignal): Promise<XFeedInsightPackage>
   exploreCandidate(candidateId: string, signal?: AbortSignal): Promise<XFeedInsightPackage>
   setTheme(theme: string, signal?: AbortSignal): Promise<XFeedInsightPackage>
+  prepareDelivery(text: string, urls: readonly string[], options: XFeedPrepareDeliveryOptions): Promise<XFeedPreparedArtifact>
   prepareDelivery(text: string, urls: readonly string[], signal?: AbortSignal): Promise<XFeedPreparedArtifact>
 }
 
@@ -477,10 +489,19 @@ export function createXFeedPythonPorts(options: XFeedPythonPortOptions): XFeedPy
         '--theme', theme,
       ], signal)
     },
-    async prepareDelivery(text, urls, signal) {
+    async prepareDelivery(text, urls, optionsOrSignal?: PrepareDeliveryCallOptions) {
+      let normalized: XFeedPrepareDeliveryOptions | undefined
+      let signal: AbortSignal | undefined
+      if (optionsOrSignal !== undefined && isPrepareDeliveryOptions(optionsOrSignal)) {
+        normalized = optionsOrSignal
+        signal = optionsOrSignal.signal
+      } else if (optionsOrSignal !== undefined) {
+        signal = optionsOrSignal
+      }
       if (!isNonEmptyString(text)) {
         throw new XFeedPythonPortError('capability-denied', 'delivery text must be non-empty')
       }
+      if (normalized !== undefined) requireTopic(normalized.themeId)
       const uniqueUrls = requirePreparedUrls(urls)
       const output = validateXFeedRichMarkdown(text, { preparedUrls: uniqueUrls })
       if (!output.ok) {
@@ -490,6 +511,10 @@ export function createXFeedPythonPorts(options: XFeedPythonPortOptions): XFeedPy
         pipelinePath, 'prepare-delivery',
         '--package', capabilities.packagePath,
         '--cron-job-id', capabilities.cronJobId,
+        ...(normalized === undefined ? [] : [
+          '--pending-theme', normalized.themeId,
+          '--last-theme', join(resolve(capabilities.dataDir), 'x_last_theme.json'),
+        ]),
         ...(uniqueUrls.length === 0 ? [] : ['--urls', ...uniqueUrls]),
       ], signal)
     },

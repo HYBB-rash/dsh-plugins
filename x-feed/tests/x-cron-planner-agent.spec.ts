@@ -1,0 +1,148 @@
+import { Context } from '@deepseek-ai/cordis'
+import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import LlmRuntime, { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import SessionStore from '@deepseek-ai/dsh-session'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
+import { afterEach, describe, expect, it } from 'vitest'
+import {
+  PLANNER_SYSTEM_PROMPT,
+  SUBMIT_X_CRON_PLANNER,
+  SUBMIT_X_CRON_PLANNER_SCHEMA,
+  runXCronPlanner,
+  type XCronPlannerRequest,
+} from '../src/x-cron/planner-agent.ts'
+
+const candidate = { id: 'candidate-1', title: '一条候选', summary: '当前候选摘要' } as const
+const request: XCronPlannerRequest = {
+  candidates: [candidate],
+  allowedThemes: ['theme-1'],
+  allowedTopics: ['topic-1'],
+  allowlistedExploreIds: ['candidate-1'],
+  mechanicalSignals: { contentAvailable: true, candidateCount: 1 },
+}
+
+function response(value: unknown, callId = 'planner-1'): StreamChunk[] {
+  const args = JSON.stringify(value)
+  const id = CallId(callId)
+  return [
+    { type: 'block-start', index: 0, blockType: 'tool-call' },
+    { type: 'tool-call-delta', index: 0, id, name: SUBMIT_X_CRON_PLANNER, argumentsDelta: args },
+    { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: SUBMIT_X_CRON_PLANNER, arguments: args } },
+    { type: 'finish', reason: { kind: 'tool-calls' } },
+  ]
+}
+
+class WireAdapter extends LlmAdapter {
+  readonly requests: GenerateOptions[] = []
+  constructor(private readonly script: StreamChunk[][]) { super() }
+  override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
+    return Promise.resolve({ provider, id: model, name: model })
+  }
+  override async *stream(requestValue: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(requestValue)
+    for (const chunk of this.script.shift() ?? []) yield chunk
+  }
+}
+
+async function harness(adapter: WireAdapter): Promise<Context> {
+  const ctx = new Context()
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(AgentRegistry)
+  await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(AgentDefaultModelConfig, { provider: 'wire-test', model: 'wire-model' })
+  ctx.llm.registerAdapter(['wire-test'], adapter)
+  return ctx
+}
+
+const contexts: Context[] = []
+afterEach(async () => {
+  while (contexts.length > 0) await contexts.pop()?.fiber.dispose()
+})
+
+describe('one-shot X cron planner Agent', () => {
+  it('returns a strict DTO from one fresh isolated model request', async () => {
+    const adapter = new WireAdapter([response({
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration: { kind: 'search', topicId: 'topic-1' },
+    })])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+
+    const result = await runXCronPlanner(ctx, request)
+
+    expect(result?.dto).toEqual({
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration: { kind: 'search', topicId: 'topic-1' },
+    })
+    expect(result?.sessionId).toMatch(/^session-x-planner-[0-9a-f-]+$/u)
+    expect(adapter.requests).toHaveLength(1)
+    expect(adapter.requests[0]?.tools?.map(tool => tool.name)).toEqual([SUBMIT_X_CRON_PLANNER])
+    expect(adapter.requests[0]?.system).toBe(PLANNER_SYSTEM_PROMPT)
+    expect(adapter.requests[0]?.tools?.[0]).toEqual(SUBMIT_X_CRON_PLANNER_SCHEMA)
+    expect(JSON.stringify(adapter.requests[0])).not.toMatch(/https?:\/\/|`|\*\*|\[[^\]]+\]\(/u)
+  })
+
+  it('rejects an empty candidate set without a model request', async () => {
+    const adapter = new WireAdapter([])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+    await expect(runXCronPlanner(ctx, { ...request, candidates: [], mechanicalSignals: { contentAvailable: false, candidateCount: 0 } }))
+      .rejects.toThrow(/non-empty|candidate/u)
+    expect(adapter.requests).toHaveLength(0)
+  })
+
+  it('fails closed for unknown IDs and does not make a second request', async () => {
+    const adapter = new WireAdapter([response({
+      selectedCandidateIds: ['outside'],
+      themeId: 'theme-1',
+      exploration: { kind: 'none' },
+    })])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+    await expect(runXCronPlanner(ctx, request)).rejects.toThrow(/allowlist|unknown|invalid/u)
+    expect(adapter.requests).toHaveLength(1)
+  })
+
+  it('fails closed for unknown theme, topic, schema, and URL-bearing candidate input before model creation', async () => {
+    const adapter = new WireAdapter([
+      response({ selectedCandidateIds: ['candidate-1'], themeId: 'other-theme', exploration: { kind: 'none' } }, 'bad-theme'),
+      response({ selectedCandidateIds: ['candidate-1'], themeId: 'theme-1', exploration: { kind: 'search', topicId: 'other-topic' } }, 'bad-topic'),
+    ])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+    await expect(runXCronPlanner(ctx, request)).rejects.toThrow(/theme|allow|invalid/u)
+    await expect(runXCronPlanner(ctx, request)).rejects.toThrow(/topic|allow|invalid/u)
+    await expect(runXCronPlanner(ctx, { ...request, unexpected: 'history' } as never)).rejects.toThrow(/unknown|invalid/u)
+    await expect(runXCronPlanner(ctx, {
+      ...request,
+      candidates: [{ id: candidate.id, title: candidate.title, summary: 'https://x.com/status/1' }],
+    })).rejects.toThrow(/candidate|invalid/u)
+    await expect(runXCronPlanner(ctx, {
+      ...request,
+      candidates: [{ id: candidate.id, content: '替代字段' }],
+    } as never)).rejects.toThrow(/shape|invalid/u)
+    expect(adapter.requests).toHaveLength(2)
+  })
+
+  it('uses a new context-free session for every call', async () => {
+    const adapter = new WireAdapter([
+      response({ selectedCandidateIds: ['candidate-1'], themeId: 'theme-1', exploration: { kind: 'none' } }, 'one'),
+      response({ selectedCandidateIds: ['candidate-1'], themeId: 'theme-1', exploration: { kind: 'none' } }, 'two'),
+    ])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+    const first = await runXCronPlanner(ctx, request)
+    const second = await runXCronPlanner(ctx, request)
+    expect(second?.sessionId).not.toBe(first?.sessionId)
+    expect(adapter.requests).toHaveLength(2)
+    expect(adapter.requests[1]?.messages[0]?.content).toEqual(adapter.requests[0]?.messages[0]?.content)
+  })
+})

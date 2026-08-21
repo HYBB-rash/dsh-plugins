@@ -42,6 +42,7 @@ export function createCronEnvironmentExtension(
     },
     prepare: async (context: CronAgentEnvironmentPrepareContext) => {
       const lease = await provider.prepare(context)
+      if ('kind' in lease && lease.kind === 'skip') return lease
       return {
         ...lease,
         settleRun: async (event: CronRunFinishedEvent) => {

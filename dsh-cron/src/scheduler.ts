@@ -46,6 +46,7 @@ import {
   type CronAgentEnvironmentPrepareContext,
   type CronAgentEnvironmentRegistry,
   type CronAgentEnvironmentSettle,
+  type CronAgentEnvironmentSkip,
   type ResolvedCronAgentEnvironmentLease,
 } from './run-environment.ts'
 import { JobStore, RunLedger, type FoldedJobRuns } from './store.ts'
@@ -127,11 +128,25 @@ export class AgentRunLease {
   }
 
   /**
-   * Let a provider validate the exact scheduler outcome while the Agent is
-   * still owned and before close() releases it or delivery observes it.
+   * Let a provider validate or transform the exact scheduler outcome while
+   * the Agent is still owned and before close() releases it or delivery sees it.
    */
-  finalizeOutcome(outcome: CronAgentEnvironmentOutcome): Promise<void> {
-    return Promise.resolve(this.environment?.finalizeOutcome?.(outcome))
+  async finalizeOutcome(outcome: CronAgentEnvironmentOutcome): Promise<CronAgentEnvironmentOutcome> {
+    const finalizer = this.environment?.finalizeOutcome
+    if (finalizer === undefined) return outcome
+    const transformed = await finalizer(outcome)
+    if (transformed === undefined) return outcome
+    if (
+      typeof transformed !== 'object'
+      || transformed === null
+      || !Object.prototype.hasOwnProperty.call(transformed, 'text')
+      || !Object.prototype.hasOwnProperty.call(transformed, 'error')
+      || typeof transformed.text !== 'string'
+      || (transformed.error !== undefined && typeof transformed.error !== 'string')
+    ) {
+      throw new Error('run environment finalizer returned an invalid outcome')
+    }
+    return transformed
   }
 
   /**
@@ -1079,7 +1094,10 @@ export class SchedulerRuntime implements RunNowPort {
   }
 
   /** Resolve and prepare a marked environment after the durable run claim. */
-  private async prepareAgentEnvironment(job: Job, runId: string): Promise<PreparedAgentEnvironment | undefined> {
+  private async prepareAgentEnvironment(
+    job: Job,
+    runId: string,
+  ): Promise<PreparedAgentEnvironment | CronAgentEnvironmentSkip | undefined> {
     const marker = 'agentEnvironment' in job ? job.agentEnvironment : undefined
     if (marker === undefined) return undefined
 
@@ -1140,6 +1158,7 @@ export class SchedulerRuntime implements RunNowPort {
     if (!prepared.ok) {
       throw new SchedulerExecutionError(`agent_environment.${prepared.error.code}`, prepared.error.message)
     }
+    if ('skip' in prepared) return prepared.skip
     return { registry, lease: prepared.lease }
   }
 
@@ -1305,6 +1324,8 @@ export class SchedulerRuntime implements RunNowPort {
     let finishedAt = startedAt
     let outcome: TurnOutcome | undefined
     let executionError: string | undefined
+    let outcomeFinalizationFailed = false
+    let skipped = false
     let runLease: AgentRunLease | undefined
     let settleRun: CronAgentEnvironmentSettle | undefined
     try {
@@ -1312,12 +1333,23 @@ export class SchedulerRuntime implements RunNowPort {
         throw new SchedulerExecutionError('invalid_replay_evidence', state.invalidError)
       }
       const preparedEnvironment = await this.prepareAgentEnvironment(job, runId)
-      settleRun = preparedEnvironment?.lease.settleRun
-      if (job.kind === 'command') {
+      const leaseEnvironment = preparedEnvironment !== undefined && 'kind' in preparedEnvironment
+        ? undefined
+        : preparedEnvironment
+      if (preparedEnvironment !== undefined && 'kind' in preparedEnvironment) {
+        skipped = true
+      } else {
+        settleRun = leaseEnvironment?.lease.settleRun
+      }
+      if (skipped) {
+        // A typed provider skip is already a successful terminal outcome. It
+        // deliberately bypasses Agent creation, setup, verification, drive,
+        // finalization, and Telegram delivery.
+      } else if (job.kind === 'command') {
         outcome = await this.runCommand(job, this.signal)
       } else {
-        if (preparedEnvironment !== undefined) {
-          runLease = new AgentRunLease({ environment: preparedEnvironment.lease })
+        if (leaseEnvironment !== undefined) {
+          runLease = new AgentRunLease({ environment: leaseEnvironment.lease })
         }
         let prompt = job.prompt
         if (job.gate !== undefined) {
@@ -1335,10 +1367,10 @@ export class SchedulerRuntime implements RunNowPort {
           if (sessions === undefined) throw new Error('dsh-cron: sessions service unavailable')
           runLease ??= new AgentRunLease()
           runLease.attachSessions(sessions)
-          const acquired = await this.acquireAgent(job, runId, preparedEnvironment)
+          const acquired = await this.acquireAgent(job, runId, leaseEnvironment)
           runLease.attachAgent(acquired.agent, acquired.ownsHandle ? acquired.handle : undefined)
-          if (preparedEnvironment !== undefined) {
-            const verifyResult = await preparedEnvironment.registry.verify(preparedEnvironment.lease, acquired.agent)
+          if (leaseEnvironment !== undefined) {
+            const verifyResult = await leaseEnvironment.registry.verify(leaseEnvironment.lease, acquired.agent)
             if (!verifyResult.ok) {
               throw new SchedulerExecutionError(
                 `agent_environment.${verifyResult.error.code}`,
@@ -1348,7 +1380,12 @@ export class SchedulerRuntime implements RunNowPort {
           }
           outcome = await this.driveTurn(acquired.agent, prompt, sessions, this.signal)
           if (outcome !== undefined) {
-            await runLease.finalizeOutcome(outcome)
+            try {
+              outcome = await runLease.finalizeOutcome(outcome)
+            } catch (error) {
+              outcomeFinalizationFailed = true
+              throw error
+            }
           }
         }
       }
@@ -1373,6 +1410,15 @@ export class SchedulerRuntime implements RunNowPort {
 
     const nextRunExtra = manual || finishedNextRunAt === undefined ? {} : { nextRunAt: finishedNextRunAt }
     const triggerExtra = { trigger }
+    if (skipped) {
+      const finished = this.appendFinish(job, runId, scheduledFor, 'success', startedAt, finishedAt, {
+        ...triggerExtra,
+        ...nextRunExtra,
+        deliveryState: 'not_requested',
+      })
+      if (finished !== undefined) await this.settleFinishedRun(finished, undefined)
+      return
+    }
     const errorText = executionError ?? outcome?.error
     if (this.signal.aborted) {
       const finished = this.appendFinish(job, runId, scheduledFor, 'interrupted', startedAt, finishedAt, {
@@ -1388,7 +1434,7 @@ export class SchedulerRuntime implements RunNowPort {
 
     if (errorText !== undefined) {
       let delivery: DeliveryObservation = { state: 'not_requested' }
-      if (this.deliverOnError && job.deliver === 'telegram') {
+      if (this.deliverOnError && !outcomeFinalizationFailed && job.deliver === 'telegram') {
         if (job.failureAlert === undefined) {
           // Compatibility: jobs without a policy keep the historical
           // notify-on-every-execution-error behavior.

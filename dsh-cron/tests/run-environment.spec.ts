@@ -129,6 +129,52 @@ describe('dsh-cron run environment registry', () => {
     expect(received).toEqual([expect.objectContaining({ jobId: 'cron-x-feed' })])
   })
 
+  it('passes a typed generic skip through prepare without treating it as a lease', async () => {
+    const registry = createCronAgentEnvironmentRegistry([{
+      ...provider('x-feed/v1'),
+      prepare: async () => ({
+        kind: 'skip',
+        outcome: { text: undefined, error: undefined },
+      }) as never,
+    }])
+
+    await expect(registry.prepare('x-feed/v1', {
+      jobId: 'cron-x-feed',
+      jobKind: 'agent',
+      sessionMode: 'per_run',
+      gate: 'forbidden',
+      runId: 'run-skip',
+    })).resolves.toMatchObject({
+      ok: true,
+      skip: {
+        kind: 'skip',
+        outcome: { text: undefined, error: undefined },
+      },
+    })
+  })
+
+  it.each([
+    ['array outcome', { kind: 'skip', outcome: [] }],
+    ['extra outcome field', { kind: 'skip', outcome: { text: undefined, error: undefined, extra: true } }],
+    ['extra top-level field', { kind: 'skip', outcome: { text: undefined, error: undefined }, extra: true }],
+  ])('fails closed for a malformed generic skip (%s)', async (_name, malformed) => {
+    const registry = createCronAgentEnvironmentRegistry([{
+      ...provider('x-feed/v1'),
+      prepare: async () => malformed as never,
+    }])
+
+    await expect(registry.prepare('x-feed/v1', {
+      jobId: 'cron-x-feed',
+      jobKind: 'agent',
+      sessionMode: 'per_run',
+      gate: 'forbidden',
+      runId: 'run-invalid-skip',
+    })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'prepare_failed', operation: 'prepare' },
+    })
+  })
+
   it('maps surface verification failures and always exposes cleanup', async () => {
     const dispose = vi.fn(async () => undefined)
     const lease: CronAgentEnvironmentLease = {

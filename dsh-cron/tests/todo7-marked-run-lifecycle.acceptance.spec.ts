@@ -469,10 +469,15 @@ describe('generic marked Agent run lifecycle acceptance', () => {
       const finish = lastFinish(directory)
       expect(finish.status).toBe('error')
       expect(finish.error).toEqual(expect.stringContaining(stage === 'drive-timeout' ? 'drive timed out' : `${stage} failed`))
-      expect(delivered).toHaveLength(1)
-      expect(delivered[0]).toContain('出错')
-      expect(delivered[0]).not.toContain('success body must not be delivered')
-      expect(finish.deliveryState).toBe('delivered')
+      if (stage === 'finalize') {
+        expect(delivered).toHaveLength(0)
+        expect(finish.deliveryState).toBe('not_requested')
+      } else {
+        expect(delivered).toHaveLength(1)
+        expect(delivered[0]).toContain('出错')
+        expect(delivered[0]).not.toContain('success body must not be delivered')
+        expect(finish.deliveryState).toBe('delivered')
+      }
 
       const position = (step: string): number => order.indexOf(step)
       if (stage === 'drive-timeout') {
@@ -493,7 +498,7 @@ describe('generic marked Agent run lifecycle acceptance', () => {
         expect(order.slice(position('finalize'), position('environment-dispose') + 1)).toEqual([
           'finalize', 'cancel', 'idle', 'flush', 'handle-dispose', 'environment-dispose',
         ])
-        expect(position('environment-dispose')).toBeLessThan(position('deliver'))
+        expect(order).not.toContain('deliver')
       }
       if (stage === 'setup') {
         expect(order).toContain('environment-dispose')

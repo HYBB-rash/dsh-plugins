@@ -12,6 +12,7 @@ import {
 } from '../src/index.ts'
 import { FileNavigationSnapshotStore } from '../src/navigation/file-navigation-snapshot-store.ts'
 import { DeliveryReceipt } from '../src/receipt.ts'
+import * as xCronProvider from '../src/x-cron/provider.ts'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -127,6 +128,35 @@ describe('business extension boundaries', () => {
 
   it('cron adapter refuses an unbound job', () => {
     expect(() => createCronEnvironmentExtension(makeCtx().ctx as never, {})).toThrow('requires cronJobId')
+  })
+
+  it('returns a provider skip byte-for-byte without decorating it with settleRun', async () => {
+    const skip = Object.freeze({
+      kind: 'skip' as const,
+      outcome: Object.freeze({ text: undefined, error: undefined }),
+    })
+    vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProvider').mockReturnValue({
+      marker: 'dsh-x-feed/v1',
+      requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
+      prepare: vi.fn(async () => skip),
+    } as never)
+
+    const provider = createCronEnvironmentExtension(makeCtx().ctx as never, {
+      cronJobId: 'cron-x-skip',
+      dataDir: '/tmp/x-feed-cron-skip',
+      pipelinePath: '/opt/x-feed/python/x_insight_pipeline.py',
+    })
+    const prepared = await provider.prepare({
+      jobId: 'cron-x-skip',
+      jobKind: 'agent',
+      sessionMode: 'per_run',
+      gate: 'forbidden',
+      runId: 'cron-x-skip@once',
+    })
+
+    expect(prepared).toBe(skip)
+    expect(prepared).toEqual(skip)
+    expect('settleRun' in prepared).toBe(false)
   })
 })
 
