@@ -9,7 +9,7 @@
   AI 只需读这一个文件即可决策+总结, 无需自己跑收集/分析。
 
 用法:
-  python3 x_insight_pipeline.py [--rolls 8] [--sleep 2] [--recent 30] [--cap-items 25] [--out <path>] [--no-collect]
+  python3 x_insight_pipeline.py [--rolls 8] [--sleep 2] [--recent 30] [--cap-items 20] [--out <path>] [--no-collect]
 """
 import json
 import os
@@ -278,7 +278,7 @@ def new_items_since(before_ids, after_items):
     return result
 
 
-def select_package_items(current_items, history_items, shown_path, cap_items=25):
+def select_package_items(current_items, history_items, shown_path, cap_items=20):
     """Select current-batch fresh items first, then fresh history as fallback."""
     if cap_items <= 0:
         return []
@@ -306,7 +306,7 @@ def _write_items_file(items):
     return path
 
 
-def build_package(items_path=TIMELINE, last_path=LAST_THEME, recent=30, cap_items=25,
+def build_package(items_path=TIMELINE, last_path=LAST_THEME, recent=30, cap_items=20,
                   seed=None, shown_path=None, current_items=None, delivery_id=None,
                   graph_path=None, aliases_path=None, state_path=None, wander_now=None):
     """组装 AI 决策支持包: {decision, recent_items, shown_count, ts}。
@@ -519,7 +519,7 @@ def verify_delivery(package_path, shown_path):
 
 def main(argv=None):
     args = argv if argv is not None else sys.argv[1:]
-    rolls, sleep_s, recent, cap, out = 8, 2, 30, 25, DEFAULT_OUT
+    rolls, sleep_s, recent, cap, out = 8, 2, 30, 20, DEFAULT_OUT
     no_collect = False
     shown_path = os.path.join(DATA, "x_shown.json")
     batch_out = None

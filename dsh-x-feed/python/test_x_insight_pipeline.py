@@ -99,6 +99,34 @@ class TestBuildPackage(unittest.TestCase):
             pkg = pipe.build_package(tl, last, recent=30, cap_items=15)
             self.assertEqual(len(pkg["recent_items"]), 15)
 
+    def test_package_default_bound_keeps_parallel_candidate_fields_consistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tl = os.path.join(tmp, "tl.jsonl")
+            last = os.path.join(tmp, "last.json")
+            with open(tl, "w") as f:
+                for i in range(25):
+                    f.write(json.dumps({
+                        "id": str(1000 + i),
+                        "url": f"https://x.com/test/status/{1000 + i}",
+                        "text": f"candidate {i}",
+                        "source": "x",
+                        "ts": i,
+                    }) + "\n")
+
+            pkg = pipe.build_package(tl, last, recent=30)
+
+            self.assertEqual(len(pkg["recent_items"]), 20)
+            self.assertEqual(len(pkg["selected_urls"]), 20)
+            self.assertEqual(len(pkg["selected_ids"]), 20)
+            self.assertEqual(
+                [item["url"] for item in pkg["recent_items"]],
+                pkg["selected_urls"],
+            )
+            self.assertEqual(
+                [item["id"] for item in pkg["recent_items"]],
+                pkg["selected_ids"],
+            )
+
     def test_package_graph_material_uses_current_theme_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             timeline = os.path.join(tmp, "timeline.jsonl")
