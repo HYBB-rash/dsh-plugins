@@ -4,6 +4,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ToolSchema, UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
+  COMPOSER_SUMMARY_MAX_UTF8_BYTES,
   parseComposerDto,
   type ComposerDto,
   type ComposerSectionKind,
@@ -136,7 +137,8 @@ export class XFeedComposerAgentSurface {
       toolSchema: SUBMIT_X_CRON_COMPOSER_SCHEMA,
       materialMessage: createMaterialMessage(this.materialText),
       parseSubmission: value => {
-        const parsed = parseComposerDto(JSON.stringify(value), { itemIds: this.itemIds })
+        const projected = projectComposerSubmission(value, this.itemIds, this.allowedSectionKinds)
+        const parsed = parseComposerDto(JSON.stringify(projected), { itemIds: this.itemIds })
         if (!parsed.ok) throw new XFeedComposerAgentError(parsed.code, parsed.message)
         this.validateAllowedSections(parsed.value)
         return parsed.value
@@ -181,6 +183,60 @@ export class XFeedComposerAgentSurface {
     }
   }
 
+}
+
+function projectComposerSubmission(
+  value: unknown,
+  itemIds: readonly string[],
+  allowedSectionKinds: ReadonlySet<ComposerSectionKind>,
+): unknown {
+  if (!isRecord(value) || !hasExactKeys(value, ['title', 'sections'])) {
+    throw new XFeedComposerAgentError('invalid-submission', 'composer submission has an invalid top-level shape')
+  }
+  if (!Array.isArray(value.sections)) {
+    throw new XFeedComposerAgentError('invalid-submission', 'composer submission sections must be an array')
+  }
+
+  const allowedItemIds = new Set(itemIds)
+  const seenItems = new Set<string>()
+  const sections: Array<{ kind: ComposerSectionKind; items: Array<{ itemId: string; summary: string }> }> = []
+  for (const section of value.sections) {
+    if (!isRecord(section) || !hasExactKeys(section, ['kind', 'items'])) {
+      throw new XFeedComposerAgentError('invalid-submission', 'composer submission section is invalid')
+    }
+    const kind = section.kind
+    if (typeof kind !== 'string' || !SECTION_KINDS.includes(kind as ComposerSectionKind)) {
+      throw new XFeedComposerAgentError('invalid-submission', 'composer submission section kind is invalid')
+    }
+    if (!allowedSectionKinds.has(kind as ComposerSectionKind)) {
+      throw new XFeedComposerAgentError('invalid-submission', `section kind ${kind} is not allowlisted for this run`)
+    }
+    if (!Array.isArray(section.items)) {
+      throw new XFeedComposerAgentError('invalid-submission', 'composer submission section items must be an array')
+    }
+    const items: Array<{ itemId: string; summary: string }> = []
+    for (const item of section.items) {
+      if (!isRecord(item) || !hasExactKeys(item, ['itemId', 'summary'])) {
+        throw new XFeedComposerAgentError('invalid-submission', 'composer submission item is invalid')
+      }
+      const itemId = item.itemId
+      const summary = item.summary
+      if (typeof itemId !== 'string' || !allowedItemIds.has(itemId)) {
+        throw new XFeedComposerAgentError('invalid-submission', 'composer submission item is not in the allowlist')
+      }
+      if (!boundedText(summary, COMPOSER_SUMMARY_MAX_UTF8_BYTES)) {
+        throw new XFeedComposerAgentError('invalid-submission', 'composer submission item summary is invalid')
+      }
+      if (seenItems.has(itemId)) continue
+      seenItems.add(itemId)
+      items.push({ itemId, summary })
+    }
+    if (items.length > 0) sections.push({ kind: kind as ComposerSectionKind, items })
+  }
+  if (sections.length === 0) {
+    throw new XFeedComposerAgentError('invalid-submission', 'composer submission has no items after projection')
+  }
+  return { title: value.title, sections }
 }
 
 function validateMaterial(value: XFeedComposerMaterial): XFeedComposerMaterial {

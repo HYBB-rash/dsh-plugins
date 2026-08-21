@@ -91,6 +91,25 @@ async function drive(
   return { sessionId, handle, firstSeq }
 }
 
+async function expectRejectedDto(dto: unknown, materialValue: XFeedComposerMaterial = material): Promise<void> {
+  const original = structuredClone(dto)
+  const adapter = new WireAdapter([response(dto)])
+  const ctx = await harness(adapter)
+  contexts.push(ctx)
+  const surface = new XFeedComposerAgentSurface({ material: materialValue })
+  const { handle, firstSeq } = await drive(ctx, surface)
+  try {
+    expect(() => surface.finalizeOutcome(summarizeTurn(handle.agent.session.events, firstSeq))).toThrow(/invalid|submission|outcome|unknown|allowlist|empty/u)
+    expect(dto).toEqual(original)
+    expect(surface.wires).toHaveLength(1)
+    expect(adapter.requests).toHaveLength(1)
+  } finally {
+    surface.dispose()
+    await ctx.sessions.flush(handle.agent.session)
+    await handle.dispose()
+  }
+}
+
 const contexts: Context[] = []
 afterEach(async () => {
   while (contexts.length > 0) await contexts.pop()?.fiber.dispose()
@@ -150,6 +169,116 @@ describe('scheduler-owned X cron composer Agent surface', () => {
       await ctx.sessions.flush(handle.agent.session)
       await handle.dispose()
     }
+  })
+
+  it('keeps the first occurrence of an item across sections, drops empty sections, and preserves the raw DTO', async () => {
+    const dto = {
+      title: '本轮洞察',
+      sections: [
+        { kind: 'highlight', items: [{ itemId: 'item-1', summary: '首次摘要' }] },
+        { kind: 'source', items: [{ itemId: 'item-1', summary: '第二摘要' }] },
+        { kind: 'timeline', items: [{ itemId: 'item-1', summary: '第三摘要' }] },
+        { kind: 'focus', items: [{ itemId: 'item-1', summary: '第四摘要' }] },
+      ],
+    }
+    const original = structuredClone(dto)
+    const adapter = new WireAdapter([response(dto)])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+    const surface = new XFeedComposerAgentSurface({ material: {
+      ...material,
+      allowedSectionKinds: ['highlight', 'source', 'timeline', 'focus'],
+    } })
+    const { handle, firstSeq } = await drive(ctx, surface)
+    try {
+      const projected = {
+        title: '本轮洞察',
+        sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary: '首次摘要' }] }],
+      }
+      const summarized = summarizeTurn(handle.agent.session.events, firstSeq)
+      expect(summarized.text).toBe(JSON.stringify(projected))
+      expect(surface.finalizeOutcome(summarized)).toEqual(projected)
+      expect(dto).toEqual(original)
+      expect(surface.wires).toHaveLength(1)
+      expect(adapter.requests).toHaveLength(1)
+    } finally {
+      surface.dispose()
+      await ctx.sessions.flush(handle.agent.session)
+      await handle.dispose()
+    }
+  })
+
+  it('keeps only the first duplicate in one section', async () => {
+    const dto = {
+      title: '本轮洞察',
+      sections: [{
+        kind: 'highlight',
+        items: [
+          { itemId: 'item-1', summary: '首次摘要' },
+          { itemId: 'item-1', summary: '重复摘要' },
+        ],
+      }],
+    }
+    const original = structuredClone(dto)
+    const adapter = new WireAdapter([response(dto)])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+    const surface = new XFeedComposerAgentSurface({ material })
+    const { handle, firstSeq } = await drive(ctx, surface)
+    try {
+      const projected = {
+        title: '本轮洞察',
+        sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary: '首次摘要' }] }],
+      }
+      const summarized = summarizeTurn(handle.agent.session.events, firstSeq)
+      expect(summarized.text).toBe(JSON.stringify(projected))
+      expect(surface.finalizeOutcome(summarized)).toEqual(projected)
+      expect(dto).toEqual(original)
+      expect(adapter.requests).toHaveLength(1)
+    } finally {
+      surface.dispose()
+      await ctx.sessions.flush(handle.agent.session)
+      await handle.dispose()
+    }
+  })
+
+  it('fails closed for unknown IDs, keys, kinds, unsafe text, and all-empty sections', async () => {
+    await expectRejectedDto({
+      title: '本轮洞察',
+      sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary: '摘要' }] }],
+      extra: 'unknown',
+    })
+    await expectRejectedDto({
+      title: '本轮洞察',
+      sections: [
+        { kind: 'highlight', items: [{ itemId: 'item-1', summary: '首次摘要' }] },
+        { kind: 'source', items: [{ itemId: 'item-1', summary: '越权重复摘要' }] },
+      ],
+    }, { ...material, allowedSectionKinds: ['highlight'] })
+    await expectRejectedDto({
+      title: '本轮洞察',
+      sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary: '摘要' }], extra: 'unknown' }],
+    })
+    await expectRejectedDto({
+      title: '本轮洞察',
+      sections: [{ kind: 'highlight', items: [{ itemId: 'outside', summary: '越权条目' }] }],
+    })
+    await expectRejectedDto({
+      title: '本轮洞察',
+      sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary: '摘要', extra: 'unknown' }] }],
+    })
+    await expectRejectedDto({
+      title: '本轮洞察',
+      sections: [{ kind: 'invalid-kind', items: [{ itemId: 'item-1', summary: '摘要' }] }],
+    })
+    await expectRejectedDto({
+      title: '本轮洞察',
+      sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary: 'https://example.com' }] }],
+    })
+    await expectRejectedDto({
+      title: '本轮洞察',
+      sections: [{ kind: 'highlight', items: [] }],
+    })
   })
 
   it('fails closed for malformed or overreaching DTOs without a second wire', async () => {
