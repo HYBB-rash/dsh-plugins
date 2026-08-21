@@ -228,6 +228,131 @@ describe('scheduler-owned X cron composer Agent surface', () => {
     }
   })
 
+  it('projects the online six-element composer payload without mutating its raw sections', async () => {
+    const itemIds = Array.from({ length: 10 }, (_, index) => `item-${index + 1}`)
+    const onlineMaterial: XFeedComposerMaterial = {
+      ...material,
+      selectedItems: itemIds.map((itemId, index) => ({ itemId, title: `条目${index}`, summary: `条目${index}摘要` })),
+      facts: [{ targetId: itemIds[0], summary: '当前目标的精确事实' }],
+      allowedSectionKinds: ['highlight', 'timeline', 'focus', 'wander', 'source'],
+    }
+    const dto = {
+      title: 'AI 编码新纪元：Slack Code 上线，智能体协作与数据接入全面铺开',
+      sections: [
+        { kind: 'highlight', items: [
+          { itemId: itemIds[0], summary: 'Slack Code 正式上线：人类与智能体在同一频道、同一工作流中协作编码。' },
+          { itemId: itemIds[1], summary: '同花顺金融 API 将 A 股快照、日 K 线、财务与行业数据引入 AI 工作流。' },
+          { itemId: itemIds[2], summary: 'Grok @Bot 正在获得更广泛的访问入口。' },
+        ] },
+        { kind: 'timeline', items: [
+          { itemId: itemIds[3], summary: 'Slack Code 发布，人类与智能体在同一频道协作。' },
+          { itemId: itemIds[4], summary: '金融数据 API 通过 MCP 接入智能体生态。' },
+          { itemId: itemIds[5], summary: 'Grok 机器人扩大访问范围。' },
+        ] },
+        { kind: 'focus', items: [
+          { itemId: itemIds[6], summary: '焦点：Slack Code 把智能体放进团队日常协作频道。' },
+        ] },
+        { itemId: itemIds[7], summary: '延伸：当编码 Agent 普及，数据供给成为关键。' },
+        { kind: 'wander', items: [
+          { itemId: itemIds[8], summary: '来自 X 的尖锐观点：两条 AI 路线形成鲜明对照。' },
+        ] },
+        { kind: 'source', items: [
+          { itemId: itemIds[9], summary: '来源：Marc Benioff 在 X 官宣 Slack Code 上线。' },
+        ] },
+      ],
+    }
+    const original = structuredClone(dto)
+    const projected = {
+      title: dto.title,
+      sections: [
+        { kind: 'highlight', items: [
+          { itemId: itemIds[0], summary: 'Slack Code 正式上线：人类与智能体在同一频道、同一工作流中协作编码。' },
+          { itemId: itemIds[1], summary: '同花顺金融 API 将 A 股快照、日 K 线、财务与行业数据引入 AI 工作流。' },
+          { itemId: itemIds[2], summary: 'Grok @Bot 正在获得更广泛的访问入口。' },
+        ] },
+        { kind: 'timeline', items: [
+          { itemId: itemIds[3], summary: 'Slack Code 发布，人类与智能体在同一频道协作。' },
+          { itemId: itemIds[4], summary: '金融数据 API 通过 MCP 接入智能体生态。' },
+          { itemId: itemIds[5], summary: 'Grok 机器人扩大访问范围。' },
+        ] },
+        { kind: 'focus', items: [
+          { itemId: itemIds[6], summary: '焦点：Slack Code 把智能体放进团队日常协作频道。' },
+          { itemId: itemIds[7], summary: '延伸：当编码 Agent 普及，数据供给成为关键。' },
+        ] },
+        { kind: 'wander', items: [
+          { itemId: itemIds[8], summary: '来自 X 的尖锐观点：两条 AI 路线形成鲜明对照。' },
+        ] },
+        { kind: 'source', items: [
+          { itemId: itemIds[9], summary: '来源：Marc Benioff 在 X 官宣 Slack Code 上线。' },
+        ] },
+      ],
+    }
+    const adapter = new WireAdapter([response(dto)])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+    const surface = new XFeedComposerAgentSurface({ material: onlineMaterial })
+    const { handle, firstSeq } = await drive(ctx, surface)
+    try {
+      const summarized = summarizeTurn(handle.agent.session.events, firstSeq)
+      expect(summarized.text).toBe(JSON.stringify(projected))
+      expect(surface.finalizeOutcome(summarized)).toEqual(projected)
+      expect(dto).toEqual(original)
+      expect(surface.wires).toHaveLength(1)
+      expect(adapter.requests).toHaveLength(1)
+    } finally {
+      surface.dispose()
+      await ctx.sessions.flush(handle.agent.session)
+      await handle.dispose()
+    }
+  })
+
+  it('attaches consecutive orphan items to the same preceding section', async () => {
+    const orphanMaterial: XFeedComposerMaterial = {
+      ...material,
+      selectedItems: [
+        { itemId: 'item-1', title: '第一条目', summary: '第一条目摘要' },
+        { itemId: 'item-2', title: '第二条目', summary: '第二条目摘要' },
+        { itemId: 'item-3', title: '第三条目', summary: '第三条目摘要' },
+      ],
+      facts: [{ targetId: 'item-1', summary: '当前目标的精确事实' }],
+      allowedSectionKinds: ['focus'],
+    }
+    const dto = {
+      title: '本轮洞察',
+      sections: [
+        { kind: 'focus', items: [{ itemId: 'item-1', summary: '第一段' }] },
+        { itemId: 'item-2', summary: '连续孤立项一' },
+        { itemId: 'item-3', summary: '连续孤立项二' },
+      ],
+    }
+    const original = structuredClone(dto)
+    const projected = {
+      title: '本轮洞察',
+      sections: [{ kind: 'focus', items: [
+        { itemId: 'item-1', summary: '第一段' },
+        { itemId: 'item-2', summary: '连续孤立项一' },
+        { itemId: 'item-3', summary: '连续孤立项二' },
+      ] }],
+    }
+    const adapter = new WireAdapter([response(dto)])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+    const surface = new XFeedComposerAgentSurface({ material: orphanMaterial })
+    const { handle, firstSeq } = await drive(ctx, surface)
+    try {
+      const summarized = summarizeTurn(handle.agent.session.events, firstSeq)
+      expect(summarized.text).toBe(JSON.stringify(projected))
+      expect(surface.finalizeOutcome(summarized)).toEqual(projected)
+      expect(dto).toEqual(original)
+      expect(surface.wires).toHaveLength(1)
+      expect(adapter.requests).toHaveLength(1)
+    } finally {
+      surface.dispose()
+      await ctx.sessions.flush(handle.agent.session)
+      await handle.dispose()
+    }
+  })
+
   it('keeps the first occurrence of an item across sections, drops empty sections, and preserves the raw DTO', async () => {
     const dto = {
       title: '本轮洞察',
@@ -343,6 +468,18 @@ describe('scheduler-owned X cron composer Agent surface', () => {
     await expectRejectedDto({
       title: '本轮洞察',
       sections: [{ kind: 'highlight', items: [] }],
+    })
+    await expectRejectedDto({
+      title: '本轮洞察',
+      sections: [{ itemId: 'item-1', summary: '无前置 section' }],
+    })
+    await expectRejectedDto({
+      title: '本轮洞察',
+      sections: [{ kind: 'highlight', items: [], itemId: 'item-1', summary: '混合 section' }],
+    })
+    await expectRejectedDto({
+      title: '本轮洞察',
+      sections: [{ itemId: 'item-1', summary: '孤立项', extra: 'unknown' }],
     })
   })
 

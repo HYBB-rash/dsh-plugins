@@ -203,9 +203,38 @@ function projectComposerSubmission(
 
   const allowedItemIds = new Set(itemIds)
   const seenItems = new Set<string>()
-  const sections: Array<{ kind: ComposerSectionKind; items: Array<{ itemId: string; summary: string }> }> = []
+  type ProjectedSection = { kind: ComposerSectionKind; items: Array<{ itemId: string; summary: string }> }
+  const sections: ProjectedSection[] = []
+  let latestSection: ProjectedSection | undefined
+  const appendItem = (target: ProjectedSection, item: Record<string, unknown>): void => {
+    if (!hasExactKeys(item, ['itemId', 'summary'])) {
+      throw new XFeedComposerAgentError('invalid-submission', 'composer submission item is invalid')
+    }
+    const itemId = item.itemId
+    const summary = item.summary
+    if (typeof itemId !== 'string' || !allowedItemIds.has(itemId)) {
+      throw new XFeedComposerAgentError('invalid-submission', 'composer submission item is not in the allowlist')
+    }
+    if (!isValidComposerPlainText(summary, Number.POSITIVE_INFINITY)) {
+      throw new XFeedComposerAgentError('invalid-submission', 'composer submission item summary is invalid')
+    }
+    if (seenItems.has(itemId)) return
+    seenItems.add(itemId)
+    target.items.push({ itemId, summary: truncateComposerPlainText(summary, COMPOSER_SUMMARY_MAX_UTF8_BYTES) })
+  }
+
   for (const section of value.sections) {
-    if (!isRecord(section) || !hasExactKeys(section, ['kind', 'items'])) {
+    if (!isRecord(section)) {
+      throw new XFeedComposerAgentError('invalid-submission', 'composer submission section is invalid')
+    }
+    if (hasExactKeys(section, ['itemId', 'summary'])) {
+      if (latestSection === undefined) {
+        throw new XFeedComposerAgentError('invalid-submission', 'composer submission item has no preceding section')
+      }
+      appendItem(latestSection, section)
+      continue
+    }
+    if (!hasExactKeys(section, ['kind', 'items'])) {
       throw new XFeedComposerAgentError('invalid-submission', 'composer submission section is invalid')
     }
     const kind = section.kind
@@ -218,29 +247,21 @@ function projectComposerSubmission(
     if (!Array.isArray(section.items)) {
       throw new XFeedComposerAgentError('invalid-submission', 'composer submission section items must be an array')
     }
-    const items: Array<{ itemId: string; summary: string }> = []
+    const projectedSection: ProjectedSection = { kind: kind as ComposerSectionKind, items: [] }
+    sections.push(projectedSection)
+    latestSection = projectedSection
     for (const item of section.items) {
-      if (!isRecord(item) || !hasExactKeys(item, ['itemId', 'summary'])) {
+      if (!isRecord(item)) {
         throw new XFeedComposerAgentError('invalid-submission', 'composer submission item is invalid')
       }
-      const itemId = item.itemId
-      const summary = item.summary
-      if (typeof itemId !== 'string' || !allowedItemIds.has(itemId)) {
-        throw new XFeedComposerAgentError('invalid-submission', 'composer submission item is not in the allowlist')
-      }
-      if (!isValidComposerPlainText(summary, Number.POSITIVE_INFINITY)) {
-        throw new XFeedComposerAgentError('invalid-submission', 'composer submission item summary is invalid')
-      }
-      if (seenItems.has(itemId)) continue
-      seenItems.add(itemId)
-      items.push({ itemId, summary: truncateComposerPlainText(summary, COMPOSER_SUMMARY_MAX_UTF8_BYTES) })
+      appendItem(projectedSection, item)
     }
-    if (items.length > 0) sections.push({ kind: kind as ComposerSectionKind, items })
   }
-  if (sections.length === 0) {
+  const nonEmptySections = sections.filter(section => section.items.length > 0)
+  if (nonEmptySections.length === 0) {
     throw new XFeedComposerAgentError('invalid-submission', 'composer submission has no items after projection')
   }
-  return { title: truncateComposerPlainText(value.title, COMPOSER_TITLE_MAX_UTF8_BYTES), sections }
+  return { title: truncateComposerPlainText(value.title, COMPOSER_TITLE_MAX_UTF8_BYTES), sections: nonEmptySections }
 }
 
 function validateMaterial(value: XFeedComposerMaterial): XFeedComposerMaterial {
