@@ -2,7 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { CallId, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -33,6 +33,15 @@ function response(value: unknown, callId = 'planner-1'): StreamChunk[] {
     { type: 'tool-call-delta', index: 0, id, name: SUBMIT_X_CRON_PLANNER, argumentsDelta: args },
     { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: SUBMIT_X_CRON_PLANNER, arguments: args } },
     { type: 'finish', reason: { kind: 'tool-calls' } },
+  ]
+}
+
+function textResponse(text: string): StreamChunk[] {
+  return [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'text-delta', index: 0, text },
+    { type: 'block-end', index: 0, block: { type: 'text', text } },
+    { type: 'finish', reason: { kind: 'stop' } },
   ]
 }
 
@@ -89,6 +98,84 @@ describe('one-shot X cron planner Agent', () => {
     expect(adapter.requests[0]?.system).toBe(PLANNER_SYSTEM_PROMPT)
     expect(adapter.requests[0]?.tools?.[0]).toEqual(SUBMIT_X_CRON_PLANNER_SCHEMA)
     expect(JSON.stringify(adapter.requests[0])).not.toMatch(/https?:\/\/|`|\*\*|\[[^\]]+\]\(/u)
+  })
+
+  it('keeps a successful submit when the harness emits a post-submit empty internal stream', async () => {
+    const adapter = new WireAdapter([response({
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration: { kind: 'none' },
+    })])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+    const events: string[] = []
+    const observedWires: Array<{ readonly keys: string[]; readonly sessionId: string | undefined; readonly system: string | undefined; readonly tools: number | undefined }> = []
+    let injected = false
+    let injectedStream: Promise<void> | undefined
+    ctx.on('agent/pre-step', (_payload, next) => {
+      events.push('agent/pre-step')
+      return next()
+    })
+    ctx.on('llm/stream', (wire, next) => {
+      observedWires.push({ keys: Object.keys(wire), sessionId: wire.sessionId, system: wire.system, tools: wire.tools?.length })
+      events.push('llm/stream')
+      return next()
+    })
+    ctx.on('session/event', (session, event) => {
+      events.push(event.type)
+      if (event.type !== 'tool/result' || injected) return
+      injected = true
+      injectedStream = (async () => {
+        for await (const _chunk of ctx.llm.stream({
+          provider: 'wire-test',
+          model: 'wire-model',
+          messages: [],
+          sessionId: session.id,
+        })) { /* the structured surface must short-circuit this internal call */ }
+      })()
+    })
+
+    const result = await runXCronPlanner(ctx, request)
+    await injectedStream
+    expect(result.dto.exploration).toEqual({ kind: 'none' })
+    expect(observedWires).toHaveLength(2)
+    expect(observedWires[0]?.keys).toEqual(['provider', 'model', 'messages', 'system', 'tools', 'sessionId', 'signal'])
+    expect(observedWires[0]?.system).toBe(PLANNER_SYSTEM_PROMPT)
+    expect(observedWires[0]?.tools).toBe(1)
+    expect(observedWires[1]).toEqual({
+      keys: ['provider', 'model', 'messages', 'sessionId'],
+      sessionId: result.sessionId,
+      system: undefined,
+      tools: undefined,
+    })
+    expect(events.indexOf('llm/stream')).toBeLessThan(events.indexOf('tool/call'))
+    expect(events.lastIndexOf('llm/stream')).toBeGreaterThan(events.indexOf('tool/result'))
+    expect(events.at(-1)).toBe('turn/end')
+    expect(adapter.requests).toHaveLength(1)
+  })
+
+  it('rejects a second pre-step before it can reach llm/stream or the adapter', async () => {
+    const adapter = new WireAdapter([textResponse('首步没有提交 DTO')])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+    let steered = false
+    let stepStarts = 0
+    ctx.on('session/event', (_session, event) => {
+      if (event.type === 'step/start') stepStarts += 1
+    })
+    ctx.on('agent/turn-stopping', ({ agent }) => {
+      if (!steered) {
+        steered = true
+        agent.steer(createUserMessage({
+          content: [{ type: 'text', text: 'second pre-step probe' }],
+          source: { kind: 'plugin', plugin: 'test' },
+        }))
+      }
+    })
+
+    await expect(runXCronPlanner(ctx, request)).rejects.toThrow(/second pre-step|invalid-submission|cancelled/u)
+    expect(adapter.requests).toHaveLength(1)
+    expect(stepStarts).toBe(1)
   })
 
   it('projects the real three-key explore submission before strict parsing', async () => {

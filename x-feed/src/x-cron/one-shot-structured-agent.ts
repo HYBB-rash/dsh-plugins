@@ -126,6 +126,10 @@ export class OneShotStructuredAgentSurface<T> {
     this.expectedSessionId = sessionId
     this.disposeCapture = ctx.on('llm/stream', (request, next) => {
       if (request.sessionId !== sessionId) return next()
+      // A tool may conclude the turn while a harness-owned internal stream is
+      // already queued. Once the DTO is accepted, that follow-up has no
+      // business work and must not become a second captured or adapter call.
+      if (this.submitted !== undefined) return emptyStream()
       try {
         const wire = projectWireRequest(request)
         this.wires.push(wire)
