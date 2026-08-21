@@ -127,6 +127,61 @@ class TestBuildPackage(unittest.TestCase):
                 pkg["selected_ids"],
             )
 
+    def test_package_projection_normalizes_and_deduplicates_analytics_without_mutating_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            timeline = os.path.join(tmp, "timeline.jsonl")
+            last = os.path.join(tmp, "last.json")
+            raw_items = [
+                {
+                    "id": "2090990000000000001",
+                    "url": "https://x.com/example/status/2090990000000000001/analytics",
+                    "text": "analytics candidate",
+                },
+                {
+                    "id": "2090990000000000001",
+                    "url": "https://x.com/example/status/2090990000000000001/photo/1",
+                    "text": "analytics candidate with photo",
+                },
+                {
+                    "id": "2090990000000000002",
+                    "url": "https://x.com/example/status/2090990000000000002",
+                    "text": "second candidate",
+                },
+            ]
+            original_items = json.loads(json.dumps(raw_items))
+
+            with unittest.mock.patch.object(
+                    pipe, "run_engine_analyze",
+                    return_value={"top_theme": "ai", "themes": {"ai": 1}, "candidates": []}):
+                pkg = pipe.build_package(
+                    timeline,
+                    last,
+                    recent=10,
+                    current_items=raw_items,
+                )
+
+            self.assertEqual(raw_items, original_items)
+            self.assertEqual(len(pkg["recent_items"]), 2)
+            self.assertEqual(
+                [item["url"] for item in pkg["recent_items"]],
+                [
+                    "https://x.com/example/status/2090990000000000001",
+                    "https://x.com/example/status/2090990000000000002",
+                ],
+            )
+            self.assertEqual(
+                [item["id"] for item in pkg["recent_items"]],
+                ["2090990000000000001", "2090990000000000002"],
+            )
+            self.assertEqual(
+                pkg["selected_urls"],
+                [item["url"] for item in pkg["recent_items"]],
+            )
+            self.assertEqual(
+                pkg["selected_ids"],
+                [item["id"] for item in pkg["recent_items"]],
+            )
+
     def test_package_graph_material_uses_current_theme_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             timeline = os.path.join(tmp, "timeline.jsonl")

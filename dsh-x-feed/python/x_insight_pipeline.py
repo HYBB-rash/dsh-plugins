@@ -26,6 +26,7 @@ from urllib.parse import urlsplit, urlunsplit
 import x_browser
 import x_neighborhood
 import x_paths
+import x_timeline_dedup
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = x_paths.data_dir()
@@ -348,14 +349,15 @@ def build_package(items_path=TIMELINE, last_path=LAST_THEME, recent=30, cap_item
         decision["recent_count"] = 0
         decision["candidates"] = []
         decision["wander_suggested"] = False
+    package_items, _ = x_timeline_dedup.deduplicate_records(selected)
     state = _shown_state(shown_path)
     shown_count = sum(1 for item in history if _is_shown(item, state))
     delivery_id = delivery_id or f"x-{int(time.time())}-{uuid.uuid4().hex[:10]}"
     pkg = {
         "decision": decision,
-        "recent_items": selected,
-        "selected_urls": [item.get("url", "") for item in selected if item.get("url")],
-        "selected_ids": [tweet_id(item) for item in selected if tweet_id(item)],
+        "recent_items": package_items,
+        "selected_urls": [item.get("url", "") for item in package_items if item.get("url")],
+        "selected_ids": [tweet_id(item) for item in package_items if tweet_id(item)],
         "shown_count": shown_count,
         "delivery_id": delivery_id,
         "collection_status": collection_status,
