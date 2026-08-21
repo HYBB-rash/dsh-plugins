@@ -35,4 +35,19 @@ describe('cron environment module loader', () => {
       async () => ({}),
     )).rejects.toThrow('does not export createCronEnvironmentExtension')
   })
+
+  it('resolves a bare business package from the active profile composition', async () => {
+    const create = vi.fn(() => ({ marker: 'business/v1', requirements: {}, prepare: vi.fn() }))
+    const load = vi.fn(async () => ({ createCronEnvironmentExtension: create }))
+    const ctx = {
+      baseUrl: 'file:///srv/dsh/profiles/telegram/cordis.yml',
+      loader: { internal: { import: load } },
+    }
+    await loadCronEnvironmentModules(ctx as never, [{ modulePath: '@herman/business' }])
+    expect(load).toHaveBeenCalledWith(
+      '@herman/business',
+      'file:///srv/dsh/profiles/telegram/cordis.yml',
+      {},
+    )
+  })
 })

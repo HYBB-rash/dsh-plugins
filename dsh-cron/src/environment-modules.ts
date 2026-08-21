@@ -24,8 +24,9 @@ export type ImportCronEnvironmentModule = (specifier: string) => Promise<unknown
 export async function loadCronEnvironmentModules(
   ctx: Context,
   configs: readonly CronEnvironmentModuleConfig[],
-  importModule: ImportCronEnvironmentModule = specifier => import(specifier),
+  importModule?: ImportCronEnvironmentModule,
 ): Promise<CronAgentEnvironmentProvider[]> {
+  const load = importModule ?? (specifier => importFromComposition(ctx, specifier))
   const providers: CronAgentEnvironmentProvider[] = []
   for (const config of configs) {
     if (config.modulePath.trim() === '') throw new Error('cron environment modulePath must be non-empty')
@@ -33,13 +34,24 @@ export async function loadCronEnvironmentModules(
     const specifier = isAbsolute(config.modulePath)
       ? pathToFileURL(config.modulePath).href
       : config.modulePath
-    const loaded = await importModule(specifier)
+    const loaded = await load(specifier)
     if (!isModule(loaded)) {
       throw new Error(`cron environment module ${config.modulePath} does not export createCronEnvironmentExtension`)
     }
     providers.push(await loaded.createCronEnvironmentExtension(ctx, parsed))
   }
   return providers
+}
+
+/** Resolve bare business packages from the active profile, just like Cordis plugins. */
+function importFromComposition(ctx: Context, specifier: string): Promise<unknown> {
+  const loader = (ctx as Context & {
+    loader?: { internal?: { import: (name: string, parentUrl: string, attributes: object) => Promise<unknown> } }
+  }).loader
+  if (ctx.baseUrl !== undefined && loader?.internal !== undefined) {
+    return loader.internal.import(specifier, ctx.baseUrl, {})
+  }
+  return import(specifier)
 }
 
 function parseConfig(value: string | undefined): Readonly<Record<string, unknown>> {

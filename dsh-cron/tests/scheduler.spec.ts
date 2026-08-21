@@ -260,6 +260,15 @@ async function waitFor(condition: () => boolean, timeoutMs = 4000): Promise<void
   }
 }
 
+function lastFinish(dir: string): Record<string, unknown> {
+  const finish = readLines(dir)
+    .map(line => JSON.parse(line) as Record<string, unknown>)
+    .filter(record => record.event === 'finish')
+    .at(-1)
+  if (finish === undefined) throw new Error('run ledger has no finish record')
+  return finish
+}
+
 function newRuntime(dir: string, deps: object) {
   const errors: string[] = []
   const events: Array<{ name: string; payload: unknown }> = []
@@ -1593,7 +1602,9 @@ describe('marked Agent environment and run lease lifecycle', () => {
       ])
       const records = readLines(dir).map(line => JSON.parse(line) as Record<string, unknown>)
       expect(records[0]).toMatchObject({ event: 'claim' })
-      expect(records.at(-1)).toMatchObject({ event: 'finish', status: 'success', deliveryState: 'silent' })
+      expect(records.filter(record => record.event === 'finish').at(-1)).toMatchObject({
+        event: 'finish', status: 'success', deliveryState: 'silent',
+      })
     } finally {
       await runtime.dispose()
     }
@@ -1639,7 +1650,7 @@ describe('marked Agent environment and run lease lifecycle', () => {
       expect(order.indexOf('finalize:final-output')).toBeGreaterThan(order.indexOf('drive'))
       expect(order.indexOf('finalize:final-output')).toBeLessThan(order.indexOf('environment-dispose'))
       expect(order.indexOf('environment-dispose')).toBeLessThan(order.indexOf('deliver'))
-      expect(JSON.parse(readLines(dir).at(-1)!)).toMatchObject({
+      expect(lastFinish(dir)).toMatchObject({
         status: 'success',
         deliveryState: 'delivered',
       })
@@ -1682,7 +1693,7 @@ describe('marked Agent environment and run lease lifecycle', () => {
       expect(delivered).toEqual([])
       expect(order).toContain('finalize')
       expect(order).toContain('environment-dispose')
-      const finish = JSON.parse(readLines(dir).at(-1)!) as Record<string, unknown>
+      const finish = lastFinish(dir)
       expect(finish).toMatchObject({ status: 'error', deliveryState: 'not_requested' })
       expect(String(finish.error)).toContain('output guard mismatch')
     } finally {
@@ -1755,7 +1766,7 @@ describe('marked Agent environment and run lease lifecycle', () => {
     runtime.start()
     try {
       await waitFor(() => readLines(dir).some(line => JSON.parse(line).event === 'finish'))
-      const finish = JSON.parse(readLines(dir).at(-1)!) as Record<string, unknown>
+      const finish = lastFinish(dir)
       expect(finish).toMatchObject({ status: 'error', deliveryState: 'not_requested' })
       expect(String(finish.error)).toContain(expectedError)
       expect(driveCalls).toBe(0)
@@ -1793,7 +1804,7 @@ describe('marked Agent environment and run lease lifecycle', () => {
       await waitFor(() => readLines(dir).some(line => JSON.parse(line).event === 'finish'))
       expect(order).toEqual(['prepare', 'create', 'setup', 'environment-dispose'])
       expect(driveCalls).toBe(0)
-      expect(JSON.parse(readLines(dir).at(-1)!).status).toBe('error')
+      expect(lastFinish(dir).status).toBe('error')
     } finally {
       await runtime.dispose()
     }
@@ -1824,7 +1835,7 @@ describe('marked Agent environment and run lease lifecycle', () => {
       await waitFor(() => readLines(dir).some(line => JSON.parse(line).event === 'finish'))
       expect(order).toEqual(['prepare'])
       expect(driveCalls).toBe(0)
-      expect(JSON.parse(readLines(dir).at(-1)!).status).toBe('error')
+      expect(lastFinish(dir).status).toBe('error')
     } finally {
       await runtime.dispose()
     }
@@ -1859,7 +1870,7 @@ describe('marked Agent environment and run lease lifecycle', () => {
       await waitFor(() => readLines(dir).some(line => JSON.parse(line).event === 'finish'))
       expect(order).toEqual(['prepare', 'create', 'setup', 'verify', 'whenIdle', 'flush', 'dispose', 'environment-dispose'])
       expect(driveCalls).toBe(0)
-      expect(JSON.parse(readLines(dir).at(-1)!).status).toBe('error')
+      expect(lastFinish(dir).status).toBe('error')
     } finally {
       await runtime.dispose()
     }
@@ -1895,7 +1906,7 @@ describe('marked Agent environment and run lease lifecycle', () => {
     runtime.start()
     try {
       await waitFor(() => readLines(dir).some(line => JSON.parse(line).event === 'finish'))
-      expect(JSON.parse(readLines(dir).at(-1)!)).toMatchObject({ status: 'error' })
+      expect(lastFinish(dir)).toMatchObject({ status: 'error' })
       expect(delivered).toHaveLength(1)
       expect(delivered[0]).toContain('cron job marked-cleanup-failure 出错')
       expect(delivered[0]).not.toContain('success body must not be delivered')

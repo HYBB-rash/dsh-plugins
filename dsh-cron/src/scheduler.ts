@@ -588,6 +588,14 @@ export class SchedulerRuntime implements RunNowPort {
     const job = foldedJobs.active.find(entry => entry.id === request.jobId)
     if (job === undefined) return { ok: false, code: 'job_not_found' }
 
+    // reload() can yield while a natural occurrence is already due but has
+    // not yet reached the local reservation map. Do not let an immediate
+    // manual request jump ahead during that narrow scheduler-drive window.
+    const scheduled = this.jobs.get(job.id)?.nextRunAt ?? this.rebuildNextRun(job, foldedRuns)
+    if (this.run !== undefined && scheduled !== undefined && scheduled <= Date.now()) {
+      return { ok: false, code: 'job_active' }
+    }
+
     const inFlight = this.inFlightByJob.get(job.id)
     if (inFlight !== undefined) {
       if (inFlight === runId) return { ok: true, alreadyAccepted: true, runId }

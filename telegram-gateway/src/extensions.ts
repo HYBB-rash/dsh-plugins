@@ -22,8 +22,9 @@ export type ImportTelegramExtension = (specifier: string) => Promise<unknown>
 export async function loadTelegramExtensions(
   ctx: Context,
   configs: readonly TelegramExtensionConfig[],
-  importModule: ImportTelegramExtension = specifier => import(specifier),
+  importModule?: ImportTelegramExtension,
 ): Promise<Array<() => void | Promise<void>>> {
+  const load = importModule ?? (specifier => importFromComposition(ctx, specifier))
   const disposers: Array<() => void | Promise<void>> = []
   try {
     for (const config of configs) {
@@ -32,7 +33,7 @@ export async function loadTelegramExtensions(
       const specifier = isAbsolute(config.modulePath)
         ? pathToFileURL(config.modulePath).href
         : config.modulePath
-      const loaded = await importModule(specifier)
+      const loaded = await load(specifier)
       if (!isModule(loaded)) {
         throw new Error(`Telegram extension ${config.modulePath} does not export installTelegramExtension`)
       }
@@ -44,6 +45,17 @@ export async function loadTelegramExtensions(
     await Promise.allSettled(disposers.reverse().map(dispose => Promise.resolve(dispose())))
     throw error
   }
+}
+
+/** Resolve bare business packages from the active profile, just like Cordis plugins. */
+function importFromComposition(ctx: Context, specifier: string): Promise<unknown> {
+  const loader = (ctx as Context & {
+    loader?: { internal?: { import: (name: string, parentUrl: string, attributes: object) => Promise<unknown> } }
+  }).loader
+  if (ctx.baseUrl !== undefined && loader?.internal !== undefined) {
+    return loader.internal.import(specifier, ctx.baseUrl, {})
+  }
+  return import(specifier)
 }
 
 function parseConfig(value: string | undefined): Readonly<Record<string, unknown>> {

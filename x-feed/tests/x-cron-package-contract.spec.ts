@@ -16,7 +16,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 const packageDirectory = resolve(import.meta.dirname, '..')
 const workspaceDirectory = resolve(packageDirectory, '..')
 const temporaryDirectories: string[] = []
-const typeScript = '/home/herman/Documents/Codex/2026-08-14/deepseek-harness/node_modules/.pnpm/typescript@6.0.3/node_modules/typescript/bin/tsc'
+const harnessDirectory = process.env.DSH_HARNESS_ROOT!
+const harnessDependencies = join(harnessDirectory, 'node_modules/.pnpm/node_modules')
+const typeScript = join(harnessDirectory, 'node_modules/typescript/bin/tsc')
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true })
@@ -49,14 +51,14 @@ function unpack(tarball: string, packageDirectory: string): void {
 }
 
 function linkExistingDependencies(consumerNodeModules: string): void {
-  const sourceScope = join(packageDirectory, 'node_modules', '@deepseek-ai')
+  const sourceScope = join(harnessDependencies, '@deepseek-ai')
   const targetScope = join(consumerNodeModules, '@deepseek-ai')
   mkdirSync(targetScope, { recursive: true })
   for (const entry of readdirSync(sourceScope)) {
     if (entry === 'dsh-cron') continue
     symlinkSync(join(sourceScope, entry), join(targetScope, entry), 'dir')
   }
-  const standardSchema = join(packageDirectory, 'node_modules', '@standard-schema')
+  const standardSchema = join(harnessDependencies, '@standard-schema')
   if (existsSync(standardSchema)) symlinkSync(standardSchema, join(consumerNodeModules, '@standard-schema'), 'dir')
 }
 
@@ -128,9 +130,17 @@ if (X_CRON_AGENT_ENVIRONMENT_MARKER !== provider.marker) throw new Error('marker
       files: ['consumer.ts'],
     }, null, 2))
 
-    execFileSync(typeScript, ['--project', join(consumer, 'tsconfig.json'), '--pretty', 'false'], {
-      cwd: consumer,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    try {
+      execFileSync(typeScript, ['--project', join(consumer, 'tsconfig.json'), '--pretty', 'false'], {
+        cwd: consumer,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (error) {
+      const processError = error as { stdout?: Buffer; stderr?: Buffer }
+      const output = [processError.stdout, processError.stderr]
+        .flatMap(value => value === undefined ? [] : [value.toString('utf8')])
+        .join('\n')
+      throw new Error(`packed consumer type-check failed:\n${output || String(error)}`, { cause: error })
+    }
   }, 15_000)
 })

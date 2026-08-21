@@ -31,4 +31,19 @@ describe('Telegram extension loader', () => {
     )).rejects.toThrow('does not export installTelegramExtension')
     expect(dispose).toHaveBeenCalledOnce()
   })
+
+  it('resolves a bare business package from the active profile composition', async () => {
+    const install = vi.fn()
+    const load = vi.fn(async () => ({ installTelegramExtension: install }))
+    const ctx = {
+      baseUrl: 'file:///srv/dsh/profiles/telegram/cordis.yml',
+      loader: { internal: { import: load } },
+    }
+    await loadTelegramExtensions(ctx as never, [{ modulePath: '@herman/business' }])
+    expect(load).toHaveBeenCalledWith(
+      '@herman/business',
+      'file:///srv/dsh/profiles/telegram/cordis.yml',
+      {},
+    )
+  })
 })

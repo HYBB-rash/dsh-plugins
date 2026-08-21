@@ -33,6 +33,12 @@ function readRunRecords(directory: string): Array<Record<string, unknown>> {
     .map(line => JSON.parse(line) as Record<string, unknown>)
 }
 
+function lastFinish(directory: string): Record<string, unknown> {
+  const finish = readRunRecords(directory).filter(record => record.event === 'finish').at(-1)
+  if (finish === undefined) throw new Error('run ledger has no finish record')
+  return finish
+}
+
 function waitForRunRecords(directory: string, count: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now()
@@ -276,7 +282,7 @@ describe('generic marked Agent run lifecycle acceptance', () => {
       expect(createOptions[0]).not.toHaveProperty('resumeSessionId')
       expect(createOptions[0]).not.toHaveProperty('seed')
       expect(createOptions[0]).not.toHaveProperty('parent')
-      expect(readRunRecords(directory).at(-1)).toMatchObject({ status: 'success', deliveryState: 'delivered' })
+      expect(lastFinish(directory)).toMatchObject({ status: 'success', deliveryState: 'delivered' })
     } finally {
       await runtime.dispose()
     }
@@ -324,7 +330,7 @@ describe('generic marked Agent run lifecycle acceptance', () => {
         finalizeOutcome: async () => { order.push('finalize') },
         settleRun: async event => {
           order.push(`settle:${event.deliveryState}`)
-          expect(readRunRecords(directory).at(-1)).toMatchObject({
+          expect(lastFinish(directory)).toMatchObject({
             event: 'finish',
             runId: event.runId,
             deliveryState: 'delivered',
@@ -460,7 +466,7 @@ describe('generic marked Agent run lifecycle acceptance', () => {
     })
     try {
       await waitForRunRecords(directory, 1)
-      const finish = readRunRecords(directory).at(-1)!
+      const finish = lastFinish(directory)
       expect(finish.status).toBe('error')
       expect(finish.error).toEqual(expect.stringContaining(stage === 'drive-timeout' ? 'drive timed out' : `${stage} failed`))
       expect(delivered).toHaveLength(1)
@@ -528,7 +534,7 @@ describe('generic marked Agent run lifecycle acceptance', () => {
         'handle-dispose', 'environment-dispose', 'finish',
       ])
       expect(delivered).toEqual([])
-      expect(readRunRecords(directory).at(-1)).toMatchObject({ status: 'interrupted', deliveryState: 'uncertain' })
+      expect(lastFinish(directory)).toMatchObject({ status: 'interrupted', deliveryState: 'uncertain' })
     } finally {
       await runtime.dispose()
     }
@@ -569,7 +575,7 @@ describe('generic marked Agent run lifecycle acceptance', () => {
     runtime.start()
     try {
       await waitForRunRecords(directory, 1)
-      const finish = readRunRecords(directory).at(-1)!
+      const finish = lastFinish(directory)
       expect(order).toContain('cancel')
       expect(order).toContain('idle')
       expect(order).toContain('flush')
@@ -615,7 +621,7 @@ describe('generic marked Agent run lifecycle acceptance', () => {
     })
     try {
       await waitForRunRecords(directory, 1)
-      const finish = readRunRecords(directory).at(-1)!
+      const finish = lastFinish(directory)
       expect(finish).toMatchObject({ status: 'error', deliveryState: 'not_requested' })
       expect(String(finish.error)).toContain(expectedCode)
       expect(agents).toHaveLength(0)

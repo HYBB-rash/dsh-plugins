@@ -58,7 +58,7 @@ export * from './prepared-delivery.ts'
 export * from './environment-modules.ts'
 
 /** Services required by either role before activation. */
-export const inject = ['agents', 'sessions', 'tools', 'agentDefaultModel', 'credentials']
+export const inject = ['agents', 'sessions', 'tools', 'agentDefaultModel', 'credentials', 'loader']
 
 /** dsh-cron configuration. */
 export interface Config {
