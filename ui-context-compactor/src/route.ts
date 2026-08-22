@@ -135,6 +135,14 @@ const MAX_SOURCE_SEQS = 12
 const MIN_REDUCER_INPUT_CHARS = 32_000
 const MIN_LARGE_TOOL_RESULT_CHARS = 1_024
 const DEFAULT_LARGE_TOOL_RESULT_CHARS = 2_500
+// A Telegram root is a long-lived personal control surface, not one immutable
+// project.  Keep only the active topic's working state here; raw Session
+// history and compaction summaries remain the durable historical record.
+const ACTIVE_SUCCESS_CRITERIA = 4
+const ACTIVE_DECISIONS = 6
+const ACTIVE_RETIRED_ROUTES = 3
+const ACTIVE_REVIEW_TRIGGERS = 4
+const ACTIVE_DETAIL_REFS = 6
 const SYSTEM_PROMPT_SOURCE = '@deepseek-ai/dsh-system-prompt'
 
 const SECRET_PATTERNS: readonly RegExp[] = [
@@ -579,13 +587,20 @@ function validateEvolution(snapshot: RouteSnapshot, previous: RouteSnapshot | un
   if (previous === undefined) return
   if (snapshot.asOfSeq < previous.asOfSeq) fail('asOfSeq must not move backward')
 
-  const retainedTexts = new Set(snapshot.retiredRoutes.map(item => item.text))
-  for (const retired of previous.retiredRoutes) {
-    if (!retainedTexts.has(retired.text)) fail(`retired route "${retired.text}" was dropped`)
-  }
-  if (snapshot.currentRoute.text !== previous.currentRoute.text
-    && !retainedTexts.has(previous.currentRoute.text)) {
-    fail('a changed currentRoute must explicitly retire the previous current route')
+  // Route state is a bounded active-topic projection.  Earlier topic changes
+  // remain recoverable from durable Session events and compaction summaries,
+  // but are deliberately not carried forever in every new route revision.
+}
+
+/** Reduce a model body to the bounded active-topic surface before publishing. */
+function activeRouteBody(body: RouteBody): RouteBody {
+  return {
+    ...body,
+    successCriteria: body.successCriteria.slice(-ACTIVE_SUCCESS_CRITERIA),
+    decisions: body.decisions.slice(-ACTIVE_DECISIONS),
+    retiredRoutes: body.retiredRoutes.slice(-ACTIVE_RETIRED_ROUTES),
+    reviewTriggers: body.reviewTriggers.slice(-ACTIVE_REVIEW_TRIGGERS),
+    detailRefs: body.detailRefs.slice(-ACTIVE_DETAIL_REFS),
   }
 }
 
@@ -838,7 +853,7 @@ export function parseRouteBody(
   } catch {
     return fail('model output is not valid JSON')
   }
-  const body = routeBody(parsed, true)
+  const body = activeRouteBody(routeBody(parsed, true))
   const snapshot: RouteSnapshot = {
     revision: (previous?.revision ?? 0) + 1,
     asOfSeq,

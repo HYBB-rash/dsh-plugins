@@ -281,18 +281,18 @@ describe('strict route message fold', () => {
     }
   })
 
-  it('rejects a route switch that silently drops the previous current route', () => {
+  it('allows an active-topic switch to discard old route history', () => {
     const session = Session.create(SessionId('route-missing-retirement'))
     const first = appendInitialRoute(session)
     const correctionSeq = appendUser(session, '确认改走路线 B。')
     const body = correctedBody(first, 0, correctionSeq)
 
-    expect(() => parseRouteBody(
+    expect(parseRouteBody(
       JSON.stringify({ ...body, retiredRoutes: [] }),
       first,
       correctionSeq,
       session.events,
-    )).toThrow(/must explicitly retire the previous current route/)
+    ).snapshot.retiredRoutes).toEqual([])
   })
 
   it('keeps the previous valid snapshot when a cold source has non-monotonic metadata', () => {

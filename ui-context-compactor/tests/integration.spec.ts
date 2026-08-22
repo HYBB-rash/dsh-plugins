@@ -183,7 +183,7 @@ class RouteAwareAdapter extends LlmAdapter {
   }
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    if (options.system?.includes('You maintain the current route state') === true) {
+    if (options.system?.includes('Return exactly one JSON object and nothing else.') === true) {
       this.reducerRequests.push(options)
       const call = this.reducerRequests.length
       const output = this.secretReducerCall === call

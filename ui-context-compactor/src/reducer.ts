@@ -61,9 +61,9 @@ export function routeUpdateFailureCode(error: unknown): RouteUpdateFailureCode {
   return error instanceof RouteUpdateFailure ? error.routeCode : 'unknown'
 }
 
-const REDUCER_SYSTEM_PROMPT = `You maintain the current route state for one long-running AI work session.
+const REDUCER_SYSTEM_PROMPT = `You maintain the bounded active-topic route state for a long-running personal Telegram session.
 
-The Session has exactly one root problem. Do not switch the root to a new unrelated problem; the user must open a new Session for that. Update the route only from the supplied prior snapshot and source-labelled original events. A newer direct human source overrides an older snapshot, inference, assistant proposal, or ordinary tool result. Direct human sources are [user] events and [human-answer] events; [human-answer] is a successful, host-verified answer returned by ask_user_question, not an assistant proposal.
+One Telegram Session can contain unrelated topics. The route is not a permanent diary: it keeps only the user's current actionable topic and the small amount of live decision state needed to continue it. When a newer direct human source begins unrelated work, make that the current rootGoal; older topics remain in raw Session history and compaction summaries, not in this snapshot. Update only from the supplied prior snapshot and source-labelled original events. A newer direct human source overrides an older snapshot, inference, assistant proposal, or ordinary tool result. Direct human sources are [user] events and [human-answer] events; [human-answer] is a successful, host-verified answer returned by ask_user_question, not an assistant proposal.
 
 Return exactly one JSON object and nothing else. It must have these exact keys:
 {
@@ -79,12 +79,13 @@ Return exactly one JSON object and nothing else. It must have these exact keys:
 }
 
 Rules:
-- Every revision is a complete current snapshot, not a patch.
+- Every revision is a complete bounded active-topic snapshot, not a patch.
 - Copy no code, command output, logs, credentials, tokens, private keys, or long operational detail into the JSON.
 - sourceSeqs must name supplied original semantic events. rootGoal and every success criterion must cite a [user] or [human-answer] event. A confirmed route or decision must cite a [user] or [human-answer] event; otherwise mark it tentative.
 - detailRefs may cite only [user], [human-answer], or ordinary tool-result events. They describe what to retrieve and why, but never copy the detail itself. Prefer exact sourceSeqs; fallbackQuery is optional and secondary.
-- If currentRoute changes, copy the previous currentRoute.text exactly into retiredRoutes and explain whether it was superseded or rejected. Preserve all earlier retiredRoutes so an old route cannot silently revive.
-- Preserve the root goal, accepted constraints, and valid review triggers unless a newer direct human event explicitly corrects them.
+- Keep at most 4 successCriteria, 6 decisions, 3 retiredRoutes, 4 reviewTriggers, and 6 detailRefs. Drop old unrelated material rather than compressing it into this JSON.
+- If currentRoute changes within the same active topic, retain only its most recent replaced route. Do not preserve a permanent retirement history.
+- Preserve the active root goal, accepted constraints, and valid review triggers unless a newer direct human event explicitly corrects them or starts an unrelated topic.
 - Keep prose concise, plain, and in the user's language. Use one line per text field.`
 
 function finishFailure(finish: FinishReason): RouteUpdateFailureCode | undefined {
