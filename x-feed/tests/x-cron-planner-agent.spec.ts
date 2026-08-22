@@ -247,6 +247,22 @@ describe('one-shot X cron planner Agent', () => {
     expect(adapter.requests).toHaveLength(1)
   })
 
+  it.each([
+    [{ kind: 'explore', candidateId: 'candidate-1', topicId: '' }, { kind: 'explore', candidateId: 'candidate-1' }],
+    [{ kind: 'search', topicId: 'topic-1', candidateId: '' }, { kind: 'search', topicId: 'topic-1' }],
+  ] as const)('drops only an empty stale union field', async (exploration, expected) => {
+    const adapter = new WireAdapter([response({
+      selectedCandidateIds: ['candidate-1'],
+      themeId: 'theme-1',
+      exploration,
+    })])
+    const ctx = await harness(adapter)
+    contexts.push(ctx)
+
+    await expect(runXCronPlanner(ctx, request)).resolves.toMatchObject({ dto: { exploration: expected } })
+    expect(adapter.requests).toHaveLength(1)
+  })
+
   it('rejects a non-none exploration without a target and rejects canonicalized targets outside their allowlists', async () => {
     const submissions = [
       { kind: 'search' },

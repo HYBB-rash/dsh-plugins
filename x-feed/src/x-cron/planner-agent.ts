@@ -129,7 +129,7 @@ export function projectPlannerSubmission(value: unknown): unknown {
   const projectedExploration: Record<string, unknown> = { ...exploration }
   if (oppositeKey !== undefined
     && Object.prototype.hasOwnProperty.call(exploration, oppositeKey)
-    && isSafeUnionResidual(exploration[oppositeKey])) {
+    && (exploration[oppositeKey] === '' || isSafeUnionResidual(exploration[oppositeKey]))) {
     delete projectedExploration[oppositeKey]
   }
   return { ...value, exploration: projectedExploration }
