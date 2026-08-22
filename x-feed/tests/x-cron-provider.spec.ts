@@ -69,6 +69,10 @@ function toolCall(id: string, name: string, value: unknown): StreamChunk[] {
 class TwoCallProviderAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
 
+  constructor(private readonly themeId = 'agentic systems') {
+    super()
+  }
+
   override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
     return Promise.resolve({ provider, id: model, name: model })
   }
@@ -78,7 +82,7 @@ class TwoCallProviderAdapter extends LlmAdapter {
     if (request.system.includes('planner Agent')) {
       yield* toolCall('planner-submit', 'submit_x_cron_planner', {
         selectedCandidateIds: ['x-status:1'],
-        themeId: 'agentic systems',
+        themeId: this.themeId,
         exploration: { kind: 'none' },
       })
       return
@@ -343,6 +347,100 @@ describe('dsh-x-feed/v1 cron provider composition boundary', () => {
       await handle.dispose()
       await lease.dispose()
     }
+  })
+
+  it('uses a mixed theme for a nonempty unclassified random-walk batch without inventing a search topic', async () => {
+    const { directory, candidateUrl, packagePath } = await emptyAlignedFactFixture()
+    const python = runner()
+    const readFile = vi.fn(async (path: string) => {
+      if (path !== packagePath) throw new Error(`unexpected artifact read: ${path}`)
+      return JSON.stringify({
+        recent_items: [{ id: '1', url: candidateUrl, text: 'an uncategorized random-walk candidate' }],
+        selected_urls: [candidateUrl],
+        decision: { top_theme: null, themes: {} },
+      })
+    })
+    const adapter = new TwoCallProviderAdapter('mixed')
+    const ctx = await finalHarness(adapter)
+    const provider = createXFeedCronEnvironmentProvider({
+      ctx,
+      cronJobId: 'cron-x',
+      dataDir: directory,
+      pythonBin: 'python3',
+      pipelinePath: '/pkg/python/x_insight_pipeline.py',
+      run: python.run,
+      readFile,
+    })
+
+    const lease = await provider.prepare({ jobId: 'cron-x', runId: 'cron-x@mixed-theme' })
+    if (lease.kind === 'skip') throw new Error('nonempty unclassified fixture unexpectedly skipped')
+    const plannerRequest = adapter.requests.find(request => request.system.includes('planner Agent'))
+    const plannerText = plannerRequest?.messages[0]?.content.find(block => block.type === 'text')
+    expect(plannerText).toMatchObject({ type: 'text' })
+    if (plannerText?.type !== 'text') throw new Error('planner material is missing')
+    const plannerMaterial = JSON.parse(plannerText.text.slice(plannerText.text.indexOf('\n') + 1)) as {
+      allowedThemes: readonly string[]
+      allowedTopics: readonly string[]
+    }
+    expect(plannerMaterial).toMatchObject({ allowedThemes: ['mixed'], allowedTopics: [] })
+
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('provider-mixed-composer-session'),
+      agentOptions: { provider: 'wire-test', model: 'wire-model' },
+      setup: async agentCtx => {
+        installModelSelection(agentCtx, { current: { provider: 'wire-test', model: 'wire-model' }, assembled: undefined })
+        await lease.setupAgent(agentCtx)
+      },
+    })
+    try {
+      await lease.verifySurface(handle.agent)
+      const firstSeq = handle.agent.session.seq
+      handle.agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'drive mixed provider composition' }],
+        source: { kind: 'plugin', plugin: 'dsh-cron' },
+      }))
+      await handle.agent.whenIdle()
+      const finalized = await lease.finalizeOutcome!(summarizeTurn(handle.agent.session.events, firstSeq))
+
+      expect(adapter.requests).toHaveLength(2)
+      expect(finalized.text).toContain('📦 X 洞察 provider title')
+      expect(python.calls).toHaveLength(2)
+      expect(python.calls.at(-1)?.args).toEqual(expect.arrayContaining(['--pending-theme', 'mixed']))
+      expect(python.calls.some(call => call.args.includes('search-topic'))).toBe(false)
+    } finally {
+      await handle.dispose()
+      await lease.dispose()
+    }
+  })
+
+  it('rejects an explicitly empty theme allowlist instead of silently using mixed', async () => {
+    const { directory, candidateUrl, packagePath } = await emptyAlignedFactFixture()
+    const python = runner()
+    const readFile = vi.fn(async (path: string) => {
+      if (path !== packagePath) throw new Error(`unexpected artifact read: ${path}`)
+      return JSON.stringify({
+        allowed_themes: [],
+        recent_items: [{ id: '1', url: candidateUrl, text: 'candidate with a malformed explicit allowlist' }],
+        selected_urls: [candidateUrl],
+        decision: { top_theme: null, themes: {} },
+      })
+    })
+    const adapter = new FailIfCalledAdapter()
+    const ctx = await finalHarness(adapter)
+    const provider = createXFeedCronEnvironmentProvider({
+      ctx,
+      cronJobId: 'cron-x',
+      dataDir: directory,
+      pythonBin: 'python3',
+      pipelinePath: '/pkg/python/x_insight_pipeline.py',
+      run: python.run,
+      readFile,
+    })
+
+    await expect(provider.prepare({ jobId: 'cron-x', runId: 'cron-x@invalid-theme-allowlist' }))
+      .rejects.toThrow(/bounded theme/u)
+    expect(adapter.requests).toHaveLength(0)
+    expect(python.calls).toHaveLength(1)
   })
 
   it('uses the shared status identity parser for canonical and invalid package URLs', () => {

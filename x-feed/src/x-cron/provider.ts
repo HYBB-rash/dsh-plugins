@@ -54,6 +54,8 @@ const DEFAULT_PROJECTION_BUDGET: ProjectionBudget = Object.freeze({
   maxSerializedBytes: 16_000,
 })
 
+const UNCLASSIFIED_THEME_ID = 'mixed'
+
 export interface XFeedCronProviderOptions {
   readonly ctx: Context
   readonly cronJobId: string
@@ -246,23 +248,28 @@ function parseInsightPackage(value: XFeedInsightPackage, base: XFeedRunCapabilit
   }
   const decision = isRecord(value.decision) ? value.decision : {}
   const candidateTopics = candidates.flatMap(candidate => candidate.topics)
-  const allowedThemes = collectAllowlist(
-    value.allowed_themes ?? value.allowedThemes ?? value.allowed_topics ?? decision.allowed_themes ?? decision.top_theme,
+  const hasExplicitThemeAllowlist = Object.prototype.hasOwnProperty.call(value, 'allowed_themes')
+    || Object.prototype.hasOwnProperty.call(value, 'allowedThemes')
+  const explicitThemeSource = value.allowed_themes ?? value.allowedThemes
+  if (hasExplicitThemeAllowlist && collectAllowlist(explicitThemeSource, []).length === 0) {
+    throw new Error('X insight package does not expose a bounded theme allowlist')
+  }
+  const derivedThemes = collectAllowlist(
+    explicitThemeSource ?? value.allowed_topics ?? decision.allowed_themes ?? decision.top_theme,
     candidateTopics,
   )
+  const usesUnclassifiedTheme = derivedThemes.length === 0
+  const allowedThemes = usesUnclassifiedTheme ? Object.freeze([UNCLASSIFIED_THEME_ID]) : derivedThemes
   const allowedTopics = collectAllowlist(
     value.allowed_topics ?? value.allowedTopics ?? decision.allowed_topics ?? candidateTopics,
-    allowedThemes,
+    usesUnclassifiedTheme ? candidateTopics : allowedThemes,
   )
-  if (allowedThemes.length === 0 || allowedTopics.length === 0) {
-    throw new Error('X insight package does not expose a bounded theme/topic allowlist')
-  }
   const selectedUrls = parseUrls(value.selected_urls, 'selected_urls')
   const preparedUrls = [...new Set([...selectedUrls, ...candidates.map(candidate => candidate.source)])]
   const mechanicalSignals = collectMechanicalSignals(decision, candidates.length)
   const capabilities: XFeedRunCapabilities = {
     ...base,
-    allowedTopics,
+    allowedTopics: Object.freeze([...new Set([...allowedTopics, ...allowedThemes])]),
     candidates: Object.fromEntries(candidates.map(candidate => [candidate.id, {
       id: candidate.id,
       url: candidate.source,
