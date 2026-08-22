@@ -23,6 +23,7 @@ import {
   routeNeedsRearm,
   routeBodyFailureCode,
   ROUTE_CONTEXT_SOURCE,
+  shouldPreprocessLargeToolResult,
   type RouteBody,
   type RouteSnapshot,
 } from '../src/index.ts'
@@ -65,6 +66,31 @@ function appendToolAnswer(
     message: createToolResultMessage({
       callId,
       content: [{ type: 'text', text: JSON.stringify(value) }],
+      isError,
+    }),
+  }, { surfaceOp: 'append' }).seq
+}
+
+function appendToolTextResult(
+  session: Session,
+  name: string,
+  text: string,
+  isError = false,
+): number {
+  const callId = CallId(`call-${session.seq}`)
+  session.append('tool/call', {
+    turn: 1,
+    step: 1,
+    callId,
+    name,
+    arguments: '{}',
+  })
+  return session.append('tool/result', {
+    turn: 1,
+    step: 1,
+    message: createToolResultMessage({
+      callId,
+      content: [{ type: 'text', text }],
       isError,
     }),
   }, { surfaceOp: 'append' }).seq
@@ -386,6 +412,78 @@ describe('route projection and bounded material', () => {
     expect(material).not.toContain('super-secret-value')
     expect(material).not.toContain('raw-tool-secret')
     expect(material).not.toContain('duplicate route prose')
+  })
+
+  it('replaces large mechanical tool output with a seq-only reference when the experiment is enabled', () => {
+    const session = Session.create(SessionId('route-material-large-tool'))
+    const resultText = `build output ${'x'.repeat(4_000)}`
+    const resultSeq = appendToolTextResult(session, 'bash', resultText)
+
+    const material = buildRouteMaterial(session.events, undefined, 32_000, {
+      largeToolResultPreprocessing: { enabled: true, minChars: 2_500 },
+    })
+
+    expect(material).toContain(`[seq ${resultSeq} tool] [tool result bash elided; original seq ${resultSeq}; ${resultText.length} chars omitted; retrieve exact output by seq if needed]`)
+    expect(material).not.toContain(resultText)
+  })
+
+  it('finds the matching tool call when persisted event sequence numbers have gaps', () => {
+    const session = Session.create(SessionId('route-material-large-tool-gaps'))
+    const resultText = `build output ${'x'.repeat(4_000)}`
+    appendToolTextResult(session, 'bash', resultText)
+    const sparse: typeof session.events = []
+    for (const event of session.events) sparse[event.seq + 10] = { ...event, seq: event.seq + 10 }
+
+    const material = buildRouteMaterial(sparse, undefined, 32_000, {
+      largeToolResultPreprocessing: { enabled: true, minChars: 2_500 },
+    })
+
+    expect(material).toContain('tool result bash elided')
+    expect(material).not.toContain(resultText)
+  })
+
+  it('keeps human answers, failed results, and stateful results even when large-tool preprocessing is enabled', () => {
+    const session = Session.create(SessionId('route-material-large-tool-guards'))
+    const answerSeq = appendToolAnswer(session, 'ask_user_question', {
+      answers: [{ id: 'route', selected: ['路线 B'] }],
+    })
+    const failedSeq = appendToolTextResult(session, 'bash', `stderr ${'e'.repeat(4_000)}`, true)
+    const statusSeq = appendToolTextResult(session, 'assistant_task_status', `status ${'s'.repeat(4_000)}`)
+    const events = session.events
+
+    const answerEvent = events[answerSeq]
+    const failedEvent = events[failedSeq]
+    const statusEvent = events[statusSeq]
+    expect(answerEvent).toBeDefined()
+    expect(failedEvent).toBeDefined()
+    expect(statusEvent).toBeDefined()
+    expect(shouldPreprocessLargeToolResult(
+      answerEvent!,
+      events,
+      JSON.stringify({ answers: [{ id: 'route', selected: ['路线 B'] }] }),
+      { enabled: true, minChars: 2_500 },
+    )).toBe(false)
+    expect(shouldPreprocessLargeToolResult(
+      failedEvent!,
+      events,
+      `stderr ${'e'.repeat(4_000)}`,
+      { enabled: true, minChars: 2_500 },
+    )).toBe(false)
+    expect(shouldPreprocessLargeToolResult(
+      statusEvent!,
+      events,
+      `status ${'s'.repeat(4_000)}`,
+      { enabled: true, minChars: 2_500 },
+    )).toBe(false)
+
+    const material = buildRouteMaterial(session.events, undefined, 32_000, {
+      largeToolResultPreprocessing: { enabled: true, minChars: 2_500 },
+    })
+    expect(material).toContain(`[seq ${answerSeq} human-answer]`)
+    expect(material).toContain(`[seq ${failedSeq} tool] stderr`)
+    expect(material).toContain(`[seq ${statusSeq} tool] status`)
+    expect(material).not.toContain(`original seq ${failedSeq}`)
+    expect(material).not.toContain(`original seq ${statusSeq}`)
   })
 
   it('keeps the first root fact and newest human correction when older detail exceeds the budget', () => {

@@ -133,6 +133,8 @@ const MAX_REVIEW_TRIGGERS = 12
 const MAX_DETAIL_REFS = 20
 const MAX_SOURCE_SEQS = 12
 const MIN_REDUCER_INPUT_CHARS = 32_000
+const MIN_LARGE_TOOL_RESULT_CHARS = 1_024
+const DEFAULT_LARGE_TOOL_RESULT_CHARS = 2_500
 const SYSTEM_PROMPT_SOURCE = '@deepseek-ai/dsh-system-prompt'
 
 const SECRET_PATTERNS: readonly RegExp[] = [
@@ -478,7 +480,8 @@ export function isHumanAnswerEvent(
     || result.content.length !== 1
     || result.content[0]?.type !== 'text') return false
   const call = precedingEvents.find(candidate => (
-    candidate.seq < event.seq
+    candidate !== undefined
+    && candidate.seq < event.seq
     && candidate.type === 'tool/call'
     && candidate.data.callId === message.source.callId
   ))
@@ -756,6 +759,7 @@ export function foldRoute(events: readonly SessionEvent[]): RouteProjection | un
   let projection: RouteProjection | undefined
   const preceding: SessionEvent[] = []
   for (const event of events) {
+    if (event === undefined) continue
     if (isRouteContextEvent(event)) {
       try {
         const source = decodeRouteMessage(event, projection?.snapshot, preceding)
@@ -1004,6 +1008,13 @@ function blockText(block: ContentBlock): string[] {
   return []
 }
 
+function isErroredToolResultEvent(event: Extract<SessionEvent, { type: 'tool/result' }>): boolean {
+  if (event.data.error !== undefined) return true
+  return event.data.message.content.some((block) => (
+    block.type === 'tool-result' && block.isError === true
+  ))
+}
+
 function boundedExcerpt(text: string, maxChars: number): string {
   const normalized = normalizeLine(text)
   if (normalized.length === 0) return '[empty text]'
@@ -1017,10 +1028,156 @@ interface MaterialEntry {
   readonly text: string
 }
 
+export interface LargeToolResultPreprocessingConfig {
+  readonly enabled: boolean
+  readonly minChars: number
+}
+
+export interface BuildRouteMaterialConfig {
+  readonly largeToolResultPreprocessing?: LargeToolResultPreprocessingConfig
+}
+
+const DISABLED_LARGE_TOOL_RESULT_PREPROCESSING = Object.freeze({
+  enabled: false,
+  minChars: DEFAULT_LARGE_TOOL_RESULT_CHARS,
+} satisfies LargeToolResultPreprocessingConfig)
+
+const SIDE_EFFECT_TOOL_NAME_PARTS = [
+  'create',
+  'update',
+  'delete',
+  'write',
+  'append',
+  'save',
+  'set',
+  'send',
+  'submit',
+  'post',
+  'publish',
+  'deploy',
+  'install',
+  'uninstall',
+  'remove',
+  'restart',
+  'stop',
+  'start',
+  'apply',
+  'patch',
+  'commit',
+  'archive',
+  'pin',
+  'unpin',
+  'rename',
+  'fork',
+  'handoff',
+  'navigate',
+] as const
+const STATEFUL_TOOL_NAME_PARTS = [
+  'status',
+  'task',
+  'todo',
+  'plan',
+  'memory',
+  'goal',
+  'route',
+  'focus',
+  'monitor',
+  'reminder',
+  'observation',
+  'report',
+  'summary',
+  'decision',
+  'calendar',
+] as const
+const MECHANICAL_TOOL_NAME_PARTS = [
+  'read',
+  'search',
+  'query',
+  'find',
+  'list',
+  'get',
+  'fetch',
+  'open',
+  'browse',
+  'crawl',
+  'screenshot',
+  'inspect',
+  'render',
+  'download',
+  'bash',
+  'shell',
+  'exec',
+  'command',
+] as const
+
+function normalizedLargeToolResultPreprocessing(
+  config: BuildRouteMaterialConfig | undefined,
+): LargeToolResultPreprocessingConfig {
+  const candidate = config?.largeToolResultPreprocessing
+  if (candidate === undefined) return DISABLED_LARGE_TOOL_RESULT_PREPROCESSING
+  if (!Number.isSafeInteger(candidate.minChars) || candidate.minChars < MIN_LARGE_TOOL_RESULT_CHARS) {
+    fail(`large tool-result preprocessing minChars must be at least ${MIN_LARGE_TOOL_RESULT_CHARS}`)
+  }
+  return candidate
+}
+
+function findToolCallEvent(
+  event: SessionEvent,
+  events: readonly SessionEvent[],
+): Extract<SessionEvent, { type: 'tool/call' }> | undefined {
+  if (event.type !== 'tool/result') return undefined
+  const callId = event.data.message.source.callId
+  return precedingEvents(events, event.seq).find((candidate): candidate is Extract<SessionEvent, { type: 'tool/call' }> => (
+    candidate !== undefined && candidate.type === 'tool/call' && candidate.data.callId === callId
+  ))
+}
+
+function precedingEvents(events: readonly SessionEvent[], seq: number): readonly SessionEvent[] {
+  return events.slice(0, Math.max(0, seq))
+}
+
+function toolResultToolName(
+  event: SessionEvent,
+  events: readonly SessionEvent[],
+): string | undefined {
+  return findToolCallEvent(event, events)?.data.name
+}
+
+function toolNameHasPart(toolName: string, parts: readonly string[]): boolean {
+  const normalized = toolName.toLowerCase()
+  return parts.some(part => normalized.includes(part))
+}
+
+export function shouldPreprocessLargeToolResult(
+  event: SessionEvent,
+  events: readonly SessionEvent[],
+  rawText: string,
+  config: LargeToolResultPreprocessingConfig,
+): boolean {
+  if (!config.enabled || event.type !== 'tool/result') return false
+  if (isErroredToolResultEvent(event) || isHumanAnswerEvent(event, events)) return false
+  if (rawText.length < config.minChars) return false
+  const toolName = toolResultToolName(event, events)
+  if (toolName === undefined) return false
+  if (toolNameHasPart(toolName, SIDE_EFFECT_TOOL_NAME_PARTS)) return false
+  if (toolNameHasPart(toolName, STATEFUL_TOOL_NAME_PARTS)) return false
+  return toolNameHasPart(toolName, MECHANICAL_TOOL_NAME_PARTS)
+}
+
+export function renderLargeToolResultReference(
+  toolName: string,
+  seq: number,
+  rawChars: number,
+): string {
+  return `[tool result ${toolName} elided; original seq ${seq}; ${rawChars} chars omitted; retrieve exact output by seq if needed]`
+}
+
 function materialEntry(
   event: SessionEvent,
   events: readonly SessionEvent[],
+  config?: BuildRouteMaterialConfig,
 ): MaterialEntry | undefined {
+  const largeToolResultPreprocessing = normalizedLargeToolResultPreprocessing(config)
   if (event.type === 'user/message') {
     if (event.data.source.kind !== 'user') return undefined
     return {
@@ -1040,10 +1197,20 @@ function materialEntry(
     return { seq: event.seq, source: 'tool', text: `[tool call ${event.data.name}; arguments omitted]` }
   }
   if (event.type === 'tool/result') {
+    const rawText = normalizeLine(event.data.message.content.flatMap(blockText).join('\n'))
+    const toolName = toolResultToolName(event, events)
+    if (shouldPreprocessLargeToolResult(event, events, rawText, largeToolResultPreprocessing)
+      && toolName !== undefined) {
+      return {
+        seq: event.seq,
+        source: 'tool',
+        text: renderLargeToolResultReference(toolName, event.seq, rawText.length),
+      }
+    }
     return {
       seq: event.seq,
       source: isHumanAnswerEvent(event, events) ? 'human-answer' : 'tool',
-      text: boundedExcerpt(event.data.message.content.flatMap(blockText).join('\n'), 2_500),
+      text: boundedExcerpt(rawText, 2_500),
     }
   }
   return undefined
@@ -1058,6 +1225,7 @@ export function buildRouteMaterial(
   events: readonly SessionEvent[],
   previous: RouteSnapshot | undefined,
   maxChars: number,
+  config?: BuildRouteMaterialConfig,
 ): string {
   if (!Number.isSafeInteger(maxChars) || maxChars < MIN_REDUCER_INPUT_CHARS) {
     fail(`max reducer input must be at least ${MIN_REDUCER_INPUT_CHARS} characters`)
@@ -1065,13 +1233,13 @@ export function buildRouteMaterial(
   const lowerBound = previous?.asOfSeq === undefined ? 0 : previous.asOfSeq + 1
   const newEntries = events
     .filter(event => event.seq >= lowerBound)
-    .map(event => materialEntry(event, events))
+    .map(event => materialEntry(event, events, config))
     .filter((entry): entry is MaterialEntry => entry !== undefined)
 
   // On a newly installed plugin, keep the original root prompt even when a
   // long old Session must otherwise be tail-trimmed.
   const firstUser = previous === undefined
-    ? events.map(event => materialEntry(event, events)).find(entry => entry?.source === 'user')
+    ? events.map(event => materialEntry(event, events, config)).find(entry => entry?.source === 'user')
     : undefined
   const entriesBySeq = new Map<number, MaterialEntry>()
   if (firstUser !== undefined) entriesBySeq.set(firstUser.seq, firstUser)

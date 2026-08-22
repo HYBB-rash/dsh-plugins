@@ -17,6 +17,7 @@ import {
   latestRouteRelevantSeq,
   parseRouteBody,
   routeBodyFailureCode,
+  type BuildRouteMaterialConfig,
   type RouteBodyFailureCode,
 } from './route.ts'
 
@@ -27,6 +28,7 @@ export interface RouteReducerConfig {
   readonly reasoningEffort?: ReasoningEffortId
   readonly maxInputChars: number
   readonly maxOutputTokens: number
+  readonly materialConfig?: BuildRouteMaterialConfig
 }
 
 /** Fixed, non-secret reasons an auxiliary route update can fail. */
@@ -133,7 +135,12 @@ export async function updateRoute(
 
   let material: string
   try {
-    material = buildRouteMaterial(agent.session.events, projection?.snapshot, config.maxInputChars)
+    material = buildRouteMaterial(
+      agent.session.events,
+      projection?.snapshot,
+      config.maxInputChars,
+      config.materialConfig,
+    )
   } catch {
     return failUpdate('input-budget')
   }

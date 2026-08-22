@@ -29,8 +29,10 @@ import * as ContextRoutePlugin from '../src/index.ts'
 import * as RouteInvariant from '../src/invariant.ts'
 import {
   assertRouteFreshForCompaction,
+  completedTurnsSinceLastSuccessfulCompaction,
   foldRoute,
   ROUTE_CONTEXT_SOURCE,
+  type Config as ContextRouteConfig,
   type RouteBody,
   type RouteSnapshot,
 } from '../src/index.ts'
@@ -166,6 +168,7 @@ class RouteAwareAdapter extends LlmAdapter {
   readonly reducerRequests: GenerateOptions[] = []
   secretReducerCall: number | undefined
   toolConversationSteps = 0
+  toolConversationName = 'route_probe'
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     return Promise.resolve({
@@ -195,7 +198,7 @@ class RouteAwareAdapter extends LlmAdapter {
       const step = this.conversationRequests.length
       yield* toolCallChunks(
         `route-probe-${step}`,
-        'route_probe',
+        this.toolConversationName,
         JSON.stringify({ step }),
       )
       return
@@ -206,12 +209,17 @@ class RouteAwareAdapter extends LlmAdapter {
 
 class DeterministicCompactionEngine extends BasicCompactionEngine {
   summaries = 0
+  summaryFailures = 0
 
   override async summarize(): Promise<{
     summary: [{ type: 'text'; text: string }]
     provider: string
     model: string
   }> {
+    if (this.summaryFailures > 0) {
+      this.summaryFailures -= 1
+      throw new Error('deterministic summary failure')
+    }
     this.summaries += 1
     return {
       summary: [{ type: 'text', text: `working-tail checkpoint ${this.summaries}` }],
@@ -228,7 +236,7 @@ interface Harness {
   readonly compaction: DeterministicCompactionEngine
 }
 
-async function harness(): Promise<Harness> {
+async function harness(config: ContextRouteConfig = {}): Promise<Harness> {
   const ctx = new Context()
   contexts.push(ctx)
   await mountAgentLoopTestDependencies(ctx)
@@ -241,12 +249,13 @@ async function harness(): Promise<Harness> {
   await ctx.plugin(RouteInvariant)
   await ctx.plugin(SqliteSessionQueryEngine, { path: ':memory:', openAt: 'first-search' })
   await ctx.plugin(ToolSessionQuery)
-  await ctx.plugin(ContextRoutePlugin, { reasoningEffort: 'off' })
-  await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(TokenMeter)
+  await ctx.plugin(DeterministicCompactionEngine, { auto: false })
+  const compaction = ctx.compaction as DeterministicCompactionEngine
+  await ctx.plugin(ContextRoutePlugin, { reasoningEffort: 'off', ...config })
+  await ctx.plugin(AgentLoop, { agents: [] })
   const adapter = new RouteAwareAdapter()
   ctx.llm.registerAdapter(['mock'], adapter)
-  const compaction = new DeterministicCompactionEngine(ctx, { auto: false })
   const agent = ctx.agentLoop.create(SessionId('route-integration'), { provider: 'mock', model: 'mock' })
   return { ctx, agent, adapter, compaction }
 }
@@ -370,6 +379,33 @@ describe('single-session context route through the real loop', () => {
     expect(() => assertRouteFreshForCompaction(h.agent.session.events)).toThrow(/compaction is blocked/)
   })
 
+  it('feeds the reducer a seq-only placeholder for a large mechanical tool result when enabled', async () => {
+    const h = await harness({
+      largeToolResultPreprocessing: { enabled: true, minChars: 2_500 },
+    })
+    h.adapter.toolConversationSteps = 1
+    h.adapter.toolConversationName = 'bash'
+    h.ctx.tools.register(defineContentToolFixture({
+      name: 'bash',
+      description: 'Return deterministic long output.',
+      parameters: { step: { type: 'number', required: true } },
+      async execute() {
+        return [{ type: 'text', text: `stdout ${'x'.repeat(4_000)}` }]
+      },
+    }))
+
+    await send(h.agent, '根目标：验证大型工具结果预处理。')
+
+    const reducerInput = modelInput(h.adapter.reducerRequests[0]!)
+    const toolResultSeq = h.agent.session.events.find(event =>
+      event.type === 'tool/result'
+      && event.data.message.source.kind === 'tool')?.seq
+
+    expect(toolResultSeq).toBeDefined()
+    expect(reducerInput).toContain(`[tool result bash elided; original seq ${toolResultSeq}`)
+    expect(reducerInput).not.toContain(`stdout ${'x'.repeat(200)}`)
+  })
+
   it('repairs a stale failed revision during the next pre-step before the conversation model runs', async () => {
     const h = await harness()
     await send(h.agent, '根目标：验证失败后可以在下一请求前恢复。')
@@ -387,5 +423,71 @@ describe('single-session context route through the real loop', () => {
       revision: 3,
       currentRoute: { text: '路线 B', status: 'confirmed' },
     })
+  })
+
+  it('forces one idle safe compaction after each configured number of completed root turns', async () => {
+    const h = await harness({ compactEveryTurns: 3 })
+    const compactNow = vi.spyOn(h.compaction, 'compactNow')
+
+    await send(h.agent, '根目标：每三个完整轮次压缩一次。')
+    expect(h.compaction.summaries).toBe(0)
+    expect(completedTurnsSinceLastSuccessfulCompaction(h.agent.session.events)).toBe(1)
+
+    await send(h.agent, '完成第二个完整轮次。')
+    expect(h.compaction.summaries).toBe(0)
+    await send(h.agent, '完成第三个完整轮次。')
+    expect(compactNow).toHaveBeenCalledTimes(1)
+    await expect(compactNow.mock.results[0]!.value).resolves.not.toBeNull()
+    expect(h.compaction.summaries).toBe(1)
+    expect(completedTurnsSinceLastSuccessfulCompaction(h.agent.session.events)).toBe(0)
+    expect(h.agent.session.events.filter(event => event.type === 'compaction/summary')).toHaveLength(1)
+    expect(() => assertRouteFreshForCompaction(
+      h.agent.session.events,
+      h.agent.session.surface.nodes,
+    )).not.toThrow()
+
+    await send(h.agent, '完成第四个完整轮次。')
+    expect(h.compaction.summaries).toBe(1)
+    await send(h.agent, '完成第五个完整轮次。')
+    expect(h.compaction.summaries).toBe(1)
+    await send(h.agent, '完成第六个完整轮次。')
+    expect(h.compaction.summaries).toBe(2)
+    expect(h.agent.session.events.filter(event => event.type === 'compaction/summary')).toHaveLength(2)
+  })
+
+  it('keeps periodic compaction disabled when compactEveryTurns is omitted', async () => {
+    const h = await harness()
+    for (let turn = 1; turn <= 5; turn += 1) {
+      await send(h.agent, `完成默认关闭验证的第 ${turn} 个轮次。`)
+    }
+    expect(h.compaction.summaries).toBe(0)
+    expect(h.agent.session.events.some(event => event.type === 'compaction/start')).toBe(false)
+  })
+
+  it('retains raw history after a periodic summary failure and retries after the next completed turn', async () => {
+    const h = await harness({ compactEveryTurns: 3 })
+    h.compaction.summaryFailures = 1
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => undefined)
+
+    await send(h.agent, '根目标：验证周期压缩失败后保留原始历史。')
+    await send(h.agent, '完成第二个轮次。')
+    await send(h.agent, '第三轮会触发一次确定性压缩失败。')
+
+    expect(h.compaction.summaries).toBe(0)
+    expect(h.agent.session.events.filter(event => event.type === 'compaction/summary')).toHaveLength(0)
+    expect(h.agent.session.events.findLast(event => event.type === 'compaction/end')?.data)
+      .toEqual(expect.objectContaining({ error: expect.any(String) }))
+    const directUserEvents = h.agent.session.events.filter(event =>
+      event.type === 'user/message' && event.data.source.kind === 'user')
+    expect(directUserEvents).toHaveLength(3)
+    expect(directUserEvents.every(event => h.agent.session.surface.nodes.includes(event.seq))).toBe(true)
+    expect(completedTurnsSinceLastSuccessfulCompaction(h.agent.session.events)).toBe(3)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('periodic compaction failed (backend-call)'))
+
+    await send(h.agent, '第四轮完成后只重试一次。')
+    expect(h.compaction.summaries).toBe(1)
+    expect(completedTurnsSinceLastSuccessfulCompaction(h.agent.session.events)).toBe(0)
+    expect(h.agent.session.events.filter(event => event.type === 'compaction/start')).toHaveLength(2)
+    expect(h.agent.session.events.filter(event => event.type === 'compaction/summary')).toHaveLength(1)
   })
 })

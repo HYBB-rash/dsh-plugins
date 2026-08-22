@@ -13,13 +13,17 @@ import z from '@deepseek-ai/schemastery'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-compaction'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import {
+  assertRouteFreshForCompaction,
   createRouteRearmMessage,
   foldRoute,
   renderRouteBootstrapContext,
   routeNeedsCompletedTurnRecovery,
   routeNeedsRearm,
+  type BuildRouteMaterialConfig,
+  type LargeToolResultPreprocessingConfig,
 } from './route.ts'
 import {
   routeUpdateFailureCode,
@@ -46,6 +50,15 @@ export interface Config {
   readonly maxInputChars?: number
   /** Maximum route JSON output tokens. */
   readonly maxOutputTokens?: number
+  /** Experimental reducer-input preprocessing for large mechanical tool results. */
+  readonly largeToolResultPreprocessing?: {
+    /** Disabled by default; when enabled, reducer input keeps only a reference placeholder. */
+    readonly enabled?: boolean
+    /** Minimum rendered tool-result characters before elision is considered. */
+    readonly minChars?: number
+  }
+  /** Force one safe standalone compaction after this many completed root turns. Disabled when omitted. */
+  readonly compactEveryTurns?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -53,8 +66,25 @@ export const Config: z<Config> = z.object({
   model: z.string(),
   reasoningEffort: z.string(),
   maxInputChars: z.number().step(1).min(32_000).default(32_000),
-  maxOutputTokens: z.number().step(1).min(256).default(2_400),
+  // A route update is a complete replacement snapshot, including valid prior
+  // decisions and retired routes.  2,400 tokens can truncate a healthy
+  // long-session snapshot in the middle of its JSON, leaving the safety gate
+  // permanently stale.  Keep enough headroom for the bounded 18k-char route.
+  maxOutputTokens: z.number().step(1).min(256).default(8_192),
+  largeToolResultPreprocessing: z.object({
+    enabled: z.boolean().default(false),
+    minChars: z.number().step(1).min(1_024).default(2_500),
+  }),
+  compactEveryTurns: z.number().step(1).min(1),
 })
+
+function resolveCompactEveryTurns(value: number | undefined): number | undefined {
+  if (value === undefined) return undefined
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error('ui-context-compactor: compactEveryTurns must be a positive safe integer')
+  }
+  return value
+}
 
 function resolveConfig(config: Config): RouteReducerConfig {
   const hasProvider = config.provider !== undefined
@@ -69,13 +99,14 @@ function resolveConfig(config: Config): RouteReducerConfig {
     throw new Error('ui-context-compactor: reasoningEffort must be non-blank when configured')
   }
   const maxInputChars = config.maxInputChars ?? 32_000
-  const maxOutputTokens = config.maxOutputTokens ?? 2_400
+  const maxOutputTokens = config.maxOutputTokens ?? 8_192
   if (!Number.isSafeInteger(maxInputChars) || maxInputChars < 32_000) {
     throw new Error('ui-context-compactor: maxInputChars must be a safe integer of at least 32000')
   }
   if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 256) {
     throw new Error('ui-context-compactor: maxOutputTokens must be a safe integer of at least 256')
   }
+  const materialConfig = resolveMaterialConfig(config.largeToolResultPreprocessing)
   return {
     ...config.provider === undefined ? {} : { provider: config.provider },
     ...config.model === undefined ? {} : { model: config.model },
@@ -84,7 +115,21 @@ function resolveConfig(config: Config): RouteReducerConfig {
       : { reasoningEffort: ReasoningEffortId(config.reasoningEffort.trim()) },
     maxInputChars,
     maxOutputTokens,
+    ...materialConfig === undefined ? {} : { materialConfig },
   }
+}
+
+function resolveMaterialConfig(
+  preprocessing: Config['largeToolResultPreprocessing'],
+): BuildRouteMaterialConfig | undefined {
+  if (preprocessing === undefined) return undefined
+  const enabled = preprocessing.enabled ?? false
+  const minChars = preprocessing.minChars ?? 2_500
+  if (!Number.isSafeInteger(minChars) || minChars < 1_024) {
+    throw new Error('ui-context-compactor: largeToolResultPreprocessing.minChars must be a safe integer of at least 1024')
+  }
+  const largeToolResultPreprocessing: LargeToolResultPreprocessingConfig = { enabled, minChars }
+  return { largeToolResultPreprocessing }
 }
 
 function isRootSession(delegationDepth: number | undefined): boolean {
@@ -99,9 +144,36 @@ function warnRouteFailure(ctx: Context, code: RouteUpdateFailureCode): void {
   console.warn(message)
 }
 
+/** Count fully completed root turns after the latest successful compaction transaction. */
+export function completedTurnsSinceLastSuccessfulCompaction(
+  events: readonly (SessionEvent | undefined)[],
+): number {
+  let latestSuccessfulCompactionEnd = -1
+  for (const event of events) {
+    if (event?.type === 'compaction/end' && event.data.error === undefined) {
+      latestSuccessfulCompactionEnd = event.seq
+    }
+  }
+  let completed = 0
+  for (const event of events) {
+    if (event !== undefined
+      && event.seq > latestSuccessfulCompactionEnd
+      && event.type === 'turn/end'
+      && event.data.reason.kind === 'completed') completed += 1
+  }
+  return completed
+}
+
+function warnPeriodicCompactionFailure(ctx: Context, code: 'stale-route' | 'backend-call'): void {
+  ctx.logger.warn(
+    `ui-context-compactor: periodic compaction failed (${code}); raw Session history is retained and the next completed root turn will retry`,
+  )
+}
+
 /** Register stable route policy, rearming, stale recovery, and turn-end reduction. */
 export function apply(ctx: Context, config: Config = {}): void {
   const resolved = resolveConfig(config)
+  const compactEveryTurns = resolveCompactEveryTurns(config.compactEveryTurns)
 
   ctx.systemPrompt.context({
     name: 'context-route:policy',
@@ -162,6 +234,36 @@ export function apply(ctx: Context, config: Config = {}): void {
       warnRouteFailure(ctx, routeUpdateFailureCode(error))
     }
   })
+
+  // `turn-stopping` still runs inside the active driver, so forced compaction
+  // cannot safely use the idle-only backend there. Recompute the durable count
+  // when the root agent becomes idle, then let compactNow reserve maintenance.
+  // A failure writes no surface replacement; because only a successful
+  // compaction/end resets the count, the next completed turn retries once.
+  if (compactEveryTurns !== undefined) {
+    ctx.inject(['compaction'], (compactionCtx) => {
+      compactionCtx.on('agent/status', ({ agent, status }) => {
+        if (status !== 'idle'
+          || !isRootSession(agent.session.header.delegationDepth)
+          || completedTurnsSinceLastSuccessfulCompaction(agent.session.events) < compactEveryTurns) return
+        try {
+          assertRouteFreshForCompaction(agent.session.events, agent.session.surface.nodes)
+        } catch {
+          warnPeriodicCompactionFailure(compactionCtx, 'stale-route')
+          return
+        }
+        try {
+          void compactionCtx.compaction.compactNow(agent, new AbortController().signal).then((result) => {
+            if (result === null) warnPeriodicCompactionFailure(compactionCtx, 'backend-call')
+          }, () => {
+            warnPeriodicCompactionFailure(compactionCtx, 'backend-call')
+          })
+        } catch {
+          warnPeriodicCompactionFailure(compactionCtx, 'backend-call')
+        }
+      })
+    })
+  }
 }
 
 export {
@@ -182,13 +284,17 @@ export {
   renderRouteBootstrapContext,
   renderRouteContext,
   renderRouteMessageContent,
+  renderLargeToolResultReference,
   routeNeedsCompletedTurnRecovery,
   routeNeedsRearm,
   routeBodyFailureCode,
   ROUTE_CONTEXT_SOURCE,
+  shouldPreprocessLargeToolResult,
   type CurrentRoute,
+  type BuildRouteMaterialConfig,
   type DetailReference,
   type DetailSourceKind,
+  type LargeToolResultPreprocessingConfig,
   type RetiredRoute,
   type RetiredRouteStatus,
   type RouteBody,
