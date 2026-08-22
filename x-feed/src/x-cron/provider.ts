@@ -28,6 +28,7 @@ import {
   type GenerateXDigestPorts,
   type XFeedDigestCandidateInput,
   type XFeedExploreResult,
+  type XFeedRandomWalkPlan,
   type XFeedSearchResult,
 } from './generate-x-digest.ts'
 import { itemIdFor } from './current-run-item-registry.ts'
@@ -155,6 +156,7 @@ async function prepareXFeedRun(
       allowedTopics: parsed.allowedTopics,
       allowlistedExploreIds: parsed.allowlistedExploreIds,
       mechanicalSignals: parsed.mechanicalSignals,
+      ...(parsed.randomWalk === undefined ? {} : { randomWalk: parsed.randomWalk }),
       ports: servicePorts,
     })
     if (generated.kind === 'skip') return generated
@@ -187,6 +189,7 @@ interface ParsedPackage {
   readonly allowedTopics: readonly string[]
   readonly allowlistedExploreIds: readonly string[]
   readonly mechanicalSignals: Readonly<Record<string, boolean | number | string>>
+  readonly randomWalk?: XFeedRandomWalkPlan
   readonly candidates: readonly XFeedDigestCandidateInput[]
 }
 
@@ -264,12 +267,16 @@ function parseInsightPackage(value: XFeedInsightPackage, base: XFeedRunCapabilit
     value.allowed_topics ?? value.allowedTopics ?? decision.allowed_topics ?? candidateTopics,
     usesUnclassifiedTheme ? candidateTopics : allowedThemes,
   )
+  const randomWalk = collectRandomWalkPlan(value, decision, candidates)
   const selectedUrls = parseUrls(value.selected_urls, 'selected_urls')
   const preparedUrls = [...new Set([...selectedUrls, ...candidates.map(candidate => candidate.source)])]
   const mechanicalSignals = collectMechanicalSignals(decision, candidates.length)
+  const randomWalkCapabilities = randomWalk?.options.flatMap(option => option.kind === 'search'
+    ? [option.topicId, option.themeId]
+    : [option.themeId]) ?? []
   const capabilities: XFeedRunCapabilities = {
     ...base,
-    allowedTopics: Object.freeze([...new Set([...allowedTopics, ...allowedThemes])]),
+    allowedTopics: Object.freeze([...new Set([...allowedTopics, ...allowedThemes, ...randomWalkCapabilities])]),
     candidates: Object.fromEntries(candidates.map(candidate => [candidate.id, {
       id: candidate.id,
       url: candidate.source,
@@ -283,6 +290,7 @@ function parseInsightPackage(value: XFeedInsightPackage, base: XFeedRunCapabilit
     allowedTopics,
     allowlistedExploreIds: Object.freeze(candidates.map(candidate => candidate.id)),
     mechanicalSignals,
+    ...(randomWalk === undefined ? {} : { randomWalk }),
     candidates: Object.freeze(candidates),
   }
 }
@@ -332,6 +340,51 @@ function collectMechanicalSignals(
     if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) signals[key] = value
   }
   return Object.freeze(signals)
+}
+
+function collectRandomWalkPlan(
+  value: XFeedInsightPackage,
+  decision: Record<string, unknown>,
+  candidates: readonly XFeedDigestCandidateInput[],
+): XFeedRandomWalkPlan | undefined {
+  if (decision.wander_suggested !== true || typeof decision.random_roll !== 'number'
+    || !Number.isFinite(decision.random_roll) || decision.random_roll < 0 || decision.random_roll >= 1) return undefined
+  const topTheme = typeof decision.top_theme === 'string' ? decision.top_theme : undefined
+  const options: Array<XFeedRandomWalkPlan['options'][number]> = []
+  const seen = new Set<string>()
+  for (const raw of Array.isArray(value.explore_candidates) ? value.explore_candidates : []) {
+    if (!isRecord(raw)) continue
+    const topicId = parseRandomWalkLabel(raw.topic)
+    if (topicId === undefined || topicId === topTheme || seen.has(`search:${topicId}`)) continue
+    seen.add(`search:${topicId}`)
+    options.push(Object.freeze({ kind: 'search', topicId, themeId: topicId }))
+    if (options.length >= 20) break
+  }
+  if (options.length === 0) {
+    const candidateIdByUrl = new Map(candidates.map(candidate => [candidate.source, candidate.id]))
+    for (const raw of Array.isArray(decision.candidates) ? decision.candidates : []) {
+      if (!isRecord(raw) || typeof raw.url !== 'string') continue
+      const identity = parseXStatusIdentity(raw.url)
+      if (identity === undefined) continue
+      const candidateId = candidateIdByUrl.get(identity.canonicalUrl)
+      if (candidateId === undefined || seen.has(`explore:${candidateId}`)) continue
+      const themeId = parseRandomWalkLabel(raw.theme) ?? UNCLASSIFIED_THEME_ID
+      if (themeId === topTheme) continue
+      seen.add(`explore:${candidateId}`)
+      options.push(Object.freeze({ kind: 'explore', candidateId, themeId }))
+      if (options.length >= 20) break
+    }
+  }
+  if (options.length === 0) return undefined
+  return Object.freeze({ roll: decision.random_roll, options: Object.freeze(options) })
+}
+
+function parseRandomWalkLabel(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.trim() === '' || value !== value.trim()
+    || Buffer.byteLength(value, 'utf8') > 320 || /(?:https?:\/\/|ftp:\/\/|www\.)/iu.test(value)
+    || /!?(?:\[[^\]]*\]\([^)]*\)|`{1,3}|\*\*|__|^\s{0,3}#{1,6}\s|(?:^|\s)[*+-]\s)/mu.test(value)
+    || /[\u0000-\u001f\u007f]/u.test(value)) return undefined
+  return value
 }
 
 function parseTopicArray(value: unknown): readonly string[] {
@@ -385,7 +438,7 @@ function normalizeSearchResult(value: XFeedInsightPackage): XFeedSearchResult {
   if (!isRecord(value) || !Array.isArray(value.items)) throw new Error('X topic search result is invalid')
   const items = value.items.map(item => {
     const candidate = parseCandidate(item)
-    return { id: candidate.id, source: candidate.source, content: candidate.content, topics: candidate.topics }
+    return candidate
   })
   const summary = boundedPlainText(value.summary, 'topic search result', 1_200)
   return { items, summary }

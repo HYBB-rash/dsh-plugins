@@ -18,6 +18,14 @@ describe('generateXDigest application service', () => {
     title: '条目二',
     summary: '条目二摘要',
   } as const
+  const searchedCandidate = {
+    id: 'x-status:3',
+    source: 'https://x.com/bob/status/3',
+    content: '随机换台后的正文',
+    topics: ['anime'],
+    title: '随机换台条目',
+    summary: '随机换台摘要',
+  } as const
 
   const plan = (exploration: { kind: 'none' } | { kind: 'search'; topicId: string } | { kind: 'explore'; candidateId: string }) => ({
     selectedCandidateIds: ['x-status:1'],
@@ -91,6 +99,108 @@ describe('generateXDigest application service', () => {
     )
   })
 
+  it('mechanically changes topic once, admits discovered items, and lets the composer judge them', async () => {
+    const ports = basePorts({
+      plan: () => plan({ kind: 'none' }),
+      search: () => ({ items: [searchedCandidate], summary: '换台搜索完成' }),
+    })
+    const ready = await generateXDigest({
+      candidates: [candidate, secondCandidate],
+      allowedThemes: ['theme-a'],
+      allowedTopics: [],
+      allowlistedExploreIds: ['x-status:1', 'x-status:2'],
+      randomWalk: {
+        roll: 0,
+        options: [{ kind: 'search', topicId: 'anime', themeId: 'anime' }],
+      },
+      ports,
+    })
+
+    expect(ready.kind).toBe('ready')
+    if (ready.kind !== 'ready') return
+    expect(ports.plan).toHaveBeenCalledTimes(1)
+    expect(ports.search).toHaveBeenCalledTimes(1)
+    expect(ports.search).toHaveBeenCalledWith('anime')
+    expect(ports.explore).not.toHaveBeenCalled()
+    expect(ready.themeId).toBe('anime')
+    expect(ready.composerMaterial.exploration).toEqual({
+      kind: 'search', topicId: 'anime', status: 'success', summary: '换台搜索完成',
+    })
+    expect(ready.composerMaterial.selectedItems.map(item => item.itemId)).toEqual([
+      'item:x-status:3',
+      'item:x-status:1',
+    ])
+
+    await expect(ready.finalize({
+      title: '随机漫步',
+      sections: [{ kind: 'wander', items: [{ itemId: 'item:x-status:3', summary: '换台后值得发' }] }],
+    })).resolves.toEqual({
+      text: '📦 X 洞察 随机漫步\n\n🔄 漫游发现\n- 换台后值得发 (https://x.com/bob/status/3)',
+      error: undefined,
+    })
+    expect(ports.prepareDelivery).toHaveBeenCalledWith(
+      '📦 X 洞察 随机漫步\n\n🔄 漫游发现\n- 换台后值得发 (https://x.com/bob/status/3)',
+      ['https://x.com/bob/status/3'],
+      { themeId: 'anime' },
+    )
+  })
+
+  it('does not retry or change the recorded theme when the mechanical topic switch fails', async () => {
+    const ports = basePorts({
+      plan: () => plan({ kind: 'none' }),
+      search: () => { throw new Error('search failed') },
+    })
+    const ready = await generateXDigest({
+      candidates: [candidate],
+      allowedThemes: ['theme-a'],
+      allowedTopics: [],
+      allowlistedExploreIds: ['x-status:1'],
+      randomWalk: {
+        roll: 0,
+        options: [{ kind: 'search', topicId: 'anime', themeId: 'anime' }],
+      },
+      ports,
+    })
+
+    expect(ready.kind).toBe('ready')
+    if (ready.kind !== 'ready') return
+    expect(ports.search).toHaveBeenCalledTimes(1)
+    expect(ready.themeId).toBe('theme-a')
+    expect(ready.composerMaterial.exploration).toEqual({
+      kind: 'search', topicId: 'anime', status: 'failed', summary: 'search unavailable',
+    })
+    expect(ready.composerMaterial.selectedItems.map(item => item.itemId)).toEqual(['item:x-status:1'])
+  })
+
+  it('uses the run-local roll to choose exactly one option from the mechanical walk pool', async () => {
+    const ports = basePorts({ plan: () => plan({ kind: 'none' }) })
+    const ready = await generateXDigest({
+      candidates: [candidate, secondCandidate],
+      allowedThemes: ['theme-a'],
+      allowedTopics: [],
+      allowlistedExploreIds: ['x-status:1', 'x-status:2'],
+      randomWalk: {
+        roll: 0.75,
+        options: [
+          { kind: 'search', topicId: 'anime', themeId: 'anime' },
+          { kind: 'explore', candidateId: 'x-status:2', themeId: 'mixed' },
+        ],
+      },
+      ports,
+    })
+
+    expect(ready.kind).toBe('ready')
+    if (ready.kind !== 'ready') return
+    expect(ports.search).not.toHaveBeenCalled()
+    expect(ports.explore).toHaveBeenCalledTimes(1)
+    expect(ports.explore).toHaveBeenCalledWith('x-status:2')
+    expect(ready.themeId).toBe('mixed')
+    expect(ready.composerMaterial.selectedItems.map(item => item.itemId)).toEqual([
+      'item:x-status:2',
+      'item:x-status:1',
+    ])
+  })
+
   it.each([
     ['search', plan({ kind: 'search', topicId: 'topic-a' }), 'search unavailable'],
     ['explore', plan({ kind: 'explore', candidateId: 'x-status:1' }), 'exploration unavailable'],
@@ -123,7 +233,7 @@ describe('generateXDigest application service', () => {
   it('registers successful search atomically and leaves explore unused', async () => {
     const ports = basePorts({
       plan: () => plan({ kind: 'search', topicId: 'topic-a' }),
-      search: () => ({ items: [{ id: secondCandidate.id, source: secondCandidate.source, content: secondCandidate.content, topics: secondCandidate.topics }], summary: '搜索完成' }),
+      search: () => ({ items: [secondCandidate], summary: '搜索完成' }),
     })
     const ready = await generateXDigest({ candidates: [candidate], allowedThemes: ['theme-a'], allowedTopics: ['topic-a'], allowlistedExploreIds: [], ports })
     expect(ready.kind).toBe('ready')

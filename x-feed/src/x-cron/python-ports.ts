@@ -423,10 +423,6 @@ export function createXFeedPythonPorts(options: XFeedPythonPortOptions): XFeedPy
     if (!isNonEmptyString(topic) || !capabilities.allowedTopics.includes(topic)) {
       throw new XFeedPythonPortError('capability-denied', 'topic is not in the current run allowlist', { topic })
     }
-    const candidateTopics = Object.values(capabilities.candidates).flatMap(candidate => candidate.topics ?? [])
-    if (candidateTopics.length > 0 && !candidateTopics.includes(topic)) {
-      throw new XFeedPythonPortError('capability-denied', 'topic is not attached to a current candidate', { topic })
-    }
   }
 
   function requireCandidate(candidateId: string): XFeedCandidateCapability {

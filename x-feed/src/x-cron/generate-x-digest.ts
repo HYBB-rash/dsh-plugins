@@ -40,7 +40,7 @@ export interface XFeedDigestCandidateInput extends CurrentRunCandidateInput {
 }
 
 export interface XFeedSearchResult {
-  readonly items: readonly CurrentRunCandidateInput[]
+  readonly items: readonly XFeedDigestCandidateInput[]
   readonly summary: string
 }
 
@@ -78,7 +78,17 @@ export interface GenerateXDigestInput {
   readonly allowedTopics: readonly string[]
   readonly allowlistedExploreIds: readonly string[]
   readonly mechanicalSignals?: XCronPlannerMechanicalSignals
+  readonly randomWalk?: XFeedRandomWalkPlan
   readonly ports: GenerateXDigestPorts
+}
+
+export type XFeedRandomWalkOption =
+  | Readonly<{ kind: 'search'; topicId: string; themeId: string }>
+  | Readonly<{ kind: 'explore'; candidateId: string; themeId: string }>
+
+export interface XFeedRandomWalkPlan {
+  readonly roll: number
+  readonly options: readonly XFeedRandomWalkOption[]
 }
 
 export interface XFeedDigestSuccessOutcome {
@@ -125,10 +135,13 @@ export async function generateXDigest(input: GenerateXDigestInput): Promise<Gene
   const registry = new CurrentRunItemRegistry(currentCandidates)
   const plannerRequest = createPlannerRequest(input, currentCandidates)
   const plannerDto = await planOnce(input.ports, plannerRequest)
-  const selectedIds = validatePlan(plannerDto, plannerRequest, registry)
+  const plannedSelectedIds = validatePlan(plannerDto, plannerRequest, registry)
   const candidateById = new Map(currentCandidates.map(candidate => [candidate.id, candidate]))
+  const randomWalk = chooseRandomWalk(input.randomWalk, currentCandidates, input.allowlistedExploreIds)
+  const requestedExploration = randomWalk ?? plannerDto.exploration
 
-  const exploration = await runExploration(input.ports, plannerDto, registry, candidateById)
+  const explorationRun = await runExploration(input.ports, requestedExploration, registry, candidateById)
+  const selectedIds = mergeSelectedIds(explorationRun.discoveredIds, plannedSelectedIds)
   const selectedItems = selectedIds.map(candidateId => {
     const candidate = candidateById.get(candidateId)
     if (candidate === undefined) throw new GenerateXDigestError('invalid-plan', 'planner selected an unknown candidate')
@@ -137,12 +150,12 @@ export async function generateXDigest(input: GenerateXDigestInput): Promise<Gene
   const { facts, factAudits } = await projectSelectedFacts(input.ports, selectedIds, candidateById)
   const material: XFeedComposerMaterial = Object.freeze({
     selectedItems: Object.freeze(selectedItems),
-    exploration,
+    exploration: explorationRun.material,
     facts: Object.freeze(facts),
     allowedSectionKinds: ALLOWED_SECTION_KINDS,
   })
 
-  const themeId = plannerDto.themeId
+  const themeId = randomWalk !== undefined && explorationRun.switched ? randomWalk.themeId : plannerDto.themeId
   const selectedItemIds = Object.freeze(selectedItems.map(item => item.itemId))
   const prepareDelivery = input.ports.prepareDelivery
   let finalized = false
@@ -229,23 +242,37 @@ function validatePlan(dto: PlannerDto, request: XCronPlannerRequest, registry: C
 
 async function runExploration(
   ports: GenerateXDigestPorts,
-  planner: PlannerDto,
+  exploration: PlannerDto['exploration'],
   registry: CurrentRunItemRegistry,
   candidateById: Map<string, XFeedDigestCandidateInput>,
-): Promise<XFeedComposerMaterial['exploration']> {
-  if (planner.exploration.kind === 'none') return { kind: 'none' }
-  if (planner.exploration.kind === 'search') {
+): Promise<Readonly<{
+  material: XFeedComposerMaterial['exploration']
+  discoveredIds: readonly string[]
+  switched: boolean
+}>> {
+  if (exploration.kind === 'none') return { material: { kind: 'none' }, discoveredIds: [], switched: false }
+  if (exploration.kind === 'search') {
     try {
-      const result = await ports.search(planner.exploration.topicId)
+      const result = await ports.search(exploration.topicId)
       validateSearchResult(result)
       const registered = registry.registerExploration({ kind: 'search', items: result.items })
       if (!registered.ok) throw new Error('search result could not be registered')
-      return { kind: 'search', topicId: planner.exploration.topicId, status: 'success', summary: result.summary }
+      for (const item of result.items) candidateById.set(item.id, item)
+      const discoveredIds = Object.freeze(result.items.map(item => item.id))
+      return {
+        material: { kind: 'search', topicId: exploration.topicId, status: 'success', summary: result.summary },
+        discoveredIds,
+        switched: discoveredIds.length > 0,
+      }
     } catch {
-      return { kind: 'search', topicId: planner.exploration.topicId, status: 'failed', summary: 'search unavailable' }
+      return {
+        material: { kind: 'search', topicId: exploration.topicId, status: 'failed', summary: 'search unavailable' },
+        discoveredIds: [],
+        switched: false,
+      }
     }
   }
-  const candidateId = planner.exploration.candidateId
+  const candidateId = exploration.candidateId
   try {
     const result = await ports.explore(candidateId)
     validateExploreResult(result)
@@ -253,10 +280,63 @@ async function runExploration(
     if (!registered.ok) throw new Error('exploration result could not be registered')
     const original = candidateById.get(candidateId)
     if (original !== undefined) candidateById.set(candidateId, { ...original, content: result.content, topics: result.topics })
-    return { kind: 'explore', candidateId, status: 'success', summary: result.summary }
+    return {
+      material: { kind: 'explore', candidateId, status: 'success', summary: result.summary },
+      discoveredIds: Object.freeze([candidateId]),
+      switched: true,
+    }
   } catch {
-    return { kind: 'explore', candidateId, status: 'failed', summary: 'exploration unavailable' }
+    return {
+      material: { kind: 'explore', candidateId, status: 'failed', summary: 'exploration unavailable' },
+      discoveredIds: [],
+      switched: false,
+    }
   }
+}
+
+function chooseRandomWalk(
+  plan: XFeedRandomWalkPlan | undefined,
+  candidates: readonly XFeedDigestCandidateInput[],
+  allowlistedExploreIds: readonly string[],
+): XFeedRandomWalkOption | undefined {
+  if (plan === undefined) return undefined
+  if (!hasExactKeys(plan, ['roll', 'options']) || typeof plan.roll !== 'number' || !Number.isFinite(plan.roll)
+    || plan.roll < 0 || plan.roll >= 1 || !Array.isArray(plan.options) || plan.options.length === 0
+    || plan.options.length > 20) throw new GenerateXDigestError('invalid-input', 'random-walk plan is invalid')
+  const candidateIds = new Set(candidates.map(candidate => candidate.id))
+  const exploreIds = new Set(allowlistedExploreIds)
+  const seen = new Set<string>()
+  const options: XFeedRandomWalkOption[] = []
+  for (const option of plan.options) {
+    if (!isRecord(option) || typeof option.kind !== 'string' || !isBoundedText(option.themeId, 320)) {
+      throw new GenerateXDigestError('invalid-input', 'random-walk option is invalid')
+    }
+    if (option.kind === 'search') {
+      if (!hasExactKeys(option, ['kind', 'themeId', 'topicId']) || !isBoundedText(option.topicId, 320)) {
+        throw new GenerateXDigestError('invalid-input', 'random-walk search option is invalid')
+      }
+      const key = `search:${option.topicId}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      options.push(Object.freeze({ kind: 'search', topicId: option.topicId, themeId: option.themeId }))
+      continue
+    }
+    if (option.kind !== 'explore' || !hasExactKeys(option, ['candidateId', 'kind', 'themeId'])
+      || typeof option.candidateId !== 'string' || !candidateIds.has(option.candidateId)
+      || !exploreIds.has(option.candidateId)) {
+      throw new GenerateXDigestError('invalid-input', 'random-walk explore option is invalid')
+    }
+    const key = `explore:${option.candidateId}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    options.push(Object.freeze({ kind: 'explore', candidateId: option.candidateId, themeId: option.themeId }))
+  }
+  if (options.length === 0) throw new GenerateXDigestError('invalid-input', 'random-walk plan has no usable option')
+  return options[Math.min(Math.floor(plan.roll * options.length), options.length - 1)]
+}
+
+function mergeSelectedIds(discoveredIds: readonly string[], plannedIds: readonly string[]): readonly string[] {
+  return Object.freeze([...new Set([...discoveredIds, ...plannedIds])].slice(0, 20))
 }
 
 async function projectSelectedFacts(
@@ -289,7 +369,9 @@ async function projectSelectedFacts(
 
 function validateSearchResult(result: XFeedSearchResult): void {
   if (!Array.isArray(result.items) || result.items.length > MAX_SEARCH_ITEMS || !isBoundedText(result.summary, MAX_SUMMARY_BYTES)
-    || result.items.some(item => !hasExactKeys(item, ['id', 'source', 'content', 'topics']) || !isValidCurrentCandidate(item))) throw new Error('invalid search result')
+    || result.items.some(item => !hasExactKeys(item, ['id', 'source', 'content', 'summary', 'title', 'topics'])
+      || !isValidCurrentCandidate(item) || !isBoundedText(item.title, MAX_SUMMARY_BYTES)
+      || !isBoundedText(item.summary, MAX_SUMMARY_BYTES))) throw new Error('invalid search result')
 }
 
 function validateExploreResult(result: XFeedExploreResult): void {
@@ -323,4 +405,8 @@ function hasExactKeys(value: unknown, expected: readonly string[]): boolean {
   const keys = Object.keys(value).sort()
   const wanted = [...expected].sort()
   return keys.length === wanted.length && keys.every((key, index) => key === wanted[index])
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

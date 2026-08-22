@@ -69,7 +69,10 @@ function toolCall(id: string, name: string, value: unknown): StreamChunk[] {
 class TwoCallProviderAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
 
-  constructor(private readonly themeId = 'agentic systems') {
+  constructor(
+    private readonly themeId = 'agentic systems',
+    private readonly composerItemId = 'item:x-status:1',
+  ) {
     super()
   }
 
@@ -90,7 +93,7 @@ class TwoCallProviderAdapter extends LlmAdapter {
     if (request.system.includes('composer Agent')) {
       yield* toolCall('composer-submit', 'submit_x_cron_composer', {
         title: 'provider title',
-        sections: [{ kind: 'highlight', items: [{ itemId: 'item:x-status:1', summary: 'provider summary' }] }],
+        sections: [{ kind: 'highlight', items: [{ itemId: this.composerItemId, summary: 'provider summary' }] }],
       })
       return
     }
@@ -407,6 +410,142 @@ describe('dsh-x-feed/v1 cron provider composition boundary', () => {
       expect(python.calls).toHaveLength(2)
       expect(python.calls.at(-1)?.args).toEqual(expect.arrayContaining(['--pending-theme', 'mixed']))
       expect(python.calls.some(call => call.args.includes('search-topic'))).toBe(false)
+    } finally {
+      await handle.dispose()
+      await lease.dispose()
+    }
+  })
+
+  it('mechanically searches one unfamiliar graph topic and admits its result into the composer', async () => {
+    const { directory, candidateUrl, packagePath } = await emptyAlignedFactFixture()
+    const searchUrl = 'https://x.com/bob/status/2'
+    const python = runner()
+    const readFile = vi.fn(async (path: string) => {
+      if (path === packagePath) {
+        return JSON.stringify({
+          recent_items: [{ id: '1', url: candidateUrl, text: 'repeated AI candidate' }],
+          selected_urls: [candidateUrl],
+          decision: {
+            top_theme: 'ai', themes: { ai: 1 }, flooded: true, same_as_last: true,
+            random_roll: 0, random_hit: true, wander_suggested: true,
+          },
+          explore_candidates: [{
+            topic: 'anime', hop: 1, from_anchor: 'ai-agent', via: 'creative-tools',
+            bridge: 'creative-tools → anime', explored_count: 0, last_explored_ts: null,
+            familiarity: 'new', cooldown_ok: true, cooldown_remaining_s: 0, recently_explored: false,
+          }],
+        })
+      }
+      if (path.endsWith('/topic-search.jsonl')) {
+        return `${JSON.stringify({ id: '2', url: searchUrl, text: 'a genuinely different anime discovery', topic: 'anime' })}\n`
+      }
+      throw new Error(`unexpected artifact read: ${path}`)
+    })
+    const adapter = new TwoCallProviderAdapter('ai', 'item:x-status:2')
+    const ctx = await finalHarness(adapter)
+    const provider = createXFeedCronEnvironmentProvider({
+      ctx,
+      cronJobId: 'cron-x',
+      dataDir: directory,
+      pythonBin: 'python3',
+      pipelinePath: '/pkg/python/x_insight_pipeline.py',
+      run: python.run,
+      readFile,
+    })
+
+    const lease = await provider.prepare({ jobId: 'cron-x', runId: 'cron-x@mechanical-random-walk' })
+    if (lease.kind === 'skip') throw new Error('random-walk fixture unexpectedly skipped')
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('provider-random-walk-composer-session'),
+      agentOptions: { provider: 'wire-test', model: 'wire-model' },
+      setup: async agentCtx => {
+        installModelSelection(agentCtx, { current: { provider: 'wire-test', model: 'wire-model' }, assembled: undefined })
+        await lease.setupAgent(agentCtx)
+      },
+    })
+    try {
+      await lease.verifySurface(handle.agent)
+      const firstSeq = handle.agent.session.seq
+      handle.agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'drive mechanical random walk' }],
+        source: { kind: 'plugin', plugin: 'dsh-cron' },
+      }))
+      await handle.agent.whenIdle()
+      const finalized = await lease.finalizeOutcome!(summarizeTurn(handle.agent.session.events, firstSeq))
+
+      expect(adapter.requests).toHaveLength(2)
+      expect(python.calls.filter(call => call.args.some(arg => arg.endsWith('/x_topic_search.py')))).toHaveLength(1)
+      expect(python.calls.some(call => call.args.includes('anime'))).toBe(true)
+      expect(finalized.text).toContain(searchUrl)
+      expect(python.calls.at(-1)?.args).toEqual(expect.arrayContaining(['--pending-theme', 'anime']))
+    } finally {
+      await handle.dispose()
+      await lease.dispose()
+    }
+  })
+
+  it('falls back to one non-dominant current candidate when the topic graph has no route', async () => {
+    const { directory, candidateUrl, packagePath } = await emptyAlignedFactFixture()
+    const alternateUrl = 'https://x.com/bob/status/2'
+    const python = runner()
+    const readFile = vi.fn(async (path: string) => {
+      if (path === packagePath) {
+        return JSON.stringify({
+          recent_items: [
+            { id: '1', url: candidateUrl, text: 'repeated AI candidate' },
+            { id: '2', url: alternateUrl, text: 'an unrelated everyday discovery' },
+          ],
+          selected_urls: [candidateUrl, alternateUrl],
+          decision: {
+            top_theme: 'ai', themes: { ai: 1 }, flooded: true, same_as_last: true,
+            random_roll: 0, random_hit: true, wander_suggested: true,
+            candidates: [{ url: alternateUrl, text: 'an unrelated everyday discovery', theme: null }],
+          },
+          explore_candidates: [],
+        })
+      }
+      if (path.endsWith('/x_explore/x-status:2.txt')) {
+        return `TITLE: alternate details\nURL: ${alternateUrl}\n\nalternate expanded body\nLINKS:\n${alternateUrl}\n`
+      }
+      throw new Error(`unexpected artifact read: ${path}`)
+    })
+    const adapter = new TwoCallProviderAdapter('ai', 'item:x-status:2')
+    const ctx = await finalHarness(adapter)
+    const provider = createXFeedCronEnvironmentProvider({
+      ctx,
+      cronJobId: 'cron-x',
+      dataDir: directory,
+      pythonBin: 'python3',
+      pipelinePath: '/pkg/python/x_insight_pipeline.py',
+      run: python.run,
+      readFile,
+    })
+
+    const lease = await provider.prepare({ jobId: 'cron-x', runId: 'cron-x@candidate-random-walk' })
+    if (lease.kind === 'skip') throw new Error('candidate random-walk fixture unexpectedly skipped')
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('provider-candidate-walk-composer-session'),
+      agentOptions: { provider: 'wire-test', model: 'wire-model' },
+      setup: async agentCtx => {
+        installModelSelection(agentCtx, { current: { provider: 'wire-test', model: 'wire-model' }, assembled: undefined })
+        await lease.setupAgent(agentCtx)
+      },
+    })
+    try {
+      await lease.verifySurface(handle.agent)
+      const firstSeq = handle.agent.session.seq
+      handle.agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'drive candidate random walk' }],
+        source: { kind: 'plugin', plugin: 'dsh-cron' },
+      }))
+      await handle.agent.whenIdle()
+      const finalized = await lease.finalizeOutcome!(summarizeTurn(handle.agent.session.events, firstSeq))
+
+      expect(adapter.requests).toHaveLength(2)
+      expect(python.calls.filter(call => call.args.some(arg => arg.endsWith('/x_explorer.py')))).toHaveLength(1)
+      expect(python.calls.filter(call => call.args.some(arg => arg.endsWith('/x_topic_search.py')))).toHaveLength(0)
+      expect(finalized.text).toContain(alternateUrl)
+      expect(python.calls.at(-1)?.args).toEqual(expect.arrayContaining(['--pending-theme', 'mixed']))
     } finally {
       await handle.dispose()
       await lease.dispose()

@@ -120,6 +120,31 @@ describe('X cron Python ports', () => {
     await expect(ports.exploreCandidate('candidate-unknown')).rejects.toMatchObject({ code: 'capability-denied' })
   })
 
+  it('allows a mechanically allowlisted neighboring topic without attaching it to a current candidate', async () => {
+    const runner = makeRunner()
+    const ports = createXFeedPythonPorts({
+      pythonBin: '/usr/bin/python3',
+      pythonDirectory: '/pkg/python',
+      pipelinePath: '/pkg/python/x_insight_pipeline.py',
+      topicSearchPath: '/pkg/python/x_topic_search.py',
+      explorerPath: '/pkg/python/x_explorer.py',
+      capabilities: {
+        ...capabilities,
+        allowedTopics: ['agentic systems', 'anime'],
+      },
+      run: runner.run,
+      readFile: async () => '',
+    })
+
+    await expect(ports.searchTopic('anime')).resolves.toEqual({ items: [] })
+    expect(runner.requests).toHaveLength(1)
+    expect(runner.requests[0]!.args).toEqual([
+      '/pkg/python/x_topic_search.py', 'anime', '--rolls', '3', '--live', '--out', capabilities.topicSearchOutputPath,
+    ])
+    await expect(ports.searchTopic('not-allowlisted')).rejects.toMatchObject({ code: 'capability-denied' })
+    expect(runner.requests).toHaveLength(1)
+  })
+
   it('prepares an artifact only and never exposes mark-shown or receipt commands', async () => {
     const runner = makeRunner('{"ok":true,"prepared":1}\n')
     const ports = createXFeedPythonPorts({
