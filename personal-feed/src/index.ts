@@ -19,7 +19,11 @@ export {
   createRunOpportunityLifecycle,
 } from './components.ts'
 
-export { createCrossSourceEditor } from './cross-source-editor.ts'
+export {
+  createCrossSourceEditor,
+  type ContextEnabledCrossSourceEditorOptions,
+  type CrossSourceEditorOptions,
+} from './cross-source-editor.ts'
 
 export type { PeriodBusinessFinalizer, PeriodBusinessScopeFinalizer } from './components.ts'
 
@@ -40,6 +44,8 @@ export type {
   C09Result,
   C10Accepted,
   C10Result,
+  C11Accepted,
+  C11Result,
   C16Accepted,
   C16Result,
   C26Accepted,
@@ -69,8 +75,16 @@ export type {
   CandidateReportingWindowAccepted,
   CandidateReportingWindowIdentity,
   ContractResult,
+  ConfiguredCurrentContextProjection,
+  ContextEnabledCrossSourceEditor,
+  CurrentContextEditorOptions,
+  ContextUnavailable,
+  CurrentContext,
+  CurrentContextClue,
   CurrentContextProjection,
   CurrentContextProjectionPeriodScopeEstablished,
+  CurrentContextResult,
+  CurrentContextResultReceiver,
   ExternalPeriodScopeInput,
   ExternalRunOpportunity,
   ExternalRunOpportunityOrigin,

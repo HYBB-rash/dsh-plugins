@@ -71,6 +71,29 @@ export interface CurrentContextProjectionPeriodScopeEstablished {
   readonly period: PeriodIdentity
 }
 
+export interface CurrentContextClue {
+  readonly factOwner: unknown
+  readonly originalAttribution: unknown
+  readonly exactLookup: unknown
+  readonly currentFact: unknown
+}
+
+export interface CurrentContext {
+  readonly scope: CurrentContextProjectionPeriodScopeEstablished
+  readonly period: PeriodIdentity
+  readonly clues: readonly CurrentContextClue[]
+}
+
+export interface ContextUnavailable {
+  readonly scope: CurrentContextProjectionPeriodScopeEstablished
+  readonly period: PeriodIdentity
+  readonly unavailableFact: unknown
+}
+
+export type CurrentContextResult =
+  | { readonly kind: 'available'; readonly context: CurrentContext }
+  | { readonly kind: 'unavailable'; readonly value: ContextUnavailable }
+
 export interface MaterialProjectionReportScope {
   readonly period: PeriodIdentity
   readonly source: SourceIdentity
@@ -251,6 +274,7 @@ export type C35Result = ContractResult<MaterialProjectionReportScopeEstablished,
 export type C08Result = ContractResult<UnscreenedMaterialCandidateAccepted, MechanicalCandidate>
 export type C09Result = ContractResult<MaterialBasisAccepted, MaterialSourceFacts>
 export type C10Result = ContractResult<EditingInputAccepted, CandidateMaterial>
+export type C11Result = ContractResult<CurrentContextResult, CurrentContextResult>
 export type C16Result = ContractResult<MaterialFactRecorded, MaterialFact>
 export type C36Result = ContractResult<SourceCandidateReportAccepted, SourceCandidateReport>
 export type C26Result = ContractResult<CandidateAcceptedIntoPeriod, ReportedMaterialCandidate>
@@ -263,6 +287,7 @@ export type C34Accepted = Extract<C34Result, { readonly status: 'accepted' }>
 export type C35Accepted = Extract<C35Result, { readonly status: 'accepted' }>
 export type C36Accepted = Extract<C36Result, { readonly status: 'accepted' }>
 export type C10Accepted = Extract<C10Result, { readonly status: 'accepted' }>
+export type C11Accepted = Extract<C11Result, { readonly status: 'accepted' }>
 export type C16Accepted = Extract<C16Result, { readonly status: 'accepted' }>
 export type C26Accepted = Extract<C26Result, { readonly status: 'accepted' }>
 
@@ -284,6 +309,29 @@ export interface CurrentContextProjection {
   readonly establishPeriodScope: (
     period: PeriodIdentity,
   ) => C33Result | Promise<C33Result>
+}
+
+export interface CurrentContextResultProducer {
+  readonly produceCurrentContextResult: (
+    scope: CurrentContextProjectionPeriodScopeEstablished,
+  ) => CurrentContextResult | Promise<CurrentContextResult>
+}
+
+export interface CurrentContextResultReceiver {
+  readonly acceptCurrentContext: (
+    result: CurrentContextResult,
+  ) => C11Result | Promise<C11Result>
+}
+
+export interface CurrentContextProjectionOptions {
+  readonly resultProducer: CurrentContextResultProducer
+  readonly c11Receiver: CurrentContextResultReceiver
+}
+
+export interface ConfiguredCurrentContextProjection extends CurrentContextProjection {
+  readonly completeCurrentContextForEstablishedScope: (
+    scope: CurrentContextProjectionPeriodScopeEstablished,
+  ) => Promise<C11Result>
 }
 
 export interface SourceScopeComponents {
@@ -346,3 +394,10 @@ export interface CrossSourceEditor {
   readonly acceptCandidateMaterial: (material: CandidateMaterial) => C10Result
   readonly listAcceptedInputs: () => readonly CandidateMaterial[]
 }
+
+export interface CurrentContextEditorOptions {
+  readonly periodScopeLedgerPath: string
+  readonly currentContextInputLedgerPath: string
+}
+
+export interface ContextEnabledCrossSourceEditor extends CrossSourceEditor, CurrentContextResultReceiver {}

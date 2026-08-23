@@ -5,13 +5,18 @@ import { createCandidatePeriodFinalizer } from './candidate-period-finalizer.ts'
 import type {
   C01Accepted,
   C02Accepted,
+  C11Result,
   C32Accepted,
   C33Accepted,
   C34Accepted,
   C35Accepted,
   CandidateMaterialProjection,
   CandidateReportingWindow,
+  ConfiguredCurrentContextProjection,
   CurrentContextProjection,
+  CurrentContextProjectionPeriodScopeEstablished,
+  CurrentContextProjectionOptions,
+  CurrentContextResult,
   ExternalRunOpportunity,
   MechanicalAdmission,
   MechanicalAdmissionPeriodScopeRequest,
@@ -119,9 +124,37 @@ export function createCandidateMaterialProjection(source: SourceIdentity): Candi
   })
 }
 
-export function createCurrentContextProjection(): CurrentContextProjection {
+export function createCurrentContextProjection(): CurrentContextProjection
+export function createCurrentContextProjection(
+  options: CurrentContextProjectionOptions,
+): ConfiguredCurrentContextProjection
+export function createCurrentContextProjection(
+  options?: CurrentContextProjectionOptions,
+): CurrentContextProjection | ConfiguredCurrentContextProjection {
+  const establishPeriodScope = (period: PeriodIdentity): C33Accepted => {
+    return accepted({ period })
+  }
+  const base = { establishPeriodScope }
+  if (options === undefined) return Object.freeze(base)
+  if (typeof options.resultProducer?.produceCurrentContextResult !== 'function'
+    || typeof options.c11Receiver?.acceptCurrentContext !== 'function') {
+    throw new TypeError('current context projection requires a result producer and C11 receiver')
+  }
+
+  const projectCurrentContext = async (
+    scope: CurrentContextProjectionPeriodScopeEstablished,
+  ): Promise<CurrentContextResult> => {
+    return options.resultProducer.produceCurrentContextResult(scope)
+  }
+
   return Object.freeze({
-    establishPeriodScope: (period: PeriodIdentity) => accepted({ period }),
+    ...base,
+    completeCurrentContextForEstablishedScope: async (
+      scope: CurrentContextProjectionPeriodScopeEstablished,
+    ): Promise<C11Result> => {
+      const result = await projectCurrentContext(scope)
+      return options.c11Receiver.acceptCurrentContext(result)
+    },
   })
 }
 

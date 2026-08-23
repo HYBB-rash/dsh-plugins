@@ -49,14 +49,34 @@ export function createCronEnvironmentExtension(
   assertXFeedRequiredSources(config.personalFeedRequiredSources)
 
   const xSource = sourceIdentity(X_FEED_SOURCE_IDENTITY)
+  const periodScopeLedgerPath = join(config.personalFeedDataDir, 'period-scopes.jsonl')
+  const crossSourceEditor = createCrossSourceEditor({
+    candidatePeriodLedgerPath: join(config.personalFeedDataDir, 'candidate-period-facts.jsonl'),
+    editingInputLedgerPath: join(config.personalFeedDataDir, 'editing-inputs.jsonl'),
+    periodScopeLedgerPath,
+    currentContextInputLedgerPath: join(config.personalFeedDataDir, 'current-context-inputs.jsonl'),
+  })
+  const currentContextProjection = createCurrentContextProjection({
+    resultProducer: {
+      produceCurrentContextResult: scope => ({
+        kind: 'unavailable',
+        value: {
+          scope,
+          period: scope.period,
+          unavailableFact: { kind: 'no_configured_authorized_context_source' },
+        },
+      }),
+    },
+    c11Receiver: crossSourceEditor,
+  })
   const scopeService = createPersonalFeedScopeService({
-    ledgerPath: join(config.personalFeedDataDir, 'period-scopes.jsonl'),
+    ledgerPath: periodScopeLedgerPath,
     sourceScopes: [{
       source: xSource,
       mechanicalAdmission: createMechanicalAdmission(xSource),
       candidateMaterialProjection: createCandidateMaterialProjection(xSource),
     }],
-    currentContextProjection: createCurrentContextProjection(),
+    currentContextProjection,
   })
   const scopeAdapter = createXFeedScopeAdapter({
     establishExternalPeriodScope: request => scopeService.establishExternalPeriodScope({
@@ -70,16 +90,11 @@ export function createCronEnvironmentExtension(
     }),
   })
   const sourceCandidateReportFinalizer = createPeriodBusinessFinalizer({
-    periodScopeLedgerPath: join(config.personalFeedDataDir, 'period-scopes.jsonl'),
+    periodScopeLedgerPath,
     reportLedgerPath: join(config.personalFeedDataDir, 'source-candidate-reports.jsonl'),
     candidatePeriodLedgerPath: join(config.personalFeedDataDir, 'candidate-period-facts.jsonl'),
     now: () => new Date().toISOString(),
   })
-  const crossSourceEditor = createCrossSourceEditor({
-    candidatePeriodLedgerPath: join(config.personalFeedDataDir, 'candidate-period-facts.jsonl'),
-    editingInputLedgerPath: join(config.personalFeedDataDir, 'editing-inputs.jsonl'),
-  })
-
   const receipt = new DeliveryReceipt({
     cronJobId: config.cronJobId,
     dataDir: config.dataDir,
@@ -113,6 +128,10 @@ export function createCronEnvironmentExtension(
         requiredSources: config.personalFeedRequiredSources,
         reportingWindowClosesAt: closesAt,
       })
+      const c11 = await currentContextProjection.completeCurrentContextForEstablishedScope(established.c33.value)
+      if (c11.status !== 'accepted') {
+        throw new Error('x-feed C11 current-context result was not accepted')
+      }
       const sourceCandidateReport = sourceCandidateReportWiring(
         established,
         sourceCandidateReportFinalizer,

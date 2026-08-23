@@ -1,10 +1,19 @@
 import { createCandidatePeriodStore } from './candidate-period-store.ts'
+import { createCurrentContextInputStore, currentContextInputReceiptFor } from './current-context-input-store.ts'
 import { createEditingInputStore } from './editing-input-store.ts'
+import { PersonalFeedScopeStoreError } from './errors.ts'
+import { createPeriodScopeStore } from './store.ts'
 import type {
   C10Result,
+  C11Result,
   CandidateMaterial,
+  ContextEnabledCrossSourceEditor,
+  CurrentContextEditorOptions,
   CrossSourceEditor,
+  CurrentContextProjectionPeriodScopeEstablished,
+  CurrentContextResult,
   EditingInputAccepted,
+  PeriodIdentity,
 } from './types.ts'
 
 export interface CrossSourceEditorOptions {
@@ -12,11 +21,28 @@ export interface CrossSourceEditorOptions {
   readonly editingInputLedgerPath: string
 }
 
-export function createCrossSourceEditor(options: CrossSourceEditorOptions): CrossSourceEditor {
+export type ContextEnabledCrossSourceEditorOptions = CrossSourceEditorOptions & CurrentContextEditorOptions
+
+export function createCrossSourceEditor(
+  options: ContextEnabledCrossSourceEditorOptions,
+): ContextEnabledCrossSourceEditor
+export function createCrossSourceEditor(options: CrossSourceEditorOptions): CrossSourceEditor
+export function createCrossSourceEditor(
+  options: CrossSourceEditorOptions | ContextEnabledCrossSourceEditorOptions,
+): CrossSourceEditor | ContextEnabledCrossSourceEditor {
+  validateContextOptions(options)
   const candidatePeriodStore = createCandidatePeriodStore(options.candidatePeriodLedgerPath)
   const editingInputStore = createEditingInputStore(options.editingInputLedgerPath)
+  const contextEnabled = 'periodScopeLedgerPath' in options
+    && 'currentContextInputLedgerPath' in options
+  const periodScopeStore = contextEnabled
+    ? createPeriodScopeStore(options.periodScopeLedgerPath)
+    : undefined
+  const currentContextInputStore = contextEnabled
+    ? createCurrentContextInputStore(options.currentContextInputLedgerPath)
+    : undefined
 
-  return Object.freeze({
+  const editor: CrossSourceEditor = {
     acceptCandidateMaterial: (input: CandidateMaterial): C10Result => {
       try {
         if (!hasCompleteMaterial(input)) return { status: 'rejected', input }
@@ -41,7 +67,100 @@ export function createCrossSourceEditor(options: CrossSourceEditorOptions): Cros
       }
     },
     listAcceptedInputs: () => editingInputStore.list(),
+  }
+  if (!contextEnabled || periodScopeStore === undefined || currentContextInputStore === undefined) {
+    return Object.freeze(editor)
+  }
+  return Object.freeze({
+    ...editor,
+    acceptCurrentContext: (input: CurrentContextResult): C11Result => {
+      try {
+        if (!isRecord(input) || (input.kind !== 'available' && input.kind !== 'unavailable')) {
+          return { status: 'rejected', input }
+        }
+        const identity = currentContextIdentity(input)
+        if (identity === undefined) return { status: 'rejected', input }
+        const periodScope = periodScopeStore.list().find(record => samePeriod(record.c01.value.period, identity.period))
+        if (periodScope === undefined || !sameValue(periodScope.c33.value, identity.scope)) {
+          return { status: 'rejected', input }
+        }
+
+        const receipt = currentContextInputReceiptFor(input)
+        if (receipt === undefined) return { status: 'rejected', input }
+        const existing = currentContextInputStore.findByPeriod(identity.period)
+        if (existing !== undefined) {
+          return existing.digest === receipt.digest && existing.branch === receipt.branch
+            ? { status: 'accepted', value: input }
+            : { status: 'rejected', input }
+        }
+        currentContextInputStore.append(receipt)
+        return { status: 'accepted', value: input }
+      } catch {
+        return { status: 'failed', input }
+      }
+    },
   })
+}
+
+function validateContextOptions(options: CrossSourceEditorOptions | ContextEnabledCrossSourceEditorOptions): void {
+  const hasPeriodScopeLedger = 'periodScopeLedgerPath' in options
+  const hasContextInputLedger = 'currentContextInputLedgerPath' in options
+  if (hasPeriodScopeLedger !== hasContextInputLedger) {
+    throw new PersonalFeedScopeStoreError(
+      'personal Feed C11 requires both periodScopeLedgerPath and currentContextInputLedgerPath',
+    )
+  }
+}
+
+interface CurrentContextIdentity {
+  readonly period: PeriodIdentity
+  readonly scope: CurrentContextProjectionPeriodScopeEstablished
+}
+
+function currentContextIdentity(input: CurrentContextResult): CurrentContextIdentity | undefined {
+  if (input.kind === 'available') {
+    if (!isCurrentContext(input.context)
+      || !samePeriod(input.context.scope.period, input.context.period)) return undefined
+    return { period: input.context.period, scope: input.context.scope }
+  }
+  if (!isContextUnavailable(input.value)
+    || !samePeriod(input.value.scope.period, input.value.period)) return undefined
+  return { period: input.value.period, scope: input.value.scope }
+}
+
+function isCurrentContext(value: unknown): value is Extract<CurrentContextResult, { readonly kind: 'available' }>['context'] {
+  return isRecord(value)
+    && isContextScope(value.scope)
+    && isPeriod(value.period)
+    && Array.isArray(value.clues)
+    && value.clues.every(isCurrentContextClue)
+}
+
+function isCurrentContextClue(value: unknown): boolean {
+  return isRecord(value)
+    && Object.hasOwn(value, 'factOwner')
+    && Object.hasOwn(value, 'originalAttribution')
+    && Object.hasOwn(value, 'exactLookup')
+    && Object.hasOwn(value, 'currentFact')
+}
+
+function isContextUnavailable(value: unknown): value is Extract<CurrentContextResult, { readonly kind: 'unavailable' }>['value'] {
+  return isRecord(value)
+    && isContextScope(value.scope)
+    && isPeriod(value.period)
+    && Object.hasOwn(value, 'unavailableFact')
+}
+
+function isContextScope(value: unknown): value is { readonly period: { readonly run: string; readonly period: string } } {
+  return isRecord(value) && isPeriod(value.period)
+}
+
+function isPeriod(value: unknown): value is { readonly run: string; readonly period: string } {
+  return isRecord(value) && typeof value.run === 'string' && typeof value.period === 'string'
+}
+
+function samePeriod(left: { readonly run: string; readonly period: string }, right: { readonly run: string; readonly period: string }): boolean {
+  return left.run === right.run && left.period === right.period
 }
 
 function acceptedInputResult(material: CandidateMaterial): C10Result {
