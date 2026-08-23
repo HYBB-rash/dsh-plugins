@@ -1566,6 +1566,63 @@ function markedProvider(
 }
 
 describe('marked Agent environment and run lease lifecycle', () => {
+  it('passes the durable claim trigger facts to scheduled and manual providers', async () => {
+    const dir = tempDir()
+    const scheduledJob = markedAgentJob('claim-fact-scheduled')
+    const manualJob = markedAgentJob('claim-fact-manual', {
+      schedule: { kind: 'once', runAt: new Date(Date.now() + 60 * 60_000).toISOString() },
+    })
+    seedJob(dir, scheduledJob)
+    seedJob(dir, manualJob)
+    const order: string[] = []
+    const received: Array<Record<string, unknown>> = []
+    const registry = createCronAgentEnvironmentRegistry([markedProvider(order, {
+      prepare: async context => {
+        received.push(context as unknown as Record<string, unknown>)
+        return {
+          kind: 'skip',
+          outcome: { text: undefined, error: undefined },
+        } as never
+      },
+    })])
+    const runtime = new SchedulerRuntime(
+      orderedEnvironmentCtx(order, registry),
+      makeConfig(dir),
+      {} as never,
+      0,
+      new AbortController().signal,
+      { driveTurn: async () => { throw new Error('provider skip must avoid Agent execution') } },
+    )
+
+    runtime.start()
+    try {
+      await waitFor(() => received.some(context => context.jobId === scheduledJob.id))
+      await expect(runtime.runNow({ jobId: manualJob.id, requestKey: 'claim-fact-manual-request' })).resolves.toMatchObject({
+        ok: true,
+      })
+      await waitFor(() => received.length === 2)
+
+      const claims = readLines(dir)
+        .map(line => JSON.parse(line) as Record<string, unknown>)
+        .filter(record => record.event === 'claim')
+      expect(claims).toHaveLength(2)
+      for (const context of received) {
+        const claim = claims.find(record => record.runId === context.runId)
+        expect(claim).toBeDefined()
+        expect(context).toMatchObject({
+          jobId: claim?.jobId,
+          runId: claim?.runId,
+          trigger: claim?.trigger,
+          scheduledFor: claim?.scheduledFor,
+          claimedAt: claim?.claimedAt,
+        })
+      }
+      expect(received.map(context => context.trigger).sort()).toEqual(['manual', 'scheduled'])
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
   it('records a prepared generic skip as success without creating an Agent or delivering', async () => {
     const dir = tempDir()
     seedJob(dir, markedAgentJob('marked-prepared-skip', { deliver: 'telegram' }))

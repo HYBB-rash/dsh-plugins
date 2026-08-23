@@ -16,6 +16,16 @@ export {
 
 export { createCronEnvironmentExtension } from './cron-extension.ts'
 export {
+  assertXFeedRequiredSources,
+  createXFeedScopeAdapter,
+  X_FEED_SOURCE_IDENTITY,
+  XFeedScopeAdapterError,
+  type ExternalPeriodScopePort,
+  type XFeedExternalPeriodScopeRequest,
+  type XFeedPeriodScopeInput,
+  type XFeedScopeAdapter,
+} from './feed-scope-adapter.ts'
+export {
   createTrustedFactNavigation,
   installTelegramExtension,
   X_FEED_CONTRACT,

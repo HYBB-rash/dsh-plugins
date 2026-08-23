@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 const xFeedDirectory = resolve(import.meta.dirname, '..')
 const workspaceDirectory = resolve(xFeedDirectory, '..')
 const cronDirectory = join(workspaceDirectory, 'dsh-cron')
+const personalFeedDirectory = join(workspaceDirectory, 'personal-feed')
 const harnessDirectory = process.env.DSH_HARNESS_ROOT!
 const harnessDependencies = join(harnessDirectory, 'node_modules/.pnpm/node_modules')
 const typeScript = join(harnessDirectory, 'node_modules/typescript/bin/tsc')
@@ -72,7 +73,7 @@ function assertNoCrossPackageSubpathImports(directory: string, packageName: stri
 }
 
 describe('TODO7 packed NodeNext public-root consumer', () => {
-  it('packs both packages and executes a consumer against only their public roots', () => {
+  it('packs all runtime packages and executes a consumer against only their public roots', () => {
     const temporary = mkdtempSync(join(tmpdir(), 'dsh-x-feed-todo7-packed-consumer-'))
     temporaryDirectories.push(temporary)
     const tarballs = join(temporary, 'tarballs')
@@ -80,16 +81,27 @@ describe('TODO7 packed NodeNext public-root consumer', () => {
     const consumerNodeModules = join(consumer, 'node_modules')
     const cronPackage = join(consumerNodeModules, '@deepseek-ai/dsh-cron')
     const xFeedPackage = join(consumerNodeModules, '@herman/x-feed')
+    const personalFeedPackage = join(consumerNodeModules, '@herman/personal-feed')
     mkdirSync(tarballs)
     mkdirSync(consumerNodeModules, { recursive: true })
 
     const cronTarball = pack(cronDirectory, tarballs)
+    const personalFeedTarball = pack(personalFeedDirectory, tarballs)
     const xFeedTarball = pack(xFeedDirectory, tarballs)
     unpack(cronTarball, cronPackage)
+    unpack(personalFeedTarball, personalFeedPackage)
     unpack(xFeedTarball, xFeedPackage)
     linkWorkspaceDependencies(consumerNodeModules)
 
-    for (const path of [cronTarball, xFeedTarball, cronPackage, xFeedPackage, consumer]) {
+    for (const path of [
+      cronTarball,
+      personalFeedTarball,
+      xFeedTarball,
+      cronPackage,
+      personalFeedPackage,
+      xFeedPackage,
+      consumer,
+    ]) {
       expect(path.startsWith(`${temporary}/`), `path escaped temporary root: ${path}`).toBe(true)
     }
 
@@ -107,11 +119,26 @@ describe('TODO7 packed NodeNext public-root consumer', () => {
       types: string
       exports: Record<string, unknown>
     }
+    const personalFeedManifest = JSON.parse(readFileSync(join(personalFeedPackage, 'package.json'), 'utf8')) as {
+      name: string
+      version: string
+      main: string
+      types: string
+      exports: Record<string, unknown>
+    }
     expect(cronManifest.name).toBe('@deepseek-ai/dsh-cron')
+    expect(personalFeedManifest.name).toBe('@herman/personal-feed')
     expect(xFeedManifest.name).toBe('@herman/x-feed')
     expect(cronManifest.version).toBe(JSON.parse(readFileSync(join(cronDirectory, 'package.json'), 'utf8')).version)
     expect(xFeedManifest.version).toBe(JSON.parse(readFileSync(join(xFeedDirectory, 'package.json'), 'utf8')).version)
-    for (const [directory, manifest] of [[cronPackage, cronManifest], [xFeedPackage, xFeedManifest]] as const) {
+    expect(personalFeedManifest.version).toBe(
+      JSON.parse(readFileSync(join(personalFeedDirectory, 'package.json'), 'utf8')).version,
+    )
+    for (const [directory, manifest] of [
+      [cronPackage, cronManifest],
+      [personalFeedPackage, personalFeedManifest],
+      [xFeedPackage, xFeedManifest],
+    ] as const) {
       expect(manifest.exports['.']).toBeDefined()
       expect(existsSync(join(directory, manifest.main))).toBe(true)
       expect(existsSync(join(directory, manifest.types))).toBe(true)
@@ -129,6 +156,7 @@ describe('TODO7 packed NodeNext public-root consumer', () => {
     expect(packedFiles.some(path => path.endsWith('.d.ts'))).toBe(true)
 
     assertNoCrossPackageSubpathImports(consumer, '@deepseek-ai/dsh-cron')
+    assertNoCrossPackageSubpathImports(consumer, '@herman/personal-feed')
     assertNoCrossPackageSubpathImports(consumer, '@herman/x-feed')
 
     writeFileSync(join(consumer, 'package.json'), JSON.stringify({ type: 'module' }))

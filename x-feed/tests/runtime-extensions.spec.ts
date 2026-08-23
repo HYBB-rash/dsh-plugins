@@ -59,6 +59,8 @@ describe('X runtime configuration', () => {
       telegramSessionId: 'session-telegram',
       feedbackPendingTtlMs: 600_000,
       feedbackTurnTimeoutMs: 30_000,
+      personalFeedRequiredSources: [],
+      candidateReportingWindowMs: undefined,
     })
     expect(resolvePipelinePath({}).endsWith('python/x_insight_pipeline.py')).toBe(true)
   })
@@ -66,6 +68,8 @@ describe('X runtime configuration', () => {
   it('rejects invalid values from host JSON', () => {
     expect(() => parseXFeedRuntimeConfig({ feedbackTurnTimeoutMs: 0 })).toThrow('feedbackTurnTimeoutMs')
     expect(() => parseXFeedRuntimeConfig({ dataDir: 42 })).toThrow('dataDir')
+    expect(() => parseXFeedRuntimeConfig({ candidateReportingWindowMs: 0 })).toThrow('candidateReportingWindowMs')
+    expect(() => parseXFeedRuntimeConfig({ personalFeedRequiredSources: 'x' })).toThrow('personalFeedRequiredSources')
   })
 })
 
@@ -110,6 +114,8 @@ describe('business extension boundaries', () => {
       cronJobId: 'cron-x-1',
       dataDir: '/tmp/x-feed-cron-extension',
       pipelinePath: '/opt/x-feed/python/x_insight_pipeline.py',
+      personalFeedRequiredSources: ['x'],
+      candidateReportingWindowMs: 300_000,
     })
     expect(provider.marker).toBe('dsh-x-feed/v1')
     expect(provider.requirements).toMatchObject({ jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' })
@@ -131,6 +137,7 @@ describe('business extension boundaries', () => {
   })
 
   it('returns a provider skip byte-for-byte without decorating it with settleRun', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'x-feed-cron-skip-'))
     const skip = Object.freeze({
       kind: 'skip' as const,
       outcome: Object.freeze({ text: undefined, error: undefined }),
@@ -141,22 +148,106 @@ describe('business extension boundaries', () => {
       prepare: vi.fn(async () => skip),
     } as never)
 
-    const provider = createCronEnvironmentExtension(makeCtx().ctx as never, {
-      cronJobId: 'cron-x-skip',
-      dataDir: '/tmp/x-feed-cron-skip',
-      pipelinePath: '/opt/x-feed/python/x_insight_pipeline.py',
-    })
-    const prepared = await provider.prepare({
-      jobId: 'cron-x-skip',
-      jobKind: 'agent',
-      sessionMode: 'per_run',
-      gate: 'forbidden',
-      runId: 'cron-x-skip@once',
-    })
+    try {
+      const provider = createCronEnvironmentExtension(makeCtx().ctx as never, {
+        cronJobId: 'cron-x-skip',
+        dataDir: directory,
+        pipelinePath: '/opt/x-feed/python/x_insight_pipeline.py',
+        personalFeedDataDir: join(directory, 'personal-feed'),
+        personalFeedRequiredSources: ['x'],
+        candidateReportingWindowMs: 300_000,
+      })
+      const prepared = await provider.prepare({
+        jobId: 'cron-x-skip',
+        jobKind: 'agent',
+        sessionMode: 'per_run',
+        gate: 'forbidden',
+        runId: 'cron-x-skip@once',
+        trigger: 'scheduled',
+        scheduledFor: '2026-08-23T13:00:00.000Z',
+        claimedAt: '2026-08-23T13:00:01.000Z',
+      })
 
-    expect(prepared).toBe(skip)
-    expect(prepared).toEqual(skip)
-    expect('settleRun' in prepared).toBe(false)
+      expect(prepared).toBe(skip)
+      expect(prepared).toEqual(skip)
+      expect('settleRun' in prepared).toBe(false)
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('establishes one observable Feed period scope before X preparation for scheduled and manual runs', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'x-feed-personal-scope-'))
+    const scopeDirectory = join(directory, 'personal-feed')
+    const ledgerPath = join(scopeDirectory, 'period-scopes.jsonl')
+    const observedScopeCounts: number[] = []
+    const prepare = vi.fn(async () => {
+      observedScopeCounts.push(readFileSync(ledgerPath, 'utf8').trim().split('\n').length)
+      return {
+        kind: 'skip' as const,
+        outcome: { text: undefined, error: undefined },
+      }
+    })
+    vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProvider').mockReturnValue({
+      marker: 'dsh-x-feed/v1',
+      requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
+      prepare,
+    } as never)
+
+    try {
+      const provider = createCronEnvironmentExtension(makeCtx().ctx as never, {
+        cronJobId: 'cron-x-scope',
+        dataDir: directory,
+        pipelinePath: '/opt/x-feed/python/x_insight_pipeline.py',
+        personalFeedDataDir: scopeDirectory,
+        personalFeedRequiredSources: ['x'],
+        candidateReportingWindowMs: 300_000,
+      })
+      const scheduled = {
+        jobId: 'cron-x-scope',
+        jobKind: 'agent' as const,
+        sessionMode: 'per_run' as const,
+        gate: 'forbidden' as const,
+        runId: 'cron-x-scope@2026-08-23T13:30:00.000Z',
+        trigger: 'scheduled' as const,
+        scheduledFor: '2026-08-23T13:30:00.000Z',
+        claimedAt: '2026-08-23T13:30:01.000Z',
+      }
+      const manual = {
+        ...scheduled,
+        runId: 'manual:cron-x-scope:request-1',
+        trigger: 'manual' as const,
+        scheduledFor: '2026-08-23T13:31:00.000Z',
+        claimedAt: '2026-08-23T13:31:01.000Z',
+      }
+
+      await provider.prepare(scheduled)
+      await provider.prepare(manual)
+
+      const records = readFileSync(ledgerPath, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+      expect(observedScopeCounts).toEqual([1, 2])
+      expect(records).toHaveLength(2)
+      expect(records.map(record => record.external.trigger)).toEqual(['scheduled', 'manual'])
+      expect(records[0].c01.value.run).not.toBe(records[1].c01.value.run)
+      for (const record of records) {
+        expect(record.c01.value.run).toBe(record.c01.value.period.run)
+        expect(record.c02.value.start.period).toEqual(record.c01.value.period)
+        expect(record.c34.value.window.period).toEqual(record.c01.value.period)
+        expect(record.c34.value.window.sources).toEqual(['x'])
+        expect(record.c32[0].value.reportingWindow).toEqual(record.c34.value)
+        expect(record.c33.value.period).toEqual(record.c01.value.period)
+        expect(record.c35[0].value.scope.reportingWindow).toEqual(record.c34.value)
+      }
+
+      await expect(provider.prepare({
+        ...manual,
+        claimedAt: '2026-08-23T13:31:02.000Z',
+      })).rejects.toThrow('already established a different period scope')
+      expect(prepare).toHaveBeenCalledTimes(2)
+      expect(readFileSync(ledgerPath, 'utf8').trim().split('\n')).toHaveLength(2)
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 })
 

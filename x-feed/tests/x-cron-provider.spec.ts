@@ -214,6 +214,9 @@ describe('dsh-x-feed/v1 cron provider composition boundary', () => {
       dataDir: directory,
       pythonBin: 'python3',
       pipelinePath: '/pkg/python/x_insight_pipeline.py',
+      personalFeedDataDir: join(directory, 'personal-feed'),
+      personalFeedRequiredSources: ['x'],
+      candidateReportingWindowMs: 300_000,
     })
     const dispose = registry.register(provider)
     expect(registry.resolve(X_CRON_AGENT_ENVIRONMENT_MARKER)).toMatchObject({ ok: true })

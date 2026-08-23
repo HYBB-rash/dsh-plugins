@@ -43,7 +43,8 @@
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-system-prompt": "*",
     "@deepseek-ai/dsh-telegram-gateway": "*",
-    "@deepseek-ai/dsh-tools": "*"
+    "@deepseek-ai/dsh-tools": "*",
+    "@herman/personal-feed": "*"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "*",
@@ -54,6 +55,7 @@
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-system-prompt": "*",
     "@deepseek-ai/dsh-telegram-gateway": "*",
-    "@deepseek-ai/dsh-tools": "*"
+    "@deepseek-ai/dsh-tools": "*",
+    "@herman/personal-feed": "*"
   }
 }

@@ -58,6 +58,7 @@ import type {
   RunDeliveryState,
   RunFinishRecord,
   RunFinishStatus,
+  RunClaimRecord,
   RunTrigger,
 } from './types.ts'
 
@@ -1096,7 +1097,7 @@ export class SchedulerRuntime implements RunNowPort {
   /** Resolve and prepare a marked environment after the durable run claim. */
   private async prepareAgentEnvironment(
     job: Job,
-    runId: string,
+    claimRecord: RunClaimRecord & { readonly trigger: RunTrigger },
   ): Promise<PreparedAgentEnvironment | CronAgentEnvironmentSkip | undefined> {
     const marker = 'agentEnvironment' in job ? job.agentEnvironment : undefined
     if (marker === undefined) return undefined
@@ -1147,7 +1148,10 @@ export class SchedulerRuntime implements RunNowPort {
       jobKind: 'agent',
       sessionMode: job.sessionMode,
       gate: 'forbidden',
-      runId,
+      runId: claimRecord.runId,
+      trigger: claimRecord.trigger,
+      scheduledFor: claimRecord.scheduledFor,
+      claimedAt: claimRecord.claimedAt,
     }
     let prepared
     try {
@@ -1272,19 +1276,21 @@ export class SchedulerRuntime implements RunNowPort {
       ? undefined
       : nextRunAfter(job.schedule, Date.now())
 
+    const claimRecord: RunClaimRecord & { readonly trigger: RunTrigger } = {
+      schemaVersion: 2,
+      event: 'claim',
+      trigger,
+      runId,
+      jobId: job.id,
+      sessionId: this.sessionIdForRun(job, runId),
+      scheduledFor: new Date(scheduledFor).toISOString(),
+      claimedAt: new Date().toISOString(),
+      ...(crashFallback === undefined ? {} : { nextRunAt: new Date(crashFallback).toISOString() }),
+    }
+
     let claimed: boolean
     try {
-      claimed = this.ledger.claim({
-        schemaVersion: 2,
-        event: 'claim',
-        trigger,
-        runId,
-        jobId: job.id,
-        sessionId: this.sessionIdForRun(job, runId),
-        scheduledFor: new Date(scheduledFor).toISOString(),
-        claimedAt: new Date().toISOString(),
-        ...(crashFallback === undefined ? {} : { nextRunAt: new Date(crashFallback).toISOString() }),
-      }) === 'claimed'
+      claimed = this.ledger.claim(claimRecord) === 'claimed'
     } catch (error) {
       // Claim write failed: fail closed — no Agent/tool/Telegram side effect.
       // Back off in-process (schedule time and trigger identity untouched) so
@@ -1332,7 +1338,7 @@ export class SchedulerRuntime implements RunNowPort {
       if (state.invalidError !== undefined) {
         throw new SchedulerExecutionError('invalid_replay_evidence', state.invalidError)
       }
-      const preparedEnvironment = await this.prepareAgentEnvironment(job, runId)
+      const preparedEnvironment = await this.prepareAgentEnvironment(job, claimRecord)
       const leaseEnvironment = preparedEnvironment !== undefined && 'kind' in preparedEnvironment
         ? undefined
         : preparedEnvironment

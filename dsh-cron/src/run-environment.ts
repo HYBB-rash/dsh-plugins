@@ -7,7 +7,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { CronRunFinishedEvent } from './types.ts'
+import type { CronRunFinishedEvent, RunTrigger } from './types.ts'
 
 /** Public Cordis service name for the context-owned registry. */
 export const CRON_AGENT_ENVIRONMENT_REGISTRY = 'cronAgentEnvironmentRegistry' as const
@@ -31,6 +31,10 @@ export interface CronAgentEnvironmentPrepareContext {
   readonly sessionMode: CronAgentEnvironmentSessionMode
   readonly gate: CronAgentEnvironmentGate
   readonly runId: string
+  /** Trigger facts copied from the durable claim that admitted this run. */
+  readonly trigger: RunTrigger
+  readonly scheduledFor: string
+  readonly claimedAt: string
 }
 
 export type CronAgentEnvironmentSetup = (agent: unknown) => void | Promise<void>

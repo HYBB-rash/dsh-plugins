@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config'
 import tsconfigPaths from 'vite-tsconfig-paths'
+import { resolve } from 'node:path'
 
 const harnessRoot = process.env.DSH_HARNESS_ROOT
 
@@ -18,5 +19,10 @@ export default defineConfig({
   })],
   test: {
     include: ['tests/**/*.spec.ts'],
+  },
+  resolve: {
+    alias: {
+      '@herman/personal-feed': resolve(import.meta.dirname, '../personal-feed/src/index.ts'),
+    },
   },
 })
