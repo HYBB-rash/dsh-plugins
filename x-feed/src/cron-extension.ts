@@ -7,6 +7,7 @@ import type {
 import {
   createCandidateMaterialProjection,
   createCurrentContextProjection,
+  createCrossSourceEditor,
   createMechanicalAdmission,
   createPersonalFeedScopeService,
   createPeriodBusinessFinalizer,
@@ -29,6 +30,7 @@ import {
   type XFeedSourceCandidateReportWiring,
 } from './x-cron/provider.ts'
 import { createXSourceCandidateReportPorts } from './x-cron/source-candidate-report.ts'
+import type { XCandidateEditingInputPorts } from './x-cron/candidate-editing-input.ts'
 
 /**
  * Business-owned dsh-cron environment. The host owns scheduling and the final
@@ -70,7 +72,12 @@ export function createCronEnvironmentExtension(
   const sourceCandidateReportFinalizer = createPeriodBusinessFinalizer({
     periodScopeLedgerPath: join(config.personalFeedDataDir, 'period-scopes.jsonl'),
     reportLedgerPath: join(config.personalFeedDataDir, 'source-candidate-reports.jsonl'),
+    candidatePeriodLedgerPath: join(config.personalFeedDataDir, 'candidate-period-facts.jsonl'),
     now: () => new Date().toISOString(),
+  })
+  const crossSourceEditor = createCrossSourceEditor({
+    candidatePeriodLedgerPath: join(config.personalFeedDataDir, 'candidate-period-facts.jsonl'),
+    editingInputLedgerPath: join(config.personalFeedDataDir, 'editing-inputs.jsonl'),
   })
 
   const receipt = new DeliveryReceipt({
@@ -109,6 +116,7 @@ export function createCronEnvironmentExtension(
       const sourceCandidateReport = sourceCandidateReportWiring(
         established,
         sourceCandidateReportFinalizer,
+        crossSourceEditor,
       )
       const runProvider = createXFeedCronEnvironmentProvider({
         ...providerOptions,
@@ -131,7 +139,8 @@ export function createCronEnvironmentExtension(
 
 function sourceCandidateReportWiring(
   established: PeriodScopeEstablished,
-  finalizer: SourceCandidateReportFinalizer,
+  finalizer: SourceCandidateReportFinalizer & XCandidateEditingInputPorts['periodFinalizer'],
+  crossSourceEditor: ReturnType<typeof createCrossSourceEditor>,
 ): XFeedSourceCandidateReportWiring {
   const c32 = established.c32.find(scope => scope.value.source === X_FEED_SOURCE_IDENTITY)
   const c35 = established.c35.find(scope => scope.value.scope.source === X_FEED_SOURCE_IDENTITY)
@@ -146,6 +155,8 @@ function sourceCandidateReportWiring(
     reportPort: {
       submitSourceCandidateReport: report => finalizer.acceptSourceCandidateReport(report),
     },
+    periodFinalizer: finalizer,
+    crossSourceEditor,
   }
 }
 

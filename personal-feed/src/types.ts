@@ -185,6 +185,53 @@ export interface SourceCandidateReportAccepted {
   readonly report: SourceCandidateReport
 }
 
+export interface ReportedMaterialCandidate {
+  readonly report: SourceCandidateReportAccepted
+  readonly candidate: MaterialCandidate
+}
+
+export interface CandidateAcceptedIntoPeriod {
+  readonly period: PeriodIdentity
+  readonly candidate: SourceCandidateReference
+  readonly nomination?: unknown
+}
+
+export interface CandidateMaterial {
+  readonly acceptedIntoPeriod: CandidateAcceptedIntoPeriod
+  readonly period: PeriodIdentity
+  readonly candidate: SourceCandidateReference
+  readonly boundedContent: unknown
+  readonly attribution: unknown
+  readonly exactLookup: unknown
+  readonly nomination?: unknown
+}
+
+export interface MaterialFormed {
+  readonly kind: 'material_formed'
+  readonly acceptedIntoPeriod: CandidateAcceptedIntoPeriod
+  readonly period: PeriodIdentity
+  readonly candidate: SourceCandidateReference
+  readonly materialFormedFact: unknown
+}
+
+export interface MaterialUnavailable {
+  readonly kind: 'material_unavailable'
+  readonly acceptedIntoPeriod: CandidateAcceptedIntoPeriod
+  readonly period: PeriodIdentity
+  readonly candidate: SourceCandidateReference
+  readonly unavailableFact: unknown
+}
+
+export type MaterialFact = MaterialFormed | MaterialUnavailable
+
+export interface MaterialFactRecorded {
+  readonly fact: MaterialFact
+}
+
+export interface EditingInputAccepted {
+  readonly material: CandidateMaterial
+}
+
 export type ContractResult<TAccepted, TInput> =
   | { readonly status: 'accepted'; readonly value: TAccepted }
   | { readonly status: 'rejected'; readonly input: TInput }
@@ -203,7 +250,10 @@ export type C34Result = ContractResult<CandidateReportingWindowAccepted, Candida
 export type C35Result = ContractResult<MaterialProjectionReportScopeEstablished, MaterialProjectionReportScope>
 export type C08Result = ContractResult<UnscreenedMaterialCandidateAccepted, MechanicalCandidate>
 export type C09Result = ContractResult<MaterialBasisAccepted, MaterialSourceFacts>
+export type C10Result = ContractResult<EditingInputAccepted, CandidateMaterial>
+export type C16Result = ContractResult<MaterialFactRecorded, MaterialFact>
 export type C36Result = ContractResult<SourceCandidateReportAccepted, SourceCandidateReport>
+export type C26Result = ContractResult<CandidateAcceptedIntoPeriod, ReportedMaterialCandidate>
 
 export type C01Accepted = Extract<C01Result, { readonly status: 'accepted' }>
 export type C02Accepted = Extract<C02Result, { readonly status: 'accepted' }>
@@ -212,6 +262,9 @@ export type C33Accepted = Extract<C33Result, { readonly status: 'accepted' }>
 export type C34Accepted = Extract<C34Result, { readonly status: 'accepted' }>
 export type C35Accepted = Extract<C35Result, { readonly status: 'accepted' }>
 export type C36Accepted = Extract<C36Result, { readonly status: 'accepted' }>
+export type C10Accepted = Extract<C10Result, { readonly status: 'accepted' }>
+export type C16Accepted = Extract<C16Result, { readonly status: 'accepted' }>
+export type C26Accepted = Extract<C26Result, { readonly status: 'accepted' }>
 
 export interface MechanicalAdmission {
   readonly source: SourceIdentity
@@ -272,9 +325,24 @@ export interface PersonalFeedScopeService {
 export interface PeriodBusinessFinalizerOptions {
   readonly periodScopeLedgerPath: string
   readonly reportLedgerPath: string
+  readonly candidatePeriodLedgerPath?: string
   readonly now: () => string
+}
+
+export interface CandidatePeriodBusinessFinalizerOptions extends PeriodBusinessFinalizerOptions {
+  readonly candidatePeriodLedgerPath: string
 }
 
 export interface SourceCandidateReportFinalizer {
   readonly acceptSourceCandidateReport: (report: SourceCandidateReport) => C36Result
+}
+
+export interface PeriodBusinessFinalizerContract {
+  readonly acceptCandidateIntoPeriod: (candidate: ReportedMaterialCandidate) => C26Result
+  readonly acceptMaterialFact: (fact: MaterialFact) => C16Result
+}
+
+export interface CrossSourceEditor {
+  readonly acceptCandidateMaterial: (material: CandidateMaterial) => C10Result
+  readonly listAcceptedInputs: () => readonly CandidateMaterial[]
 }

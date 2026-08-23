@@ -55,6 +55,11 @@ export interface XSourceCandidateReportPort {
   ) => C36Result | Promise<C36Result>
 }
 
+/** Parse and freeze the one bounded current_collection snapshot used by X. */
+export function normalizeXCurrentCollection(value: readonly unknown[]): readonly XSourceCollectionItem[] {
+  return validateCurrentCollection(value)
+}
+
 /**
  * The X adapter's concrete C03/C08/C09 receiver.  These are source-side
  * acceptance seams; they do not create a second Personal Feed contract.
@@ -106,9 +111,14 @@ export function createXSourceCandidateReportPorts(): XSourceCandidateReportPorts
         || !matchesXMaterialSourceFacts(facts, admission.facts)) {
         return { status: 'rejected', input: facts }
       }
+      const evidence = collectionEvidenceFromAdmission(admission.facts)
+      if (evidence === undefined) return { status: 'rejected', input: facts }
       const accepted = Object.freeze({
         candidate: facts.candidate,
-        acceptedBasis: Object.freeze({ kind: 'x-material-basis' }),
+        acceptedBasis: Object.freeze({
+          kind: 'x-material-basis',
+          evidence: Object.freeze(evidence),
+        }),
       })
       materialCandidates.add(candidateKey)
       return { status: 'accepted', value: accepted }
@@ -136,7 +146,7 @@ export interface XSourceCandidateReportPreparationInput {
 export async function prepareAndSubmitXSourceCandidateReport(
   input: XSourceCandidateReportPreparationInput,
 ): Promise<SourceCandidateReportAccepted> {
-  const candidates = validateCurrentCollection(input.currentCollection)
+  const candidates = normalizeXCurrentCollection(input.currentCollection)
   const reportCandidates = []
   for (const item of candidates) {
     reportCandidates.push(await prepareMaterialCandidate(item, input))
@@ -474,6 +484,41 @@ function matchesXMaterialSourceFacts(
     && facts.version.kind === 'x-status-version'
     && isNonEmptyString(facts.version.observedAt)
     && Number.isFinite(Date.parse(facts.version.observedAt))
+}
+
+function collectionEvidenceFromAdmission(
+  facts: AdmissionSourceFacts,
+): XSourceCollectionEvidence | undefined {
+  if (!isRecord(facts.authorization)
+    || !isRecord(facts.exactDuplicateFact)
+    || !isRecord(facts.candidateBasis)
+    || facts.candidateBasis.kind !== 'objective_new_content'
+    || !isRecord(facts.candidateBasis.fact)) {
+    return undefined
+  }
+  const authorization = facts.authorization
+  const duplicate = facts.exactDuplicateFact
+  const basis = facts.candidateBasis.fact
+  if (!isNonEmptyString(authorization.runId)
+    || !isNonEmptyString(authorization.deliveryId)
+    || !isNonEmptyString(duplicate.collectionPath)
+    || duplicate.collectionBatch !== duplicate.collectionPath
+    || basis.kind !== 'x-current-collection-item'
+    || basis.runId !== authorization.runId
+    || basis.collectionPath !== duplicate.collectionPath
+    || basis.collectionBatch !== duplicate.collectionBatch
+    || basis.deliveryId !== authorization.deliveryId
+    || !isPositiveSafeInteger(basis.ts)) {
+    return undefined
+  }
+  return {
+    runId: authorization.runId,
+    source: 'x',
+    collectionPath: duplicate.collectionPath,
+    collectionBatch: duplicate.collectionBatch,
+    deliveryId: authorization.deliveryId,
+    ts: basis.ts,
+  }
 }
 
 function isOrdinaryXMechanicalScope(scope: unknown, period: unknown): boolean {

@@ -1,6 +1,7 @@
 import { PersonalFeedScopeConflictError } from './errors.ts'
 import { periodReferenceFor, runIdentityFor } from './identity.ts'
 import { createSourceCandidateReportFinalizer } from './source-candidate-report.ts'
+import { createCandidatePeriodFinalizer } from './candidate-period-finalizer.ts'
 import type {
   C01Accepted,
   C02Accepted,
@@ -21,6 +22,8 @@ import type {
   SourceIdentity,
   PeriodBusinessFinalizerOptions,
   SourceCandidateReportFinalizer,
+  PeriodBusinessFinalizerContract,
+  CandidatePeriodBusinessFinalizerOptions,
 } from './types.ts'
 
 function accepted<T>(value: T): { readonly status: 'accepted'; readonly value: T } {
@@ -50,26 +53,40 @@ export function createRunOpportunityLifecycle(): RunOpportunityLifecycle {
   })
 }
 
-export interface PeriodBusinessFinalizer {
+export interface PeriodBusinessScopeFinalizer {
   readonly establishPeriod: (start: PeriodStartNotice) => C02Accepted
   readonly acceptCandidateReportingWindow: (window: CandidateReportingWindow) => C34Accepted
 }
 
-export function createPeriodBusinessFinalizer(): PeriodBusinessFinalizer
+export interface PeriodBusinessFinalizer extends PeriodBusinessScopeFinalizer, PeriodBusinessFinalizerContract {}
+
+export function createPeriodBusinessFinalizer(): PeriodBusinessScopeFinalizer
 export function createPeriodBusinessFinalizer(
-  options: PeriodBusinessFinalizerOptions,
+  options: CandidatePeriodBusinessFinalizerOptions,
 ): PeriodBusinessFinalizer & SourceCandidateReportFinalizer
 export function createPeriodBusinessFinalizer(
+  options: PeriodBusinessFinalizerOptions,
+): PeriodBusinessScopeFinalizer & SourceCandidateReportFinalizer
+export function createPeriodBusinessFinalizer(
   options?: PeriodBusinessFinalizerOptions,
-): PeriodBusinessFinalizer | (PeriodBusinessFinalizer & SourceCandidateReportFinalizer) {
+): PeriodBusinessScopeFinalizer
+  | (PeriodBusinessScopeFinalizer & SourceCandidateReportFinalizer)
+  | (PeriodBusinessFinalizer & SourceCandidateReportFinalizer) {
   const base = {
     establishPeriod: (start: PeriodStartNotice): C02Accepted => accepted({ start }),
     acceptCandidateReportingWindow: (window: CandidateReportingWindow): C34Accepted => accepted({ window }),
   }
   if (options === undefined) return Object.freeze(base)
+  const candidatePeriod = options.candidatePeriodLedgerPath === undefined
+    ? undefined
+    : createCandidatePeriodFinalizer({
+      ...options,
+      candidatePeriodLedgerPath: options.candidatePeriodLedgerPath,
+    })
   return Object.freeze({
     ...base,
     ...createSourceCandidateReportFinalizer(options),
+    ...(candidatePeriod === undefined ? {} : candidatePeriod),
   })
 }
 

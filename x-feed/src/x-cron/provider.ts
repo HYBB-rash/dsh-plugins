@@ -47,10 +47,15 @@ import {
 } from './python-ports.ts'
 import {
   prepareAndSubmitXSourceCandidateReport,
+  normalizeXCurrentCollection,
   type XSourceCandidateReportPorts,
   type XSourceCandidateReportPort,
   type XSourceCollectionEvidence,
 } from './source-candidate-report.ts'
+import {
+  projectXAcceptedReportIntoEditingInputs,
+  type XCandidateEditingInputPorts,
+} from './candidate-editing-input.ts'
 
 export const X_CRON_AGENT_ENVIRONMENT_MARKER = 'dsh-x-feed/v1'
 
@@ -92,6 +97,8 @@ export interface XFeedSourceCandidateReportWiring {
   readonly materialProjectionReportScope: MaterialProjectionReportScopeEstablished
   readonly candidatePort: XSourceCandidateReportPorts
   readonly reportPort: XSourceCandidateReportPort
+  readonly periodFinalizer?: XCandidateEditingInputPorts['periodFinalizer']
+  readonly crossSourceEditor?: XCandidateEditingInputPorts['crossSourceEditor']
 }
 
 /** Build the exact provider registered for one configured cron job. */
@@ -102,6 +109,11 @@ export function createXFeedCronEnvironmentProvider(
   if (options.dataDir.trim() === '') throw new Error('X cron provider requires a non-empty dataDir')
   if (basename(options.pipelinePath) !== 'x_insight_pipeline.py') {
     throw new Error('X cron provider only accepts the shipped x_insight_pipeline.py adapter')
+  }
+  const hasPeriodFinalizer = options.sourceCandidateReport?.periodFinalizer !== undefined
+  const hasCrossSourceEditor = options.sourceCandidateReport?.crossSourceEditor !== undefined
+  if (hasPeriodFinalizer !== hasCrossSourceEditor) {
+    throw new Error('X source candidate report wiring requires both periodFinalizer and crossSourceEditor')
   }
 
   return {
@@ -163,7 +175,7 @@ async function prepareXFeedRun(
         throw new Error('X source candidate report requires current_collection in the Python package')
       }
       const evidence = collectionEvidence(insightPackage, baseCapabilities, context.runId)
-      await prepareAndSubmitXSourceCandidateReport({
+      const acceptedReport = await prepareAndSubmitXSourceCandidateReport({
         period: options.sourceCandidateReport.period,
         mechanicalAdmissionScope: options.sourceCandidateReport.mechanicalAdmissionScope,
         materialProjectionReportScope: options.sourceCandidateReport.materialProjectionReportScope,
@@ -172,6 +184,17 @@ async function prepareXFeedRun(
         candidatePort: options.sourceCandidateReport.candidatePort,
         reportPort: options.sourceCandidateReport.reportPort,
       })
+      if (options.sourceCandidateReport.periodFinalizer !== undefined) {
+        const currentCollection = normalizeXCurrentCollection(parsed.currentCollection)
+        await projectXAcceptedReportIntoEditingInputs({
+          period: options.sourceCandidateReport.period,
+          collectionEvidence: evidence,
+          acceptedReport,
+          currentCollection,
+          periodFinalizer: options.sourceCandidateReport.periodFinalizer,
+          crossSourceEditor: options.sourceCandidateReport.crossSourceEditor!,
+        })
+      }
     }
     if (parsed.candidates.length === 0) {
       return { kind: 'skip', outcome: { text: undefined, error: undefined } }

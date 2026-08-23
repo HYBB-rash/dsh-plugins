@@ -19,7 +19,9 @@ export {
   createRunOpportunityLifecycle,
 } from './components.ts'
 
-export type { PeriodBusinessFinalizer } from './components.ts'
+export { createCrossSourceEditor } from './cross-source-editor.ts'
+
+export type { PeriodBusinessFinalizer, PeriodBusinessScopeFinalizer } from './components.ts'
 
 export {
   createPersonalFeedScopeService,
@@ -36,6 +38,12 @@ export type {
   C03Result,
   C08Result,
   C09Result,
+  C10Accepted,
+  C10Result,
+  C16Accepted,
+  C16Result,
+  C26Accepted,
+  C26Result,
   C32Accepted,
   C32Result,
   C33Accepted,
@@ -46,6 +54,8 @@ export type {
   C35Result,
   C36Accepted,
   C36Result,
+  CandidateAcceptedIntoPeriod,
+  CandidateMaterial,
   CandidateIdentity,
   AdmissionCandidateBasis,
   AdmissionSourceFacts,
@@ -54,6 +64,7 @@ export type {
   MaterialSourceFacts,
   SourceStableReference,
   CandidateMaterialProjection,
+  CandidatePeriodBusinessFinalizerOptions,
   CandidateReportingWindow,
   CandidateReportingWindowAccepted,
   CandidateReportingWindowIdentity,
@@ -64,11 +75,17 @@ export type {
   ExternalRunOpportunity,
   ExternalRunOpportunityOrigin,
   ExternalRunStartFact,
+  CrossSourceEditor,
+  EditingInputAccepted,
   MechanicalAdmission,
   MechanicalAdmissionPeriodScopeEstablished,
   MechanicalAdmissionPeriodScopeRequest,
   MaterialProjectionReportScope,
   MaterialProjectionReportScopeEstablished,
+  MaterialFact,
+  MaterialFactRecorded,
+  MaterialFormed,
+  MaterialUnavailable,
   PeriodEstablished,
   PeriodIdentity,
   PeriodReference,
@@ -76,6 +93,7 @@ export type {
   PeriodBusinessFinalizerOptions,
   PeriodStartNotice,
   PersonalFeedScopeService,
+  ReportedMaterialCandidate,
   RunIdentity,
   RunOpportunityRequest,
   RunRequestIdentity,
