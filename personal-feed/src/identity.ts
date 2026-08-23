@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto'
 import type {
   CandidateReportingWindowIdentity,
+  CandidateIdentity,
   PeriodReference,
   RunIdentity,
   RunRequestIdentity,
   SourceIdentity,
+  SourceStableReference,
 } from './types.ts'
 
 function identity(namespace: string, evidence: string): string {
@@ -18,6 +20,14 @@ export function runRequestIdentity(value: string): RunRequestIdentity {
 
 export function sourceIdentity(value: string): SourceIdentity {
   return value as SourceIdentity
+}
+
+export function candidateIdentity(value: string): CandidateIdentity {
+  return value as CandidateIdentity
+}
+
+export function sourceStableReference(value: string): SourceStableReference {
+  return value as SourceStableReference
 }
 
 export function runIdentityFor(request: RunRequestIdentity): RunIdentity {

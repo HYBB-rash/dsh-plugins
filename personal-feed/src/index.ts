@@ -5,8 +5,10 @@ export {
 } from './errors.ts'
 
 export {
+  candidateIdentity,
   runRequestIdentity,
   sourceIdentity,
+  sourceStableReference,
 } from './identity.ts'
 
 export {
@@ -16,6 +18,8 @@ export {
   createPeriodBusinessFinalizer,
   createRunOpportunityLifecycle,
 } from './components.ts'
+
+export type { PeriodBusinessFinalizer } from './components.ts'
 
 export {
   createPersonalFeedScopeService,
@@ -29,6 +33,9 @@ export type {
   C01Result,
   C02Accepted,
   C02Result,
+  C03Result,
+  C08Result,
+  C09Result,
   C32Accepted,
   C32Result,
   C33Accepted,
@@ -37,6 +44,15 @@ export type {
   C34Result,
   C35Accepted,
   C35Result,
+  C36Accepted,
+  C36Result,
+  CandidateIdentity,
+  AdmissionCandidateBasis,
+  AdmissionSourceFacts,
+  AdmissionSourceFactsAccepted,
+  MechanicalCandidate,
+  MaterialSourceFacts,
+  SourceStableReference,
   CandidateMaterialProjection,
   CandidateReportingWindow,
   CandidateReportingWindowAccepted,
@@ -57,11 +73,24 @@ export type {
   PeriodIdentity,
   PeriodReference,
   PeriodScopeEstablished,
+  PeriodBusinessFinalizerOptions,
   PeriodStartNotice,
   PersonalFeedScopeService,
   RunIdentity,
   RunOpportunityRequest,
   RunRequestIdentity,
   SourceIdentity,
+  SourceCandidateReference,
+  SourceCandidateReport,
+  SourceCandidateReportAccepted,
+  SourceCandidateReportFinalizer,
+  ScreenedSourceCandidateReport,
+  ScreenedMaterialCandidate,
+  ScreenedMaterialCandidateAccepted,
   SourceScopeComponents,
+  UnscreenedMaterialCandidate,
+  UnscreenedMaterialCandidateAccepted,
+  UnscreenedSourceCandidateReport,
+  MaterialBasisAccepted,
+  MaterialCandidate,
 } from './types.ts'

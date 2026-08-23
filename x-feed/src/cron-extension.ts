@@ -9,7 +9,12 @@ import {
   createCurrentContextProjection,
   createMechanicalAdmission,
   createPersonalFeedScopeService,
+  createPeriodBusinessFinalizer,
   sourceIdentity,
+} from '@herman/personal-feed'
+import type {
+  PeriodScopeEstablished,
+  SourceCandidateReportFinalizer,
 } from '@herman/personal-feed'
 import { join } from 'node:path'
 import { parseXFeedRuntimeConfig } from './config.ts'
@@ -19,7 +24,11 @@ import {
   X_FEED_SOURCE_IDENTITY,
 } from './feed-scope-adapter.ts'
 import { DeliveryReceipt } from './receipt.ts'
-import { createXFeedCronEnvironmentProvider } from './x-cron/provider.ts'
+import {
+  createXFeedCronEnvironmentProvider,
+  type XFeedSourceCandidateReportWiring,
+} from './x-cron/provider.ts'
+import { createXSourceCandidateReportPorts } from './x-cron/source-candidate-report.ts'
 
 /**
  * Business-owned dsh-cron environment. The host owns scheduling and the final
@@ -58,6 +67,11 @@ export function createCronEnvironmentExtension(
       reportingWindowClosesAt: request.reportingWindowClosesAt,
     }),
   })
+  const sourceCandidateReportFinalizer = createPeriodBusinessFinalizer({
+    periodScopeLedgerPath: join(config.personalFeedDataDir, 'period-scopes.jsonl'),
+    reportLedgerPath: join(config.personalFeedDataDir, 'source-candidate-reports.jsonl'),
+    now: () => new Date().toISOString(),
+  })
 
   const receipt = new DeliveryReceipt({
     cronJobId: config.cronJobId,
@@ -66,13 +80,14 @@ export function createCronEnvironmentExtension(
     pipelinePath: config.pipelinePath,
     logger: ctx.logger,
   })
-  const provider = createXFeedCronEnvironmentProvider({
+  const providerOptions = {
     ctx,
     cronJobId: config.cronJobId,
     dataDir: config.dataDir,
     pythonBin: config.pythonBin,
     pipelinePath: config.pipelinePath,
-  })
+  }
+  const provider = createXFeedCronEnvironmentProvider(providerOptions)
 
   return Object.freeze({
     marker: provider.marker,
@@ -82,7 +97,7 @@ export function createCronEnvironmentExtension(
     },
     prepare: async (context: CronAgentEnvironmentPrepareContext) => {
       const closesAt = reportingWindowClosesAt(context.claimedAt, candidateReportingWindowMs)
-      await scopeAdapter.establishExternalPeriodScope({
+      const established = await scopeAdapter.establishExternalPeriodScope({
         requestIdentity: `dsh-cron:${context.jobId}:${context.runId}`,
         trigger: context.trigger,
         scheduledFor: context.scheduledFor,
@@ -91,7 +106,15 @@ export function createCronEnvironmentExtension(
         requiredSources: config.personalFeedRequiredSources,
         reportingWindowClosesAt: closesAt,
       })
-      const lease = await provider.prepare(context)
+      const sourceCandidateReport = sourceCandidateReportWiring(
+        established,
+        sourceCandidateReportFinalizer,
+      )
+      const runProvider = createXFeedCronEnvironmentProvider({
+        ...providerOptions,
+        sourceCandidateReport,
+      })
+      const lease = await runProvider.prepare(context)
       if ('kind' in lease && lease.kind === 'skip') return lease
       return {
         ...lease,
@@ -104,6 +127,26 @@ export function createCronEnvironmentExtension(
       }
     },
   })
+}
+
+function sourceCandidateReportWiring(
+  established: PeriodScopeEstablished,
+  finalizer: SourceCandidateReportFinalizer,
+): XFeedSourceCandidateReportWiring {
+  const c32 = established.c32.find(scope => scope.value.source === X_FEED_SOURCE_IDENTITY)
+  const c35 = established.c35.find(scope => scope.value.scope.source === X_FEED_SOURCE_IDENTITY)
+  if (c32 === undefined || c35 === undefined) {
+    throw new Error('x-feed period scope did not establish the X C32/C35 values')
+  }
+  return {
+    period: established.c01.value.period,
+    mechanicalAdmissionScope: c32.value,
+    materialProjectionReportScope: c35.value,
+    candidatePort: createXSourceCandidateReportPorts(),
+    reportPort: {
+      submitSourceCandidateReport: report => finalizer.acceptSourceCandidateReport(report),
+    },
+  }
 }
 
 function reportingWindowClosesAt(claimedAt: string, durationMs: number): string {

@@ -1,5 +1,6 @@
 import { PersonalFeedScopeConflictError } from './errors.ts'
 import { periodReferenceFor, runIdentityFor } from './identity.ts'
+import { createSourceCandidateReportFinalizer } from './source-candidate-report.ts'
 import type {
   C01Accepted,
   C02Accepted,
@@ -18,6 +19,8 @@ import type {
   PeriodStartNotice,
   RunOpportunityRequest,
   SourceIdentity,
+  PeriodBusinessFinalizerOptions,
+  SourceCandidateReportFinalizer,
 } from './types.ts'
 
 function accepted<T>(value: T): { readonly status: 'accepted'; readonly value: T } {
@@ -52,10 +55,21 @@ export interface PeriodBusinessFinalizer {
   readonly acceptCandidateReportingWindow: (window: CandidateReportingWindow) => C34Accepted
 }
 
-export function createPeriodBusinessFinalizer(): PeriodBusinessFinalizer {
-  return Object.freeze({
+export function createPeriodBusinessFinalizer(): PeriodBusinessFinalizer
+export function createPeriodBusinessFinalizer(
+  options: PeriodBusinessFinalizerOptions,
+): PeriodBusinessFinalizer & SourceCandidateReportFinalizer
+export function createPeriodBusinessFinalizer(
+  options?: PeriodBusinessFinalizerOptions,
+): PeriodBusinessFinalizer | (PeriodBusinessFinalizer & SourceCandidateReportFinalizer) {
+  const base = {
     establishPeriod: (start: PeriodStartNotice): C02Accepted => accepted({ start }),
     acceptCandidateReportingWindow: (window: CandidateReportingWindow): C34Accepted => accepted({ window }),
+  }
+  if (options === undefined) return Object.freeze(base)
+  return Object.freeze({
+    ...base,
+    ...createSourceCandidateReportFinalizer(options),
   })
 }
 

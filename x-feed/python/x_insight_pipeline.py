@@ -97,7 +97,8 @@ def _shown_state(shown_path):
     if not shown_path or not os.path.exists(shown_path):
         return state
     try:
-        data = json.load(open(shown_path))
+        with open(shown_path, encoding="utf-8") as handle:
+            data = json.load(handle)
     except (OSError, ValueError, TypeError):
         return state
     for url in data.get("urls", []) if isinstance(data, dict) else []:
@@ -298,6 +299,23 @@ def select_package_items(current_items, history_items, shown_path, cap_items=20)
     return selected
 
 
+def current_collection_items(current_items, shown_path):
+    """Return this run's complete fresh collection without planner limits.
+
+    The collection is deliberately projected from ``current_items`` only:
+    history fallback belongs to ``recent_items`` and must not become source
+    evidence for the current run.  Stable identity deduplication keeps the
+    richer record, while the shown ledger remains a mechanical exclusion.
+    """
+    state = _shown_state(shown_path)
+    fresh_items = [
+        item for item in (current_items or [])
+        if not _is_shown(item, state)
+    ]
+    collection, _ = x_timeline_dedup.deduplicate_records(fresh_items)
+    return collection
+
+
 def _write_items_file(items):
     os.makedirs(DATA, exist_ok=True)
     fd, path = tempfile.mkstemp(prefix="x-analysis-", suffix=".jsonl", dir=DATA, text=True)
@@ -363,6 +381,8 @@ def build_package(items_path=TIMELINE, last_path=LAST_THEME, recent=30, cap_item
         "collection_status": collection_status,
         "ts": int(time.time()),
     }
+    if current_items is not None:
+        pkg["current_collection"] = current_collection_items(current_items, shown_path)
     if graph_path is not None:
         wnow = int(wander_now) if wander_now is not None else int(time.time())
         root_surfaces = []

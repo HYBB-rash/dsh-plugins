@@ -5,6 +5,7 @@ import type { PeriodScopeEstablished, RunRequestIdentity } from './types.ts'
 
 export interface PeriodScopeStore {
   readonly findByRequest: (request: RunRequestIdentity) => PeriodScopeEstablished | undefined
+  readonly list: () => readonly PeriodScopeEstablished[]
   readonly append: (record: PeriodScopeEstablished) => void
 }
 
@@ -45,6 +46,7 @@ export function createPeriodScopeStore(path: string): PeriodScopeStore {
   if (path.trim() === '') throw new PersonalFeedScopeStoreError('personal Feed scope ledger path must be non-empty')
 
   return Object.freeze({
+    list: () => readRecords(path),
     findByRequest: (request: RunRequestIdentity) => {
       return readRecords(path).find(record => record.c01.value.request === request)
     },

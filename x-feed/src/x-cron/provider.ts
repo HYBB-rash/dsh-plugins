@@ -4,6 +4,11 @@ import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {
+  MaterialProjectionReportScopeEstablished,
+  MechanicalAdmissionPeriodScopeEstablished,
+  PeriodIdentity,
+} from '@herman/personal-feed'
+import type {
   CronAgentEnvironmentSkip,
   CronAgentEnvironmentLease,
   CronAgentEnvironmentProvider,
@@ -40,6 +45,12 @@ import {
   type XFeedInsightPackage,
   type XFeedRunCapabilities,
 } from './python-ports.ts'
+import {
+  prepareAndSubmitXSourceCandidateReport,
+  type XSourceCandidateReportPorts,
+  type XSourceCandidateReportPort,
+  type XSourceCollectionEvidence,
+} from './source-candidate-report.ts'
 
 export const X_CRON_AGENT_ENVIRONMENT_MARKER = 'dsh-x-feed/v1'
 
@@ -71,6 +82,16 @@ export interface XFeedCronProviderOptions {
   readonly maxArtifactBytes?: number
   readonly maxArtifactItemBytes?: number
   readonly maxArtifactItems?: number
+  readonly sourceCandidateReport?: XFeedSourceCandidateReportWiring
+}
+
+/** The provider receives C32/C35 and the source's narrow C36 boundary from the cron adapter. */
+export interface XFeedSourceCandidateReportWiring {
+  readonly period: PeriodIdentity
+  readonly mechanicalAdmissionScope: MechanicalAdmissionPeriodScopeEstablished
+  readonly materialProjectionReportScope: MaterialProjectionReportScopeEstablished
+  readonly candidatePort: XSourceCandidateReportPorts
+  readonly reportPort: XSourceCandidateReportPort
 }
 
 /** Build the exact provider registered for one configured cron job. */
@@ -137,6 +158,21 @@ async function prepareXFeedRun(
     const basePorts = createPythonPorts(options, baseCapabilities)
     const insightPackage = await basePorts.runPipeline()
     const parsed = parseInsightPackage(insightPackage, baseCapabilities)
+    if (options.sourceCandidateReport !== undefined) {
+      if (parsed.currentCollection === undefined) {
+        throw new Error('X source candidate report requires current_collection in the Python package')
+      }
+      const evidence = collectionEvidence(insightPackage, baseCapabilities, context.runId)
+      await prepareAndSubmitXSourceCandidateReport({
+        period: options.sourceCandidateReport.period,
+        mechanicalAdmissionScope: options.sourceCandidateReport.mechanicalAdmissionScope,
+        materialProjectionReportScope: options.sourceCandidateReport.materialProjectionReportScope,
+        collectionEvidence: evidence,
+        currentCollection: parsed.currentCollection,
+        candidatePort: options.sourceCandidateReport.candidatePort,
+        reportPort: options.sourceCandidateReport.reportPort,
+      })
+    }
     if (parsed.candidates.length === 0) {
       return { kind: 'skip', outcome: { text: undefined, error: undefined } }
     }
@@ -191,6 +227,7 @@ interface ParsedPackage {
   readonly mechanicalSignals: Readonly<Record<string, boolean | number | string>>
   readonly randomWalk?: XFeedRandomWalkPlan
   readonly candidates: readonly XFeedDigestCandidateInput[]
+  readonly currentCollection: readonly unknown[] | undefined
 }
 
 function createPythonPorts(options: XFeedCronProviderOptions, capabilities: XFeedRunCapabilities) {
@@ -231,6 +268,10 @@ function parseInsightPackage(value: XFeedInsightPackage, base: XFeedRunCapabilit
     throw new Error('X insight package must contain a bounded recent_items array')
   }
   const candidates: XFeedDigestCandidateInput[] = []
+  const currentCollection = Object.prototype.hasOwnProperty.call(value, 'current_collection')
+    && Array.isArray(value.current_collection)
+    ? Object.freeze([...value.current_collection])
+    : undefined
   const seenIds = new Set<string>()
   for (const raw of value.recent_items) {
     const candidate = parseCandidate(raw)
@@ -247,6 +288,7 @@ function parseInsightPackage(value: XFeedInsightPackage, base: XFeedRunCapabilit
       allowlistedExploreIds: [],
       mechanicalSignals: { candidateCount: 0 },
       candidates: Object.freeze([]),
+      currentCollection,
     }
   }
   const decision = isRecord(value.decision) ? value.decision : {}
@@ -292,7 +334,43 @@ function parseInsightPackage(value: XFeedInsightPackage, base: XFeedRunCapabilit
     mechanicalSignals,
     ...(randomWalk === undefined ? {} : { randomWalk }),
     candidates: Object.freeze(candidates),
+    currentCollection,
   }
+}
+
+function collectionEvidence(
+  value: XFeedInsightPackage,
+  capabilities: XFeedRunCapabilities,
+  runId: string,
+): XSourceCollectionEvidence {
+  const collectionBatch = requirePackageString(value.collection_batch, 'collection_batch')
+  if (collectionBatch !== capabilities.collectionPath) {
+    throw new Error('X insight package collection_batch does not match the known run collection path')
+  }
+  const deliveryId = requirePackageString(value.delivery_id, 'delivery_id')
+  const ts = value.ts
+  if (typeof ts !== 'number' || !Number.isSafeInteger(ts) || ts <= 0) {
+    throw new Error('X insight package ts is invalid')
+  }
+  const collectionStatus = value.collection_status
+  if (collectionStatus !== 'ok' && collectionStatus !== 'empty') {
+    throw new Error('X insight package collection_status is invalid')
+  }
+  return {
+    runId,
+    source: 'x',
+    collectionPath: capabilities.collectionPath,
+    collectionBatch,
+    deliveryId,
+    ts,
+  }
+}
+
+function requirePackageString(value: unknown, name: string): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`X insight package ${name} is invalid`)
+  }
+  return value
 }
 
 function parseCandidate(value: unknown): XFeedDigestCandidateInput {

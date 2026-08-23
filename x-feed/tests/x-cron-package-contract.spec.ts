@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 const packageDirectory = resolve(import.meta.dirname, '..')
 const workspaceDirectory = resolve(packageDirectory, '..')
+const personalFeedDirectory = join(workspaceDirectory, 'personal-feed')
 const temporaryDirectories: string[] = []
 const harnessDirectory = process.env.DSH_HARNESS_ROOT!
 const harnessDependencies = join(harnessDirectory, 'node_modules/.pnpm/node_modules')
@@ -84,7 +85,7 @@ describe('x-feed cron environment package root contract', () => {
     expect(readFileSync(join(packageDirectory, 'src/index.ts'), 'utf8')).toContain('createXFeedCronEnvironmentProvider')
   })
 
-  it('type-checks root imports from both packed tarballs with NodeNext resolution', () => {
+  it('type-checks root imports from all packed runtime dependencies with NodeNext resolution', () => {
     const temporary = mkdtempSync(join(tmpdir(), 'dsh-x-feed-package-consumer-'))
     temporaryDirectories.push(temporary)
     const tarballs = join(temporary, 'tarballs')
@@ -92,8 +93,10 @@ describe('x-feed cron environment package root contract', () => {
     mkdirSync(tarballs)
     mkdirSync(join(consumer, 'node_modules'), { recursive: true })
     const cronTarball = pack(join(workspaceDirectory, 'dsh-cron'), tarballs)
+    const personalFeedTarball = pack(personalFeedDirectory, tarballs)
     const xFeedTarball = pack(packageDirectory, tarballs)
     unpack(cronTarball, join(consumer, 'node_modules/@deepseek-ai/dsh-cron'))
+    unpack(personalFeedTarball, join(consumer, 'node_modules/@herman/personal-feed'))
     unpack(xFeedTarball, join(consumer, 'node_modules/@herman/x-feed'))
     linkExistingDependencies(join(consumer, 'node_modules'))
 
