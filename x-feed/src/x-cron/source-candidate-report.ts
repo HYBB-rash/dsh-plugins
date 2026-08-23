@@ -185,7 +185,7 @@ async function prepareMaterialCandidate(
     `C08 candidate ${item.id}`,
   )
 
-  const materialFacts = materialSourceFacts(item, reference)
+  const materialFacts = materialSourceFacts(item, reference, input.collectionEvidence)
   const materialResult = await input.candidatePort.acceptMaterialSourceFacts(materialFacts)
   const materialBasis = requireMaterialBasisAccepted(
     requireAccepted(materialResult, `C09 candidate ${item.id}`),
@@ -252,6 +252,7 @@ function admissionSourceFacts(
 function materialSourceFacts(
   item: XSourceCollectionItem,
   reference: SourceCandidateReference,
+  evidence: XSourceCollectionEvidence,
 ): MaterialSourceFacts {
   return {
     candidate: reference,
@@ -275,9 +276,28 @@ function materialSourceFacts(
     },
     version: {
       kind: 'x-status-version',
-      observedAt: item.time,
+      observedAt: xStatusObservedAt(item, evidence),
     },
   }
+}
+
+function xStatusObservedAt(
+  item: XSourceCollectionItem,
+  evidence: XSourceCollectionEvidence,
+): string {
+  if (item.time !== '') return item.time
+  if (item.ts !== undefined) {
+    const observedAt = observedAtFromEpochSeconds(item.ts)
+    if (observedAt === undefined) {
+      throw new Error(`X current collection item ${item.id} has an invalid observation timestamp`)
+    }
+    return observedAt
+  }
+  const observedAt = observedAtFromEpochSeconds(evidence.ts)
+  if (observedAt === undefined) {
+    throw new Error('X current collection evidence has an invalid observation timestamp')
+  }
+  return observedAt
 }
 
 function sourceCandidateReference(item: XSourceCollectionItem): SourceCandidateReference {
@@ -321,12 +341,15 @@ function parseCollectionItem(value: unknown, index: number): XSourceCollectionIt
   if (typeof value.url !== 'string' || typeof value.text !== 'string' || value.text.trim() === '') {
     throw new Error(`X current collection item ${index} has invalid url or text`)
   }
-  if (typeof value.time !== 'string' || !Number.isFinite(Date.parse(value.time))) {
+  if (typeof value.time !== 'string'
+    || (value.time !== '' && !Number.isFinite(Date.parse(value.time)))) {
     throw new Error(`X current collection item ${index} has an invalid time`)
   }
+  if (hasOptionalTimestamp && observedAtFromEpochSeconds(value.ts) === undefined) {
+    throw new Error(`X current collection item ${index} has an invalid observation timestamp`)
+  }
   if (typeof value.user !== 'string' || value.user.trim() === '' || !Array.isArray(value.media)
-    || value.media.some(media => typeof media !== 'string')
-    || (hasOptionalTimestamp && (typeof value.ts !== 'number' || !Number.isFinite(value.ts)))) {
+    || value.media.some(media => typeof media !== 'string')) {
     throw new Error(`X current collection item ${index} has invalid user or media`)
   }
   return {
@@ -338,6 +361,12 @@ function parseCollectionItem(value: unknown, index: number): XSourceCollectionIt
     media: Object.freeze([...value.media]),
     ...(hasOptionalTimestamp ? { ts: value.ts as number } : {}),
   }
+}
+
+function observedAtFromEpochSeconds(value: unknown): string | undefined {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) return undefined
+  const date = new Date(value * 1_000)
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined
 }
 
 function requireAccepted<T>(result: AcceptedResult<T>, operation: string): T {

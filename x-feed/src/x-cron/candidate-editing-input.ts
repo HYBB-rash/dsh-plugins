@@ -155,6 +155,7 @@ function candidateMaterial(
       url: item.url,
       text: item.text,
       time: item.time,
+      ...(item.ts === undefined ? {} : { ts: item.ts }),
       media: item.media,
     },
     attribution: { kind: 'x-author', handle: item.user },

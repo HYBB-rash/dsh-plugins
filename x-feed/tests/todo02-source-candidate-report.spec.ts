@@ -32,7 +32,7 @@ type Candidate = {
   readonly time: string
   readonly user: string
   readonly media: readonly string[]
-  readonly ts: number
+  readonly ts?: number
 }
 
 type CollectionEvidence = {
@@ -343,6 +343,104 @@ describe('TODO02 X source-side complete candidate report seam', () => {
     expect(report.branch).toBe('unscreened')
     expect(reportCandidateIds(report)).toEqual(['x-status:1', 'x-status:2'])
   })
+
+  it('keeps a candidate with missing published time and uses its observation timestamp for C09', async () => {
+    const missingPublishedTime = {
+      ...candidate('2084423106102526107'),
+      time: '',
+      ts: 1_787_510_409,
+    }
+    const run = prepareInput('scheduled', [
+      candidate('1'),
+      candidate('2'),
+      missingPublishedTime,
+      candidate('4'),
+    ])
+
+    await prepareAndSubmitXSourceCandidateReport(run.input as never)
+
+    expect(run.ports.candidatePort.acceptAdmissionSourceFacts).toHaveBeenCalledTimes(4)
+    expect(run.ports.candidatePort.acceptUnscreenedMechanicalCandidate).toHaveBeenCalledTimes(4)
+    expect(run.ports.candidatePort.acceptMaterialSourceFacts).toHaveBeenCalledTimes(4)
+    expect(run.ports.reportPort.submitSourceCandidateReport).toHaveBeenCalledOnce()
+    const [report] = run.ports.reportPort.submitSourceCandidateReport.mock.calls[0]!
+    expect(reportCandidateIds(report)).toEqual([
+      'x-status:1',
+      'x-status:2',
+      'x-status:2084423106102526107',
+      'x-status:4',
+    ])
+    const materialFacts = run.ports.candidatePort.acceptMaterialSourceFacts.mock.calls
+      .map(([facts]) => facts)
+      .find(facts => facts.candidate.candidate === 'x-status:2084423106102526107')
+    expect(materialFacts.version).toEqual({
+      kind: 'x-status-version',
+      observedAt: '2026-08-23T18:40:09.000Z',
+    })
+    expect(missingPublishedTime.time).toBe('')
+  })
+
+  it('uses collection evidence only when missing published time has no item observation timestamp', async () => {
+    const { ts: _observationTimestamp, ...withoutItemTimestamp } = {
+      ...candidate('2084423106102526107'),
+      time: '',
+    }
+    const run = prepareInput('scheduled', [withoutItemTimestamp])
+    const input = {
+      ...run.input,
+      collectionEvidence: {
+        ...run.input.collectionEvidence,
+        ts: 1_787_510_448,
+      },
+    }
+
+    await prepareAndSubmitXSourceCandidateReport(input as never)
+
+    expect(run.ports.candidatePort.acceptMaterialSourceFacts).toHaveBeenCalledOnce()
+    const [materialFacts] = run.ports.candidatePort.acceptMaterialSourceFacts.mock.calls[0]!
+    expect(materialFacts.version).toEqual({
+      kind: 'x-status-version',
+      observedAt: '2026-08-23T18:40:48.000Z',
+    })
+    expect(withoutItemTimestamp.time).toBe('')
+    const [report] = run.ports.reportPort.submitSourceCandidateReport.mock.calls[0]!
+    expect(reportCandidateIds(report)).toEqual(['x-status:2084423106102526107'])
+  })
+
+  it('fails closed on a non-empty malformed published time instead of replacing it', async () => {
+    const run = prepareInput('scheduled', [{
+      ...candidate('2084423106102526107'),
+      time: 'not-a-time',
+      ts: 1_787_510_409,
+    }])
+
+    await expect(prepareAndSubmitXSourceCandidateReport(run.input as never))
+      .rejects.toThrow('X current collection item 0 has an invalid time')
+
+    expect(run.ports.candidatePort.acceptAdmissionSourceFacts).not.toHaveBeenCalled()
+    expect(run.ports.candidatePort.acceptUnscreenedMechanicalCandidate).not.toHaveBeenCalled()
+    expect(run.ports.candidatePort.acceptMaterialSourceFacts).not.toHaveBeenCalled()
+    expect(run.ports.reportPort.submitSourceCandidateReport).not.toHaveBeenCalled()
+  })
+
+  it.each([0, -1, 1.5, Number.POSITIVE_INFINITY, 'not-a-timestamp'])(
+    'fails closed when missing published time has invalid item observation timestamp %s',
+    async invalidTimestamp => {
+      const run = prepareInput('scheduled', [{
+        ...candidate('2084423106102526107'),
+        time: '',
+        ts: invalidTimestamp,
+      } as never])
+
+      await expect(prepareAndSubmitXSourceCandidateReport(run.input as never))
+        .rejects.toThrow('X current collection item 0 has an invalid observation timestamp')
+
+      expect(run.ports.candidatePort.acceptAdmissionSourceFacts).not.toHaveBeenCalled()
+      expect(run.ports.candidatePort.acceptUnscreenedMechanicalCandidate).not.toHaveBeenCalled()
+      expect(run.ports.candidatePort.acceptMaterialSourceFacts).not.toHaveBeenCalled()
+      expect(run.ports.reportPort.submitSourceCandidateReport).not.toHaveBeenCalled()
+    },
+  )
 
   it('production X candidate ports return the shared C03/C08/C09 accepted shapes', async () => {
     const run = prepareInput('scheduled', [candidate('1')])

@@ -207,6 +207,30 @@ describe('TODO03 X candidate material to editing-input seam', () => {
       .toBeLessThan(candidatePorts.crossSourceEditor.acceptCandidateMaterial.mock.invocationCallOrder[0]!)
   })
 
+  it('preserves missing source time and keeps the real item observation timestamp separate', async () => {
+    const candidatePorts = ports()
+    const evidence = collectionEvidence()
+    const currentItem = {
+      ...candidate('1'),
+      time: '',
+      ts: 1_787_510_409,
+    }
+
+    await projectXAcceptedReportIntoEditingInputs(input(
+      acceptedReport(['1'], evidence),
+      [currentItem],
+      candidatePorts,
+      evidence,
+    ) as never)
+
+    const [material] = candidatePorts.crossSourceEditor.acceptCandidateMaterial.mock.calls[0]!
+    expect(material.boundedContent).toMatchObject({
+      time: '',
+      ts: 1_787_510_409,
+    })
+    expect(material.boundedContent.time).not.toBe('2026-08-23T18:40:09.000Z')
+  })
+
   it('does not call C26, C16, or C10 for a legal empty C36 report', async () => {
     const candidatePorts = ports()
     const result = await projectXAcceptedReportIntoEditingInputs(input(
