@@ -18,7 +18,6 @@ The repository evolves around the author's own needs. It makes **no promise of c
 | **X Insight Filter / X 洞察筛选器** | [`x-feed`](x-feed) private business runtime + [`skills/x-feed`](skills/x-feed) Skill | You want a few worthwhile X/Twitter items, not an entire timeline pasted into Telegram. | `dsh-cron` schedules and reliably delivers Python-selected items; the Skill and Telegram adapter handle feedback and saves. | It is not a plugin; it needs the host extension ports, `dsh-cron`, and Python, and provides no account, cookie, or general crawler. |
 | **Exploration Opportunity / 探索机会** | [`skills/explore-opportunity`](skills/explore-opportunity) / Skill | You drop a sentence or link and want the most interesting mechanism first, then retain it only if it truly catches your interest. | The agent uses the host's existing search, Web, file, or Shell capabilities for a quick check and gives one hook; only an explicit reaction updates `EXPLORE.md`. | Adds no browser, network isolation, or background task; follow-up count alone never retains an item. |
 | **Conversation Route Map / 会话路线提示** | [`ui-context-compactor`](ui-context-compactor) / `@deepseek-ai/dsh-client-ui-context-compactor` | A long conversation has happened and you need Harness to retain the goal, current approach, and review triggers. | It keeps a short route note for one session so compaction or context recovery can resume the thread. | One session only; summaries can be wrong, and the host chooses model/cost. |
-| **UI Plugin Watchdog / UI 插件自救器** | [`ui-plugin-guardian`](ui-plugin-guardian) / `@deepseek-ai/dsh-client-ui-plugin-guardian` | Your in-house Web UI plugin occasionally drops out and you do not want to restart it manually every time. | It notices selected plugin failures, waits out a cooldown, tries a remount, and leaves a short record. | It cannot repair bad config, dependencies, data, or external services. |
 
 ```mermaid
 flowchart LR
@@ -31,7 +30,6 @@ flowchart LR
   C --> DSH
   X --> DSH
   R[Session Route] --> DSH
-  W[Plugin Watchdog] --> R
 ```
 
 The diagram shows code-level collaboration, not a requirement to install everything together. The host discovers the Exploration Opportunity Skill semantically, and the Skill coordinates search, Web, file, or Shell tools the agent already has. `x-feed` is not a Cordis plugin: `dsh-cron` loads its scheduled business logic through a generic run-environment port, while `telegram-gateway` loads its feedback adapter through a generic Telegram extension port. The UI packages remain Web/session extensions.
@@ -76,8 +74,6 @@ The following are **object shapes passed to `apply()`**, not a specific DSH prof
 // Session Route: provider and model must be supplied together, or both omitted.
 { maxInputChars: 32_000, maxOutputTokens: 2_400 }
 
-// Plugin Watchdog
-{ watched: ['ui-context-compactor'], repairCooldownMs: 30_000 }
 ```
 
 Telegram Bridge, Responsibility Ledger, and Agent Clock ask the credential provider for Telegram credentials; do not put a token or chat ID directly into a source-controlled object. Exploration Opportunity and X Feed Skills have no `apply()` configuration; the latter only guides use of the already-mounted X tools. `x-feed` keeps the old default data location at `DSH_HOME/storages/dsh-x-feed`, so this refactor neither migrates nor deletes existing data. Session Route uses an explicit reducer only when `provider` and `model` are set together.
@@ -149,16 +145,6 @@ After a long conversation, the annoying failure is that Harness loses the goal, 
 - Can use an explicit reducer `provider` and `model` as a pair, or the host's default selection.
 - Handles one session only; summaries can still be wrong and do not replace the original log or a cross-session knowledge base.
 
-### UI Plugin Watchdog / UI 插件自救器
-
-When an in-house Web UI plugin occasionally drops out, manually restarting it every time gets tiresome. With `ui-plugin-guardian`, selected plugins are watched; a failed or disposed one is remounted after a cooldown and leaves a small record for diagnosis.
-
-- Watches `ui-context-compactor` by default.
-- Can instead watch only the plugin names listed in configuration.
-- Uses a separate cooldown per plugin to avoid a rapid remount loop.
-- Records detection, remount start, success, and failure in a short audit trail.
-- Cannot repair bad configuration, incompatible dependencies, corrupted data, or external services; automatic remounting can amplify a fault, so isolate it first.
-
 ## Build, test, and local development
 
 There is no unified install/build/test command, and the `@deepseek-ai/*` dependencies are not published as directly retrievable npm dependencies. Do not run `pnpm install` or `pnpm run bundle` in an isolated clone: the package manager will try, and fail, to fetch those source/private dependencies from npm. The commands below use a compatible Harness source checkout as the toolchain and dependency source. They are not a release process and do not deploy services.
@@ -173,7 +159,6 @@ export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
 (cd dsh-cron && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd x-feed && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd ui-context-compactor && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
-(cd ui-plugin-guardian && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 ```
 
 Tests also run per package:
@@ -187,7 +172,6 @@ export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
 (cd x-feed && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd telegram-gateway && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd ui-context-compactor && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
-(cd ui-plugin-guardian && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 
 # The Skill has no build artifact; validate its structure and frontmatter with a compatible Skill Creator.
 python '<path-to-skill-creator>/scripts/quick_validate.py' skills/explore-opportunity
@@ -223,7 +207,6 @@ x-feed/                 Private X insight business runtime and Python pipeline (
 skills/x-feed/          Agent guidance for X feedback and saves
 skills/explore-opportunity/  Skill for verifying a lead and retaining explicit interest
 ui-context-compactor/   Single-session route and context projection
-ui-plugin-guardian/     Cordis plugin-fiber observation and remounting
 tsdown.client.ts        Shared Web-client bundling configuration
 web/                    Small Web platform type entry point
 ```

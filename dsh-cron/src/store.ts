@@ -3,8 +3,7 @@
  *
  * `jobs.jsonl` is append-only (create/delete tombstones), folded on read;
  * `runs.jsonl` is append-only audit history. All writes are atomic:
- * write-to-tmp + rename (same convention as the telegram offset store and
- * the plugin guardian audit log).
+ * write-to-tmp + rename (same convention as the telegram offset store).
  * @module @deepseek-ai/dsh-cron
  */
 
