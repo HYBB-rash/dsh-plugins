@@ -844,6 +844,20 @@ export class AssistantStore {
     return raw === undefined ? undefined : mapOutbox(raw)
   }
 
+  /**
+   * Read the last check-in delivery for one user focus.  The reminder's
+   * durable scheduling state and its delivery outcome are separate facts:
+   * after a due reminder is queued, `reminder_due_at` is deliberately cleared
+   * to prevent duplicate queueing, so callers must not infer "not armed"
+   * from a null due time alone.
+   */
+  getLatestCheckInOutbox(commitmentId: string): OutboxRow | undefined {
+    const raw = this.db.prepare(`SELECT ${OUTBOX_COLUMNS} FROM outbox
+      WHERE commitment_id = ? AND kind IN ('check_in', 'missed_check_in')
+      ORDER BY created_at DESC, id DESC LIMIT 1`).get(commitmentId) as RawRow | undefined
+    return raw === undefined ? undefined : mapOutbox(raw)
+  }
+
   listMonitorFailedOrUncertainEventKeys(commitmentId: string): string[] {
     return (this.db.prepare(`SELECT monitor_event_key FROM outbox WHERE commitment_id = ? AND kind = 'monitor_event' AND state IN ('failed','uncertain') AND monitor_event_key IS NOT NULL ORDER BY created_at, id`).all(commitmentId) as RawRow[])
       .map(row => str(row.monitor_event_key))

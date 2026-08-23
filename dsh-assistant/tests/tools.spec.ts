@@ -235,6 +235,38 @@ describe('assistant_task_status', () => {
     web.dispose(); tg.dispose(); store.close()
   })
 
+  it('distinguishes a due reminder delivery failure from an unarmed timer', async () => {
+    const store = new AssistantStore(join(tempDir(), 'check-in-delivery.sqlite'))
+    const created = store.createUserCommitment({
+      title: '外部访问', status: 'active', checkInMinutes: 2, sourceSurface: 'telegram', now: NOW,
+    })
+    if (!created.ok) throw new Error('focus seed failed')
+    const queued = store.queueDueReminder('2026-08-15T02:02:00.000Z', 2 * 60 * 60 * 1000, () => '提醒')
+    if (!queued.inserted || queued.outboxId === undefined) throw new Error('reminder was not queued')
+    store.finishOutbox(queued.outboxId, 'failed', { error: 'fetch failed' })
+
+    const { tools } = register(store, 'telegram')
+    let status = await tools.get('assistant_task_status')!.execute({}, exec()) as { current: Record<string, unknown> }
+    expect(status.current).toMatchObject({
+      nextContactAt: null,
+      checkInState: 'failed',
+      lastCheckInDeliveryState: 'failed',
+      lastCheckInDeliveryError: 'fetch failed',
+    })
+
+    const current = store.getById(created.row.id)!
+    const rearmed = store.stillWorking(current.id, current.revision, 15, '2026-08-15T02:03:00.000Z')
+    if (!rearmed.ok) throw new Error('re-arm failed')
+    status = await tools.get('assistant_task_status')!.execute({}, exec()) as { current: Record<string, unknown> }
+    expect(status.current).toMatchObject({
+      checkInState: 'scheduled',
+      nextContactAt: '2026-08-15T02:18:00.000Z',
+      lastCheckInDeliveryState: 'failed',
+      lastCheckInDeliveryError: 'fetch failed',
+    })
+    store.close()
+  })
+
   it('shares one Telegram-created focus with Web, including Web updates visible back in Telegram', async () => {
     const store = new AssistantStore(join(tempDir(), 'cross-surface.sqlite'))
     const created = store.createUserCommitment({

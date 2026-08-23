@@ -39,6 +39,11 @@ export type CommitmentView = {
   readonly status: CommitmentStatus
   readonly nextAction: string | null
   readonly nextContactAt: string | null
+  /** Current scheduling/delivery state for a user-owned check-in. */
+  readonly checkInState: 'none' | 'scheduled' | 'queued' | 'delivered' | 'failed' | 'uncertain' | 'cancelled'
+  /** Most recent check-in outbox outcome, kept even after a later re-arm. */
+  readonly lastCheckInDeliveryState: 'delivered' | 'failed' | 'uncertain' | 'cancelled' | null
+  readonly lastCheckInDeliveryError: string | null
   readonly result: string | null
   readonly progressSummary: string | null
   readonly progressAt: string | null
@@ -196,6 +201,19 @@ function renderValue(_args: unknown, value: unknown): ContentBlock[] {
   return [{ type: 'text', text: JSON.stringify(value) }]
 }
 
+function terminalCheckInDeliveryState(row: OutboxRow | undefined): CommitmentView['lastCheckInDeliveryState'] {
+  if (row === undefined) return null
+  switch (row.state) {
+    case 'delivered':
+    case 'failed':
+    case 'uncertain':
+    case 'cancelled':
+      return row.state
+    default:
+      return null
+  }
+}
+
 function toView(
   row: CommitmentRow,
   mode: 'web' | 'telegram',
@@ -203,6 +221,18 @@ function toView(
   store?: AssistantStore,
 ): CommitmentView {
   const monitor = row.kind === 'monitor'
+  const latestCheckIn = row.kind === 'focus' && store !== undefined
+    ? store.getLatestCheckInOutbox(row.id)
+    : undefined
+  const checkInState = row.kind !== 'focus'
+    ? 'none'
+    : row.reminderState === 'scheduled'
+      ? 'scheduled'
+      : row.reminderState === 'queued'
+        ? latestCheckIn === undefined || latestCheckIn.state === 'pending' || latestCheckIn.state === 'claimed'
+          ? 'queued'
+          : latestCheckIn.state
+        : row.reminderState
   return {
     id: row.id,
     title: row.title,
@@ -211,6 +241,9 @@ function toView(
     status: row.status,
     nextAction: row.nextAction,
     nextContactAt: row.reminderDueAt,
+    checkInState,
+    lastCheckInDeliveryState: terminalCheckInDeliveryState(latestCheckIn),
+    lastCheckInDeliveryError: latestCheckIn?.error ?? null,
     result: row.result,
     progressSummary: row.progressSummary,
     progressAt: row.progressAt,

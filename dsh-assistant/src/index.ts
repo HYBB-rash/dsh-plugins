@@ -357,6 +357,7 @@ export const STABLE_CONTRACT = [
   'monitor 表示持续到用户明确暂停或取消的监控；cron-bound monitor 的时钟和唤醒由 dsh-cron 持有，assistant 只保存用户期望与 manager 回传的运行事实，不启动 continuable child，也不走 reminder tick。普通 delegated worker 仍沿用现有 worker 生命周期。',
   'Cron 监控没有新观察或无更新时记为 success+silent，不要编造事件身份；只有 Cron 或明确的控制结果显示异常时才如实说明。',
   '只有工具或 worker lifecycle 确认状态变化后，才能声称已暂停、已恢复或已完成。',
+  '用户时间焦点的 checkInState 才是提醒事实：scheduled 才能说已武装；queued 表示到点后正在投递；failed 或 uncertain 必须如实说明投递未成功确认。nextContactAt 为空本身不能推出没有设置提醒。',
   '回答用简短中文，先给结论；用户事情说「事情由你做，跟进由我负责」，Agent 事情说「事情和跟进都由我负责」。',
   '',
   '自有 worker 的内部通知（subagent report / settled）由 dsh-assistant 代码过滤，不会产生父 Agent 回合；不要就这些通知输出任何用户可见回复，也不要再次创建、完成或投递同一承诺。终态结果只由 outbox 投递一次。',
@@ -395,12 +396,24 @@ export function promptSectionText(store: AssistantStore, mode: 'web' | 'telegram
       snapshot = `dsh-assistant 当前责任共 ${status.totalOpen} 项（必须按 id 定位）：\n${lines.join('\n')}`
     } else if (current !== null) {
       const when = current.nextContactAt === null ? '' : `、我在 ${formatLocalTime(current.nextContactAt)} 跟进`
+      const priorDelivery = current.lastCheckInDeliveryState === 'failed' || current.lastCheckInDeliveryState === 'uncertain'
+        ? `；上一轮提醒投递${current.lastCheckInDeliveryState}（${current.lastCheckInDeliveryError ?? '未知原因'}）`
+        : ''
+      const checkIn = current.kind !== 'focus'
+        ? ''
+        : current.checkInState === 'scheduled'
+          ? `；提醒已武装${priorDelivery}`
+        : current.checkInState === 'failed' || current.checkInState === 'uncertain'
+          ? `；上一轮提醒投递${current.checkInState}（${current.lastCheckInDeliveryError ?? '未知原因'}）`
+            : current.checkInState === 'queued'
+              ? '；提醒已到点，正在投递'
+              : ''
       const next = current.nextAction === null ? '等待你的指示' : current.nextAction
       snapshot = [
         `dsh-assistant 当前承诺 ${current.id}（${current.kind}，revision ${current.revision}）：${current.title}；`,
         `工作归${current.workOwner === 'user' ? '用户' : 'Agent'}；`,
         `${statusLabel(current.status)}；`,
-        `下一步是${next}${when}${monitorPromptFacts(current)}。`,
+        `下一步是${next}${when}${checkIn}${monitorPromptFacts(current)}。`,
       ].join('')
     } else if (status.lastClosed !== null) {
       const closed = status.lastClosed
