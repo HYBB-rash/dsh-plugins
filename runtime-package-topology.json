@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "targets": [
+    {
+      "name": "@deepseek-ai/dsh-agent",
+      "kind": "harness",
+      "requiredBy": [
+        "@deepseek-ai/dsh-cron",
+        "@deepseek-ai/dsh-telegram-gateway",
+        "@herman/x-feed"
+      ]
+    },
+    {
+      "name": "@deepseek-ai/dsh-credentials",
+      "kind": "harness",
+      "requiredBy": [
+        "@deepseek-ai/dsh-assistant",
+        "@deepseek-ai/dsh-cron",
+        "@deepseek-ai/dsh-telegram-gateway"
+      ]
+    },
+    {
+      "name": "@deepseek-ai/dsh-home-paths",
+      "kind": "harness",
+      "requiredBy": [
+        "@deepseek-ai/dsh-assistant",
+        "@deepseek-ai/dsh-cron",
+        "@deepseek-ai/dsh-telegram-gateway",
+        "@herman/x-feed"
+      ]
+    },
+    {
+      "name": "@deepseek-ai/dsh-llm",
+      "kind": "harness",
+      "requiredBy": [
+        "@deepseek-ai/dsh-client-ui-context-compactor",
+        "@deepseek-ai/dsh-cron",
+        "@deepseek-ai/dsh-telegram-gateway",
+        "@herman/x-feed"
+      ]
+    },
+    {
+      "name": "@deepseek-ai/dsh-session",
+      "kind": "harness",
+      "requiredBy": [
+        "@deepseek-ai/dsh-assistant",
+        "@deepseek-ai/dsh-cron",
+        "@deepseek-ai/dsh-telegram-gateway",
+        "@herman/x-feed"
+      ]
+    },
+    {
+      "name": "@deepseek-ai/dsh-tools",
+      "kind": "harness",
+      "requiredBy": [
+        "@deepseek-ai/dsh-assistant",
+        "@deepseek-ai/dsh-cron",
+        "@herman/x-feed"
+      ]
+    },
+    {
+      "name": "@deepseek-ai/schemastery",
+      "kind": "harness",
+      "requiredBy": [
+        "@deepseek-ai/dsh-assistant",
+        "@deepseek-ai/dsh-client-ui-context-compactor",
+        "@deepseek-ai/dsh-cron",
+        "@deepseek-ai/dsh-telegram-gateway"
+      ]
+    },
+    {
+      "name": "@deepseek-ai/dsh-cron",
+      "kind": "release",
+      "releaseDirectory": "dsh-cron",
+      "requiredBy": [
+        "@deepseek-ai/dsh-assistant"
+      ]
+    },
+    {
+      "name": "@deepseek-ai/dsh-telegram-gateway",
+      "kind": "release",
+      "releaseDirectory": "telegram-gateway",
+      "requiredBy": [
+        "@deepseek-ai/dsh-assistant",
+        "@deepseek-ai/dsh-cron",
+        "@herman/x-feed"
+      ]
+    },
+    {
+      "name": "@herman/personal-feed",
+      "kind": "release",
+      "releaseDirectory": "personal-feed",
+      "requiredBy": [
+        "@herman/x-feed"
+      ]
+    }
+  ]
+}

@@ -21,8 +21,6 @@
   "files": [
     "lib/*.js",
     "lib/types/**/*.d.ts",
-    "runtime-package-topology.json",
-    "scripts/materialize-runtime-topology.mjs",
     "python/browser_start.py",
     "python/insight_engine.py",
     "python/x_browser.py",
