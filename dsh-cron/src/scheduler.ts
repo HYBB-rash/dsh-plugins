@@ -1555,6 +1555,10 @@ export class SchedulerRuntime implements RunNowPort {
       const retryNotBefore = state.settlementRetryNotBefore
       if (retryNotBefore !== undefined && retryNotBefore > Date.now()
         && (target === undefined || retryNotBefore < target)) target = retryNotBefore
+      if (retryNotBefore !== undefined && retryNotBefore <= Date.now()) {
+        target = Date.now()
+        break
+      }
       if (state.nextRunAt === undefined) {
         continue
       }

@@ -28,7 +28,7 @@ import {
   type CronAgentEnvironmentProvider,
 } from '../src/index.ts'
 import type { CronAgentEnvironmentLease } from '../src/run-environment.ts'
-import { SchedulerRuntime, type SchedulerConfig } from '../src/scheduler.ts'
+import { CLAIM_RETRY_DELAY_MS, SchedulerRuntime, type SchedulerConfig } from '../src/scheduler.ts'
 import { JobStore, RunLedger } from '../src/store.ts'
 import {
   DELIVERY_ATTEMPT_CLAIM_EVENT,
@@ -1417,6 +1417,105 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
       expect(state.find(record => record.event === PREPARED_DELIVERY_EVENT)).toMatchObject(prepared)
     } finally {
       await runtime.dispose()
+    }
+  })
+
+  it('retries a failed prepared finish from the scheduled backoff timer after a near-boundary drive', async () => {
+    const T0 = Date.parse('2026-08-25T00:00:00.000Z')
+    const SETTLEMENT_BACKOFF_MS = CLAIM_RETRY_DELAY_MS
+    const BEFORE_BACKOFF_BOUNDARY_MS = 1
+    const AFTER_BACKOFF_BOUNDARY_MS = 1
+    const jobId = 'todo05-prefinish-finish-retry-boundary'
+    const directory = temporaryDirectory()
+    const prepared = { objectId: `formal:${jobId}`, text: 'prepared boundary recovery body' }
+    const events: Array<{ readonly name: string; readonly payload: unknown }> = []
+    let sends = 0
+    let drives = 0
+    vi.useFakeTimers()
+    vi.setSystemTime(T0)
+    seedJob(directory, markedJob(jobId))
+
+    const provider = providerWithLease(() => ({
+      preparedDelivery: prepared,
+      setupAgent: async () => undefined,
+      verifySurface: async () => undefined,
+      settleDeliveryBeforeFinish: async () => ({ status: 'accepted' as const }),
+      dispose: async () => undefined,
+    }), {
+      settleRecoveredDelivery: async () => ({ status: 'accepted' as const }),
+    })
+    const finishSpy = vi.spyOn(RunLedger.prototype, 'finish')
+      .mockImplementationOnce(() => { throw new Error('controlled finish append failure') })
+    let restoreFoldSpy: (() => void) | undefined
+    const runtime = new SchedulerRuntime(
+      contextFor(events, createCronAgentEnvironmentRegistry([provider])),
+      baseConfig(directory),
+      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
+      1,
+      new AbortController().signal,
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+    )
+
+    const flushScheduler = async (): Promise<void> => {
+      await vi.advanceTimersByTimeAsync(0)
+      await Promise.resolve()
+      await Promise.resolve()
+    }
+
+    try {
+      runtime.start()
+      await flushScheduler()
+      const started = records(directory)
+      expect(started.filter(record => record.event === 'claim')).toHaveLength(1)
+      expect(started.filter(record => record.event === PREPARED_DELIVERY_EVENT)).toHaveLength(1)
+      expect(started.filter(record => record.event === DELIVERY_ATTEMPT_CLAIM_EVENT)).toHaveLength(1)
+      expect(started.filter(record => record.event === DELIVERY_RECEIPT_EVENT)).toHaveLength(1)
+      expect(started.filter(record => record.event === ENVIRONMENT_PREFINISH_SETTLE_EVENT)).toHaveLength(1)
+      expect(started.filter(record => record.event === 'finish')).toHaveLength(0)
+      expect(finishSpy).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(SETTLEMENT_BACKOFF_MS - BEFORE_BACKOFF_BOUNDARY_MS)
+      expect(Date.now()).toBe(T0 + SETTLEMENT_BACKOFF_MS - BEFORE_BACKOFF_BOUNDARY_MS)
+      expect(records(directory).filter(record => record.event === 'finish')).toHaveLength(0)
+      expect(finishSpy).toHaveBeenCalledTimes(1)
+
+      const foldTimes: number[] = []
+      const originalFoldJob = RunLedger.prototype.foldJob
+      const foldSpy = vi.spyOn(RunLedger.prototype, 'foldJob').mockImplementation(function (jobId: string) {
+        const callNumber = foldTimes.length + 1
+        if (callNumber === 2) {
+          // The second fold is the orphan projection after reload deferred settlement at T0+4999.
+          vi.setSystemTime(T0 + SETTLEMENT_BACKOFF_MS + AFTER_BACKOFF_BOUNDARY_MS)
+        }
+        foldTimes.push(Date.now())
+        return originalFoldJob.call(this, jobId)
+      })
+      restoreFoldSpy = () => foldSpy.mockRestore()
+      runtime.requestDrive()
+      await flushScheduler()
+      await vi.advanceTimersByTimeAsync(AFTER_BACKOFF_BOUNDARY_MS)
+      await flushScheduler()
+
+      const completed = records(directory)
+      expect(foldTimes.slice(0, 2)).toEqual([
+        T0 + SETTLEMENT_BACKOFF_MS - BEFORE_BACKOFF_BOUNDARY_MS,
+        T0 + SETTLEMENT_BACKOFF_MS + AFTER_BACKOFF_BOUNDARY_MS,
+      ])
+      expect(completed.filter(record => record.event === 'claim')).toHaveLength(1)
+      expect(completed.filter(record => record.event === PREPARED_DELIVERY_EVENT)).toHaveLength(1)
+      expect(completed.filter(record => record.event === DELIVERY_ATTEMPT_CLAIM_EVENT)).toHaveLength(1)
+      expect(completed.filter(record => record.event === DELIVERY_RECEIPT_EVENT)).toHaveLength(1)
+      expect(completed.filter(record => record.event === ENVIRONMENT_PREFINISH_SETTLE_EVENT)).toHaveLength(1)
+      expect(completed.filter(record => record.event === 'finish')).toHaveLength(1)
+      expect(sends).toBe(1)
+      expect(drives).toBe(0)
+      expect(finishSpy).toHaveBeenCalledTimes(2)
+    } finally {
+      await runtime.dispose()
+      restoreFoldSpy?.()
+      finishSpy.mockRestore()
+      vi.useRealTimers()
     }
   })
 
