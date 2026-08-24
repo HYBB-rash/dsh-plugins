@@ -132,8 +132,17 @@ describe('business extension boundaries', () => {
     expect(handle).toHaveBeenCalledOnce()
   })
 
-  it('cron adapter refuses an unbound job', () => {
-    expect(() => createCronEnvironmentExtension(makeCtx().ctx as never, {})).toThrow('requires cronJobId')
+  it('ordinary cron adapter accepts a complete config without a profile cronJobId', () => {
+    const harness = makeCtx()
+    const provider = createCronEnvironmentExtension(harness.ctx as never, {
+      dataDir: '/tmp/x-feed-cron-extension-no-profile-job-id',
+      pipelinePath: '/opt/x-feed/python/x_insight_pipeline.py',
+      personalFeedRequiredSources: ['x'],
+      candidateReportingWindowMs: 300_000,
+    })
+    expect(provider.marker).toBe('dsh-x-feed/v1')
+    expect(provider.requirements).toMatchObject({ jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' })
+    expect(harness.handlers).toEqual([])
   })
 
   it('returns a provider skip byte-for-byte without decorating it with settleRun', async () => {

@@ -159,7 +159,7 @@ describe('TODO05 ordinary-feed claim-only recovery', () => {
     const scheduledFor = new Date(nowMs - 2_000).toISOString()
     const claimedAt = new Date(nowMs - 1_000).toISOString()
     const observedTs = Math.floor(Date.parse(scheduledFor) / 1_000)
-    const runId = `cron-x@${scheduledFor}`
+    const runId = `scheduler-actual-job@${scheduledFor}`
     const runPart = `run-${createHash('sha256').update(runId, 'utf8').digest('hex').slice(0, 32)}`
     const collectionBatch = join(directory, '.runs', runPart, 'collection.jsonl')
     const pipelineInvocationPath = join(directory, 'pipeline-invocations.log')
@@ -214,7 +214,6 @@ describe('TODO05 ordinary-feed claim-only recovery', () => {
       )
 
       const rawConfig = {
-        cronJobId: 'cron-x',
         dataDir: directory,
         pythonBin: '/bin/sh',
         pipelinePath: join(directory, 'x_insight_pipeline.py'),
@@ -229,7 +228,7 @@ describe('TODO05 ordinary-feed claim-only recovery', () => {
       expect(wire.requests).toHaveLength(0)
 
       const recoveryContext: CronPreparedDeliveryRecoveryContext = {
-        jobId: 'cron-x',
+        jobId: 'scheduler-actual-job',
         runId,
         sessionId: 'todo05-claim-only-session',
         scheduledFor,
@@ -286,7 +285,7 @@ describe('TODO05 ordinary-feed claim-only recovery', () => {
       expect((await readJsonLines(join(personalFeedDataDir, 'editing-inputs.jsonl')))
         .filter(record => record.event === 'editing_input_accepted')).toHaveLength(2)
       expect(recovered.claim).toEqual({
-        jobId: 'cron-x',
+        jobId: 'scheduler-actual-job',
         runId,
         sessionId: 'todo05-claim-only-session',
         scheduledFor,
@@ -315,7 +314,7 @@ describe('TODO05 ordinary-feed claim-only recovery', () => {
       }
       receipt = {
         objectId: preparedDelivery.objectId,
-        jobId: 'cron-x',
+        jobId: 'scheduler-actual-job',
         runId,
         sessionId: 'todo05-claim-only-session',
         scheduledFor,

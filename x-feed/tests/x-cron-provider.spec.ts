@@ -225,8 +225,19 @@ describe('dsh-x-feed/v1 cron provider composition boundary', () => {
       ok: false,
       error: { code: 'missing_provider' },
     })
-    expect(() => createCronEnvironmentExtension({ logger: console } as never, {}))
-      .toThrow('requires cronJobId')
+    expect(() => createXFeedCronEnvironmentProvider({
+      ctx: {} as never,
+      dataDir: '/tmp/x-provider',
+      pythonBin: 'python3',
+      pipelinePath: '/pkg/python/x_insight_pipeline.py',
+    } as never)).toThrow()
+    expect(() => createXFeedCronEnvironmentProvider({
+      ctx: {} as never,
+      cronJobId: '',
+      dataDir: '/tmp/x-provider',
+      pythonBin: 'python3',
+      pipelinePath: '/pkg/python/x_insight_pipeline.py',
+    })).toThrow('requires a non-empty cronJobId')
   })
 
   it('checks the exact persisted job id before any preflight or Python side effect', async () => {

@@ -34,8 +34,9 @@ import {
 } from './feed-scope-adapter.ts'
 import { DeliveryReceipt } from './receipt.ts'
 import {
-  createXFeedCronEnvironmentProvider,
   createXFeedCronEnvironmentProviderForOrdinaryFeed,
+  X_CRON_AGENT_ENVIRONMENT_MARKER,
+  X_CRON_ENVIRONMENT_REQUIREMENTS,
   type XFeedSourceCandidateReportWiring,
 } from './x-cron/provider.ts'
 import { createXSourceCandidateReportPorts } from './x-cron/source-candidate-report.ts'
@@ -55,7 +56,6 @@ export function createCronEnvironmentExtension(
   rawConfig: Readonly<Record<string, unknown>>,
 ): CronAgentEnvironmentProvider {
   const config = parseXFeedRuntimeConfig(rawConfig)
-  if (config.cronJobId.trim() === '') throw new Error('x-feed cron extension requires cronJobId')
   if (config.candidateReportingWindowMs === undefined) {
     throw new Error('x-feed cron extension requires candidateReportingWindowMs')
   }
@@ -157,12 +157,10 @@ export function createCronEnvironmentExtension(
   })
   const providerOptions = {
     ctx,
-    cronJobId: config.cronJobId,
     dataDir: config.dataDir,
     pythonBin: config.pythonBin,
     pipelinePath: config.pipelinePath,
   }
-  const provider = createXFeedCronEnvironmentProvider(providerOptions)
 
   const prepareXFeedRun = async (context: CronAgentEnvironmentPrepareContext) => {
     const closesAt = reportingWindowClosesAt(context.claimedAt, candidateReportingWindowMs)
@@ -228,8 +226,8 @@ export function createCronEnvironmentExtension(
   }
 
   return Object.freeze({
-    marker: provider.marker,
-    requirements: provider.requirements,
+    marker: X_CRON_AGENT_ENVIRONMENT_MARKER,
+    requirements: X_CRON_ENVIRONMENT_REQUIREMENTS,
     preparedDeliveryLifecycle: true,
     runDeliveryMeaningLifecycle: true,
     bindPreparedDelivery: async (context: CronAgentEnvironmentBindPreparedDeliveryContext) => {

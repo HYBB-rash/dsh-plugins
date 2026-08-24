@@ -426,6 +426,13 @@ export function createCronRunDeliveryMeaningPortFactory(
         },
         async acceptDurableReceipt(receipt) {
           if (disposed) return { status: 'failed' as const, input: receipt }
+          if (!isCronDeliveryReceipt(receipt)
+            || receipt.jobId !== claim.jobId
+            || receipt.runId !== claim.runId
+            || receipt.sessionId !== claim.sessionId
+            || receipt.scheduledFor !== claim.scheduledFor) {
+            return { status: 'rejected' as const, input: receipt }
+          }
           try {
             const result = lifecycle.acceptDeliveryReceipt({ receipt })
             if (result.status === 'accepted') {

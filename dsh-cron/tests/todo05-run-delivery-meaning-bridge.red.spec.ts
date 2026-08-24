@@ -49,6 +49,7 @@ async function durableClaim(
   trigger: 'scheduled' | 'manual',
   suffix: string,
   prepared = true,
+  scheduledFor = new Date(1_000).toISOString(),
 ): Promise<CronPreparedDeliveryClaimBinding> {
   const claim: RunClaimRecord = {
     schemaVersion: 2,
@@ -56,7 +57,7 @@ async function durableClaim(
     jobId: `bridge-${suffix}`,
     runId: `bridge-${trigger}-${suffix}`,
     sessionId: `session-${suffix}`,
-    scheduledFor: new Date(1_000).toISOString(),
+    scheduledFor,
     claimedAt: new Date(2_000).toISOString(),
     trigger,
     ...(prepared
@@ -106,6 +107,7 @@ async function preparedReceiptFixture(
   trigger: 'scheduled' | 'manual',
   suffix: string,
   state: CronDeliveryReceipt['deliveryState'] = 'delivered',
+  scheduledFor = new Date(1_000).toISOString(),
 ): Promise<{
   readonly binding: CronPreparedDeliveryClaimBinding
   readonly receipt: CronDeliveryReceipt
@@ -113,7 +115,7 @@ async function preparedReceiptFixture(
   readonly port: Extract<Awaited<ReturnType<CronRunDeliveryMeaningPortFactory['createRunPort']>>, { readonly status: 'accepted' }>['port']
   readonly dispose: () => void | Promise<void>
 }> {
-  const binding = await durableClaim(directory, trigger, suffix);
+  const binding = await durableClaim(directory, trigger, suffix, true, scheduledFor);
   const objectId = `receipt-object-${suffix}`;
   prepareObject(directory, binding, objectId);
   const factory = await realFactory(directory);
@@ -815,6 +817,69 @@ describe('TODO05 source-neutral scheduler-owned bridge bootstrap RED', () => {
     await expect(fixture.port.acceptDurableReceipt(input)).resolves.toEqual({ status: 'rejected', input });
     expect(await directoryBytes(directory)).toEqual(before);
     await fixture.dispose();
+  });
+
+  it('keeps a factory-created receipt port closed over its own durable claim', async () => {
+    const directory = await temporaryDirectory('todo05-bridge-receipt-closure-');
+    const runA = await preparedReceiptFixture(directory, 'scheduled', 'closure-a', 'delivered');
+    const runB = await preparedReceiptFixture(
+      directory,
+      'manual',
+      'closure-b',
+      'delivered',
+      new Date(11_000).toISOString(),
+    );
+
+    expect(runA.binding).toEqual({
+      jobId: 'bridge-closure-a',
+      runId: 'bridge-scheduled-closure-a',
+      sessionId: 'session-closure-a',
+      scheduledFor: '1970-01-01T00:00:01.000Z',
+      claimedAt: '1970-01-01T00:00:02.000Z',
+      trigger: 'scheduled',
+    });
+    expect(runB.binding).toEqual({
+      jobId: 'bridge-closure-b',
+      runId: 'bridge-manual-closure-b',
+      sessionId: 'session-closure-b',
+      scheduledFor: '1970-01-01T00:00:11.000Z',
+      claimedAt: '1970-01-01T00:00:02.000Z',
+      trigger: 'manual',
+    });
+    expect(runA.receipt).toMatchObject({
+      objectId: 'receipt-object-closure-a',
+      jobId: runA.binding.jobId,
+      runId: runA.binding.runId,
+      sessionId: runA.binding.sessionId,
+      scheduledFor: runA.binding.scheduledFor,
+    });
+    expect(runB.receipt).toMatchObject({
+      objectId: 'receipt-object-closure-b',
+      jobId: runB.binding.jobId,
+      runId: runB.binding.runId,
+      sessionId: runB.binding.sessionId,
+      scheduledFor: runB.binding.scheduledFor,
+    });
+
+    try {
+      const beforeCrossRunAttempt = await directoryBytes(directory);
+      await expect(runB.port.acceptDurableReceipt(runA.receipt)).resolves.toEqual({
+        status: 'rejected',
+        input: runA.receipt,
+      });
+      expect(await directoryBytes(directory)).toEqual(beforeCrossRunAttempt);
+
+      const beforeRunAAcceptance = await directoryBytes(directory);
+      await expect(runA.port.acceptDurableReceipt(runA.receipt)).resolves.toEqual({
+        status: 'accepted',
+        value: {
+          receipt: runA.receipt,
+        },
+      });
+      expect(await directoryBytes(directory)).not.toEqual(beforeRunAAcceptance);
+    } finally {
+      await Promise.all([runA.dispose(), runB.dispose()]);
+    }
   });
 
   it.each([

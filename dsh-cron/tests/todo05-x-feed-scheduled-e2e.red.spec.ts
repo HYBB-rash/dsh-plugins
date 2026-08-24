@@ -404,6 +404,7 @@ describe('TODO05 scheduled X E2E scaffold', () => {
       ]
       const job = {
         id: jobId,
+        externalRef: 'dsh-x-feed:primary',
         schedule: { kind: 'once', runAt: scheduledFor },
         prompt: 'Prepare the ordinary X feed editing run.',
         deliver: 'telegram',
@@ -417,7 +418,7 @@ describe('TODO05 scheduled X E2E scaffold', () => {
       ctx = await createHarness(wire)
       const registry = provideCronAgentEnvironmentRegistry(ctx)
       const provider = createCronEnvironmentExtension(ctx, {
-        cronJobId: jobId,
+        cronJobId: 'legacy-profile-job',
         dataDir: fixture.dataDir,
         pythonBin: '/bin/sh',
         pipelinePath: join(fixture.dataDir, 'x_insight_pipeline.py'),
@@ -518,7 +519,7 @@ describe('TODO05 scheduled X E2E scaffold', () => {
       ctx = await createHarness(restartWire)
       const restartRegistry = provideCronAgentEnvironmentRegistry(ctx)
       const restartProvider = createCronEnvironmentExtension(ctx, {
-        cronJobId: jobId,
+        cronJobId: 'legacy-profile-job',
         dataDir: fixture.dataDir,
         pythonBin: '/bin/sh',
         pipelinePath: join(fixture.dataDir, 'x_insight_pipeline.py'),
@@ -917,6 +918,7 @@ describe('TODO05 scheduled X E2E scaffold', () => {
       ]
       const job = {
         id: jobId,
+        externalRef: 'dsh-x-feed:primary',
         schedule: { kind: 'once', runAt: naturalScheduledFor },
         prompt: 'Prepare the ordinary X feed editing run manually.',
         deliver: 'telegram',
@@ -937,7 +939,7 @@ describe('TODO05 scheduled X E2E scaffold', () => {
         const nextCtx = await createHarness(wire)
         const registry = provideCronAgentEnvironmentRegistry(nextCtx)
         const provider = createCronEnvironmentExtension(nextCtx, {
-          cronJobId: jobId,
+          cronJobId: 'legacy-profile-job',
           dataDir: fixture.dataDir,
           pythonBin: '/bin/sh',
           pipelinePath: join(fixture.dataDir, 'x_insight_pipeline.py'),

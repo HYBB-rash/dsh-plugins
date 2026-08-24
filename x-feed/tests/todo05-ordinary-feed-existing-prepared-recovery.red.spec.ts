@@ -140,7 +140,7 @@ describe('TODO05 ordinary-feed existing prepared recovery', () => {
     const claimedAt = new Date(nowMs - 1_000).toISOString()
     const observedAt = scheduledFor
     const observedTs = Math.floor(Date.parse(observedAt) / 1_000)
-    const runId = `cron-x@${scheduledFor}`
+    const runId = `scheduler-actual-job@${scheduledFor}`
     const runPart = `run-${createHash('sha256').update(runId, 'utf8').digest('hex').slice(0, 32)}`
     const collectionBatch = join(directory, '.runs', runPart, 'collection.jsonl')
     const wire = new WireAdapter()
@@ -213,7 +213,7 @@ describe('TODO05 ordinary-feed existing prepared recovery', () => {
       await writeFile(join(directory, 'x_insight_pipeline.py'), '#!/bin/sh\necho ok >&2\necho \'{"ok":true}\'\n')
 
       const rawConfig = {
-        cronJobId: 'cron-x',
+        cronJobId: 'legacy-profile-job',
         dataDir: directory,
         pythonBin: '/bin/sh',
         pipelinePath: join(directory, 'x_insight_pipeline.py'),
@@ -224,7 +224,7 @@ describe('TODO05 ordinary-feed existing prepared recovery', () => {
       ctx = await createHarness(wire)
       const firstExtension = createCronEnvironmentExtension(ctx, rawConfig)
       const firstPrepared = await firstExtension.prepare({
-        jobId: 'cron-x',
+        jobId: 'scheduler-actual-job',
         jobKind: 'agent',
         sessionMode: 'per_run',
         gate: 'forbidden',
@@ -256,7 +256,7 @@ describe('TODO05 ordinary-feed existing prepared recovery', () => {
       }
       settlementReceipt = {
         objectId: preparedDelivery.objectId,
-        jobId: 'cron-x',
+        jobId: 'scheduler-actual-job',
         runId,
         sessionId: 'todo05-existing-recovery-session',
         scheduledFor,
@@ -264,7 +264,7 @@ describe('TODO05 ordinary-feed existing prepared recovery', () => {
         deliveredAt: new Date(Date.parse(claimedAt) + 1_000).toISOString(),
       }
       const recoveryContext = {
-        jobId: 'cron-x',
+        jobId: 'scheduler-actual-job',
         runId,
         sessionId: 'todo05-existing-recovery-session',
         scheduledFor,
@@ -288,7 +288,7 @@ describe('TODO05 ordinary-feed existing prepared recovery', () => {
       expect(recovered.status).toBe('ready')
       if (recovered.status !== 'ready') return
       expect(recovered.claim).toEqual({
-        jobId: 'cron-x',
+        jobId: 'scheduler-actual-job',
         runId,
         sessionId: 'todo05-existing-recovery-session',
         scheduledFor,

@@ -112,7 +112,14 @@ interface OrdinaryFeedRunPreparationPort {
   readonly prepareOrdinaryFeed: () => Promise<CronAgentEnvironmentLease>
 }
 
-interface InternalXFeedCronProviderOptions extends XFeedCronProviderOptions {
+type XFeedCronProviderOptionsWithoutJobId = Omit<XFeedCronProviderOptions, 'cronJobId'>
+
+type XFeedCronProviderMode =
+  | { readonly kind: 'legacy'; readonly cronJobId: string }
+  | { readonly kind: 'ordinary' }
+
+interface InternalXFeedCronProviderOptions extends XFeedCronProviderOptionsWithoutJobId {
+  readonly mode: XFeedCronProviderMode
   readonly ordinaryFeedRunPreparationPort?: OrdinaryFeedRunPreparationPort
 }
 
@@ -120,12 +127,15 @@ interface InternalXFeedCronProviderOptions extends XFeedCronProviderOptions {
 export function createXFeedCronEnvironmentProvider(
   options: XFeedCronProviderOptions,
 ): CronAgentEnvironmentProvider {
-  return createInternalXFeedCronEnvironmentProvider(options)
+  return createInternalXFeedCronEnvironmentProvider({
+    ...options,
+    mode: { kind: 'legacy', cronJobId: options.cronJobId },
+  })
 }
 
 /** Build the ordinary Feed provider without exposing the seam through the barrel. */
 export function createXFeedCronEnvironmentProviderForOrdinaryFeed(
-  options: XFeedCronProviderOptions,
+  options: XFeedCronProviderOptionsWithoutJobId,
   port: OrdinaryFeedRunPreparationPort,
 ): CronAgentEnvironmentProvider {
   const wiring = options.sourceCandidateReport
@@ -136,6 +146,7 @@ export function createXFeedCronEnvironmentProviderForOrdinaryFeed(
   }
   return createInternalXFeedCronEnvironmentProvider({
     ...options,
+    mode: { kind: 'ordinary' },
     ordinaryFeedRunPreparationPort: port,
   })
 }
@@ -143,7 +154,9 @@ export function createXFeedCronEnvironmentProviderForOrdinaryFeed(
 function createInternalXFeedCronEnvironmentProvider(
   options: InternalXFeedCronProviderOptions,
 ): CronAgentEnvironmentProvider {
-  if (options.cronJobId.trim() === '') throw new Error('X cron provider requires a non-empty cronJobId')
+  if (options.mode.kind === 'legacy' && options.mode.cronJobId.trim() === '') {
+    throw new Error('X cron provider requires a non-empty cronJobId')
+  }
   if (options.dataDir.trim() === '') throw new Error('X cron provider requires a non-empty dataDir')
   if (basename(options.pipelinePath) !== 'x_insight_pipeline.py') {
     throw new Error('X cron provider only accepts the shipped x_insight_pipeline.py adapter')
@@ -165,8 +178,8 @@ async function prepareXFeedRun(
   options: InternalXFeedCronProviderOptions,
   context: { readonly jobId: string; readonly runId: string },
 ): Promise<CronAgentEnvironmentLease | CronAgentEnvironmentSkip> {
-  if (context.jobId !== options.cronJobId) {
-    throw new Error(`X cron provider job id mismatch: expected ${options.cronJobId}, got ${context.jobId}`)
+  if (options.mode.kind === 'legacy' && context.jobId !== options.mode.cronJobId) {
+    throw new Error(`X cron provider job id mismatch: expected ${options.mode.cronJobId}, got ${context.jobId}`)
   }
 
   const runPart = safeRunPart(context.runId)
@@ -226,7 +239,7 @@ async function prepareXFeedRun(
 
     const baseCapabilities = createCapabilities({
       runId: runPart,
-      cronJobId: options.cronJobId,
+      cronJobId: context.jobId,
       dataDir: options.dataDir,
       packagePath,
       shownPath,
@@ -379,7 +392,7 @@ interface ParsedPackage {
   readonly currentCollection: readonly unknown[] | undefined
 }
 
-function createPythonPorts(options: XFeedCronProviderOptions, capabilities: XFeedRunCapabilities) {
+function createPythonPorts(options: XFeedCronProviderOptionsWithoutJobId, capabilities: XFeedRunCapabilities) {
   return createXFeedPythonPorts({
     pythonBin: options.pythonBin,
     pythonDirectory: dirname(options.pipelinePath),
