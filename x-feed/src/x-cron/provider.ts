@@ -7,6 +7,7 @@ import type {
   MaterialProjectionReportScopeEstablished,
   MechanicalAdmissionPeriodScopeEstablished,
   PeriodIdentity,
+  SourceCandidateReportAccepted,
 } from '@herman/personal-feed'
 import type {
   CronAgentEnvironmentSkip,
@@ -56,6 +57,11 @@ import {
   projectXAcceptedReportIntoEditingInputs,
   type XCandidateEditingInputPorts,
 } from './candidate-editing-input.ts'
+import {
+  createXSourceCandidateMaterialSnapshotStore,
+  type XSourceCandidateMaterialSnapshot,
+  type XSourceCandidateMaterialSnapshotBinding,
+} from './source-candidate-material-snapshot.ts'
 
 export const X_CRON_AGENT_ENVIRONMENT_MARKER = 'dsh-x-feed/v1'
 
@@ -99,6 +105,7 @@ export interface XFeedSourceCandidateReportWiring {
   readonly reportPort: XSourceCandidateReportPort
   readonly periodFinalizer?: XCandidateEditingInputPorts['periodFinalizer']
   readonly crossSourceEditor?: XCandidateEditingInputPorts['crossSourceEditor']
+  readonly acceptedReport?: SourceCandidateReportAccepted
 }
 
 interface OrdinaryFeedRunPreparationPort {
@@ -162,30 +169,61 @@ async function prepareXFeedRun(
     throw new Error(`X cron provider job id mismatch: expected ${options.cronJobId}, got ${context.jobId}`)
   }
 
-  const budget = options.projectionBudget ?? DEFAULT_PROJECTION_BUDGET
-
-  // Readiness is deliberately mechanical. No assessment Agent exists on this
-  // path; the same file readers are pinned before any Python action starts.
-  let exactAssessment: ((candidate: CandidateDescriptor) => CandidateFactAssessment | ProjectionFailure) | undefined
-  const preflight = createBoundFactProjectionPreflight(options.dataDir, budget, navigation => {
-    exactAssessment = candidate => createExactTargetAssessment({ candidate, navigation })
-    return { checkReadiness: () => ({ ready: true as const }) }
-  })
-  if (preflight.kind !== 'ready') {
-    throw new Error(`X cron preflight ${preflight.kind}: ${preflight.code}: ${preflight.message}`)
-  }
-  if (exactAssessment === undefined) throw new Error('X cron preflight completed without its exact-target assessment binder')
-  const projectionSession = preflight.session
-
   const runPart = safeRunPart(context.runId)
   const runDir = join(options.dataDir, '.runs', runPart)
-  const packagePath = join(options.dataDir, 'x_insight_package.json')
-  const shownPath = join(options.dataDir, 'x_shown.json')
-  const collectionPath = join(runDir, 'collection.jsonl')
-  const topicSearchOutputPath = join(runDir, 'topic-search.jsonl')
-  mkdirSync(runDir, { recursive: true })
 
   try {
+    const sourceCandidateReport = options.sourceCandidateReport
+    if (sourceCandidateReport?.acceptedReport !== undefined) {
+      mkdirSync(runDir, { recursive: true })
+    }
+    const materialSnapshotStore = sourceCandidateReport === undefined
+      ? undefined
+      : createXSourceCandidateMaterialSnapshotStore({
+        ledgerPath: join(runDir, 'source-candidate-material-snapshot.jsonl'),
+      })
+
+    if (sourceCandidateReport?.acceptedReport !== undefined) {
+      if (options.ordinaryFeedRunPreparationPort === undefined || materialSnapshotStore === undefined) {
+        throw new Error('ordinary X source candidate recovery requires its preparation and snapshot ports')
+      }
+      const binding: XSourceCandidateMaterialSnapshotBinding = {
+        runId: context.runId,
+        period: sourceCandidateReport.period,
+        materialProjectionReportScope: sourceCandidateReport.materialProjectionReportScope,
+      }
+      const readSnapshot = materialSnapshotStore.readSnapshot(binding)
+      if (readSnapshot.status !== 'found') {
+        throw new Error(`X source candidate material snapshot recovery was ${readSnapshot.status}`)
+      }
+      await replayAcceptedSourceCandidateReport(
+        sourceCandidateReport.acceptedReport,
+        readSnapshot.value,
+        sourceCandidateReport,
+      )
+      return options.ordinaryFeedRunPreparationPort.prepareOrdinaryFeed()
+    }
+
+    const budget = options.projectionBudget ?? DEFAULT_PROJECTION_BUDGET
+
+    // Readiness is deliberately mechanical. No assessment Agent exists on this
+    // path; the same file readers are pinned before any Python action starts.
+    let exactAssessment: ((candidate: CandidateDescriptor) => CandidateFactAssessment | ProjectionFailure) | undefined
+    const preflight = createBoundFactProjectionPreflight(options.dataDir, budget, navigation => {
+      exactAssessment = candidate => createExactTargetAssessment({ candidate, navigation })
+      return { checkReadiness: () => ({ ready: true as const }) }
+    })
+    if (preflight.kind !== 'ready') {
+      throw new Error(`X cron preflight ${preflight.kind}: ${preflight.code}: ${preflight.message}`)
+    }
+    if (exactAssessment === undefined) throw new Error('X cron preflight completed without its exact-target assessment binder')
+    const projectionSession = preflight.session
+    const packagePath = join(options.dataDir, 'x_insight_package.json')
+    const shownPath = join(options.dataDir, 'x_shown.json')
+    const collectionPath = join(runDir, 'collection.jsonl')
+    const topicSearchOutputPath = join(runDir, 'topic-search.jsonl')
+    mkdirSync(runDir, { recursive: true })
+
     const baseCapabilities = createCapabilities({
       runId: runPart,
       cronJobId: options.cronJobId,
@@ -201,29 +239,52 @@ async function prepareXFeedRun(
     const basePorts = createPythonPorts(options, baseCapabilities)
     const insightPackage = await basePorts.runPipeline()
     const parsed = parseInsightPackage(insightPackage, baseCapabilities)
-    if (options.sourceCandidateReport !== undefined) {
+    if (sourceCandidateReport !== undefined) {
       if (parsed.currentCollection === undefined) {
         throw new Error('X source candidate report requires current_collection in the Python package')
       }
       const evidence = collectionEvidence(insightPackage, baseCapabilities, context.runId)
-      const acceptedReport = await prepareAndSubmitXSourceCandidateReport({
-        period: options.sourceCandidateReport.period,
-        mechanicalAdmissionScope: options.sourceCandidateReport.mechanicalAdmissionScope,
-        materialProjectionReportScope: options.sourceCandidateReport.materialProjectionReportScope,
+      if (materialSnapshotStore === undefined) {
+        throw new Error('X source candidate report requires its material snapshot store')
+      }
+      const normalizedCollection = normalizeXCurrentCollection(parsed.currentCollection)
+      const snapshot: XSourceCandidateMaterialSnapshot = {
+        runId: context.runId,
+        period: sourceCandidateReport.period,
+        materialProjectionReportScope: sourceCandidateReport.materialProjectionReportScope,
         collectionEvidence: evidence,
-        currentCollection: parsed.currentCollection,
-        candidatePort: options.sourceCandidateReport.candidatePort,
-        reportPort: options.sourceCandidateReport.reportPort,
+        currentCollection: normalizedCollection,
+      }
+      const acceptedSnapshot = materialSnapshotStore.acceptSnapshot(snapshot)
+      if (acceptedSnapshot.status !== 'accepted') {
+        throw new Error(`X source candidate material snapshot was ${acceptedSnapshot.status}`)
+      }
+      const readSnapshot = materialSnapshotStore.readSnapshot({
+        runId: acceptedSnapshot.value.runId,
+        period: acceptedSnapshot.value.period,
+        materialProjectionReportScope: acceptedSnapshot.value.materialProjectionReportScope,
       })
-      if (options.sourceCandidateReport.periodFinalizer !== undefined) {
-        const currentCollection = normalizeXCurrentCollection(parsed.currentCollection)
+      if (readSnapshot.status !== 'found') {
+        throw new Error(`X source candidate material snapshot readback was ${readSnapshot.status}`)
+      }
+      const materialSnapshot = readSnapshot.value
+      const acceptedReport = await prepareAndSubmitXSourceCandidateReport({
+        period: sourceCandidateReport.period,
+        mechanicalAdmissionScope: sourceCandidateReport.mechanicalAdmissionScope,
+        materialProjectionReportScope: sourceCandidateReport.materialProjectionReportScope,
+        collectionEvidence: materialSnapshot.collectionEvidence,
+        currentCollection: materialSnapshot.currentCollection,
+        candidatePort: sourceCandidateReport.candidatePort,
+        reportPort: sourceCandidateReport.reportPort,
+      })
+      if (sourceCandidateReport.periodFinalizer !== undefined) {
         await projectXAcceptedReportIntoEditingInputs({
-          period: options.sourceCandidateReport.period,
-          collectionEvidence: evidence,
+          period: sourceCandidateReport.period,
+          collectionEvidence: materialSnapshot.collectionEvidence,
           acceptedReport,
-          currentCollection,
-          periodFinalizer: options.sourceCandidateReport.periodFinalizer,
-          crossSourceEditor: options.sourceCandidateReport.crossSourceEditor!,
+          currentCollection: materialSnapshot.currentCollection,
+          periodFinalizer: sourceCandidateReport.periodFinalizer,
+          crossSourceEditor: sourceCandidateReport.crossSourceEditor!,
         })
       }
     }
@@ -274,6 +335,37 @@ async function prepareXFeedRun(
     // audit evidence; no user-owned persistent state is removed here.
     throw error
   }
+}
+
+async function replayAcceptedSourceCandidateReport(
+  acceptedReport: SourceCandidateReportAccepted,
+  snapshot: XSourceCandidateMaterialSnapshot,
+  wiring: XFeedSourceCandidateReportWiring,
+): Promise<void> {
+  if (wiring.periodFinalizer === undefined || wiring.crossSourceEditor === undefined) {
+    throw new Error('ordinary X source candidate recovery requires C26/C16/C10 wiring')
+  }
+  const projected = await projectXAcceptedReportIntoEditingInputs({
+    period: wiring.period,
+    collectionEvidence: snapshot.collectionEvidence,
+    acceptedReport,
+    currentCollection: snapshot.currentCollection,
+    periodFinalizer: wiring.periodFinalizer,
+    crossSourceEditor: wiring.crossSourceEditor,
+  })
+  const expected = acceptedReport.report.candidates
+    .map(candidate => candidate.candidate.stableReference)
+    .sort()
+  const actual = projected
+    .map(candidate => candidate.candidate.stableReference)
+    .sort()
+  if (!sameStringArray(expected, actual)) {
+    throw new Error('X source candidate recovery did not project every C36 member into C26/C16/C10')
+  }
+}
+
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
 interface ParsedPackage {

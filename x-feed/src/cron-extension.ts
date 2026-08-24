@@ -17,6 +17,7 @@ import {
   createMechanicalAdmission,
   createPersonalFeedScopeService,
   createPeriodBusinessFinalizer,
+  createSourceCandidateReportReader,
   sourceIdentity,
 } from '@herman/personal-feed'
 import type {
@@ -66,6 +67,7 @@ export function createCronEnvironmentExtension(
   const candidatePeriodLedgerPath = join(config.personalFeedDataDir, 'candidate-period-facts.jsonl')
   const editingInputLedgerPath = join(config.personalFeedDataDir, 'editing-inputs.jsonl')
   const periodBusinessLedgerPath = join(config.personalFeedDataDir, 'period-business.jsonl')
+  const reportLedgerPath = join(config.personalFeedDataDir, 'source-candidate-reports.jsonl')
   const crossSourceEditor = createCrossSourceEditor({
     candidatePeriodLedgerPath,
     editingInputLedgerPath,
@@ -122,7 +124,7 @@ export function createCronEnvironmentExtension(
   })
   periodBusinessFinalizer = createPeriodBusinessFinalizer({
     periodScopeLedgerPath,
-    reportLedgerPath: join(config.personalFeedDataDir, 'source-candidate-reports.jsonl'),
+    reportLedgerPath,
     candidatePeriodLedgerPath,
     editingInputLedgerPath,
     periodBusinessLedgerPath,
@@ -133,6 +135,7 @@ export function createCronEnvironmentExtension(
     displayFactReceiver: crossSourceEditor,
     businessFinalizationReceiver: ordinaryBusinessFinalizationOwner.receiver,
   })
+  const sourceCandidateReportReader = createSourceCandidateReportReader({ reportLedgerPath })
   const ordinaryFeedRunLifecycle = createOrdinaryFeedRunLifecycle({
     ctx,
     editor: crossSourceEditor,
@@ -186,10 +189,22 @@ export function createCronEnvironmentExtension(
       periodBusinessFinalizer,
       crossSourceEditor,
     )
+    const acceptedReport = sourceCandidateReportReader.readAcceptedSourceCandidateReport(
+      sourceCandidateReport.materialProjectionReportScope,
+    )
+    if (acceptedReport.status === 'rejected' || acceptedReport.status === 'failed') {
+      throw new Error(`x-feed C36 recovery read was ${acceptedReport.status}`)
+    }
+    if (acceptedReport.status === 'found' && acceptedReport.value.report.candidates.length === 0) {
+      return { kind: 'skip' as const, outcome: { text: undefined, error: undefined } }
+    }
+    const providerSourceCandidateReport = acceptedReport.status === 'found'
+      ? { ...sourceCandidateReport, acceptedReport: acceptedReport.value }
+      : sourceCandidateReport
     const runProvider = createXFeedCronEnvironmentProviderForOrdinaryFeed(
       {
         ...providerOptions,
-        sourceCandidateReport,
+        sourceCandidateReport: providerSourceCandidateReport,
       },
       {
         prepareOrdinaryFeed: () => ordinaryFeedRunLifecycle.prepareOrdinaryFeed({

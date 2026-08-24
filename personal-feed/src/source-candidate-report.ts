@@ -7,15 +7,73 @@ import type {
   C36Result,
   MechanicalAdmissionPeriodScopeEstablished,
   MaterialCandidate,
+  MaterialProjectionReportScope,
+  MaterialProjectionReportScopeEstablished,
   PeriodIdentity,
   PeriodScopeEstablished,
   PeriodBusinessFinalizerOptions,
   SourceCandidateReference,
   SourceCandidateReport,
+  SourceCandidateReportAccepted,
   SourceCandidateReportFinalizer,
 } from './types.ts'
 
 type ReportBranch = SourceCandidateReport['branch']
+
+export interface SourceCandidateReportReaderOptions {
+  readonly reportLedgerPath: string
+}
+
+export type SourceCandidateReportReaderResult =
+  | { readonly status: 'found'; readonly value: SourceCandidateReportAccepted }
+  | {
+      readonly status: 'missing' | 'rejected' | 'failed'
+      readonly input: MaterialProjectionReportScopeEstablished
+    }
+
+export interface SourceCandidateReportReader {
+  readonly readAcceptedSourceCandidateReport: (
+    scope: MaterialProjectionReportScopeEstablished,
+  ) => SourceCandidateReportReaderResult
+}
+
+/**
+ * Package boundary for reading an accepted C36 report.
+ *
+ * The reader exposes the narrow durable read contract for accepted C36
+ * reports while keeping all storage and validation details inside this
+ * component.
+ */
+export function createSourceCandidateReportReader(
+  options: SourceCandidateReportReaderOptions,
+): SourceCandidateReportReader {
+  if (options.reportLedgerPath.trim() === '') {
+    throw new Error('source candidate report reader ledger path must be non-empty')
+  }
+  const reportStore = createSourceCandidateReportStore(options.reportLedgerPath)
+
+  return Object.freeze({
+    readAcceptedSourceCandidateReport: (
+      scope: MaterialProjectionReportScopeEstablished,
+    ): SourceCandidateReportReaderResult => {
+      if (!isReaderScope(scope)) return { status: 'rejected', input: scope }
+      try {
+        const acceptedReports = reportStore.list()
+        if (acceptedReports.some(accepted => !validateReportShape(accepted.report))) {
+          return { status: 'failed', input: scope }
+        }
+        const matches = acceptedReports.filter(accepted => matchesReportScope(accepted.report, scope))
+        if (matches.length === 0) return { status: 'missing', input: scope }
+        if (matches.length !== 1) return { status: 'failed', input: scope }
+        const accepted = matches[0]
+        if (accepted === undefined) return { status: 'failed', input: scope }
+        return { status: 'found', value: deepFreeze(accepted) }
+      } catch {
+        return { status: 'failed', input: scope }
+      }
+    },
+  })
+}
 
 export function createSourceCandidateReportFinalizer(
   options: PeriodBusinessFinalizerOptions,
@@ -145,6 +203,22 @@ function validateReportShape(value: unknown): value is SourceCandidateReport {
   return value.candidates.every(candidate => validateCandidateShape(candidate, branch))
 }
 
+function isReaderScope(value: unknown): value is MaterialProjectionReportScopeEstablished {
+  if (!isRecord(value) || !hasExactKeys(value, ['scope'])) return false
+  const scope = value.scope
+  if (!isRecord(scope) || !hasExactKeys(scope, ['period', 'source', 'reportingWindow'])) return false
+  if (!isMaterialProjectionScope(scope) || !isNonEmptyString(scope.source)) return false
+  if (!hasExactKeys(scope.reportingWindow, ['window'])) return false
+  const window = scope.reportingWindow.window
+  return isRecord(window)
+    && hasExactKeys(window, ['window', 'period', 'sources', 'closesAt'])
+    && isPeriodIdentity(window.period)
+    && isNonEmptyString(window.window)
+    && isNonEmptyString(window.closesAt)
+    && Array.isArray(window.sources)
+    && window.sources.every(source => isNonEmptyString(source))
+}
+
 function validateCandidateShape(value: unknown, branch: ReportBranch): value is MaterialCandidate {
   if (!isRecord(value)
     || !isPeriodIdentity(value.period)
@@ -172,7 +246,7 @@ function isReportBranch(value: unknown): value is ReportBranch {
   return value === 'unscreened' || value === 'screened'
 }
 
-function isMaterialProjectionScope(value: unknown): boolean {
+function isMaterialProjectionScope(value: unknown): value is MaterialProjectionReportScope {
   if (!isRecord(value)
     || !isPeriodIdentity(value.period)
     || typeof value.source !== 'string'
@@ -203,6 +277,13 @@ function isPeriodIdentity(value: unknown): value is PeriodIdentity {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasExactKeys(value: object, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort()
+  const sortedExpected = [...expected].sort()
+  return actual.length === sortedExpected.length
+    && actual.every((key, index) => key === sortedExpected[index])
 }
 
 function samePeriod(left: PeriodIdentity, right: PeriodIdentity): boolean {

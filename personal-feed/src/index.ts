@@ -38,6 +38,13 @@ export {
   type PersonalFeedScopeServiceOptions,
 } from './service.ts'
 
+export {
+  createSourceCandidateReportReader,
+  type SourceCandidateReportReader,
+  type SourceCandidateReportReaderOptions,
+  type SourceCandidateReportReaderResult,
+} from './source-candidate-report.ts'
+
 export { createPeriodScopeStore, type PeriodScopeStore } from './store.ts'
 
 export type {
