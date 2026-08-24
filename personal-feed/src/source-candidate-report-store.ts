@@ -14,6 +14,7 @@ interface SourceCandidateReportLedgerRecord {
 
 export interface SourceCandidateReportStore {
   readonly findByScope: (scopeKey: string) => SourceCandidateReportAccepted | undefined
+  readonly list: () => readonly SourceCandidateReportAccepted[]
   readonly append: (accepted: SourceCandidateReportAccepted) => void
 }
 
@@ -68,6 +69,7 @@ export function createSourceCandidateReportStore(path: string): SourceCandidateR
   }
 
   return Object.freeze({
+    list: () => readRecords(path).map(record => record.accepted),
     findByScope: (scopeKey: string) => {
       const existing = readRecords(path).find(record => sourceCandidateReportScopeKey(record.accepted.report) === scopeKey)
       return existing?.accepted

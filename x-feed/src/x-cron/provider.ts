@@ -101,9 +101,40 @@ export interface XFeedSourceCandidateReportWiring {
   readonly crossSourceEditor?: XCandidateEditingInputPorts['crossSourceEditor']
 }
 
+interface OrdinaryFeedRunPreparationPort {
+  readonly prepareOrdinaryFeed: () => Promise<CronAgentEnvironmentLease>
+}
+
+interface InternalXFeedCronProviderOptions extends XFeedCronProviderOptions {
+  readonly ordinaryFeedRunPreparationPort?: OrdinaryFeedRunPreparationPort
+}
+
 /** Build the exact provider registered for one configured cron job. */
 export function createXFeedCronEnvironmentProvider(
   options: XFeedCronProviderOptions,
+): CronAgentEnvironmentProvider {
+  return createInternalXFeedCronEnvironmentProvider(options)
+}
+
+/** Build the ordinary Feed provider without exposing the seam through the barrel. */
+export function createXFeedCronEnvironmentProviderForOrdinaryFeed(
+  options: XFeedCronProviderOptions,
+  port: OrdinaryFeedRunPreparationPort,
+): CronAgentEnvironmentProvider {
+  const wiring = options.sourceCandidateReport
+  if (wiring === undefined
+    || wiring.periodFinalizer === undefined
+    || wiring.crossSourceEditor === undefined) {
+    throw new Error('ordinary X cron provider requires source candidate report C10 wiring')
+  }
+  return createInternalXFeedCronEnvironmentProvider({
+    ...options,
+    ordinaryFeedRunPreparationPort: port,
+  })
+}
+
+function createInternalXFeedCronEnvironmentProvider(
+  options: InternalXFeedCronProviderOptions,
 ): CronAgentEnvironmentProvider {
   if (options.cronJobId.trim() === '') throw new Error('X cron provider requires a non-empty cronJobId')
   if (options.dataDir.trim() === '') throw new Error('X cron provider requires a non-empty dataDir')
@@ -124,7 +155,7 @@ export function createXFeedCronEnvironmentProvider(
 }
 
 async function prepareXFeedRun(
-  options: XFeedCronProviderOptions,
+  options: InternalXFeedCronProviderOptions,
   context: { readonly jobId: string; readonly runId: string },
 ): Promise<CronAgentEnvironmentLease | CronAgentEnvironmentSkip> {
   if (context.jobId !== options.cronJobId) {
@@ -195,6 +226,9 @@ async function prepareXFeedRun(
           crossSourceEditor: options.sourceCandidateReport.crossSourceEditor!,
         })
       }
+    }
+    if (options.ordinaryFeedRunPreparationPort !== undefined) {
+      return options.ordinaryFeedRunPreparationPort.prepareOrdinaryFeed()
     }
     if (parsed.candidates.length === 0) {
       return { kind: 'skip', outcome: { text: undefined, error: undefined } }

@@ -73,7 +73,8 @@
       "kind": "release",
       "releaseDirectory": "dsh-cron",
       "requiredBy": [
-        "@deepseek-ai/dsh-assistant"
+        "@deepseek-ai/dsh-assistant",
+        "@herman/x-feed"
       ]
     },
     {

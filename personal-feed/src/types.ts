@@ -6,6 +6,10 @@ export type PeriodReference = string & { readonly [identityBrand]: 'PeriodRefere
 export type SourceIdentity = string & { readonly [identityBrand]: 'SourceIdentity' }
 export type CandidateIdentity = string & { readonly [identityBrand]: 'CandidateIdentity' }
 export type SourceStableReference = string & { readonly [identityBrand]: 'SourceStableReference' }
+export type EditingConclusionIdentity = string & { readonly [identityBrand]: 'EditingConclusionIdentity' }
+export type FeedContentDeliveryObjectIdentity = string & {
+  readonly [identityBrand]: 'FeedContentDeliveryObjectIdentity'
+}
 export type CandidateReportingWindowIdentity = string & {
   readonly [identityBrand]: 'CandidateReportingWindowIdentity'
 }
@@ -255,6 +259,264 @@ export interface EditingInputAccepted {
   readonly material: CandidateMaterial
 }
 
+export interface EditingInputClosure {
+  readonly period: PeriodIdentity
+  readonly candidatesInJudgment: readonly SourceCandidateReference[]
+}
+
+export interface EditingInputClosureAccepted {
+  readonly closure: EditingInputClosure
+}
+
+export type CandidateEditingDecision =
+  | { readonly kind: 'selected'; readonly candidate: SourceCandidateReference }
+  | {
+      readonly kind: 'not_selected'
+      readonly candidate: SourceCandidateReference
+      readonly semanticReason: unknown
+    }
+
+export interface CompleteCandidateEditingDecisions {
+  readonly candidatesInJudgment: readonly SourceCandidateReference[]
+  readonly decisions: readonly CandidateEditingDecision[]
+}
+
+export interface EditedFeedContent {
+  readonly body: unknown
+}
+export interface SelectedCandidateSet {
+  readonly candidates: readonly SourceCandidateReference[]
+}
+
+export type EmptyCandidateSelection = Record<never, never>
+
+export interface RawFeedContentConclusion {
+  readonly conclusion: EditingConclusionIdentity
+  readonly closure: EditingInputClosureAccepted
+  readonly content: EditedFeedContent
+  readonly decisions: CompleteCandidateEditingDecisions
+}
+
+export interface EditingFailure {
+  readonly candidatesInJudgment: readonly SourceCandidateReference[]
+  readonly failureFact: unknown
+}
+
+export interface RawEmptyFeedConclusion {
+  readonly conclusion: EditingConclusionIdentity
+  readonly closure: EditingInputClosureAccepted
+  readonly content: EditedFeedContent
+  readonly decisions: CompleteCandidateEditingDecisions
+}
+
+export interface RawEditingFailureConclusion {
+  readonly conclusion: EditingConclusionIdentity
+  readonly closure: EditingInputClosureAccepted
+  readonly failure: EditingFailure
+}
+
+export type RawEditingConclusion = RawFeedContentConclusion | RawEmptyFeedConclusion | RawEditingFailureConclusion
+
+export interface FormalOrdinaryFeedContent {
+  readonly object: FeedContentDeliveryObjectIdentity
+  readonly period: PeriodIdentity
+  readonly original: EditingConclusionIdentity
+  readonly content: EditedFeedContent
+  readonly selected: SelectedCandidateSet
+}
+
+export interface FormalFeedContentConclusion {
+  readonly period: PeriodIdentity
+  readonly original: EditingConclusionIdentity
+  readonly content: FormalOrdinaryFeedContent
+  readonly decisions: CompleteCandidateEditingDecisions
+}
+
+export interface FormalEmptyFeedContent {
+  readonly object: FeedContentDeliveryObjectIdentity
+  readonly period: PeriodIdentity
+  readonly original: EditingConclusionIdentity
+  readonly content: EditedFeedContent
+  readonly selected: EmptyCandidateSelection
+}
+
+export interface FormalEmptyFeedConclusion {
+  readonly period: PeriodIdentity
+  readonly original: EditingConclusionIdentity
+  readonly content: FormalEmptyFeedContent
+  readonly decisions: CompleteCandidateEditingDecisions
+}
+
+export interface FormalEditingFailureConclusion {
+  readonly period: PeriodIdentity
+  readonly original: EditingConclusionIdentity
+  readonly failure: EditingFailure
+}
+
+export type FormalEditingConclusion =
+  | FormalFeedContentConclusion
+  | FormalEmptyFeedConclusion
+  | FormalEditingFailureConclusion
+
+export type CandidateDispositionValue =
+  | 'PeriodAdmissionNotCompletedAndClosed'
+  | 'MaterialUnavailableAndClosed'
+  | 'ReviewedNotSelected'
+  | 'Shown'
+  | 'NotDeliveredThisPeriod'
+  | 'PossiblyDelivered'
+  | 'EditingFailed'
+  | 'PeriodExpired'
+
+export interface FormalCandidateDisposition {
+  readonly period: PeriodIdentity
+  readonly source: SourceIdentity
+  readonly candidate: SourceCandidateReference
+  readonly value: CandidateDispositionValue
+}
+
+export interface DispositionBasisAccepted {
+  readonly disposition: FormalCandidateDisposition
+}
+
+export type SourceDispositionValue = 'Displayed' | 'Suppressed'
+
+export interface SourceDispositionState {
+  readonly period: PeriodIdentity
+  readonly candidate: SourceCandidateReference
+  readonly state: SourceDispositionValue
+  readonly sourceCompletion: unknown
+}
+
+export interface SourceClosureAccepted {
+  readonly state: SourceDispositionState
+}
+
+export type FormalFeedContent = FormalOrdinaryFeedContent | FormalEmptyFeedContent
+
+export type DeliveryChannelResult = 'Delivered' | 'Failed' | 'Uncertain'
+
+export interface FormalFeedContentDeliveryReceipt {
+  readonly object: FeedContentDeliveryObjectIdentity
+  readonly period: PeriodIdentity
+  readonly result: DeliveryChannelResult
+}
+
+export interface FormalFeedContentDeliveryRequest {
+  readonly object: FormalFeedContent
+}
+
+export type FormalFeedContentDeliveryOwnerRead =
+  | { readonly status: 'found'; readonly value: { readonly request: FormalFeedContentDeliveryRequest } }
+  | { readonly status: 'missing' }
+  | { readonly status: 'rejected'; readonly input: PeriodIdentity }
+  | { readonly status: 'failed'; readonly input: PeriodIdentity }
+
+export interface FormalFeedContentDeliveryAccepted {
+  readonly request: FormalFeedContentDeliveryRequest
+}
+
+export type DisplayFact =
+  | {
+      readonly period: PeriodIdentity
+      readonly candidate: SourceCandidateReference
+      readonly disposition: FormalCandidateDisposition & { readonly value: 'Shown' }
+      readonly receipt: FormalFeedContentDeliveryReceipt & { readonly result: 'Delivered' }
+    }
+  | {
+      readonly period: PeriodIdentity
+      readonly candidate: SourceCandidateReference
+      readonly disposition: FormalCandidateDisposition & { readonly value: 'NotDeliveredThisPeriod' }
+      readonly receipt: FormalFeedContentDeliveryReceipt & { readonly result: 'Failed' }
+    }
+  | {
+      readonly period: PeriodIdentity
+      readonly candidate: SourceCandidateReference
+      readonly disposition: FormalCandidateDisposition & { readonly value: 'PossiblyDelivered' }
+      readonly receipt: FormalFeedContentDeliveryReceipt & { readonly result: 'Uncertain' }
+    }
+
+export interface RecentDeduplicationBasisAccepted {
+  readonly fact: DisplayFact
+}
+
+export interface RunFeedContentDeliveryMeaningRecorded {
+  readonly receipt: FormalFeedContentDeliveryReceipt
+}
+
+export interface PeriodDeliveryResultRecorded {
+  readonly period: PeriodIdentity
+  readonly receipt: FormalFeedContentDeliveryReceipt
+}
+
+export interface RunFinalizationAccepted {
+  readonly period: PeriodIdentity
+}
+
+export interface OrdinaryContentFinalized {
+  readonly kind: 'ordinary_content_finalized'
+  readonly period: PeriodIdentity
+}
+
+export interface NormalEmptyPeriodFinalized {
+  readonly kind: 'normal_empty_period_finalized'
+  readonly period: PeriodIdentity
+}
+
+export interface EditingFailedFinalized {
+  readonly kind: 'editing_failed_finalized'
+  readonly period: PeriodIdentity
+}
+
+export interface AllCandidateMaterialsUnavailableFinalized {
+  readonly kind: 'all_candidate_materials_unavailable_finalized'
+  readonly period: PeriodIdentity
+}
+
+export interface PreContentPeriodSendFailedFinalized {
+  readonly kind: 'pre_content_period_send_failed_finalized'
+  readonly period: PeriodIdentity
+}
+
+export type BusinessFinalization =
+  | OrdinaryContentFinalized
+  | NormalEmptyPeriodFinalized
+  | EditingFailedFinalized
+  | AllCandidateMaterialsUnavailableFinalized
+  | PreContentPeriodSendFailedFinalized
+
+export type C15Result = ContractResult<FormalEditingConclusion, RawEditingConclusion>
+export type C17Result = ContractResult<DispositionBasisAccepted, FormalCandidateDisposition>
+export type C18Result = ContractResult<SourceClosureAccepted, SourceDispositionState>
+export type C19Result = ContractResult<FormalFeedContentDeliveryAccepted, FormalFeedContentDeliveryRequest>
+export type C20FormalFeedContentResult = ContractResult<RunFeedContentDeliveryMeaningRecorded, FormalFeedContentDeliveryReceipt>
+export type C21Result = ContractResult<PeriodDeliveryResultRecorded, FormalFeedContentDeliveryReceipt>
+export type C28Result = ContractResult<RecentDeduplicationBasisAccepted, DisplayFact>
+export type C23Result = ContractResult<RunFinalizationAccepted, BusinessFinalization>
+export type C37Result = ContractResult<EditingInputClosureAccepted, EditingInputClosure>
+
+export interface CandidateDispositionReceiver {
+  readonly acceptFormalDisposition: (disposition: FormalCandidateDisposition) => C17Result
+}
+
+export interface FormalContentDeliveryReceiver {
+  readonly acceptFormalFeedContent: (request: FormalFeedContentDeliveryRequest) => C19Result
+}
+
+export interface BusinessFinalizationReceiver {
+  readonly acceptBusinessFinalization: (finalization: BusinessFinalization) => C23Result
+}
+
+export interface EditingInputClosureReceiver {
+  readonly acceptEditingInputClosure: (closure: EditingInputClosure) => C37Result
+}
+
+export interface RawFeedContentInput {
+  readonly closure: EditingInputClosureAccepted
+  readonly content: EditedFeedContent
+  readonly decisions: CompleteCandidateEditingDecisions
+}
+
 export type ContractResult<TAccepted, TInput> =
   | { readonly status: 'accepted'; readonly value: TAccepted }
   | { readonly status: 'rejected'; readonly input: TInput }
@@ -374,7 +636,14 @@ export interface PeriodBusinessFinalizerOptions {
   readonly periodScopeLedgerPath: string
   readonly reportLedgerPath: string
   readonly candidatePeriodLedgerPath?: string
+  readonly editingInputLedgerPath?: string
+  readonly periodBusinessLedgerPath?: string
   readonly now: () => string
+  readonly editingInputClosureReceiver?: EditingInputClosureReceiver
+  readonly candidateDispositionReceiver?: CandidateDispositionReceiver
+  readonly formalContentDeliveryReceiver?: FormalContentDeliveryReceiver
+  readonly displayFactReceiver?: Pick<CrossSourceEditor, 'acceptDisplayFact'>
+  readonly businessFinalizationReceiver?: BusinessFinalizationReceiver
 }
 
 export interface CandidatePeriodBusinessFinalizerOptions extends PeriodBusinessFinalizerOptions {
@@ -388,11 +657,21 @@ export interface SourceCandidateReportFinalizer {
 export interface PeriodBusinessFinalizerContract {
   readonly acceptCandidateIntoPeriod: (candidate: ReportedMaterialCandidate) => C26Result
   readonly acceptMaterialFact: (fact: MaterialFact) => C16Result
+  readonly establishEditingInputClosure: (closure: EditingInputClosure) => C37Result
+  readonly acceptEditingConclusion: (conclusion: RawEditingConclusion) => C15Result
+  readonly requestSourceDisposition: (disposition: FormalCandidateDisposition) => C17Result
+  readonly acceptSourceDispositionState: (state: SourceDispositionState) => C18Result
+  readonly requestFormalContentDelivery: (request: FormalFeedContentDeliveryRequest) => C19Result
+  readonly acceptFormalFeedContentDeliveryReceipt: (receipt: FormalFeedContentDeliveryReceipt) => C21Result
+  readonly ensureBusinessFinalization: (finalization: BusinessFinalization) => C23Result
 }
 
 export interface CrossSourceEditor {
   readonly acceptCandidateMaterial: (material: CandidateMaterial) => C10Result
   readonly listAcceptedInputs: () => readonly CandidateMaterial[]
+  readonly acceptEditingInputClosure: (closure: EditingInputClosure) => C37Result
+  readonly formRawFeedContentConclusion: (input: RawFeedContentInput) => ContractResult<RawFeedContentConclusion, RawFeedContentInput>
+  readonly acceptDisplayFact: (fact: DisplayFact) => C28Result
 }
 
 export interface CurrentContextEditorOptions {

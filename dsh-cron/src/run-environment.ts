@@ -7,10 +7,18 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { CronRunFinishedEvent, RunTrigger } from './types.ts'
+import {
+  isValidPreparedDeliveryObject,
+  type CronDeliveryReceipt,
+  type CronRunFinishedEvent,
+  type PreparedDeliveryObject,
+  type RunTrigger,
+} from './types.ts'
 
 /** Public Cordis service name for the context-owned registry. */
 export const CRON_AGENT_ENVIRONMENT_REGISTRY = 'cronAgentEnvironmentRegistry' as const
+/** Scheduler-owned factory token; providers cannot resolve a current run from it. */
+export const CRON_RUN_DELIVERY_MEANING_LIFECYCLE = 'cronRunDeliveryMeaningLifecycle' as const
 
 export type CronAgentEnvironmentJobKind = 'agent' | 'command'
 export type CronAgentEnvironmentSessionMode = 'persistent' | 'per_run'
@@ -35,7 +43,140 @@ export interface CronAgentEnvironmentPrepareContext {
   readonly trigger: RunTrigger
   readonly scheduledFor: string
   readonly claimedAt: string
+  readonly runDeliveryMeaningPort?: CronRunDeliveryMeaningRunPort
 }
+
+/** Exact durable identity carried from one prepared claim into recovery. */
+export interface CronPreparedDeliveryClaimBinding {
+  readonly jobId: string
+  readonly runId: string
+  readonly sessionId: string
+  readonly scheduledFor: string
+  readonly claimedAt: string
+  readonly trigger: RunTrigger
+}
+
+/** Generic scheduler facts accompanying a claim-only recovery request. */
+export interface CronPreparedDeliveryRecoveryContext extends CronPreparedDeliveryClaimBinding {
+  readonly jobKind: CronAgentEnvironmentJobKind
+  readonly sessionMode: CronAgentEnvironmentSessionMode
+  readonly gate: CronAgentEnvironmentGate
+  readonly runDeliveryMeaningPort?: CronRunDeliveryMeaningRunPort
+}
+
+export interface CronRunDeliveryMeaningBindInput {
+  readonly businessRunId: string
+  readonly businessPeriodId: string
+}
+
+export interface CronRunDeliveryMeaningAcceptedReceipt {
+  readonly status: 'accepted'
+  readonly value: { readonly receipt: CronDeliveryReceipt }
+}
+
+export interface CronRunDeliveryMeaningRejectedReceipt {
+  readonly status: 'rejected'
+  readonly input: CronDeliveryReceipt
+}
+
+export interface CronRunDeliveryMeaningFailedReceipt {
+  readonly status: 'failed'
+  readonly input: CronDeliveryReceipt
+}
+
+export type CronRunDeliveryMeaningReceiptResult =
+  | CronRunDeliveryMeaningAcceptedReceipt
+  | CronRunDeliveryMeaningRejectedReceipt
+  | CronRunDeliveryMeaningFailedReceipt
+
+export interface CronRunDeliveryMeaningAccepted {
+  readonly status: 'accepted'
+}
+
+export interface CronRunDeliveryMeaningRejected<Input> {
+  readonly status: 'rejected'
+  readonly input: Input
+}
+
+export interface CronRunDeliveryMeaningFailed<Input> {
+  readonly status: 'failed'
+  readonly input: Input
+}
+
+export type CronRunDeliveryMeaningBindResult =
+  | CronRunDeliveryMeaningAccepted
+  | CronRunDeliveryMeaningRejected<CronRunDeliveryMeaningBindInput>
+  | CronRunDeliveryMeaningFailed<CronRunDeliveryMeaningBindInput>
+
+export type CronRunDeliveryMeaningCommitResult =
+  | CronRunDeliveryMeaningAccepted
+  | CronRunDeliveryMeaningRejected<undefined>
+  | CronRunDeliveryMeaningFailed<undefined>
+
+export interface CronRunDeliveryMeaningRunPort {
+  readonly bindPreparedDelivery: (
+    input: CronRunDeliveryMeaningBindInput,
+  ) => Promise<CronRunDeliveryMeaningBindResult>
+  readonly acceptDurableReceipt: (
+    receipt: CronDeliveryReceipt,
+  ) => Promise<CronRunDeliveryMeaningReceiptResult>
+  readonly commitBusinessFinalization: () => Promise<CronRunDeliveryMeaningCommitResult>
+}
+
+export interface CronRunDeliveryMeaningPortFactoryAccepted {
+  readonly status: 'accepted'
+  readonly port: CronRunDeliveryMeaningRunPort
+  readonly dispose: () => void | Promise<void>
+}
+
+export interface CronRunDeliveryMeaningPortFactoryFailed {
+  readonly status: 'failed'
+  readonly error: string
+}
+
+export type CronRunDeliveryMeaningPortFactoryResult =
+  | CronRunDeliveryMeaningPortFactoryAccepted
+  | CronRunDeliveryMeaningPortFactoryFailed
+
+export interface CronRunDeliveryMeaningPortFactory {
+  readonly createRunPort: (
+    claim: CronPreparedDeliveryClaimBinding,
+  ) => Promise<CronRunDeliveryMeaningPortFactoryResult>
+}
+
+export interface CronAgentEnvironmentBindPreparedDeliveryContext {
+  readonly preparedDelivery: PreparedDeliveryObject
+  readonly runDeliveryMeaningPort: CronRunDeliveryMeaningRunPort
+}
+
+/** Project only the durable identity when returning a recovery result. */
+export function toCronPreparedDeliveryClaimBinding(
+  context: CronPreparedDeliveryRecoveryContext,
+): CronPreparedDeliveryClaimBinding {
+  return {
+    jobId: context.jobId,
+    runId: context.runId,
+    sessionId: context.sessionId,
+    scheduledFor: context.scheduledFor,
+    claimedAt: context.claimedAt,
+    trigger: context.trigger,
+  }
+}
+
+export type CronPreparedDeliveryRecovery =
+  | {
+      readonly status: 'ready'
+      readonly claim: CronPreparedDeliveryClaimBinding
+      readonly preparedDelivery: PreparedDeliveryObject
+    }
+  | {
+      readonly status: 'not-ready'
+      readonly claim: CronPreparedDeliveryClaimBinding
+    }
+  | {
+      readonly status: 'conflict'
+      readonly claim: CronPreparedDeliveryClaimBinding
+    }
 
 export type CronAgentEnvironmentSetup = (agent: unknown) => void | Promise<void>
 
@@ -62,18 +203,61 @@ export type CronAgentEnvironmentSettle = (
   event: CronRunFinishedEvent,
 ) => void | Promise<void>
 
+/** Technical receipt hook invoked before the generic cron finish event. */
+export interface CronAgentEnvironmentPrefinishAccepted {
+  readonly status: 'accepted'
+}
+
+export type CronAgentEnvironmentPrefinishSettle = (
+  receipt: CronDeliveryReceipt,
+) => CronAgentEnvironmentPrefinishAccepted | Promise<CronAgentEnvironmentPrefinishAccepted>
+
+/** Recovery counterpart for a prepared object whose live lease was lost. */
+export type CronAgentEnvironmentRecoveredDeliverySettle = (
+  receipt: CronDeliveryReceipt,
+  runDeliveryMeaningPort?: CronRunDeliveryMeaningRunPort,
+) => CronAgentEnvironmentPrefinishAccepted | Promise<CronAgentEnvironmentPrefinishAccepted>
+
+export type CronPreparedDeliveryRecoveryResult =
+  | { readonly ok: true; readonly recovery: CronPreparedDeliveryRecovery }
+  | { readonly ok: false; readonly error: CronAgentEnvironmentError }
+
+export function isAcceptedPrefinishResult(value: unknown): value is CronAgentEnvironmentPrefinishAccepted {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && (value as Record<string, unknown>).status === 'accepted'
+}
+
 /** A provider-created per-run lease. The registry adds its resolved marker. */
-export interface CronAgentEnvironmentLease {
+interface CronAgentEnvironmentLeaseBase {
   /** Apply the exact provider setup to the newly-created Agent. */
   readonly setupAgent: CronAgentEnvironmentSetup
   /** Verify that the resulting Agent surface is exactly what the provider expects. */
   readonly verifySurface: CronAgentEnvironmentSetup
   /** Validate or transform the terminal outcome before any delivery is attempted. */
   readonly finalizeOutcome?: CronAgentEnvironmentFinalize
-  /** Commit provider-owned state from the durable, final delivery receipt. */
-  readonly settleRun?: CronAgentEnvironmentSettle
   /** Release all provider-owned per-run resources. */
   readonly dispose: () => void | Promise<void>
+}
+
+export type CronAgentEnvironmentLease =
+  | (CronAgentEnvironmentLeaseBase & {
+      readonly preparedDelivery: PreparedDeliveryObject
+      readonly settleDeliveryBeforeFinish: CronAgentEnvironmentPrefinishSettle
+      readonly settleRun?: never
+    })
+  | (CronAgentEnvironmentLeaseBase & {
+      readonly preparedDelivery?: never
+      readonly settleDeliveryBeforeFinish?: never
+      /** Commit provider-owned state from the durable, final delivery receipt. */
+      readonly settleRun?: CronAgentEnvironmentSettle
+    })
+
+/*
+ * The union above is intentionally the public shape: prepared delivery and
+ * its pre-finish hook are one opt-in, while legacy leases retain post-finish
+ * settlement only.
+ */
+export type ResolvedCronAgentEnvironmentLease = CronAgentEnvironmentLease & {
+  readonly marker: string
 }
 
 /** A provider may complete a claimed run without creating an Agent. */
@@ -87,20 +271,27 @@ export interface CronAgentEnvironmentSkip {
 
 export type CronAgentEnvironmentPrepareValue = CronAgentEnvironmentLease | CronAgentEnvironmentSkip
 
-/** The lease returned to the scheduler after successful provider preparation. */
-export interface ResolvedCronAgentEnvironmentLease extends CronAgentEnvironmentLease {
-  readonly marker: string
-}
-
 export interface CronAgentEnvironmentProvider {
   /** Stable persisted marker, e.g. `x-feed/v1`; never inferred from a prompt. */
   readonly marker: string
   /** Generic job constraints checked before `prepare` is called. */
   readonly requirements: CronAgentEnvironmentRequirements
+  /** Explicit provider-level opt-in for durable prepared delivery lifecycle. */
+  readonly preparedDeliveryLifecycle?: boolean
+  readonly runDeliveryMeaningLifecycle?: boolean
   /** Prepare a fresh lease for one claimed run. */
   readonly prepare: (context: CronAgentEnvironmentPrepareContext) => Promise<CronAgentEnvironmentPrepareValue>
+  readonly bindPreparedDelivery?: (
+    context: CronAgentEnvironmentBindPreparedDeliveryContext,
+  ) => void | Promise<void>
   /** Idempotently settle a durable finish whose live lease was lost to a crash. */
   readonly settleRecoveredRun?: CronAgentEnvironmentSettle
+  /** Replay a prepared object's receipt after restart, before generic finish. */
+  readonly settleRecoveredDelivery?: CronAgentEnvironmentRecoveredDeliverySettle
+  /** Continue one durable claim into its provider-owned prepared object. */
+  readonly recoverPreparedDelivery?: (
+    context: CronPreparedDeliveryRecoveryContext,
+  ) => CronPreparedDeliveryRecovery | Promise<CronPreparedDeliveryRecovery>
 }
 
 export type CronAgentEnvironmentErrorCode =
@@ -110,12 +301,14 @@ export type CronAgentEnvironmentErrorCode =
   | 'prepare_failed'
   | 'surface_verification_failed'
   | 'settlement_failed'
+  | 'recovery_failed'
+  | 'binding_failed'
 
 export interface CronAgentEnvironmentError {
   readonly code: CronAgentEnvironmentErrorCode
   readonly marker?: string
   readonly message: string
-  readonly operation?: 'prepare' | 'setup' | 'verify' | 'settle'
+  readonly operation?: 'prepare' | 'setup' | 'verify' | 'settle' | 'bind'
 }
 
 export type CronAgentEnvironmentResolution =
@@ -145,11 +338,26 @@ export interface CronAgentEnvironmentRegistry {
   readonly setup: (lease: ResolvedCronAgentEnvironmentLease, agent: unknown) => Promise<CronAgentEnvironmentOperationResult>
   /** Verify the exact Agent surface through the lease seam. */
   readonly verify: (lease: ResolvedCronAgentEnvironmentLease, agent: unknown) => Promise<CronAgentEnvironmentOperationResult>
+  /** Invoke the provider's prepared-object binding hook without trusting its return value. */
+  readonly bindPreparedDelivery: (
+    marker: string | undefined,
+    context: CronAgentEnvironmentBindPreparedDeliveryContext,
+  ) => Promise<CronAgentEnvironmentOperationResult>
   /** Replay one unacknowledged durable finish through its provider. */
   readonly settleRecovered: (
     marker: string | undefined,
     event: CronRunFinishedEvent,
   ) => Promise<CronAgentEnvironmentOperationResult>
+  readonly settleRecoveredDelivery: (
+    marker: string | undefined,
+    receipt: CronDeliveryReceipt,
+    runDeliveryMeaningPort?: CronRunDeliveryMeaningRunPort,
+  ) => Promise<CronAgentEnvironmentOperationResult>
+  /** Recover one claim-only prepared run through its registered provider. */
+  readonly recoverPreparedDelivery: (
+    marker: string | undefined,
+    context: CronPreparedDeliveryRecoveryContext,
+  ) => Promise<CronPreparedDeliveryRecoveryResult>
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -179,6 +387,88 @@ function matchesRequirements(
   return (requirements.jobKind === undefined || requirements.jobKind === context.jobKind)
     && (requirements.sessionMode === undefined || requirements.sessionMode === context.sessionMode)
     && (requirements.gate === undefined || requirements.gate === context.gate)
+}
+
+const RECOVERY_CLAIM_KEYS = ['jobId', 'runId', 'sessionId', 'scheduledFor', 'claimedAt', 'trigger'] as const
+const RECOVERY_CONTEXT_KEYS = [...RECOVERY_CLAIM_KEYS, 'jobKind', 'sessionMode', 'gate'] as const
+const RECOVERY_CONTEXT_KEYS_WITH_PORT = [...RECOVERY_CONTEXT_KEYS, 'runDeliveryMeaningPort'] as const
+
+function isExactRecord(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const actual = Object.keys(value)
+  return actual.length === keys.length && keys.every(key => actual.includes(key))
+}
+
+function isValidClaimBinding(value: unknown): value is CronPreparedDeliveryClaimBinding {
+  if (!isExactRecord(value, RECOVERY_CLAIM_KEYS)) return false
+  return hasValidClaimBindingValues(value)
+}
+
+function hasValidClaimBindingValues(value: Record<string, unknown>): boolean {
+  return typeof value.jobId === 'string'
+    && value.jobId.trim() !== ''
+    && typeof value.runId === 'string'
+    && value.runId.trim() !== ''
+    && typeof value.sessionId === 'string'
+    && value.sessionId.trim() !== ''
+    && typeof value.scheduledFor === 'string'
+    && !Number.isNaN(Date.parse(value.scheduledFor))
+    && typeof value.claimedAt === 'string'
+    && !Number.isNaN(Date.parse(value.claimedAt))
+    && (value.trigger === 'scheduled' || value.trigger === 'manual')
+}
+
+function isValidRecoveryContext(value: unknown): value is CronPreparedDeliveryRecoveryContext {
+  if ((!isExactRecord(value, RECOVERY_CONTEXT_KEYS) && !isExactRecord(value, RECOVERY_CONTEXT_KEYS_WITH_PORT))
+    || !hasValidClaimBindingValues(value)) return false
+  if (Object.prototype.hasOwnProperty.call(value, 'runDeliveryMeaningPort')) {
+    const port = value.runDeliveryMeaningPort
+    if (typeof port !== 'object' || port === null || Array.isArray(port)) return false
+    if (!isExactRecord(port, ['bindPreparedDelivery', 'acceptDurableReceipt', 'commitBusinessFinalization'])) return false
+    if (typeof port.bindPreparedDelivery !== 'function'
+      || typeof port.acceptDurableReceipt !== 'function'
+      || typeof port.commitBusinessFinalization !== 'function') return false
+  }
+  return (value.jobKind === 'agent' || value.jobKind === 'command')
+    && (value.sessionMode === 'persistent' || value.sessionMode === 'per_run')
+    && (value.gate === 'forbidden' || value.gate === 'present')
+}
+
+function sameClaimBinding(
+  left: CronPreparedDeliveryClaimBinding,
+  right: CronPreparedDeliveryClaimBinding,
+): boolean {
+  return left.jobId === right.jobId
+    && left.runId === right.runId
+    && left.sessionId === right.sessionId
+    && left.scheduledFor === right.scheduledFor
+    && left.claimedAt === right.claimedAt
+    && left.trigger === right.trigger
+}
+
+function validateRecovery(
+  value: unknown,
+  context: CronPreparedDeliveryRecoveryContext,
+): CronPreparedDeliveryRecovery | undefined {
+  if (!isExactRecord(value, ['status', 'claim', ...(value && typeof value === 'object' && 'status' in value && (value as { status?: unknown }).status === 'ready' ? ['preparedDelivery'] : [])])) return undefined
+  if (!isValidClaimBinding(value.claim) || !sameClaimBinding(value.claim, context)) return undefined
+  if (value.status === 'ready') {
+    if (!isExactRecord(value, ['status', 'claim', 'preparedDelivery'])
+      || !isExactRecord(value.preparedDelivery, ['objectId', 'text'])
+      || !isValidPreparedDeliveryObject(value.preparedDelivery)) return undefined
+    return {
+      status: 'ready',
+      claim: value.claim,
+      preparedDelivery: value.preparedDelivery,
+    }
+  }
+  if (value.status === 'not-ready' && isExactRecord(value, ['status', 'claim'])) {
+    return { status: 'not-ready', claim: value.claim }
+  }
+  if (value.status === 'conflict' && isExactRecord(value, ['status', 'claim'])) {
+    return { status: 'conflict', claim: value.claim }
+  }
+  return undefined
 }
 
 function operationFailure(
@@ -211,6 +501,25 @@ function isValidSkip(value: unknown): value is CronAgentEnvironmentSkip {
   if (!isRecord(value.outcome) || Array.isArray(value.outcome) || !hasExactKeys(value.outcome, ['text', 'error'])) return false
   if (value.kind !== 'skip') return false
   return value.outcome.text === undefined && value.outcome.error === undefined
+}
+
+function isValidRunDeliveryMeaningPort(value: unknown): value is CronRunDeliveryMeaningRunPort {
+  return isRecord(value)
+    && !Array.isArray(value)
+    && isExactRecord(value, ['bindPreparedDelivery', 'acceptDurableReceipt', 'commitBusinessFinalization'])
+    && typeof value.bindPreparedDelivery === 'function'
+    && typeof value.acceptDurableReceipt === 'function'
+    && typeof value.commitBusinessFinalization === 'function'
+}
+
+function isValidBindPreparedDeliveryContext(
+  value: unknown,
+): value is CronAgentEnvironmentBindPreparedDeliveryContext {
+  return isRecord(value)
+    && !Array.isArray(value)
+    && isExactRecord(value, ['preparedDelivery', 'runDeliveryMeaningPort'])
+    && isValidPreparedDeliveryObject(value.preparedDelivery)
+    && isValidRunDeliveryMeaningPort(value.runDeliveryMeaningPort)
 }
 
 /** Create a generic provider registry. No provider is installed implicitly. */
@@ -339,6 +648,37 @@ export function createCronAgentEnvironmentRegistry(
     }
   }
 
+  const bindPreparedDelivery = async (
+    marker: string | undefined,
+    context: CronAgentEnvironmentBindPreparedDeliveryContext,
+  ): Promise<CronAgentEnvironmentOperationResult> => {
+    const resolved = resolve(marker)
+    if (!resolved.ok) return resolved
+    if (!isValidBindPreparedDeliveryContext(context)) {
+      return {
+        ok: false,
+        error: error('binding_failed', resolved.provider.marker, 'prepared delivery binding context is invalid', 'bind'),
+      }
+    }
+    const bind = resolved.provider.bindPreparedDelivery
+    if (bind === undefined) {
+      return {
+        ok: false,
+        error: error('binding_failed', resolved.provider.marker, 'prepared delivery binding hook is unavailable', 'bind'),
+      }
+    }
+    try {
+      await bind(context)
+      return { ok: true }
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      return {
+        ok: false,
+        error: error('binding_failed', resolved.provider.marker, `prepared delivery binding failed: ${detail}`, 'bind'),
+      }
+    }
+  }
+
   const settleRecovered = async (
     marker: string | undefined,
     event: CronRunFinishedEvent,
@@ -363,7 +703,92 @@ export function createCronAgentEnvironmentRegistry(
     }
   }
 
-  return { register, resolve, prepare, setup, verify, settleRecovered }
+  const settleRecoveredDelivery = async (
+    marker: string | undefined,
+    receipt: CronDeliveryReceipt,
+    runDeliveryMeaningPort?: CronRunDeliveryMeaningRunPort,
+  ): Promise<CronAgentEnvironmentOperationResult> => {
+    const resolved = resolve(marker)
+    if (!resolved.ok) return resolved
+    if (resolved.provider.settleRecoveredDelivery === undefined) {
+      return {
+        ok: false,
+        error: error('settlement_failed', resolved.provider.marker, 'prepared delivery recovery hook is unavailable', 'settle'),
+      }
+    }
+    try {
+      const result = await resolved.provider.settleRecoveredDelivery(receipt, runDeliveryMeaningPort)
+      if (!isAcceptedPrefinishResult(result)) {
+        return {
+          ok: false,
+          error: error('settlement_failed', resolved.provider.marker, 'prepared delivery recovery hook did not return accepted', 'settle'),
+        }
+      }
+      return { ok: true }
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      return {
+        ok: false,
+        error: error('settlement_failed', resolved.provider.marker, `prepared delivery settlement failed: ${detail}`, 'settle'),
+      }
+    }
+  }
+
+  const recoverPreparedDelivery = async (
+    marker: string | undefined,
+    context: CronPreparedDeliveryRecoveryContext,
+  ): Promise<CronPreparedDeliveryRecoveryResult> => {
+    const resolved = resolve(marker)
+    if (!resolved.ok) return resolved
+    if (!isValidRecoveryContext(context)) {
+      return {
+        ok: false,
+        error: error('recovery_failed', resolved.provider.marker, 'prepared delivery recovery context is invalid'),
+      }
+    }
+    if (resolved.provider.preparedDeliveryLifecycle !== true
+      || !matchesRequirements(resolved.provider.requirements, context)) {
+      return {
+        ok: false,
+        error: error('recovery_failed', resolved.provider.marker, 'prepared delivery recovery requirements do not match'),
+      }
+    }
+    const recover = resolved.provider.recoverPreparedDelivery
+    if (recover === undefined) {
+      return {
+        ok: false,
+        error: error('recovery_failed', resolved.provider.marker, 'prepared delivery recovery port is unavailable'),
+      }
+    }
+    try {
+      const recovery = validateRecovery(await recover(context), context)
+      if (recovery === undefined) {
+        return {
+          ok: false,
+          error: error('recovery_failed', resolved.provider.marker, 'prepared delivery recovery result is invalid'),
+        }
+      }
+      return { ok: true, recovery }
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      return {
+        ok: false,
+        error: error('recovery_failed', resolved.provider.marker, `prepared delivery recovery failed: ${detail}`),
+      }
+    }
+  }
+
+  return {
+    register,
+    resolve,
+    prepare,
+    setup,
+    verify,
+    bindPreparedDelivery,
+    settleRecovered,
+    settleRecoveredDelivery,
+    recoverPreparedDelivery,
+  }
 }
 
 /**

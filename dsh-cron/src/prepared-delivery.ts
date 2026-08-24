@@ -20,13 +20,14 @@ import type {
   CronAgentEnvironmentProvider,
   CronAgentEnvironmentPrepareContext,
 } from './run-environment.ts'
+import { MAX_PREPARED_TEXT_BYTES } from './types.ts'
 import type { CommandPayload, CronRunFinishedEvent } from './types.ts'
 
 const execFileAsync = promisify(nodeExecFile)
 
 export const PREPARED_DELIVERY_ENVIRONMENT_MARKER = 'prepared-delivery/v1'
 export const PREPARE_DELIVERY_TOOL = 'cron_prepare_delivery'
-export const MAX_PREPARED_TEXT_BYTES = 64 * 1024
+export { MAX_PREPARED_TEXT_BYTES }
 export const MAX_PREPARED_METADATA_BYTES = 64 * 1024
 
 const PREPARED_DELIVERY_PROMPT = [

@@ -131,11 +131,20 @@ describe('TODO04 cron assembly: C11 current-context result', () => {
       if (providerOutcome === 'throw') throw new Error('X provider failed after C11')
       return skip
     })
+    const legacyPrepare = vi.fn(async () => {
+      throw new Error('legacy X cron provider must not prepare ordinary Feed runs')
+    })
     vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProvider').mockReturnValue({
       marker: 'dsh-x-feed/v1',
       requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
-      prepare: providerPrepare,
+      prepare: legacyPrepare,
     } as never)
+    const ordinaryFactory = vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProviderForOrdinaryFeed')
+      .mockReturnValue({
+        marker: 'dsh-x-feed/v1',
+        requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
+        prepare: providerPrepare,
+      } as never)
 
     try {
       const extension = createCronEnvironmentExtension(context().ctx as never, config(directory))
@@ -164,6 +173,9 @@ describe('TODO04 cron assembly: C11 current-context result', () => {
       expect(projectionCapture!.completeCurrentContextForEstablishedScope).toHaveBeenCalledOnce()
       expect(projectionCapture!.completeCurrentContextForEstablishedScope.mock.invocationCallOrder[0])
         .toBeLessThan(providerPrepare.mock.invocationCallOrder[0]!)
+      expect(ordinaryFactory).toHaveBeenCalledOnce()
+      expect(providerPrepare).toHaveBeenCalledOnce()
+      expect(legacyPrepare).not.toHaveBeenCalled()
 
       const [acceptedContext] = editorCapture!.acceptCurrentContext.mock.calls[0]!
       const periodScopeLedgerPath = join(directory, 'personal-feed', 'period-scopes.jsonl')
@@ -209,11 +221,20 @@ describe('TODO04 cron assembly: C11 current-context result', () => {
         kind: 'skip' as const,
         outcome: { text: undefined, error: undefined },
       }))
+      const legacyPrepare = vi.fn(async () => {
+        throw new Error('legacy X cron provider must not prepare ordinary Feed runs')
+      })
       vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProvider').mockReturnValue({
         marker: 'dsh-x-feed/v1',
         requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
-        prepare: providerPrepare,
+        prepare: legacyPrepare,
       } as never)
+      const ordinaryFactory = vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProviderForOrdinaryFeed')
+        .mockReturnValue({
+          marker: 'dsh-x-feed/v1',
+          requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
+          prepare: providerPrepare,
+        } as never)
       controls.c11Status = c11Status
 
       try {
@@ -225,6 +246,8 @@ describe('TODO04 cron assembly: C11 current-context result', () => {
           runId: `scheduled:cron-x-context:c11-${c11Status}`,
         })).rejects.toThrow('x-feed C11 current-context result was not accepted')
         expect(providerPrepare).not.toHaveBeenCalled()
+        expect(ordinaryFactory).not.toHaveBeenCalled()
+        expect(legacyPrepare).not.toHaveBeenCalled()
         expect(capturedProjections.at(-1)?.completeCurrentContextForEstablishedScope).toHaveBeenCalledOnce()
         expect(capturedEditors.at(-1)?.acceptCurrentContext).toHaveBeenCalledOnce()
         expect(existsSync(join(directory, 'personal-feed', 'current-context-inputs.jsonl'))).toBe(false)

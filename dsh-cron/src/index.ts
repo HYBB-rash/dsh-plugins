@@ -41,6 +41,13 @@ export const name = 'dsh-cron'
 
 /** Public terminal-outcome event contract (§8), see `types.ts`. */
 export type { CronRunFinishedEvent } from './types.ts'
+export {
+  isValidPreparedDeliveryObject,
+} from './types.ts'
+export type {
+  CronDeliveryReceipt,
+  PreparedDeliveryObject,
+} from './types.ts'
 
 /** Public manager control contract, kept free of scheduler/gateway imports. */
 export * from './control-contract.ts'

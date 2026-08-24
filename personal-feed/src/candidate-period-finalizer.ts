@@ -1,4 +1,6 @@
 import { createCandidatePeriodStore } from './candidate-period-store.ts'
+import { createPeriodBusinessStore } from './period-business-store.ts'
+import { createEditingInputStore } from './editing-input-store.ts'
 import {
   createSourceCandidateReportStore,
   sourceCandidateReportScopeKey,
@@ -21,6 +23,12 @@ export function createCandidatePeriodFinalizer(
 } {
   const reports = createSourceCandidateReportStore(options.reportLedgerPath)
   const candidates = createCandidatePeriodStore(options.candidatePeriodLedgerPath)
+  const business = createPeriodBusinessStore(
+    options.periodBusinessLedgerPath ?? `${options.candidatePeriodLedgerPath}.business.jsonl`,
+  )
+  const editingInputs = createEditingInputStore(
+    options.editingInputLedgerPath ?? `${options.candidatePeriodLedgerPath}.editing-inputs.jsonl`,
+  )
 
   return Object.freeze({
     acceptCandidateIntoPeriod: (input: ReportedMaterialCandidate): C26Result => {
@@ -42,6 +50,13 @@ export function createCandidatePeriodFinalizer(
             ? acceptedResult(existing)
             : rejectedCandidate(input)
         }
+        if (editingInputs.findClosureByPeriod(input.candidate.period) !== undefined) {
+          return rejectedCandidate(input)
+        }
+        if (business.list().some(record => record.event === 'editing_input_closure_accepted'
+          && samePeriod(record.closure.period, input.candidate.period))) {
+          return rejectedCandidate(input)
+        }
         if (candidates.listCandidates().some(value => samePeriodCandidate(value.period, value.candidate, accepted.period, accepted.candidate))) {
           return rejectedCandidate(input)
         }
@@ -53,7 +68,6 @@ export function createCandidatePeriodFinalizer(
     },
     acceptMaterialFact: (input: MaterialFact): C16Result => {
       try {
-        if (input.kind !== 'material_formed') return rejectedFact(input)
         const accepted = candidates.findCandidate(input.period, input.candidate)
         if (accepted === undefined || !sameValue(accepted, input.acceptedIntoPeriod)
           || !samePeriodCandidate(accepted.period, accepted.candidate, input.period, input.candidate)) {
@@ -62,6 +76,13 @@ export function createCandidatePeriodFinalizer(
         const existing = candidates.findMaterialFact(input.period, input.candidate)
         if (existing !== undefined) {
           return sameValue(existing, input) ? factResult(existing) : rejectedFact(input)
+        }
+        if (editingInputs.findClosureByPeriod(input.period) !== undefined) {
+          return rejectedFact(input)
+        }
+        if (business.list().some(record => record.event === 'editing_input_closure_accepted'
+          && samePeriod(record.closure.period, input.period))) {
+          return rejectedFact(input)
         }
         candidates.appendMaterialFact(input)
         return factResult(candidates.findMaterialFact(input.period, input.candidate) ?? input)
@@ -106,6 +127,13 @@ function samePeriodCandidate(
     && leftPeriod.period === rightPeriod.period
     && leftCandidate.source === rightCandidate.source
     && leftCandidate.candidate === rightCandidate.candidate
+}
+
+function samePeriod(
+  left: { readonly run: string; readonly period: string },
+  right: { readonly run: string; readonly period: string },
+): boolean {
+  return left.run === right.run && left.period === right.period
 }
 
 function sameValue(left: unknown, right: unknown): boolean {

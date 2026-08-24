@@ -2,6 +2,7 @@ import { PersonalFeedScopeConflictError } from './errors.ts'
 import { periodReferenceFor, runIdentityFor } from './identity.ts'
 import { createSourceCandidateReportFinalizer } from './source-candidate-report.ts'
 import { createCandidatePeriodFinalizer } from './candidate-period-finalizer.ts'
+import { createPeriodBusinessFinalizerOperations } from './period-business-finalizer.ts'
 import type {
   C01Accepted,
   C02Accepted,
@@ -88,10 +89,37 @@ export function createPeriodBusinessFinalizer(
       ...options,
       candidatePeriodLedgerPath: options.candidatePeriodLedgerPath,
     })
+  const operations = options.candidatePeriodLedgerPath === undefined
+    ? undefined
+    : createPeriodBusinessFinalizerOperations({
+      candidatePeriodLedgerPath: options.candidatePeriodLedgerPath,
+      editingInputLedgerPath: options.editingInputLedgerPath ?? `${options.candidatePeriodLedgerPath}.editing-inputs.jsonl`,
+      periodScopeLedgerPath: options.periodScopeLedgerPath,
+      reportLedgerPath: options.reportLedgerPath,
+      periodBusinessLedgerPath: options.periodBusinessLedgerPath
+        ?? `${options.candidatePeriodLedgerPath}.business.jsonl`,
+      now: options.now,
+      ...(options.editingInputClosureReceiver === undefined ? {} : {
+        editingInputClosureReceiver: options.editingInputClosureReceiver,
+      }),
+      ...(options.candidateDispositionReceiver === undefined ? {} : {
+        candidateDispositionReceiver: options.candidateDispositionReceiver,
+      }),
+      ...(options.formalContentDeliveryReceiver === undefined ? {} : {
+        formalContentDeliveryReceiver: options.formalContentDeliveryReceiver,
+      }),
+      ...(options.displayFactReceiver === undefined ? {} : {
+        displayFactReceiver: options.displayFactReceiver,
+      }),
+      ...(options.businessFinalizationReceiver === undefined ? {} : {
+        businessFinalizationReceiver: options.businessFinalizationReceiver,
+      }),
+    })
   return Object.freeze({
     ...base,
     ...createSourceCandidateReportFinalizer(options),
     ...(candidatePeriod === undefined ? {} : candidatePeriod),
+    ...(operations === undefined ? {} : operations),
   })
 }
 

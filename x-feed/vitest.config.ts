@@ -22,6 +22,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      '@deepseek-ai/dsh-cron': resolve(import.meta.dirname, '../dsh-cron/src/index.ts'),
       '@herman/personal-feed': resolve(import.meta.dirname, '../personal-feed/src/index.ts'),
     },
   },

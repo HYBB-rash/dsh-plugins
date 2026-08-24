@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { readJsonLines, appendJsonLine } from './durable-jsonl-store.ts'
 import { PersonalFeedScopeStoreError } from './errors.ts'
 import type {
   CandidateAcceptedIntoPeriod,
@@ -71,24 +70,10 @@ export function createCandidatePeriodStore(path: string): CandidatePeriodStore {
 }
 
 function readRecords(path: string): readonly CandidatePeriodRecord[] {
-  if (!existsSync(path)) return []
-  const text = readFileSync(path, 'utf8')
-  if (text === '') return []
-  const lines = text.split('\n')
-  if (lines.at(-1) === '') lines.pop()
-  return lines.map((line, index) => parseRecord(line, index + 1))
+  return readJsonLines(path, 'candidate period').map((value, index) => parseRecord(value, index + 1))
 }
 
-function parseRecord(line: string, lineNumber: number): CandidatePeriodRecord {
-  let value: unknown
-  try {
-    value = JSON.parse(line)
-  } catch (cause) {
-    throw new PersonalFeedScopeStoreError(
-      `personal Feed candidate period ledger line ${lineNumber} is not valid JSON`,
-      { cause },
-    )
-  }
+function parseRecord(value: unknown, lineNumber: number): CandidatePeriodRecord {
   if (!isRecord(value) || value.schemaVersion !== 1
     || (value.event !== 'candidate_accepted_into_period' && value.event !== 'material_fact_recorded')) {
     throw new PersonalFeedScopeStoreError(
@@ -109,12 +94,8 @@ function parseRecord(line: string, lineNumber: number): CandidatePeriodRecord {
 }
 
 function append(path: string, record: CandidatePeriodRecord): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   const records = readRecords(path)
-  const next = `${records.map(value => JSON.stringify(value)).join('\n')}${records.length === 0 ? '' : '\n'}${JSON.stringify(deepFreeze(structuredClone(record)))}\n`
-  const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`
-  writeFileSync(temporaryPath, next, { encoding: 'utf8', mode: 0o600 })
-  renameSync(temporaryPath, path)
+  appendJsonLine(path, records, deepFreeze(structuredClone(record)))
 }
 
 function sameCandidatePeriod(

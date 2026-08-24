@@ -76,10 +76,12 @@ function makeConfig(dir: string): SchedulerConfig {
 
 it('scheduler composition removes run-now before aborting its runtime', async () => {
   const disposeOrder: string[] = []
+  const services = new Map<string, unknown>()
   let pluginDispose: (() => Promise<void>) | undefined
   let runtimeSignal: AbortSignal | undefined
   const ctx = {
-    get: () => undefined,
+    get: (name: string) => services.get(name),
+    provide: (name: string, value: unknown) => { services.set(name, value) },
     logger: {
       info: () => undefined,
       warn: () => undefined,

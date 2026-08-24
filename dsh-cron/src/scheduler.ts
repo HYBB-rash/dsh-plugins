@@ -42,14 +42,32 @@ import {
 import { computeGraceSeconds, nextAfter, nextRunAfter, parseCron } from './cron.ts'
 import {
   CRON_AGENT_ENVIRONMENT_REGISTRY,
+  CRON_RUN_DELIVERY_MEANING_LIFECYCLE,
   type CronAgentEnvironmentOutcome,
   type CronAgentEnvironmentPrepareContext,
+  type CronPreparedDeliveryRecoveryContext,
   type CronAgentEnvironmentRegistry,
   type CronAgentEnvironmentSettle,
+  type CronAgentEnvironmentPrefinishSettle,
+  type CronAgentEnvironmentProvider,
+  type CronPreparedDeliveryClaimBinding,
+  type CronRunDeliveryMeaningPortFactory,
+  type CronRunDeliveryMeaningRunPort,
+  type CronAgentEnvironmentBindPreparedDeliveryContext,
+  isAcceptedPrefinishResult,
   type CronAgentEnvironmentSkip,
   type ResolvedCronAgentEnvironmentLease,
 } from './run-environment.ts'
+import {
+  inspectDurableBusinessFinalization,
+  inspectPreparedDeliveryBinding,
+} from './run-delivery-meaning-inspector.ts'
+import {
+  hasUnfinalizedPreparedTerminalOwner,
+  provideCronRunDeliveryMeaningPortFactory,
+} from './run-delivery-meaning.ts'
 import { JobStore, RunLedger, type FoldedJobRuns } from './store.ts'
+import { isValidPreparedDeliveryObject } from './types.ts'
 import type {
   AgentJob,
   CronRunFinishedEvent,
@@ -59,6 +77,11 @@ import type {
   RunFinishRecord,
   RunFinishStatus,
   RunClaimRecord,
+  CronDeliveryReceipt,
+  PreparedDeliveryObject,
+  RunDeliveryAttemptClaimRecord,
+  RunDeliveryReceiptRecord,
+  RunEnvironmentPrefinishSettleRecord,
   RunTrigger,
 } from './types.ts'
 
@@ -86,6 +109,51 @@ interface DeliveryObservation {
   readonly state: SchedulerDeliveryState
   readonly deliveredAt?: string
   readonly error?: string
+}
+
+const CRON_RECEIPT_REQUIRED_KEYS = [
+  'deliveryState',
+  'jobId',
+  'objectId',
+  'runId',
+  'scheduledFor',
+  'sessionId',
+] as const
+const CRON_RECEIPT_OPTIONAL_KEYS = ['deliveredAt', 'deliveryError'] as const
+
+function hasExactKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
+  const allowed = new Set([...required, ...optional])
+  const keys = Object.keys(value)
+  return keys.length === new Set(keys).size && keys.every(key => allowed.has(key))
+    && required.every(key => Object.prototype.hasOwnProperty.call(value, key))
+}
+
+function sameCronDeliveryReceipt(value: unknown, expected: CronDeliveryReceipt): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const receipt = value as Record<string, unknown>
+  if (!hasExactKeys(receipt, CRON_RECEIPT_REQUIRED_KEYS, CRON_RECEIPT_OPTIONAL_KEYS)) return false
+  if (receipt.objectId !== expected.objectId
+    || receipt.jobId !== expected.jobId
+    || receipt.runId !== expected.runId
+    || receipt.sessionId !== expected.sessionId
+    || receipt.scheduledFor !== expected.scheduledFor
+    || receipt.deliveryState !== expected.deliveryState) return false
+  for (const key of CRON_RECEIPT_OPTIONAL_KEYS) {
+    const expectedHasKey = Object.prototype.hasOwnProperty.call(expected, key)
+    const valueHasKey = Object.prototype.hasOwnProperty.call(receipt, key)
+    if (expectedHasKey !== valueHasKey || (expectedHasKey && receipt[key] !== expected[key])) return false
+  }
+  return true
+}
+
+function isExactAcceptedReceiptResult(value: unknown, expected: CronDeliveryReceipt): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const result = value as Record<string, unknown>
+  if (!hasExactKeys(result, ['status', 'value']) || result.status !== 'accepted') return false
+  const accepted = result.value
+  if (typeof accepted !== 'object' || accepted === null || Array.isArray(accepted)) return false
+  const acceptedValue = accepted as Record<string, unknown>
+  return hasExactKeys(acceptedValue, ['receipt']) && sameCronDeliveryReceipt(acceptedValue.receipt, expected)
 }
 
 interface AcquiredAgent {
@@ -239,11 +307,18 @@ async function deliverText(
   text: string,
   signal?: AbortSignal,
 ): Promise<DeliveryObservation> {
-  for (const chunk of chunkText(text, 4096)) {
-    const message = await http.sendMessage(chatId, chunk, undefined, signal)
-    if (!Number.isSafeInteger(message?.messageId)) {
-      throw new Error('sendMessage failed: response omitted message_id')
+  let accepted = 0
+  try {
+    for (const chunk of chunkText(text, 4096)) {
+      const message = await http.sendMessage(chatId, chunk, undefined, signal)
+      if (!Number.isSafeInteger(message?.messageId)) {
+        throw new Error('sendMessage failed: response omitted message_id')
+      }
+      accepted++
     }
+  } catch (error) {
+    if (accepted > 0) return { state: 'uncertain', error: boundedDeliveryError(error) }
+    throw error
   }
   // The scheduler only needs the terminal delivery state and must never use a
   // partial chunk result to retry the whole message.
@@ -440,6 +515,12 @@ function appendExecutionError(current: string | undefined, next: unknown): strin
 interface PreparedAgentEnvironment {
   readonly registry: CronAgentEnvironmentRegistry
   readonly lease: ResolvedCronAgentEnvironmentLease
+  readonly meaningPortLease?: MeaningPortLease
+}
+
+interface MeaningPortLease {
+  readonly port: CronRunDeliveryMeaningRunPort
+  readonly dispose: () => Promise<void>
 }
 
 /** Optional constructor dependencies used only by tests. */
@@ -549,12 +630,15 @@ export class SchedulerRuntime implements RunNowPort {
   /** Manual executions remain owned by this runtime until their background promise settles. */
   private readonly manualBackgrounds = new Set<Promise<void>>()
   private readonly handles = new Map<string, AgentHandle>()
+  /** Runs held after a malformed opt-in lease, never converted to legacy orphan finish. */
+  private readonly heldDeliveryRuns = new Set<string>()
   private readonly jobStore: JobStore
   private readonly ledger: RunLedger
   private readonly semaphore: Semaphore
   private readonly driveTurn: DriveTurn
   private readonly deliverText: DeliverText
   private readonly runCommand: RunCommand
+  private readonly storeDir: string
 
   constructor(
     private readonly ctx: Context,
@@ -564,6 +648,7 @@ export class SchedulerRuntime implements RunNowPort {
     private readonly signal: AbortSignal,
     deps: SchedulerRuntimeDeps = {},
   ) {
+    this.storeDir = config.storeDir
     this.jobStore = new JobStore(config.storeDir)
     this.ledger = new RunLedger(config.storeDir)
     this.semaphore = new Semaphore(config.maxConcurrent)
@@ -615,6 +700,15 @@ export class SchedulerRuntime implements RunNowPort {
     const inFlight = this.inFlightByJob.get(job.id)
     if (inFlight !== undefined) {
       if (inFlight === runId) return { ok: true, alreadyAccepted: true, runId }
+      return { ok: false, code: 'job_active' }
+    }
+    const settlementRetryNotBefore = this.jobs.get(job.id)?.settlementRetryNotBefore
+    if (settlementRetryNotBefore !== undefined && settlementRetryNotBefore > Date.now()) {
+      return { ok: false, code: 'job_active' }
+    }
+    if (this.shouldHoldPreparedTerminalClaim(job)) {
+      const state = this.jobs.get(job.id)
+      if (state !== undefined) state.settlementRetryNotBefore = Date.now() + CLAIM_RETRY_DELAY_MS
       return { ok: false, code: 'job_active' }
     }
 
@@ -753,6 +847,9 @@ export class SchedulerRuntime implements RunNowPort {
       }
     }
     for (const job of folded.active) {
+      const runProjection = this.ledger.foldJob(job.id)
+      const hasInvalidRunEvidence = runProjection.invalidLifecycleRunIds.size > 0
+        || runProjection.claimConflicts.size > 0
       const existing = this.jobs.get(job.id)
       if (existing !== undefined) {
         // Manager policy-only upserts deliberately retain the same identity.
@@ -765,22 +862,52 @@ export class SchedulerRuntime implements RunNowPort {
         }
         const invalidError = invalidById.get(job.id)
         if (invalidError !== undefined) nextState.invalidError = invalidError
+        if (hasInvalidRunEvidence) {
+          nextState.nextRunAt = undefined
+          nextState.settlementRetryNotBefore = Date.now() + CLAIM_RETRY_DELAY_MS
+        }
         this.jobs.set(job.id, nextState)
         continue
       }
       const nextState: JobState = {
         job,
-        nextRunAt: this.rebuildNextRun(job, this.ledger.foldJob(job.id)),
+        nextRunAt: this.rebuildNextRun(job, runProjection),
       }
       const invalidError = invalidById.get(job.id)
       if (invalidError !== undefined) nextState.invalidError = invalidError
+      if (hasInvalidRunEvidence) {
+        nextState.nextRunAt = undefined
+        nextState.settlementRetryNotBefore = Date.now() + CLAIM_RETRY_DELAY_MS
+      }
       this.jobs.set(job.id, nextState)
+    }
+    // Prepared delivery runs have a symmetric recovery seam. They never pass
+    // through the legacy interrupted marker or re-enter an Agent turn.
+    const preparedRecoveryFailed = new Set<string>()
+    const preparedRecoveryDeferred = new Set<string>()
+    for (const job of folded.active) {
+      if (job.kind === 'command' || job.agentEnvironment === undefined) continue
+      const state = this.jobs.get(job.id)
+      if (state?.settlementRetryNotBefore !== undefined && Date.now() < state.settlementRetryNotBefore) {
+        preparedRecoveryDeferred.add(job.id)
+        continue
+      }
+      const recovered = await this.recoverPreparedDelivery(job)
+      if (!recovered) {
+        preparedRecoveryFailed.add(job.id)
+        if (state !== undefined) state.settlementRetryNotBefore = Date.now() + CLAIM_RETRY_DELAY_MS
+      }
     }
     // Crash orphans: claims without a finish are marked interrupted (audit
     // only — they are settled and must never be re-executed).
     for (const job of folded.active) {
       const runs = this.ledger.foldJob(job.id)
       for (const orphan of runs.interrupted) {
+        if (orphan.deliveryLifecycle === 'prepared'
+          || this.heldDeliveryRuns.has(orphan.runId)
+          || runs.preparedDeliveries.has(orphan.runId)
+          || runs.claimConflicts.has(orphan.runId)
+          || runs.invalidLifecycleRunIds.has(orphan.runId)) continue
         if (this.inFlightByJob.get(job.id) === orphan.runId) continue
         this.ctx.logger.error(
           `dsh-cron: run ${orphan.runId} was interrupted before finishing; marking interrupted (never re-run)`,
@@ -808,13 +935,20 @@ export class SchedulerRuntime implements RunNowPort {
       if (job.kind === 'command' || job.agentEnvironment === undefined) continue
       const state = this.jobs.get(job.id)
       if (state === undefined) continue
-      const unsettled = this.ledger.foldJob(job.id).unsettledFinishes
+      const runProjection = this.ledger.foldJob(job.id)
+      const unsettled = runProjection.unsettledFinishes.filter(finish =>
+        !runProjection.preparedDeliveries.has(finish.runId)
+        && !runProjection.prefinishSettledDeliveries.has(finish.runId),
+      )
       let recovered = true
       for (const finish of unsettled) {
         if (!await this.settleRecoveredFinish(job, finish)) recovered = false
       }
-      if (recovered) delete state.settlementRetryNotBefore
-      else state.settlementRetryNotBefore = Date.now() + CLAIM_RETRY_DELAY_MS
+      if (recovered && !preparedRecoveryFailed.has(job.id) && !preparedRecoveryDeferred.has(job.id)) {
+        delete state.settlementRetryNotBefore
+      } else if (!preparedRecoveryDeferred.has(job.id)) {
+        state.settlementRetryNotBefore = Date.now() + CLAIM_RETRY_DELAY_MS
+      }
     }
     for (const id of [...this.jobs.keys()]) {
       if (activeIds.has(id)) continue
@@ -825,6 +959,293 @@ export class SchedulerRuntime implements RunNowPort {
         void handle.dispose()
       }
     }
+  }
+
+  private async recoverPreparedDelivery(
+    job: Job,
+    inheritedMeaningPorts: ReadonlyMap<string, MeaningPortLease> = new Map(),
+    inheritedBoundRunIds: ReadonlySet<string> = new Set(),
+  ): Promise<boolean> {
+    if (job.kind === 'command' || !('agentEnvironment' in job) || job.agentEnvironment === undefined) return true
+    const folded = this.ledger.foldJob(job.id)
+    if (folded.lifecycleConflicts.size > 0 || folded.claimConflicts.size > 0 || folded.invalidLifecycleRunIds.size > 0) return false
+    const declaredPreparedRunIds = new Set(
+      [...folded.claims.values()].filter(run => run.deliveryLifecycle === 'prepared').map(run => run.runId),
+    )
+    const interruptedPreparedRunIds = new Set(
+      folded.interrupted
+        .filter(run => run.deliveryLifecycle === 'prepared')
+        .map(run => run.runId),
+    )
+    const claimOnlyRunIds = [...declaredPreparedRunIds].filter(runId =>
+      interruptedPreparedRunIds.has(runId) && !folded.preparedDeliveries.has(runId),
+    )
+    for (const prepared of folded.preparedDeliveries.values()) {
+      if (!declaredPreparedRunIds.has(prepared.runId)) return false
+    }
+    const hasPreparedRuns = folded.preparedDeliveries.size > 0
+    if (!hasPreparedRuns && claimOnlyRunIds.length === 0) return true
+    const registry = (() => {
+      try { return this.ctx.get(CRON_AGENT_ENVIRONMENT_REGISTRY) } catch { return undefined }
+    })()
+    if (registry === undefined) return false
+    const resolved = registry.resolve(job.agentEnvironment)
+    if (!resolved.ok
+      || resolved.provider.settleRecoveredDelivery === undefined
+      || (claimOnlyRunIds.length > 0 && resolved.provider.recoverPreparedDelivery === undefined)) return false
+    if (claimOnlyRunIds.length > 0) {
+      const recoveredClaims: Array<{
+        readonly claim: RunClaimRecord
+        readonly context: CronPreparedDeliveryRecoveryContext
+        readonly preparedDelivery: PreparedDeliveryObject
+        readonly meaningPortLease?: MeaningPortLease
+      }> = []
+      let claimOnlyRecoveryReady = true
+      for (const runId of claimOnlyRunIds) {
+        const claim = folded.claims.get(runId)
+        if (claim === undefined || claim.agentEnvironment !== job.agentEnvironment || claim.trigger === undefined) {
+          claimOnlyRecoveryReady = false
+          continue
+        }
+        if (this.inFlightByJob.get(job.id) === runId) continue
+        let meaningPortLease: MeaningPortLease | undefined
+        try {
+          meaningPortLease = await this.createMeaningPortLease(
+            resolved.provider,
+            claim as RunClaimRecord & { readonly trigger: RunTrigger },
+          )
+        } catch (error) {
+          claimOnlyRecoveryReady = false
+          this.ctx.logger.warn(`dsh-cron: meaning port recovery setup failed for ${runId}: ${errorMessage(error)}`)
+          continue
+        }
+        const context: CronPreparedDeliveryRecoveryContext = {
+          jobId: claim.jobId,
+          runId: claim.runId,
+          sessionId: claim.sessionId,
+          scheduledFor: claim.scheduledFor,
+          claimedAt: claim.claimedAt,
+          trigger: claim.trigger,
+          jobKind: 'agent',
+          sessionMode: job.sessionMode,
+          gate: job.gate === undefined ? 'forbidden' : 'present',
+          ...(meaningPortLease === undefined ? {} : { runDeliveryMeaningPort: meaningPortLease.port }),
+        }
+        const result = await registry.recoverPreparedDelivery(job.agentEnvironment, context)
+        if (!result.ok || result.recovery.status !== 'ready') {
+          claimOnlyRecoveryReady = false
+          await this.disposeMeaningPortLease(meaningPortLease, runId)
+          continue
+        }
+        recoveredClaims.push({
+          claim,
+          context,
+          preparedDelivery: result.recovery.preparedDelivery,
+          ...(meaningPortLease === undefined ? {} : { meaningPortLease }),
+        })
+      }
+      if (!claimOnlyRecoveryReady) {
+        await Promise.all(recoveredClaims.map(recovered => this.disposeMeaningPortLease(recovered.meaningPortLease, recovered.context.runId)))
+        return false
+      }
+      for (const recovered of recoveredClaims) {
+        try {
+          this.ledger.prepareDelivery({
+            schemaVersion: 2,
+            event: 'prepared-delivery',
+            jobId: recovered.context.jobId,
+            runId: recovered.context.runId,
+            sessionId: recovered.context.sessionId,
+            scheduledFor: recovered.context.scheduledFor,
+            preparedAt: new Date().toISOString(),
+            objectId: recovered.preparedDelivery.objectId,
+            text: recovered.preparedDelivery.text,
+          })
+        } catch (error) {
+          this.ctx.logger.warn(`dsh-cron: prepared delivery recovery append failed for ${recovered.context.runId}: ${errorMessage(error)}`)
+          await Promise.all(recoveredClaims.map(item => this.disposeMeaningPortLease(item.meaningPortLease, item.context.runId)))
+          return false
+        }
+        if (recovered.meaningPortLease !== undefined) {
+          const bindContext: CronAgentEnvironmentBindPreparedDeliveryContext = {
+            preparedDelivery: recovered.preparedDelivery,
+            runDeliveryMeaningPort: recovered.meaningPortLease.port,
+          }
+          const binding = await registry.bindPreparedDelivery(job.agentEnvironment, bindContext)
+          if (!binding.ok || !inspectPreparedDeliveryBinding(recovered.meaningPortLease.port, recovered.preparedDelivery)) {
+            await Promise.all(recoveredClaims.map(item => this.disposeMeaningPortLease(item.meaningPortLease, item.context.runId)))
+            return false
+          }
+        }
+      }
+      if (recoveredClaims.length > 0) {
+        const meaningPorts = new Map(inheritedMeaningPorts)
+        const boundRunIds = new Set(inheritedBoundRunIds)
+        for (const recovered of recoveredClaims) {
+          if (recovered.meaningPortLease !== undefined) {
+            meaningPorts.set(recovered.context.runId, recovered.meaningPortLease)
+            boundRunIds.add(recovered.context.runId)
+          }
+        }
+        return this.recoverPreparedDelivery(job, meaningPorts, boundRunIds)
+      }
+    }
+    let recovered = true
+    for (const prepared of folded.preparedDeliveries.values()) {
+      if (prepared.jobId !== job.id) continue
+      if (folded.lifecycleConflicts.has(prepared.runId)) {
+        recovered = false
+        continue
+      }
+      const claim = folded.claims.get(prepared.runId)
+      if (claim === undefined
+        || claim.deliveryLifecycle !== 'prepared'
+        || claim.agentEnvironment !== job.agentEnvironment
+        || claim.sessionId !== prepared.sessionId
+        || claim.scheduledFor !== prepared.scheduledFor) {
+        recovered = false
+        continue
+      }
+      if (!folded.interrupted.some(item => item.runId === prepared.runId)) continue
+      let meaningPortLease = inheritedMeaningPorts.get(prepared.runId)
+      try {
+        if (meaningPortLease === undefined) {
+          meaningPortLease = await this.createMeaningPortLease(
+            resolved.provider,
+            claim as RunClaimRecord & { readonly trigger: RunTrigger },
+          )
+        }
+        let receipt = folded.deliveryReceipts.get(prepared.runId)
+        const attempt = folded.deliveryAttemptClaims.get(prepared.runId)
+        const acknowledgement = folded.prefinishSettledDeliveries.get(prepared.runId)
+        const sameObjectIdentity = (value: { readonly objectId: string; readonly sessionId: string; readonly scheduledFor: string }) =>
+          value.objectId === prepared.objectId
+          && value.sessionId === prepared.sessionId
+          && value.scheduledFor === prepared.scheduledFor
+        if ((attempt !== undefined && !sameObjectIdentity(attempt))
+          || (receipt !== undefined && !sameObjectIdentity(receipt))
+          || (acknowledgement !== undefined && !sameObjectIdentity(acknowledgement))
+          || (receipt !== undefined && attempt === undefined)
+          || (acknowledgement !== undefined && (receipt === undefined || attempt === undefined
+            || acknowledgement.objectId !== receipt.objectId
+            || acknowledgement.deliveryState !== receipt.deliveryState
+            || acknowledgement.deliveredAt !== receipt.deliveredAt
+            || acknowledgement.deliveryError !== receipt.deliveryError))) {
+          recovered = false
+          continue
+        }
+        if (meaningPortLease !== undefined && !inheritedBoundRunIds.has(prepared.runId)) {
+          const bindContext: CronAgentEnvironmentBindPreparedDeliveryContext = {
+            preparedDelivery: {
+              objectId: prepared.objectId,
+              text: prepared.text,
+            },
+            runDeliveryMeaningPort: meaningPortLease.port,
+          }
+          const binding = await registry.bindPreparedDelivery(job.agentEnvironment, bindContext)
+          if (!binding.ok || !inspectPreparedDeliveryBinding(meaningPortLease.port, bindContext.preparedDelivery)) {
+            recovered = false
+            continue
+          }
+        }
+        if (receipt === undefined) {
+          if (attempt === undefined) {
+            this.ledger.claimDeliveryAttempt({
+              schemaVersion: 2,
+              event: 'delivery-attempt-claim',
+              jobId: job.id,
+              runId: prepared.runId,
+              sessionId: prepared.sessionId,
+              scheduledFor: prepared.scheduledFor,
+              claimedAt: new Date().toISOString(),
+              objectId: prepared.objectId,
+            })
+            const delivery = await this.attemptDelivery(prepared.text)
+            receipt = {
+              schemaVersion: 2,
+              event: 'delivery-receipt',
+              objectId: prepared.objectId,
+              jobId: job.id,
+              runId: prepared.runId,
+              sessionId: prepared.sessionId,
+              scheduledFor: prepared.scheduledFor,
+              deliveryState: delivery.state as Extract<RunDeliveryState, 'delivered' | 'failed' | 'uncertain'>,
+              ...(delivery.deliveredAt === undefined ? {} : { deliveredAt: delivery.deliveredAt }),
+              ...(delivery.error === undefined ? {} : { deliveryError: delivery.error }),
+              receiptAt: new Date().toISOString(),
+            }
+            this.ledger.recordDeliveryReceipt(receipt)
+          } else {
+            receipt = {
+              schemaVersion: 2,
+              event: 'delivery-receipt',
+              objectId: prepared.objectId,
+              jobId: job.id,
+              runId: prepared.runId,
+              sessionId: prepared.sessionId,
+              scheduledFor: prepared.scheduledFor,
+              deliveryState: 'uncertain',
+              deliveryError: 'scheduler recovered an attempt claim without a trusted receipt',
+              receiptAt: new Date().toISOString(),
+            }
+            this.ledger.recordDeliveryReceipt(receipt)
+          }
+        }
+        const genericReceipt: CronDeliveryReceipt = {
+          objectId: receipt.objectId,
+          jobId: receipt.jobId,
+          runId: receipt.runId,
+          sessionId: receipt.sessionId,
+          scheduledFor: receipt.scheduledFor,
+          deliveryState: receipt.deliveryState,
+          ...(receipt.deliveredAt === undefined ? {} : { deliveredAt: receipt.deliveredAt }),
+          ...(receipt.deliveryError === undefined ? {} : { deliveryError: receipt.deliveryError }),
+        }
+        if (!await this.acceptDurableReceiptBeforeSettlement(meaningPortLease?.port, genericReceipt)) {
+          recovered = false
+          continue
+        }
+        if (!folded.prefinishSettledDeliveries.has(prepared.runId)) {
+          const settled = await registry.settleRecoveredDelivery(job.agentEnvironment, genericReceipt, meaningPortLease?.port)
+          if (!settled.ok) {
+            recovered = false
+            continue
+          }
+          if (!this.hasDurableBusinessFinalization(meaningPortLease?.port)) {
+            recovered = false
+            continue
+          }
+          this.ledger.environmentPrefinishSettled({
+            schemaVersion: 2,
+            event: 'environment-prefinish-settle',
+            ...genericReceipt,
+            settledAt: new Date().toISOString(),
+          })
+        } else if (!this.hasDurableBusinessFinalization(meaningPortLease?.port)) {
+          recovered = false
+          continue
+        }
+        const finished = this.appendFinish(job, prepared.runId, Date.parse(prepared.scheduledFor), 'success', Date.parse(claim.claimedAt), Date.now(), {
+          sessionId: claim.sessionId,
+          ...(claim.trigger === undefined ? {} : { trigger: claim.trigger }),
+          ...(claim.trigger === 'manual' || claim.nextRunAt === undefined ? {} : { nextRunAt: Date.parse(claim.nextRunAt) }),
+          deliveryState: receipt.deliveryState,
+          ...(receipt.deliveredAt === undefined ? {} : { deliveredAt: receipt.deliveredAt }),
+          ...(receipt.deliveryError === undefined ? {} : { deliveryError: receipt.deliveryError }),
+        })
+        if (finished === undefined) {
+          recovered = false
+          continue
+        }
+        await this.emitRunFinished(finished)
+      } catch (error) {
+        recovered = false
+        this.ctx.logger.warn(`dsh-cron: prepared delivery recovery continuation failed for ${prepared.runId}: ${errorMessage(error)}`)
+      } finally {
+        await this.disposeMeaningPortLease(meaningPortLease, prepared.runId)
+      }
+    }
+    return recovered
   }
 
   /** Stable run id for one trigger point (jobId + consumed schedule time). */
@@ -842,6 +1263,22 @@ export class SchedulerRuntime implements RunNowPort {
       return `session-cron-run-${createHash('sha256').update(runId).digest('hex').slice(0, 32)}`
     }
     return `session-cron-${job.id}`
+  }
+
+  private hasPreparedDeliveryOptIn(job: Job): boolean {
+    if (job.kind === 'command' || !('agentEnvironment' in job) || job.agentEnvironment === undefined) return false
+    try {
+      const registry = this.ctx.get(CRON_AGENT_ENVIRONMENT_REGISTRY)
+      const resolved = registry?.resolve(job.agentEnvironment)
+      return resolved?.ok === true && resolved.provider.preparedDeliveryLifecycle === true
+    } catch {
+      return false
+    }
+  }
+
+  private shouldHoldPreparedTerminalClaim(job: Job): boolean {
+    if (job.kind === 'command' || job.agentEnvironment === undefined) return false
+    return hasUnfinalizedPreparedTerminalOwner(this.storeDir, job.id)
   }
 
   /**
@@ -864,6 +1301,7 @@ export class SchedulerRuntime implements RunNowPort {
       deliveryError?: string
       error?: string
       outputPreview?: string
+      sessionId?: string
     } = {},
   ): RunFinishRecord | undefined {
     const record = {
@@ -871,7 +1309,7 @@ export class SchedulerRuntime implements RunNowPort {
       event: 'finish',
       runId,
       jobId: job.id,
-      sessionId: this.sessionIdForRun(job, runId),
+      sessionId: extra.sessionId ?? this.sessionIdForRun(job, runId),
       scheduledFor: new Date(scheduledFor).toISOString(),
       startedAt: new Date(startedAt).toISOString(),
       finishedAt: new Date(finishedAt).toISOString(),
@@ -895,6 +1333,52 @@ export class SchedulerRuntime implements RunNowPort {
       return undefined
     }
     return record
+  }
+
+  /** Close a prepared provider lease after its technical lifecycle is done. */
+  private async closePreparedLease(
+    lease: AgentRunLease | undefined,
+    deferred: boolean,
+    runId: string,
+    meaningPortLease?: MeaningPortLease,
+  ): Promise<void> {
+    if (!deferred) return
+    if (lease !== undefined) {
+      try {
+        await lease.close()
+      } catch (error) {
+        // Disposal is cleanup only. It must not synthesize a receipt, ack,
+        // finish, or legacy error delivery after the prepared lifecycle ended.
+        this.ctx.logger.error(`dsh-cron: prepared lease disposal failed for ${runId}: ${errorMessage(error)}`)
+      }
+    }
+    if (meaningPortLease !== undefined) {
+      try {
+        await meaningPortLease.dispose()
+      } catch (error) {
+        this.ctx.logger.error(`dsh-cron: meaning port disposal failed for ${runId}: ${errorMessage(error)}`)
+      }
+    }
+  }
+
+  /** Verify the generic C1 meaning before any provider pre-finish or settle hook. */
+  private async acceptDurableReceiptBeforeSettlement(
+    port: CronRunDeliveryMeaningRunPort | undefined,
+    receipt: CronDeliveryReceipt,
+  ): Promise<boolean> {
+    if (port === undefined) return true
+    try {
+      const result = await port.acceptDurableReceipt(receipt)
+      return isExactAcceptedReceiptResult(result, receipt)
+    } catch {
+      return false
+    }
+  }
+
+  private hasDurableBusinessFinalization(
+    port: CronRunDeliveryMeaningRunPort | undefined,
+  ): boolean {
+    return port === undefined || inspectDurableBusinessFinalization(port)
   }
 
   /**
@@ -1068,7 +1552,12 @@ export class SchedulerRuntime implements RunNowPort {
     // a failing claim wakes at its retry cutoff instead of immediately.
     let target: number | undefined
     for (const state of this.jobs.values()) {
-      if (state.nextRunAt === undefined) continue
+      const retryNotBefore = state.settlementRetryNotBefore
+      if (retryNotBefore !== undefined && retryNotBefore > Date.now()
+        && (target === undefined || retryNotBefore < target)) target = retryNotBefore
+      if (state.nextRunAt === undefined) {
+        continue
+      }
       if (this.inFlightByJob.has(state.job.id)) continue
       if (state.nextRunAt <= Date.now()) {
         const retryNotBefore = Math.max(
@@ -1092,6 +1581,77 @@ export class SchedulerRuntime implements RunNowPort {
     if (this.inFlightByJob.get(jobId) !== runId) return
     this.inFlightByJob.delete(jobId)
     this.requestDrive()
+  }
+
+  private async createMeaningPortLease(
+    provider: CronAgentEnvironmentProvider,
+    claimRecord: RunClaimRecord & { readonly trigger: RunTrigger },
+  ): Promise<MeaningPortLease | undefined> {
+    const preparedOptIn = provider.preparedDeliveryLifecycle === true
+    const meaningOptIn = provider.runDeliveryMeaningLifecycle === true
+    if (!preparedOptIn && !meaningOptIn) return undefined
+    if (!preparedOptIn && meaningOptIn) {
+      throw new SchedulerExecutionError(
+        'agent_environment.invalid_delivery_lifecycle',
+        'run delivery meaning lifecycle requires prepared delivery lifecycle',
+      )
+    }
+    if (!meaningOptIn) return undefined
+
+    let factory: unknown
+    try {
+      factory = this.ctx.get(CRON_RUN_DELIVERY_MEANING_LIFECYCLE)
+    } catch (error) {
+      throw new SchedulerExecutionError('agent_environment.invalid_delivery_lifecycle', errorMessage(error))
+    }
+    if (typeof factory !== 'object' || factory === null
+      || typeof (factory as { readonly createRunPort?: unknown }).createRunPort !== 'function') {
+      throw new SchedulerExecutionError(
+        'agent_environment.invalid_delivery_lifecycle',
+        'run delivery meaning lifecycle factory is unavailable',
+      )
+    }
+    const binding: CronPreparedDeliveryClaimBinding = {
+      jobId: claimRecord.jobId,
+      runId: claimRecord.runId,
+      sessionId: claimRecord.sessionId,
+      scheduledFor: claimRecord.scheduledFor,
+      claimedAt: claimRecord.claimedAt,
+      trigger: claimRecord.trigger,
+    }
+    let result
+    try {
+      result = await (factory as CronRunDeliveryMeaningPortFactory).createRunPort(binding)
+    } catch (error) {
+      throw new SchedulerExecutionError('agent_environment.invalid_delivery_lifecycle', errorMessage(error))
+    }
+    if (result.status !== 'accepted'
+      || typeof result.port !== 'object'
+      || result.port === null
+      || typeof result.dispose !== 'function') {
+      throw new SchedulerExecutionError(
+        'agent_environment.invalid_delivery_lifecycle',
+        result.status === 'failed' ? result.error : 'run delivery meaning lifecycle factory returned an invalid lease',
+      )
+    }
+    let disposed = false
+    return {
+      port: result.port,
+      dispose: async () => {
+        if (disposed) return
+        disposed = true
+        await result.dispose()
+      },
+    }
+  }
+
+  private async disposeMeaningPortLease(lease: MeaningPortLease | undefined, runId: string): Promise<void> {
+    if (lease === undefined) return
+    try {
+      await lease.dispose()
+    } catch (error) {
+      this.ctx.logger.error(`dsh-cron: meaning port disposal failed for ${runId}: ${errorMessage(error)}`)
+    }
   }
 
   /** Resolve and prepare a marked environment after the durable run claim. */
@@ -1143,6 +1703,8 @@ export class SchedulerRuntime implements RunNowPort {
       throw new SchedulerExecutionError(`agent_environment.${resolved.error.code}`, resolved.error.message)
     }
 
+    const meaningPortLease = await this.createMeaningPortLease(resolved.provider, claimRecord)
+
     const prepareContext: CronAgentEnvironmentPrepareContext = {
       jobId: job.id,
       jobKind: 'agent',
@@ -1152,18 +1714,67 @@ export class SchedulerRuntime implements RunNowPort {
       trigger: claimRecord.trigger,
       scheduledFor: claimRecord.scheduledFor,
       claimedAt: claimRecord.claimedAt,
+      ...(meaningPortLease === undefined ? {} : { runDeliveryMeaningPort: meaningPortLease.port }),
     }
     let prepared
     try {
       prepared = await registry.prepare(marker, prepareContext)
     } catch (error) {
+      await this.disposeMeaningPortLease(meaningPortLease, claimRecord.runId)
       throw new SchedulerExecutionError('agent_environment.prepare_failed', errorMessage(error))
     }
     if (!prepared.ok) {
+      await this.disposeMeaningPortLease(meaningPortLease, claimRecord.runId)
+      if (resolved.provider.preparedDeliveryLifecycle === true) {
+        throw new SchedulerExecutionError(
+          'agent_environment.invalid_delivery_lifecycle',
+          `prepared delivery provider could not produce a recoverable lease: ${prepared.error.message}`,
+        )
+      }
       throw new SchedulerExecutionError(`agent_environment.${prepared.error.code}`, prepared.error.message)
     }
-    if ('skip' in prepared) return prepared.skip
-    return { registry, lease: prepared.lease }
+    if ('skip' in prepared) {
+      await this.disposeMeaningPortLease(meaningPortLease, claimRecord.runId)
+      if (resolved.provider.preparedDeliveryLifecycle === true) {
+        throw new SchedulerExecutionError(
+          'agent_environment.invalid_delivery_lifecycle',
+          'prepared delivery providers cannot return a generic skip result',
+        )
+      }
+      return prepared.skip
+    }
+    const lease = prepared.lease
+    const disposeInvalidLease = async (): Promise<void> => {
+      try {
+        await new AgentRunLease({ environment: lease }).close()
+      } catch (error) {
+        this.ctx.logger.error(`dsh-cron: invalid environment lease disposal failed for ${claimRecord.runId}: ${errorMessage(error)}`)
+      }
+    }
+    const hasPreparedDelivery = lease.preparedDelivery !== undefined
+    const hasPrefinishHook = lease.settleDeliveryBeforeFinish !== undefined
+    const providerOptedIntoPreparedLifecycle = resolved.provider.preparedDeliveryLifecycle === true
+    if (providerOptedIntoPreparedLifecycle !== hasPreparedDelivery
+      || hasPreparedDelivery !== hasPrefinishHook
+      || (providerOptedIntoPreparedLifecycle && resolved.provider.settleRecoveredDelivery === undefined)) {
+      await disposeInvalidLease()
+      await this.disposeMeaningPortLease(meaningPortLease, claimRecord.runId)
+      throw new SchedulerExecutionError(
+        'agent_environment.invalid_delivery_lifecycle',
+        'prepared delivery lifecycle opt-in, preparedDelivery, pre-finish hook, and recovery counterpart must agree',
+      )
+    }
+    if (hasPreparedDelivery && (lease.settleRun !== undefined
+      || !isValidPreparedDeliveryObject(lease.preparedDelivery)
+      || resolved.provider.settleRecoveredDelivery === undefined)) {
+      await disposeInvalidLease()
+      await this.disposeMeaningPortLease(meaningPortLease, claimRecord.runId)
+      throw new SchedulerExecutionError(
+        'agent_environment.invalid_delivery_lifecycle',
+        'prepared delivery requires valid exact facts, a recovery counterpart, and cannot use settleRun',
+      )
+    }
+    return { registry, lease, ...(meaningPortLease === undefined ? {} : { meaningPortLease }) }
   }
 
   /** Acquire a persistent agent or create an isolated per-run agent. */
@@ -1285,7 +1896,16 @@ export class SchedulerRuntime implements RunNowPort {
       sessionId: this.sessionIdForRun(job, runId),
       scheduledFor: new Date(scheduledFor).toISOString(),
       claimedAt: new Date().toISOString(),
+      ...('agentEnvironment' in job && job.agentEnvironment !== undefined && this.hasPreparedDeliveryOptIn(job)
+        ? { agentEnvironment: job.agentEnvironment, deliveryLifecycle: 'prepared' as const }
+        : {}),
       ...(crashFallback === undefined ? {} : { nextRunAt: new Date(crashFallback).toISOString() }),
+    }
+
+    if (this.shouldHoldPreparedTerminalClaim(job)) {
+      state.settlementRetryNotBefore = Date.now() + CLAIM_RETRY_DELAY_MS
+      this.notifyClaim(execution, 'claim_failed', runId)
+      return
     }
 
     let claimed: boolean
@@ -1330,10 +1950,15 @@ export class SchedulerRuntime implements RunNowPort {
     let finishedAt = startedAt
     let outcome: TurnOutcome | undefined
     let executionError: string | undefined
+    let deliveryLifecycleInvalid = false
     let outcomeFinalizationFailed = false
     let skipped = false
     let runLease: AgentRunLease | undefined
+    let deferPreparedLeaseClose = false
     let settleRun: CronAgentEnvironmentSettle | undefined
+    let prefinishSettle: CronAgentEnvironmentPrefinishSettle | undefined
+    let preparedDelivery: PreparedDeliveryObject | undefined
+    let meaningPortLease: MeaningPortLease | undefined
     try {
       if (state.invalidError !== undefined) {
         throw new SchedulerExecutionError('invalid_replay_evidence', state.invalidError)
@@ -1346,16 +1971,63 @@ export class SchedulerRuntime implements RunNowPort {
         skipped = true
       } else {
         settleRun = leaseEnvironment?.lease.settleRun
+        prefinishSettle = leaseEnvironment?.lease.settleDeliveryBeforeFinish
+        preparedDelivery = leaseEnvironment?.lease.preparedDelivery
+        meaningPortLease = leaseEnvironment?.meaningPortLease
+        if (preparedDelivery !== undefined) {
+          if (leaseEnvironment !== undefined) {
+            // Keep the provider lease alive across the entire prepared
+            // delivery lifecycle. Its pre-finish hook may use resources that
+            // must not be disposed before receipt acknowledgement.
+            runLease = new AgentRunLease({ environment: leaseEnvironment.lease })
+            deferPreparedLeaseClose = true
+          }
+          try {
+            this.ledger.prepareDelivery({
+              schemaVersion: 2,
+              event: 'prepared-delivery',
+              jobId: job.id,
+              runId,
+              sessionId: claimRecord.sessionId,
+              scheduledFor: claimRecord.scheduledFor,
+              preparedAt: new Date().toISOString(),
+              objectId: preparedDelivery.objectId,
+              text: preparedDelivery.text,
+            })
+          } catch (error) {
+            throw new SchedulerExecutionError(
+              'agent_environment.invalid_delivery_lifecycle',
+              `prepared delivery persistence failed: ${errorMessage(error)}`,
+            )
+          }
+          if (meaningPortLease !== undefined) {
+            const bindContext: CronAgentEnvironmentBindPreparedDeliveryContext = {
+              preparedDelivery,
+              runDeliveryMeaningPort: meaningPortLease.port,
+            }
+            const marker = 'agentEnvironment' in job ? job.agentEnvironment : undefined
+            const binding = await leaseEnvironment!.registry.bindPreparedDelivery(marker, bindContext)
+            if (!binding.ok || !inspectPreparedDeliveryBinding(meaningPortLease.port, preparedDelivery)) {
+              throw new SchedulerExecutionError(
+                'agent_environment.invalid_delivery_lifecycle',
+                'prepared delivery provider did not durably bind the prepared object',
+              )
+            }
+          }
+          outcome = { text: preparedDelivery.text, error: undefined }
+        }
       }
       if (skipped) {
         // A typed provider skip is already a successful terminal outcome. It
         // deliberately bypasses Agent creation, setup, verification, drive,
         // finalization, and Telegram delivery.
+      } else if (preparedDelivery !== undefined) {
+        // The provider owns the exact text. No Agent is allowed to replace it.
       } else if (job.kind === 'command') {
         outcome = await this.runCommand(job, this.signal)
       } else {
         if (leaseEnvironment !== undefined) {
-          runLease = new AgentRunLease({ environment: leaseEnvironment.lease })
+          runLease ??= new AgentRunLease({ environment: leaseEnvironment.lease })
         }
         let prompt = job.prompt
         if (job.gate !== undefined) {
@@ -1396,9 +2068,13 @@ export class SchedulerRuntime implements RunNowPort {
         }
       }
     } catch (error: unknown) {
+      if (claimRecord.deliveryLifecycle === 'prepared'
+        || (error instanceof SchedulerExecutionError && error.code === 'agent_environment.invalid_delivery_lifecycle')) {
+        deliveryLifecycleInvalid = true
+      }
       executionError = errorMessage(error)
     } finally {
-      if (runLease !== undefined) {
+      if (runLease !== undefined && !deferPreparedLeaseClose) {
         try {
           await runLease.close()
         } catch (error) {
@@ -1406,6 +2082,23 @@ export class SchedulerRuntime implements RunNowPort {
         }
       }
     }
+    const holdPreparedRun = async (): Promise<void> => {
+      await this.closePreparedLease(runLease, deferPreparedLeaseClose, runId, meaningPortLease)
+      const retryNotBefore = Math.max(
+        state.settlementRetryNotBefore ?? 0,
+        Date.now() + CLAIM_RETRY_DELAY_MS,
+      )
+      state.settlementRetryNotBefore = retryNotBefore
+      const trackedState = this.jobs.get(job.id)
+      if (trackedState !== undefined) trackedState.settlementRetryNotBefore = retryNotBefore
+      this.heldDeliveryRuns.add(runId)
+      this.ctx.logger.warn(`dsh-cron: invalid prepared delivery lifecycle for ${runId}; run held for provider correction`)
+    }
+    if (deliveryLifecycleInvalid) {
+      await holdPreparedRun()
+      return
+    }
+
     finishedAt = Date.now()
 
     // Re-anchor the next run off the actual finish time (Hermes mark_job_run).
@@ -1426,6 +2119,10 @@ export class SchedulerRuntime implements RunNowPort {
       return
     }
     const errorText = executionError ?? outcome?.error
+    if (deferPreparedLeaseClose && (this.signal.aborted || errorText !== undefined)) {
+      await holdPreparedRun()
+      return
+    }
     if (this.signal.aborted) {
       const finished = this.appendFinish(job, runId, scheduledFor, 'interrupted', startedAt, finishedAt, {
         ...triggerExtra,
@@ -1493,6 +2190,10 @@ export class SchedulerRuntime implements RunNowPort {
     }
 
     const text = outcome?.text ?? ''
+    if (deferPreparedLeaseClose && (job.deliver === 'silent' || text.trim() === '')) {
+      await holdPreparedRun()
+      return
+    }
     if (job.deliver === 'silent' || text.trim() === '') {
       // Empty output is a successful execution with no requested delivery.
       const finished = this.appendFinish(job, runId, scheduledFor, 'success', startedAt, finishedAt, {
@@ -1502,6 +2203,93 @@ export class SchedulerRuntime implements RunNowPort {
       })
       if (finished !== undefined) await this.settleFinishedRun(finished, settleRun)
       return
+    }
+
+    if (prefinishSettle !== undefined || preparedDelivery !== undefined) {
+      try {
+        if (prefinishSettle === undefined || preparedDelivery === undefined) return
+        const attempt: RunDeliveryAttemptClaimRecord = {
+          schemaVersion: 2,
+          event: 'delivery-attempt-claim',
+          jobId: job.id,
+          runId,
+          sessionId: claimRecord.sessionId,
+          scheduledFor: claimRecord.scheduledFor,
+          claimedAt: new Date().toISOString(),
+          objectId: preparedDelivery.objectId,
+        }
+        this.ledger.claimDeliveryAttempt(attempt)
+        const delivery = await this.attemptDelivery(text)
+        const receipt: CronDeliveryReceipt = {
+          objectId: attempt.objectId,
+          jobId: job.id,
+          runId,
+          sessionId: claimRecord.sessionId,
+          scheduledFor: claimRecord.scheduledFor,
+          deliveryState: delivery.state as Extract<RunDeliveryState, 'delivered' | 'failed' | 'uncertain'>,
+          ...(delivery.deliveredAt === undefined ? {} : { deliveredAt: delivery.deliveredAt }),
+          ...(delivery.error === undefined ? {} : { deliveryError: delivery.error }),
+        }
+        this.ledger.recordDeliveryReceipt({
+          schemaVersion: 2,
+          event: 'delivery-receipt',
+          ...receipt,
+          receiptAt: new Date().toISOString(),
+        } satisfies RunDeliveryReceiptRecord)
+        if (!await this.acceptDurableReceiptBeforeSettlement(meaningPortLease?.port, receipt)) {
+          await holdPreparedRun()
+          return
+        }
+        let hookResult: unknown
+        try {
+          hookResult = await prefinishSettle(receipt)
+        } catch (error) {
+          this.ctx.logger.warn(`dsh-cron: pre-finish delivery hook failed for ${runId}: ${errorMessage(error)}`)
+          await holdPreparedRun()
+          return
+        }
+        if (!isAcceptedPrefinishResult(hookResult)) {
+          this.ctx.logger.warn(`dsh-cron: pre-finish delivery hook did not accept ${runId}`)
+          await holdPreparedRun()
+          return
+        }
+        if (!this.hasDurableBusinessFinalization(meaningPortLease?.port)) {
+          await holdPreparedRun()
+          return
+        }
+        this.ledger.environmentPrefinishSettled({
+          schemaVersion: 2,
+          event: 'environment-prefinish-settle',
+          ...receipt,
+          settledAt: new Date().toISOString(),
+        } satisfies RunEnvironmentPrefinishSettleRecord)
+        finishedAt = Date.now()
+        const completedNextRunAt = manual || job.schedule.kind === 'once'
+          ? undefined
+          : nextRunAfter(job.schedule, finishedAt)
+        if (!manual && completedNextRunAt !== undefined) state.nextRunAt = completedNextRunAt
+        const completedNextRunExtra = manual || completedNextRunAt === undefined ? {} : { nextRunAt: completedNextRunAt }
+        const finished = this.appendFinish(job, runId, scheduledFor, 'success', startedAt, finishedAt, {
+          ...triggerExtra,
+          ...completedNextRunExtra,
+          deliveryState: delivery.state,
+          ...(delivery.deliveredAt === undefined ? {} : { deliveredAt: delivery.deliveredAt }),
+          ...(delivery.error === undefined ? {} : { deliveryError: delivery.error }),
+          outputPreview: text.length > 200 ? `${text.slice(0, 200)}…` : text,
+        })
+        if (finished === undefined) {
+          await holdPreparedRun()
+          return
+        }
+        await this.settleFinishedRun(finished, settleRun)
+        return
+      } catch (error) {
+        this.ctx.logger.warn(`dsh-cron: prepared delivery lifecycle failed for ${runId}: ${errorMessage(error)}`)
+        await holdPreparedRun()
+        return
+      } finally {
+        await this.closePreparedLease(runLease, deferPreparedLeaseClose, runId, meaningPortLease)
+      }
     }
 
     const delivery = await this.attemptDelivery(text)
@@ -1546,6 +2334,7 @@ export async function applyScheduler(
       ctx.logger.warn(`dsh-cron: getMe transient failure: ${error instanceof Error ? error.message : String(error)}`)
     }
 
+    provideCronRunDeliveryMeaningPortFactory(ctx, { storeDir: config.storeDir })
     const lifetime = new AbortController()
     const runtime = new SchedulerRuntime(ctx, config, http, chatId, lifetime.signal)
     runtime.start()

@@ -142,11 +142,21 @@ describe('business extension boundaries', () => {
       kind: 'skip' as const,
       outcome: Object.freeze({ text: undefined, error: undefined }),
     })
+    const legacyPrepare = vi.fn(async () => {
+      throw new Error('legacy X cron provider must not prepare ordinary Feed runs')
+    })
+    const ordinaryPrepare = vi.fn(async () => skip)
     vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProvider').mockReturnValue({
       marker: 'dsh-x-feed/v1',
       requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
-      prepare: vi.fn(async () => skip),
+      prepare: legacyPrepare,
     } as never)
+    const ordinaryFactory = vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProviderForOrdinaryFeed')
+      .mockReturnValue({
+        marker: 'dsh-x-feed/v1',
+        requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
+        prepare: ordinaryPrepare,
+      } as never)
 
     try {
       const provider = createCronEnvironmentExtension(makeCtx().ctx as never, {
@@ -171,6 +181,9 @@ describe('business extension boundaries', () => {
       expect(prepared).toBe(skip)
       expect(prepared).toEqual(skip)
       expect('settleRun' in prepared).toBe(false)
+      expect(ordinaryFactory).toHaveBeenCalledOnce()
+      expect(ordinaryPrepare).toHaveBeenCalledOnce()
+      expect(legacyPrepare).not.toHaveBeenCalled()
     } finally {
       rmSync(directory, { recursive: true, force: true })
     }
@@ -188,11 +201,20 @@ describe('business extension boundaries', () => {
         outcome: { text: undefined, error: undefined },
       }
     })
+    const legacyPrepare = vi.fn(async () => {
+      throw new Error('legacy X cron provider must not prepare ordinary Feed runs')
+    })
     vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProvider').mockReturnValue({
       marker: 'dsh-x-feed/v1',
       requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
-      prepare,
+      prepare: legacyPrepare,
     } as never)
+    const ordinaryFactory = vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProviderForOrdinaryFeed')
+      .mockReturnValue({
+        marker: 'dsh-x-feed/v1',
+        requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
+        prepare,
+      } as never)
 
     try {
       const provider = createCronEnvironmentExtension(makeCtx().ctx as never, {
@@ -244,6 +266,8 @@ describe('business extension boundaries', () => {
         claimedAt: '2026-08-23T13:31:02.000Z',
       })).rejects.toThrow('already established a different period scope')
       expect(prepare).toHaveBeenCalledTimes(2)
+      expect(ordinaryFactory).toHaveBeenCalledTimes(2)
+      expect(legacyPrepare).not.toHaveBeenCalled()
       expect(readFileSync(ledgerPath, 'utf8').trim().split('\n')).toHaveLength(2)
     } finally {
       rmSync(directory, { recursive: true, force: true })

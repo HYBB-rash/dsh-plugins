@@ -9,6 +9,7 @@
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { isValidPreparedDeliveryObject, isValidPreparedObjectId } from './types.ts'
 import type {
   CommandGate,
   CommandPayload,
@@ -18,7 +19,11 @@ import type {
   Job,
   JobLogEntry,
   RunClaimRecord,
+  RunDeliveryAttemptClaimRecord,
+  RunDeliveryReceiptRecord,
   RunEnvironmentSettleRecord,
+  RunEnvironmentPrefinishSettleRecord,
+  RunPreparedDeliveryRecord,
   RunFailureAlertClaimRecord,
   RunFinishRecord,
   RunHistoryRecord,
@@ -347,6 +352,11 @@ export class RunStore {
         || parsed.kind === 'claim'
         || parsed.kind === 'failure-alert-claim'
         || parsed.kind === 'finish'
+        || parsed.kind === 'environment-settle'
+        || parsed.kind === 'prepared-delivery'
+        || parsed.kind === 'delivery-attempt-claim'
+        || parsed.kind === 'delivery-receipt'
+        || parsed.kind === 'environment-prefinish-settle'
       ) records.push(parsed.record)
     }
     return records
@@ -388,6 +398,10 @@ export type ParsedRunLine =
   | { readonly kind: 'failure-alert-claim'; readonly record: RunFailureAlertClaimRecord }
   | { readonly kind: 'finish'; readonly record: RunFinishRecord }
   | { readonly kind: 'environment-settle'; readonly record: RunEnvironmentSettleRecord }
+  | { readonly kind: 'prepared-delivery'; readonly record: RunPreparedDeliveryRecord }
+  | { readonly kind: 'delivery-attempt-claim'; readonly record: RunDeliveryAttemptClaimRecord }
+  | { readonly kind: 'delivery-receipt'; readonly record: RunDeliveryReceiptRecord }
+  | { readonly kind: 'environment-prefinish-settle'; readonly record: RunEnvironmentPrefinishSettleRecord }
   | { readonly kind: 'skip' }
 
 /** V2 finish statuses that are valid ledger events. */
@@ -438,6 +452,9 @@ export function parseRunLine(raw: string): ParsedRunLine {
         && isValidTime(record.scheduledFor)
         && isValidTime(record.claimedAt)
         && isValidRunTrigger(record.trigger)
+        && ((record.agentEnvironment === undefined) === (record.deliveryLifecycle === undefined))
+        && (record.agentEnvironment === undefined || isNonEmptyString(record.agentEnvironment))
+        && (record.deliveryLifecycle === undefined || record.deliveryLifecycle === 'prepared')
         && (record.trigger !== 'manual' || record.nextRunAt === undefined)
         && (record.nextRunAt === undefined || isValidTime(record.nextRunAt))
       ) {
@@ -481,6 +498,40 @@ export function parseRunLine(raw: string): ParsedRunLine {
           record: record as unknown as RunEnvironmentSettleRecord,
         }
       }
+      if (
+        record.event === 'prepared-delivery'
+        && isNonEmptyString(record.jobId)
+        && isNonEmptyString(record.runId)
+        && isNonEmptyString(record.sessionId)
+        && isValidPreparedDeliveryObject({ objectId: record.objectId, text: record.text })
+        && isValidTime(record.scheduledFor)
+        && isValidTime(record.preparedAt)
+      ) return { kind: 'prepared-delivery', record: record as unknown as RunPreparedDeliveryRecord }
+      if (
+        record.event === 'delivery-attempt-claim'
+        && isNonEmptyString(record.jobId)
+        && isNonEmptyString(record.runId)
+        && isNonEmptyString(record.sessionId)
+        && isValidPreparedObjectId(record.objectId)
+        && isValidTime(record.scheduledFor)
+        && isValidTime(record.claimedAt)
+      ) return { kind: 'delivery-attempt-claim', record: record as unknown as RunDeliveryAttemptClaimRecord }
+      if (
+        (record.event === 'delivery-receipt' || record.event === 'environment-prefinish-settle')
+        && isNonEmptyString(record.jobId)
+        && isNonEmptyString(record.runId)
+        && isNonEmptyString(record.sessionId)
+        && isValidPreparedObjectId(record.objectId)
+        && isValidTime(record.scheduledFor)
+        && (record.deliveryState === 'delivered' || record.deliveryState === 'failed' || record.deliveryState === 'uncertain')
+        && (record.deliveredAt === undefined || isValidTime(record.deliveredAt))
+        && (record.deliveryError === undefined || typeof record.deliveryError === 'string')
+        && (record.event === 'delivery-receipt' ? isValidTime(record.receiptAt) : isValidTime(record.settledAt))
+      ) {
+        return record.event === 'delivery-receipt'
+          ? { kind: 'delivery-receipt', record: record as unknown as RunDeliveryReceiptRecord }
+          : { kind: 'environment-prefinish-settle', record: record as unknown as RunEnvironmentPrefinishSettleRecord }
+      }
     }
     // An explicit but unknown/unsupported version must not fall back to V1.
     return { kind: 'skip' }
@@ -498,6 +549,8 @@ export interface FoldedJobRuns {
   readonly nextRunAt?: string
   /** Claims without a finish — interrupted audit, never re-executed. */
   readonly interrupted: readonly RunClaimRecord[]
+  /** Every parsed claim, retaining the first exact fact for conflict checks. */
+  readonly claims: ReadonlyMap<string, RunClaimRecord>
   /** Durable finishes whose business environment has not acknowledged settlement. */
   readonly unsettledFinishes: readonly RunFinishRecord[]
   /** Latest non-expired V1 terminal record's finishedAt (legacy anchor). */
@@ -508,6 +561,14 @@ export interface FoldedJobRuns {
   readonly failureAlertRunIds: ReadonlySet<string>
   /** Latest durable alert claim, used as the restart-stable cooldown anchor. */
   readonly lastFailureAlertClaimedAt?: string
+  readonly preparedDeliveries: ReadonlyMap<string, RunPreparedDeliveryRecord>
+  readonly deliveryAttemptClaims: ReadonlyMap<string, RunDeliveryAttemptClaimRecord>
+  readonly deliveryReceipts: ReadonlyMap<string, RunDeliveryReceiptRecord>
+  readonly prefinishSettledDeliveries: ReadonlyMap<string, RunEnvironmentPrefinishSettleRecord>
+  readonly lifecycleConflicts: ReadonlySet<string>
+  /** Claim identity conflicts; these are never eligible for recovery. */
+  readonly claimConflicts: ReadonlySet<string>
+  readonly invalidLifecycleRunIds: ReadonlySet<string>
 }
 
 /**
@@ -522,6 +583,18 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
   const finishRecords = new Map<string, RunFinishRecord>()
   const environmentSettled = new Set<string>()
   const failureAlertRunIds = new Set<string>()
+  const preparedDeliveries = new Map<string, RunPreparedDeliveryRecord>()
+  const deliveryAttemptClaims = new Map<string, RunDeliveryAttemptClaimRecord>()
+  const deliveryReceipts = new Map<string, RunDeliveryReceiptRecord>()
+  const prefinishSettledDeliveries = new Map<string, RunEnvironmentPrefinishSettleRecord>()
+  const lifecycleConflicts = new Set<string>()
+  const claimConflicts = new Set<string>()
+  const invalidLifecycleRunIds = new Set<string>()
+  const retainExact = <T extends { readonly runId: string }>(map: Map<string, T>, record: T, equivalent: (a: T, b: T) => boolean) => {
+    const previous = map.get(record.runId)
+    if (previous === undefined) map.set(record.runId, record)
+    else if (!equivalent(previous, record)) lifecycleConflicts.add(record.runId)
+  }
   let anyRecord = false
   let nextRunAt: string | undefined
   let legacyFinishedAt: string | undefined
@@ -533,7 +606,20 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
   }
   for (const raw of lines) {
     const parsed = parseRunLine(raw)
-    if (parsed.kind === 'skip') continue
+    if (parsed.kind === 'skip') {
+      try {
+        const value = JSON.parse(raw) as Record<string, unknown>
+        const lifecycleEvent = value.event === 'claim'
+          || value.event === 'prepared-delivery'
+          || value.event === 'delivery-attempt-claim'
+          || value.event === 'delivery-receipt'
+          || value.event === 'environment-prefinish-settle'
+        if (value.jobId === jobId && lifecycleEvent && isNonEmptyString(value.runId)) invalidLifecycleRunIds.add(value.runId)
+      } catch {
+        // Corrupt lines remain fail-conservative and have no recoverable identity.
+      }
+      continue
+    }
     if (parsed.record.jobId !== jobId) continue
     if (parsed.kind === 'v1') {
       anyRecord = true
@@ -556,10 +642,38 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
       environmentSettled.add(parsed.record.runId)
       continue
     }
+    if (parsed.kind === 'prepared-delivery') {
+      retainExact(preparedDeliveries, parsed.record, (a, b) => a.objectId === b.objectId && a.text === b.text && a.sessionId === b.sessionId && a.scheduledFor === b.scheduledFor)
+      continue
+    }
+    if (parsed.kind === 'delivery-attempt-claim') {
+      retainExact(deliveryAttemptClaims, parsed.record, (a, b) => a.objectId === b.objectId && a.claimedAt === b.claimedAt && a.sessionId === b.sessionId && a.scheduledFor === b.scheduledFor)
+      continue
+    }
+    if (parsed.kind === 'delivery-receipt') {
+      retainExact(deliveryReceipts, parsed.record, (a, b) => a.objectId === b.objectId && a.deliveryState === b.deliveryState && a.receiptAt === b.receiptAt && a.sessionId === b.sessionId && a.scheduledFor === b.scheduledFor && a.deliveredAt === b.deliveredAt && a.deliveryError === b.deliveryError)
+      continue
+    }
+    if (parsed.kind === 'environment-prefinish-settle') {
+      retainExact(prefinishSettledDeliveries, parsed.record, (a, b) => a.objectId === b.objectId && a.deliveryState === b.deliveryState && a.settledAt === b.settledAt && a.sessionId === b.sessionId && a.scheduledFor === b.scheduledFor && a.deliveredAt === b.deliveredAt && a.deliveryError === b.deliveryError)
+      continue
+    }
     if (parsed.kind === 'claim') {
-      claims.set(parsed.record.runId, parsed.record)
+      const previous = claims.get(parsed.record.runId)
+      const firstClaim = previous === undefined
+      if (firstClaim) claims.set(parsed.record.runId, parsed.record)
+      else if (
+        previous.jobId !== parsed.record.jobId
+        || previous.sessionId !== parsed.record.sessionId
+        || previous.scheduledFor !== parsed.record.scheduledFor
+        || previous.claimedAt !== parsed.record.claimedAt
+        || previous.trigger !== parsed.record.trigger
+        || previous.agentEnvironment !== parsed.record.agentEnvironment
+        || previous.deliveryLifecycle !== parsed.record.deliveryLifecycle
+        || previous.nextRunAt !== parsed.record.nextRunAt
+      ) claimConflicts.add(parsed.record.runId)
       settled.add(parsed.record.runId)
-      if (!isManualRun(parsed.record)) {
+      if (firstClaim && !isManualRun(parsed.record)) {
         anyRecord = true
         if (parsed.record.nextRunAt !== undefined) nextRunAt = parsed.record.nextRunAt
       }
@@ -584,11 +698,19 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
     anyRecord,
     ...(nextRunAt === undefined ? {} : { nextRunAt }),
     interrupted,
+    claims,
     unsettledFinishes,
     ...(legacyFinishedAt === undefined ? {} : { legacyFinishedAt }),
     consecutiveExecutionErrors,
     failureAlertRunIds,
     ...(lastFailureAlertClaimedAt === undefined ? {} : { lastFailureAlertClaimedAt }),
+    preparedDeliveries,
+    deliveryAttemptClaims,
+    deliveryReceipts,
+    prefinishSettledDeliveries,
+    lifecycleConflicts,
+    claimConflicts,
+    invalidLifecycleRunIds,
   }
 }
 
@@ -609,13 +731,44 @@ export class RunLedger {
     return foldRunLines(this.store.readLines(), jobId)
   }
 
+  private requirePreparedClaim(
+    folded: FoldedJobRuns,
+    record: { readonly jobId: string; readonly runId: string; readonly sessionId: string; readonly scheduledFor: string },
+  ): void {
+    const claim = folded.claims.get(record.runId)
+    if (claim === undefined
+      || claim.jobId !== record.jobId
+      || claim.sessionId !== record.sessionId
+      || claim.scheduledFor !== record.scheduledFor
+      || claim.agentEnvironment === undefined
+      || claim.deliveryLifecycle !== 'prepared') {
+      throw new Error(`prepared delivery requires the exact prepared claim for ${record.runId}`)
+    }
+  }
+
   /**
    * Idempotently claim one run. Returns `claimed` only when the append
    * landed; `already_claimed` when the runId is settled (claim or finish).
    * I/O failures throw — the caller must not execute any side effect.
    */
   claim(record: RunClaimRecord): 'claimed' | 'already_claimed' {
-    if (this.foldJob(record.jobId).settledRunIds.has(record.runId)) return 'already_claimed'
+    const folded = this.foldJob(record.jobId)
+    if (folded.claimConflicts.has(record.runId)) throw new Error(`conflicting claim for ${record.runId}`)
+    const current = folded.claims.get(record.runId)
+    if (current !== undefined) {
+      if (
+        current.jobId === record.jobId
+        && current.sessionId === record.sessionId
+        && current.scheduledFor === record.scheduledFor
+        && current.claimedAt === record.claimedAt
+        && current.trigger === record.trigger
+        && current.agentEnvironment === record.agentEnvironment
+        && current.deliveryLifecycle === record.deliveryLifecycle
+        && current.nextRunAt === record.nextRunAt
+      ) return 'already_claimed'
+      throw new Error(`conflicting claim for ${record.runId}`)
+    }
+    if (folded.settledRunIds.has(record.runId)) return 'already_claimed'
     this.store.append(record)
     return 'claimed'
   }
@@ -631,13 +784,126 @@ export class RunLedger {
     return 'claimed'
   }
 
-  /** Append one V2 finish event. I/O failures throw. */
+  /** Append one V2 finish event, after closing any declared prepared lifecycle. */
   finish(record: RunFinishRecord): void {
+    const folded = this.foldJob(record.jobId)
+    const claim = folded.claims.get(record.runId)
+    const prepared = folded.preparedDeliveries.get(record.runId)
+    const receipt = folded.deliveryReceipts.get(record.runId)
+    const acknowledgement = folded.prefinishSettledDeliveries.get(record.runId)
+    const hasPreparedLifecycle = claim?.deliveryLifecycle === 'prepared'
+      || prepared !== undefined
+      || folded.deliveryAttemptClaims.has(record.runId)
+      || receipt !== undefined
+      || acknowledgement !== undefined
+    if (hasPreparedLifecycle && (
+      folded.claimConflicts.has(record.runId)
+      || folded.lifecycleConflicts.has(record.runId)
+      || folded.invalidLifecycleRunIds.has(record.runId)
+      || claim === undefined
+      || claim.deliveryLifecycle !== 'prepared'
+      || claim.agentEnvironment === undefined
+      || prepared === undefined
+      || receipt === undefined
+      || acknowledgement === undefined
+      || claim.sessionId !== record.sessionId
+      || claim.scheduledFor !== record.scheduledFor
+      || prepared.sessionId !== claim.sessionId
+      || prepared.scheduledFor !== claim.scheduledFor
+      || acknowledgement.objectId !== prepared.objectId
+      || acknowledgement.objectId !== receipt.objectId
+      || acknowledgement.sessionId !== claim.sessionId
+      || acknowledgement.scheduledFor !== claim.scheduledFor
+      || acknowledgement.deliveryState !== receipt.deliveryState
+      || acknowledgement.deliveredAt !== receipt.deliveredAt
+      || acknowledgement.deliveryError !== receipt.deliveryError
+    )) {
+      throw new Error(`prepared finish requires an exact prefinish acknowledgement for ${record.runId}`)
+    }
     this.store.append(record)
   }
 
   /** Acknowledge one idempotent environment settlement after it succeeds. */
   environmentSettled(record: RunEnvironmentSettleRecord): void {
+    this.store.append(record)
+  }
+
+  /** Persist the exact provider-owned object before transport is touched. */
+  prepareDelivery(record: RunPreparedDeliveryRecord): void {
+    if (!isValidPreparedDeliveryObject(record)) throw new Error('invalid prepared delivery')
+    const folded = this.foldJob(record.jobId)
+    if (folded.invalidLifecycleRunIds.has(record.runId)) throw new Error(`invalid delivery lifecycle evidence for ${record.runId}`)
+    if (folded.claimConflicts.has(record.runId)) throw new Error(`conflicting claim for ${record.runId}`)
+    this.requirePreparedClaim(folded, record)
+    const current = folded.preparedDeliveries.get(record.runId)
+    if (current !== undefined) {
+      if (current.objectId === record.objectId && current.text === record.text && current.sessionId === record.sessionId && current.scheduledFor === record.scheduledFor) return
+      throw new Error(`conflicting prepared delivery for ${record.runId}`)
+    }
+    this.store.append(record)
+  }
+
+  /** Claim exactly one transport side effect for the prepared object. */
+  claimDeliveryAttempt(record: RunDeliveryAttemptClaimRecord): void {
+    if (!isValidPreparedObjectId(record.objectId)) throw new Error(`invalid delivery object identity for ${record.runId}`)
+    const folded = this.foldJob(record.jobId)
+    if (folded.invalidLifecycleRunIds.has(record.runId)) throw new Error(`invalid delivery lifecycle evidence for ${record.runId}`)
+    if (folded.claimConflicts.has(record.runId)) throw new Error(`conflicting claim for ${record.runId}`)
+    this.requirePreparedClaim(folded, record)
+    const current = folded.deliveryAttemptClaims.get(record.runId)
+    if (current !== undefined) {
+      if (current.objectId === record.objectId && current.claimedAt === record.claimedAt && current.sessionId === record.sessionId && current.scheduledFor === record.scheduledFor) return
+      throw new Error(`conflicting delivery attempt claim for ${record.runId}`)
+    }
+    const prepared = folded.preparedDeliveries.get(record.runId)
+    if (prepared === undefined || prepared.objectId !== record.objectId || folded.lifecycleConflicts.has(record.runId)) {
+      throw new Error(`delivery attempt requires the durable prepared object for ${record.runId}`)
+    }
+    this.store.append(record)
+  }
+
+  /** Persist one trusted object-level transport receipt. */
+  recordDeliveryReceipt(record: RunDeliveryReceiptRecord): void {
+    if (!isValidPreparedObjectId(record.objectId)) throw new Error(`invalid delivery object identity for ${record.runId}`)
+    const folded = this.foldJob(record.jobId)
+    if (folded.invalidLifecycleRunIds.has(record.runId)) throw new Error(`invalid delivery lifecycle evidence for ${record.runId}`)
+    if (folded.claimConflicts.has(record.runId)) throw new Error(`conflicting claim for ${record.runId}`)
+    this.requirePreparedClaim(folded, record)
+    const current = folded.deliveryReceipts.get(record.runId)
+    if (current !== undefined) {
+      if (current.objectId === record.objectId && current.deliveryState === record.deliveryState && current.receiptAt === record.receiptAt && current.sessionId === record.sessionId && current.scheduledFor === record.scheduledFor && current.deliveredAt === record.deliveredAt && current.deliveryError === record.deliveryError) return
+      throw new Error(`conflicting delivery receipt for ${record.runId}`)
+    }
+    const prepared = folded.preparedDeliveries.get(record.runId)
+    const attempt = folded.deliveryAttemptClaims.get(record.runId)
+    if (prepared === undefined || attempt === undefined
+      || prepared.objectId !== record.objectId || prepared.sessionId !== record.sessionId || prepared.scheduledFor !== record.scheduledFor
+      || attempt.objectId !== record.objectId || attempt.sessionId !== record.sessionId || attempt.scheduledFor !== record.scheduledFor
+      || folded.lifecycleConflicts.has(record.runId)) {
+      throw new Error(`delivery receipt requires the exact prepared object and attempt for ${record.runId}`)
+    }
+    this.store.append(record)
+  }
+
+  /** Persist the technical pre-finish acknowledgement after the hook returns. */
+  environmentPrefinishSettled(record: RunEnvironmentPrefinishSettleRecord): void {
+    if (!isValidPreparedObjectId(record.objectId)) throw new Error(`invalid delivery object identity for ${record.runId}`)
+    const folded = this.foldJob(record.jobId)
+    if (folded.invalidLifecycleRunIds.has(record.runId)) throw new Error(`invalid delivery lifecycle evidence for ${record.runId}`)
+    if (folded.claimConflicts.has(record.runId)) throw new Error(`conflicting claim for ${record.runId}`)
+    this.requirePreparedClaim(folded, record)
+    const current = folded.prefinishSettledDeliveries.get(record.runId)
+    if (current !== undefined) {
+      if (current.objectId === record.objectId && current.deliveryState === record.deliveryState && current.settledAt === record.settledAt && current.sessionId === record.sessionId && current.scheduledFor === record.scheduledFor && current.deliveredAt === record.deliveredAt && current.deliveryError === record.deliveryError) return
+      throw new Error(`conflicting prefinish acknowledgement for ${record.runId}`)
+    }
+    const prepared = folded.preparedDeliveries.get(record.runId)
+    const receipt = folded.deliveryReceipts.get(record.runId)
+    if (prepared === undefined || receipt === undefined || prepared.objectId !== record.objectId || receipt.objectId !== record.objectId
+      || receipt.deliveryState !== record.deliveryState || receipt.sessionId !== record.sessionId || receipt.scheduledFor !== record.scheduledFor
+      || receipt.deliveredAt !== record.deliveredAt || receipt.deliveryError !== record.deliveryError || folded.lifecycleConflicts.has(record.runId)) {
+      throw new Error(`prefinish acknowledgement requires the durable prepared object for ${record.runId}`)
+    }
     this.store.append(record)
   }
 }

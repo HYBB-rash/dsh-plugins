@@ -735,31 +735,43 @@ describe('TODO02 X source-side complete candidate report seam', () => {
       items: [],
     })
     const runId = `cron-x@${new Date(Date.now() - 1_000).toISOString()}`
-    vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProvider').mockImplementation(options => ({
+    const legacyPrepare = vi.fn(async () => {
+      throw new Error('legacy X cron provider must not prepare ordinary Feed runs')
+    })
+    vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProvider').mockReturnValue({
       marker: 'dsh-x-feed/v1',
       requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
-      prepare: async context => {
-        if (options.sourceCandidateReport !== undefined) {
-          await prepareAndSubmitXSourceCandidateReport({
-            period: options.sourceCandidateReport.period,
-            mechanicalAdmissionScope: options.sourceCandidateReport.mechanicalAdmissionScope,
-            materialProjectionReportScope: options.sourceCandidateReport.materialProjectionReportScope,
-            collectionEvidence: {
-              runId: context.runId,
-              source: 'x',
-              collectionPath: join(directory, '.runs', 'collection.jsonl'),
-              collectionBatch: join(directory, '.runs', 'collection.jsonl'),
-              deliveryId: 'delivery:cron',
-              ts: Math.floor(Date.now() / 1000),
-            },
-            currentCollection: [],
-            candidatePort: options.sourceCandidateReport.candidatePort,
-            reportPort: options.sourceCandidateReport.reportPort,
-          })
-        }
-        return { kind: 'skip', outcome: { text: undefined, error: undefined } }
-      },
-    } as never))
+      prepare: legacyPrepare,
+    } as never)
+    const ordinaryPrepare = vi.fn(async () => {
+      return { kind: 'skip' as const, outcome: { text: undefined, error: undefined } }
+    })
+    const ordinaryFactory = vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProviderForOrdinaryFeed')
+      .mockImplementation(options => ({
+        marker: 'dsh-x-feed/v1',
+        requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
+        prepare: async context => {
+          if (options.sourceCandidateReport !== undefined) {
+            await prepareAndSubmitXSourceCandidateReport({
+              period: options.sourceCandidateReport.period,
+              mechanicalAdmissionScope: options.sourceCandidateReport.mechanicalAdmissionScope,
+              materialProjectionReportScope: options.sourceCandidateReport.materialProjectionReportScope,
+              collectionEvidence: {
+                runId: context.runId,
+                source: 'x',
+                collectionPath: join(directory, '.runs', 'collection.jsonl'),
+                collectionBatch: join(directory, '.runs', 'collection.jsonl'),
+                deliveryId: 'delivery:cron',
+                ts: Math.floor(Date.now() / 1000),
+              },
+              currentCollection: [],
+              candidatePort: options.sourceCandidateReport.candidatePort,
+              reportPort: options.sourceCandidateReport.reportPort,
+            })
+          }
+          return ordinaryPrepare()
+        },
+      } as never))
     const extension = createCronEnvironmentExtension({
       logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
     } as never, {
@@ -791,6 +803,9 @@ describe('TODO02 X source-side complete candidate report seam', () => {
         event: 'source_candidate_report_accepted',
         accepted: { report: { source: 'x', branch: 'unscreened', candidates: [] } },
       })
+      expect(ordinaryFactory).toHaveBeenCalledOnce()
+      expect(ordinaryPrepare).toHaveBeenCalledOnce()
+      expect(legacyPrepare).not.toHaveBeenCalled()
     } finally {
       vi.restoreAllMocks()
       await rm(directory, { recursive: true, force: true })

@@ -81,9 +81,50 @@ export const MAX_COMMAND_TIMEOUT_SECONDS = 3_600
 export const MAX_COMMAND_OUTPUT_BYTES = 1_048_576
 export const MAX_FAILURE_ALERT_AFTER = 100
 export const MAX_FAILURE_ALERT_COOLDOWN_MINUTES = 10_080
+/** Maximum durable provider text size, measured in UTF-8 bytes. */
+export const MAX_PREPARED_TEXT_BYTES = 64 * 1024
+/** Maximum durable provider object identity size, measured in UTF-8 bytes. */
+export const MAX_PREPARED_OBJECT_ID_BYTES = 1024
 
 /** Delivery outcome kept orthogonal to the legacy run status field. */
 export type RunDeliveryState = 'delivered' | 'silent' | 'not_requested' | 'failed' | 'uncertain'
+
+/** Trusted terminal state for one prepared delivery object. */
+export type CronDeliveryState = Extract<RunDeliveryState, 'delivered' | 'failed' | 'uncertain'>
+
+/** Exact prepared object owned by a provider and delivered by cron. */
+export interface PreparedDeliveryObject {
+  readonly objectId: string
+  readonly text: string
+}
+
+/** Validate exact provider-owned delivery facts before durable preparation. */
+export function isValidPreparedObjectId(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.trim() !== ''
+    && value === value.trim()
+    && new TextEncoder().encode(value).byteLength <= MAX_PREPARED_OBJECT_ID_BYTES
+}
+
+export function isValidPreparedDeliveryObject(value: unknown): value is PreparedDeliveryObject {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const object = value as Record<string, unknown>
+  if (!isValidPreparedObjectId(object.objectId)) return false
+  if (typeof object.text !== 'string' || object.text.trim() === '') return false
+  return new TextEncoder().encode(object.text).byteLength <= MAX_PREPARED_TEXT_BYTES
+}
+
+/** Generic receipt fact that is durable before the technical finish event. */
+export interface CronDeliveryReceipt {
+  readonly objectId: string
+  readonly jobId: string
+  readonly runId: string
+  readonly sessionId: string
+  readonly scheduledFor: string
+  readonly deliveryState: CronDeliveryState
+  readonly deliveredAt?: string
+  readonly deliveryError?: string
+}
 
 /** One append-only line in jobs.jsonl. */
 export type JobLogEntry =
@@ -216,6 +257,9 @@ export interface RunClaimRecord {
   /** The schedule time being consumed, not the actual start time. */
   readonly scheduledFor: string
   readonly claimedAt: string
+  /** Persisted provider marker for a declared prepared-delivery lifecycle. */
+  readonly agentEnvironment?: AgentEnvironmentMarker
+  readonly deliveryLifecycle?: 'prepared'
   /** Crash-recovery anchor for recurring jobs (always in the future). */
   readonly nextRunAt?: string
 }
@@ -241,6 +285,48 @@ export interface RunEnvironmentSettleRecord {
   readonly jobId: string
   readonly settledAt: string
 }
+
+/** Durable exact prepared object, written before any transport side effect. */
+export interface RunPreparedDeliveryRecord extends PreparedDeliveryObject {
+  readonly schemaVersion: 2
+  readonly event: 'prepared-delivery'
+  readonly jobId: string
+  readonly runId: string
+  readonly sessionId: string
+  readonly scheduledFor: string
+  readonly preparedAt: string
+}
+
+/** Durable claim for the one transport attempt of a prepared object. */
+export interface RunDeliveryAttemptClaimRecord {
+  readonly schemaVersion: 2
+  readonly event: 'delivery-attempt-claim'
+  readonly jobId: string
+  readonly runId: string
+  readonly sessionId: string
+  readonly scheduledFor: string
+  readonly claimedAt: string
+  readonly objectId: string
+}
+
+/** Durable object-level trusted transport receipt. */
+export interface RunDeliveryReceiptRecord extends CronDeliveryReceipt {
+  readonly schemaVersion: 2
+  readonly event: 'delivery-receipt'
+  readonly receiptAt: string
+}
+
+/** Durable technical acknowledgement of a successful pre-finish hook. */
+export interface RunEnvironmentPrefinishSettleRecord extends CronDeliveryReceipt {
+  readonly schemaVersion: 2
+  readonly event: 'environment-prefinish-settle'
+  readonly settledAt: string
+}
+
+export const PREPARED_DELIVERY_EVENT = 'prepared-delivery' as const
+export const DELIVERY_ATTEMPT_CLAIM_EVENT = 'delivery-attempt-claim' as const
+export const DELIVERY_RECEIPT_EVENT = 'delivery-receipt' as const
+export const ENVIRONMENT_PREFINISH_SETTLE_EVENT = 'environment-prefinish-settle' as const
 
 /** V2 terminal statuses, including the crash-audit `interrupted` marker. */
 export type RunFinishStatus = RunStatus | 'interrupted'
@@ -273,6 +359,10 @@ export type RunEventRecord =
   | RunFailureAlertClaimRecord
   | RunFinishRecord
   | RunEnvironmentSettleRecord
+  | RunPreparedDeliveryRecord
+  | RunDeliveryAttemptClaimRecord
+  | RunDeliveryReceiptRecord
+  | RunEnvironmentPrefinishSettleRecord
 
 /** Every durable run line, including the legacy V1 terminal shape. */
 export type RunHistoryRecord = RunRecord | RunEventRecord
