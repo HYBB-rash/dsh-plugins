@@ -145,6 +145,13 @@ const submission = {
   ],
 } as const
 
+type LateStreamOutcome = 'complete' | 'tool-call' | 'reject'
+
+interface NeverSettlingWireAdapterOptions {
+  readonly respondToCancel?: boolean
+  readonly lateOutcome?: LateStreamOutcome
+}
+
 function response(value: unknown): StreamChunk[] {
   const argumentsText = JSON.stringify(value)
   const callId = CallId('ordinary-feed-editor-1')
@@ -192,7 +199,67 @@ class WireAdapter extends LlmAdapter {
   }
 }
 
-async function createHarness(adapter: WireAdapter): Promise<Context> {
+class NeverSettlingWireAdapter extends LlmAdapter {
+  readonly requests: GenerateOptions[] = []
+  readonly lateObserved: Promise<void>
+  private releasePending: (() => void) | undefined
+  private resolveLateObserved: (() => void) | undefined
+  private readonly respondToCancel: boolean
+  private readonly lateOutcome: LateStreamOutcome
+
+  constructor(options: NeverSettlingWireAdapterOptions = {}) {
+    super()
+    this.respondToCancel = options.respondToCancel ?? false
+    this.lateOutcome = options.lateOutcome ?? 'complete'
+    this.lateObserved = new Promise(resolve => { this.resolveLateObserved = resolve })
+  }
+
+  override resolveModel(provider: string, model: string): Promise<{
+    readonly provider: string
+    readonly id: string
+    readonly name: string
+  }> {
+    return Promise.resolve({ provider, id: model, name: model })
+  }
+
+  override async *stream(request: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(request)
+    yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+    await new Promise<void>(resolve => {
+      let settled = false
+      let removeAbort: (() => void) | undefined
+      const settle = (): void => {
+        if (settled) return
+        settled = true
+        removeAbort?.()
+        this.releasePending = undefined
+        resolve()
+      }
+      this.releasePending = settle
+      if (this.respondToCancel && request.signal !== undefined) {
+        const onAbort = (): void => settle()
+        request.signal.addEventListener('abort', onAbort, { once: true })
+        removeAbort = () => request.signal?.removeEventListener('abort', onAbort)
+      }
+    })
+    if (this.lateOutcome === 'tool-call') {
+      this.resolveLateObserved?.()
+      this.resolveLateObserved = undefined
+      for (const chunk of response(submission).slice(1)) yield chunk
+    } else if (this.lateOutcome === 'reject') {
+      this.resolveLateObserved?.()
+      this.resolveLateObserved = undefined
+      throw new Error('late provider stream rejection')
+    }
+  }
+
+  release(): void {
+    this.releasePending?.()
+    this.releasePending = undefined
+  }
+}
+
+async function createHarness(adapter: LlmAdapter): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
@@ -305,5 +372,106 @@ describe('TODO05 ordinary-feed editor one-shot Agent bootstrap', () => {
     expect(proposal.validateProposal).not.toHaveBeenCalled()
     expect(createAgent).not.toHaveBeenCalled()
     expect(adapter.requests).toHaveLength(0)
+  })
+
+  it('bounds a never-settling stream before cleanup waits for Agent idle', async () => {
+    vi.useFakeTimers()
+    const adapter = new NeverSettlingWireAdapter()
+    const ctx = await createHarness(adapter)
+    contexts.push(ctx)
+    const proposal: OrdinaryFeedEditorAgentProposalPort = {
+      readModelMaterials: vi.fn(() => ({ status: 'accepted' as const, value: { materials } })),
+      validateProposal: vi.fn(),
+    }
+    let settled = false
+    let disposed = false
+    ctx.on('agent/disposed', () => { disposed = true })
+    const resultPromise = createOrdinaryFeedEditorAgent({ ctx, proposal, timeoutMs: 10 })
+      .formEditingProposal()
+      .then(value => {
+        settled = true
+        return value
+      })
+    let settledBeforeRelease = false
+    let result: Awaited<typeof resultPromise> | undefined
+    try {
+      await vi.waitFor(() => expect(adapter.requests).toHaveLength(1), { timeout: 100, interval: 1 })
+      await vi.advanceTimersByTimeAsync(10)
+      await Promise.resolve()
+      settledBeforeRelease = settled
+    } finally {
+      adapter.release()
+      result = await resultPromise
+      vi.useRealTimers()
+    }
+    expect(result).toEqual({ status: 'failed' })
+    expect(proposal.readModelMaterials).toHaveBeenCalledTimes(1)
+    expect(proposal.validateProposal).not.toHaveBeenCalled()
+    expect(disposed).toBe(true)
+    expect(ctx.agents.list()).toHaveLength(0)
+    expect(settledBeforeRelease).toBe(true)
+  })
+
+  it('returns failed and disposes when the stream responds to Agent cancellation', async () => {
+    vi.useFakeTimers()
+    const adapter = new NeverSettlingWireAdapter({ respondToCancel: true })
+    const ctx = await createHarness(adapter)
+    contexts.push(ctx)
+    let disposed = false
+    ctx.on('agent/disposed', () => { disposed = true })
+    const proposal: OrdinaryFeedEditorAgentProposalPort = {
+      readModelMaterials: vi.fn(() => ({ status: 'accepted' as const, value: { materials } })),
+      validateProposal: vi.fn(),
+    }
+    const resultPromise = createOrdinaryFeedEditorAgent({ ctx, proposal, timeoutMs: 10 }).formEditingProposal()
+    try {
+      await vi.waitFor(() => expect(adapter.requests).toHaveLength(1), { timeout: 100, interval: 1 })
+      await vi.advanceTimersByTimeAsync(10)
+      await expect(resultPromise).resolves.toEqual({ status: 'failed' })
+    } finally {
+      adapter.release()
+      await resultPromise.catch(() => undefined)
+      vi.useRealTimers()
+    }
+    expect(disposed).toBe(true)
+    expect(ctx.agents.list()).toHaveLength(0)
+    expect(proposal.readModelMaterials).toHaveBeenCalledTimes(1)
+    expect(proposal.validateProposal).not.toHaveBeenCalled()
+  })
+
+  it.each(['tool-call', 'reject'] as const)('isolates a late %s after timeout cleanup', async lateOutcome => {
+    vi.useFakeTimers()
+    const adapter = new NeverSettlingWireAdapter({ lateOutcome })
+    const ctx = await createHarness(adapter)
+    contexts.push(ctx)
+    let disposed = false
+    ctx.on('agent/disposed', () => { disposed = true })
+    const proposal: OrdinaryFeedEditorAgentProposalPort = {
+      readModelMaterials: vi.fn(() => ({ status: 'accepted' as const, value: { materials } })),
+      validateProposal: vi.fn(),
+    }
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    const resultPromise = createOrdinaryFeedEditorAgent({ ctx, proposal, timeoutMs: 10 }).formEditingProposal()
+    try {
+      await vi.waitFor(() => expect(adapter.requests).toHaveLength(1), { timeout: 100, interval: 1 })
+      await vi.advanceTimersByTimeAsync(10)
+      await expect(resultPromise).resolves.toEqual({ status: 'failed' })
+      expect(disposed).toBe(true)
+      expect(ctx.agents.list()).toHaveLength(0)
+      adapter.release()
+      await adapter.lateObserved
+      await Promise.resolve()
+      await Promise.resolve()
+    } finally {
+      adapter.release()
+      await resultPromise.catch(() => undefined)
+      process.off('unhandledRejection', onUnhandled)
+      vi.useRealTimers()
+    }
+    expect(proposal.validateProposal).not.toHaveBeenCalled()
+    expect(unhandled).toHaveLength(0)
+    expect(ctx.agents.list()).toHaveLength(0)
   })
 })

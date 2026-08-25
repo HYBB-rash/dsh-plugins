@@ -8,7 +8,7 @@ import {
   type ModelSelection,
 } from '@deepseek-ai/dsh-agent'
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, Message, ToolSchema, UserMessage } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, Message, StreamChunk, ToolSchema, UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 
@@ -81,6 +81,7 @@ export class OneShotStructuredAgentSurface<T> {
   private submitCount = 0
   private submitted: T | undefined
   private failure: OneShotStructuredAgentError | undefined
+  private closed = false
 
   constructor(options: StructuredAgentSurfaceOptions<T>) {
     this.options = options
@@ -123,9 +124,11 @@ export class OneShotStructuredAgentSurface<T> {
 
   capture(ctx: Context, sessionId: SessionId): void {
     if (this.disposeCapture !== undefined) this.fail('surface-contaminated', 'structured wire capture is already installed')
+    if (this.closed) this.fail('surface-contaminated', 'structured wire capture is already closed')
     this.expectedSessionId = sessionId
     this.disposeCapture = ctx.on('llm/stream', (request, next) => {
       if (request.sessionId !== sessionId) return next()
+      if (this.closed) return emptyStream()
       // A tool may conclude the turn while a harness-owned internal stream is
       // already queued. Once the DTO is accepted, that follow-up has no
       // business work and must not become a second captured or adapter call.
@@ -165,11 +168,13 @@ export class OneShotStructuredAgentSurface<T> {
   }
 
   dispose(): void {
+    this.closed = true
     this.disposeCapture?.()
     this.disposeCapture = undefined
   }
 
   private async submit(value: unknown, exec: ToolRunContext): Promise<T> {
+    if (this.closed) this.fail('timeout', 'structured Agent submitted after its surface was closed')
     this.submitCount += 1
     if (this.submitCount !== 1) this.failSubmission(exec, 'structured Agent submitted more than once')
     try {
@@ -272,6 +277,8 @@ export async function runOneShotStructuredAgent<T>(
   let flushAttempted = false
   let successResult: OneShotStructuredAgentResult<T> | undefined
   let primaryError: unknown
+  let streamDeadline: OneShotStreamDeadline | undefined
+  let disposeStreamGuard: (() => void) | undefined
 
   surface.capture(options.ctx, sessionId)
 
@@ -284,6 +291,12 @@ export async function runOneShotStructuredAgent<T>(
     })
 
     await surface.verifySurface(handle.agent)
+    const deadline = createOneShotStreamDeadline(timeoutMs, options.signal, () => surface.dispose())
+    streamDeadline = deadline
+    disposeStreamGuard = options.ctx.on('llm/stream', (request, next) => {
+      if (request.sessionId !== sessionId) return next()
+      return deadline.wrap(next())
+    })
     handle.agent.followup(createDriverMessage(options.driverText ?? 'structured planner driver'))
     await waitForAgent(handle.agent, timeoutMs, options.signal, () => {
       try {
@@ -305,6 +318,8 @@ export async function runOneShotStructuredAgent<T>(
   } catch (error) {
     primaryError = error
   } finally {
+    streamDeadline?.dispose()
+    disposeStreamGuard?.()
     surface.dispose()
     const cleanupErrors = await cleanupAgent(options.ctx, handle, primaryError, flushed || flushAttempted)
     if (cleanupErrors.length > 0 && primaryError === undefined) {
@@ -448,6 +463,88 @@ function createDriverMessage(text: string): UserMessage {
 
 function createAbortError(reason: unknown): OneShotStructuredAgentError {
   return new OneShotStructuredAgentError('aborted', reason instanceof Error ? reason.message : 'structured Agent was aborted')
+}
+
+interface OneShotStreamDeadline {
+  readonly wrap: (source: AsyncIterable<StreamChunk>) => AsyncIterable<StreamChunk>
+  readonly dispose: () => void
+}
+
+function createOneShotStreamDeadline(
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+  closeSurface: () => void,
+): OneShotStreamDeadline {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let disposed = false
+  let rejectFailure: (error: OneShotStructuredAgentError) => void = () => {}
+  const failure = new Promise<never>((_resolve, reject) => { rejectFailure = reject })
+  void failure.catch(() => undefined)
+
+  const fail = (error: OneShotStructuredAgentError): void => {
+    if (disposed) return
+    disposed = true
+    closeSurface()
+    rejectFailure(error)
+  }
+  const onAbort = (): void => fail(createAbortError(signal?.reason))
+  if (signal?.aborted) onAbort()
+  else if (signal !== undefined) signal.addEventListener('abort', onAbort, { once: true })
+  if (!disposed) {
+    timer = setTimeout(() => fail(new OneShotStructuredAgentError('timeout', `structured Agent timed out after ${timeoutMs}ms`)), timeoutMs)
+  }
+
+  return {
+    wrap: source => wrapOneShotStream(source, failure),
+    dispose: () => {
+      disposed = true
+      if (timer !== undefined) clearTimeout(timer)
+      timer = undefined
+      signal?.removeEventListener('abort', onAbort)
+    },
+  }
+}
+
+function wrapOneShotStream(
+  source: AsyncIterable<StreamChunk>,
+  failure: Promise<never>,
+): AsyncIterable<StreamChunk> {
+  const sourceIterator = source[Symbol.asyncIterator]()
+  let closed = false
+
+  const closeSource = (): void => {
+    if (closed) return
+    closed = true
+    try {
+      const closing = sourceIterator.return?.()
+      if (closing !== undefined) void Promise.resolve(closing).catch(() => undefined)
+    } catch {
+      // The stream is already failing; a best-effort close must not replace it.
+    }
+  }
+
+  const iterator: AsyncIterableIterator<StreamChunk> = {
+    next: () => {
+      if (closed) return Promise.resolve({ done: true, value: undefined })
+      let pending: Promise<IteratorResult<StreamChunk>>
+      try {
+        pending = Promise.resolve(sourceIterator.next())
+      } catch (error) {
+        return Promise.reject(error)
+      }
+      void pending.catch(() => undefined)
+      return Promise.race([pending, failure]).catch(error => {
+        closeSource()
+        throw error
+      })
+    },
+    return: () => {
+      closeSource()
+      return Promise.resolve({ done: true, value: undefined })
+    },
+    [Symbol.asyncIterator]() { return this },
+  }
+  return iterator
 }
 
 async function* emptyStream(): AsyncIterable<never> {
