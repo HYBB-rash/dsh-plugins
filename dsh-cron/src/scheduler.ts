@@ -1032,6 +1032,11 @@ export class SchedulerRuntime implements RunNowPort {
           ...(meaningPortLease === undefined ? {} : { runDeliveryMeaningPort: meaningPortLease.port }),
         }
         const result = await registry.recoverPreparedDelivery(job.agentEnvironment, context)
+        if (!result.ok) {
+          this.ctx.logger.warn(
+            `dsh-cron: claim-only recovery failed category=claim_only_recovery stage=provider_recover code=${result.error.code} jobId=${context.jobId} runId=${context.runId} sessionId=${context.sessionId}`,
+          )
+        }
         if (!result.ok || result.recovery.status !== 'ready') {
           claimOnlyRecoveryReady = false
           await this.disposeMeaningPortLease(meaningPortLease, runId)

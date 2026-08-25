@@ -40,6 +40,10 @@ const SUBMIT_ORDINARY_FEED_EDITING_PROPOSAL = 'submit_x_ordinary_feed_editing_pr
 class WireAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
 
+  constructor(private failBeforeProposal = false) {
+    super()
+  }
+
   override resolveModel(provider: string, model: string): Promise<{
     readonly provider: string
     readonly id: string
@@ -50,6 +54,10 @@ class WireAdapter extends LlmAdapter {
 
   override async *stream(request: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(request)
+    if (this.failBeforeProposal) {
+      this.failBeforeProposal = false
+      throw new Error('controlled scheduled editor failure before proposal')
+    }
     const callId = CallId('todo05-scheduled-scaffold')
     const argumentsText = JSON.stringify({
       title: 'Ordinary target feed',
@@ -885,6 +893,248 @@ describe('TODO05 scheduled X E2E scaffold', () => {
       expect(sends).toBe(1)
     } finally {
       await runtime?.dispose()
+      unregister?.()
+      if (ctx !== undefined) await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('recovers a durable claim-only X run from startup without an external drive', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'todo05-scheduled-claim-only-startup-'))
+    const jobId = 'todo05-x-feed-claim-only-startup-e2e'
+    const scheduledFor = new Date(Date.now() - 2_000).toISOString()
+    const runId = `${jobId}@${scheduledFor}`
+    const sessionId = `session-cron-run-${createHash('sha256').update(runId).digest('hex').slice(0, 32)}`
+    const claimedAt = new Date(Date.parse(scheduledFor) + 1_000).toISOString()
+    const claimBinding = { jobId, runId, sessionId, scheduledFor, claimedAt, trigger: 'scheduled' as const }
+    const storeDir = join(root, 'cron')
+    let ctx: Context | undefined
+    let runtime: SchedulerRuntime | undefined
+    let unregister: (() => void) | undefined
+    let setupPortDispose: (() => Promise<void>) | undefined
+    let sends = 0
+    let driveCalls = 0
+
+    try {
+      const fixture = await createScheduledXFixture(root, jobId, scheduledFor, runId)
+      await mkdir(storeDir, { recursive: true })
+      const job = {
+        id: jobId,
+        externalRef: 'dsh-x-feed:claim-only-startup',
+        schedule: { kind: 'once', runAt: scheduledFor },
+        prompt: 'Recover the ordinary X feed editing run.',
+        deliver: 'telegram',
+        sessionMode: 'per_run',
+        agentEnvironment: 'dsh-x-feed/v1',
+        createdAt: new Date().toISOString(),
+      } satisfies Job
+      await appendFile(join(storeDir, 'jobs.jsonl'), `${JSON.stringify({ op: 'create', ...job })}\n`, 'utf8')
+      new RunLedger(storeDir).claim({
+        schemaVersion: 2,
+        event: 'claim',
+        ...claimBinding,
+        agentEnvironment: job.agentEnvironment,
+        deliveryLifecycle: 'prepared',
+      })
+
+      const wire = new WireAdapter(true)
+      ctx = await createHarness(wire)
+      const registry = provideCronAgentEnvironmentRegistry(ctx)
+      const provider = createCronEnvironmentExtension(ctx, {
+        cronJobId: jobId,
+        dataDir: fixture.dataDir,
+        pythonBin: '/bin/sh',
+        pipelinePath: join(fixture.dataDir, 'x_insight_pipeline.py'),
+        personalFeedDataDir: fixture.personalFeedDataDir,
+        personalFeedRequiredSources: ['x'],
+        candidateReportingWindowMs: 300_000,
+      })
+      unregister = registry.register(provider)
+      const meaningFactory = provideCronRunDeliveryMeaningPortFactory(ctx, { storeDir })
+      const setupPort = await meaningFactory.createRunPort(claimBinding)
+      expect(setupPort.status).toBe('accepted')
+      if (setupPort.status !== 'accepted') throw new Error('test setup could not create the real meaning port')
+      setupPortDispose = setupPort.dispose
+
+      await expect(provider.recoverPreparedDelivery!({
+        ...claimBinding,
+        jobKind: 'agent',
+        sessionMode: 'per_run',
+        gate: 'forbidden',
+        runDeliveryMeaningPort: setupPort.port,
+      })).rejects.toThrow('ordinary Feed editor Agent did not produce an accepted proposal')
+      await setupPort.dispose()
+      setupPortDispose = undefined
+
+      const periodScopes = await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'period-scopes.jsonl'))
+      const currentContexts = await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'current-context-inputs.jsonl'))
+      const reports = await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'source-candidate-reports.jsonl'))
+      const candidateFacts = await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'candidate-period-facts.jsonl'))
+      const editingInputs = await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'editing-inputs.jsonl'))
+      expect(periodScopes.filter(record => record.event === 'period_scope_established')).toHaveLength(1)
+      expect(currentContexts.filter(record => record.event === 'current_context_accepted')).toHaveLength(1)
+      expect(reports.filter(record => record.event === 'source_candidate_report_accepted')).toHaveLength(1)
+      expect(candidateFacts.filter(record => record.event === 'candidate_accepted_into_period')).toHaveLength(2)
+      expect(candidateFacts.filter(record => record.event === 'material_fact_recorded')).toHaveLength(2)
+      expect(editingInputs.filter(record => record.event === 'editing_input_accepted')).toHaveLength(2)
+      expect(await readFile(join(fixture.dataDir, 'trusted-fact-navigation.json'), 'utf8')).not.toBe('')
+      expect((await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'delivery-and-receipt.jsonl')))
+        .filter(record => record.event === 'formal_feed_content_delivery_accepted')).toHaveLength(0)
+      expect((await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'period-business.jsonl')))
+        .filter(record => record.event === 'formal_content_delivery_accepted')).toHaveLength(0)
+      expect(new RunLedger(storeDir).foldJob(jobId).preparedDeliveries.size).toBe(0)
+
+      const controller = new AbortController()
+      runtime = new SchedulerRuntime(ctx, schedulerConfig(storeDir), {} as never, 0, controller.signal, {
+        driveTurn: async () => {
+          driveCalls++
+          return { text: 'startup recovery must not drive an Agent', error: undefined }
+        },
+        deliverText: async () => {
+          sends++
+          return { state: 'delivered', deliveredAt: new Date().toISOString() }
+        },
+      })
+      runtime.start()
+
+      await waitFor(() => readJsonLinesIfPresent(join(storeDir, 'runs.jsonl'))
+        .then(rows => rows.some(record => record.event === 'finish' && record.runId === runId)))
+      const completedRows = await readJsonLinesIfPresent(join(storeDir, 'runs.jsonl'))
+      const lifecycleEvents = [
+        'claim',
+        'prepared-delivery',
+        'delivery-attempt-claim',
+        'delivery-receipt',
+        'environment-prefinish-settle',
+        'finish',
+      ] as const
+      for (const event of lifecycleEvents) {
+        expect(completedRows.filter(record => record.event === event && record.runId === runId)).toHaveLength(1)
+      }
+      expect(completedRows.filter(record => record.event === 'claim')).toHaveLength(1)
+      expect(completedRows.some(record => record.status === 'interrupted')).toBe(false)
+      expect(driveCalls).toBe(0)
+      expect(sends).toBe(1)
+      expect(wire.requests).toHaveLength(2)
+
+      const periodBusiness = await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'period-business.jsonl'))
+      const c19 = periodBusiness.filter(record => record.event === 'formal_content_delivery_accepted')
+      expect(c19).toHaveLength(1)
+      const c19Object = (c19[0]!.request as {
+        readonly object: {
+          readonly object: string
+          readonly period: { readonly run: string; readonly period: string }
+          readonly content: { readonly body: string }
+          readonly selected: { readonly candidates: readonly Record<string, unknown>[] }
+        }
+      }).object
+      expect(c19Object.selected.candidates).toHaveLength(1)
+      expect(c19Object.selected.candidates[0]?.candidate).toBe('x-status:1001')
+      const folded = new RunLedger(storeDir).foldJob(jobId)
+      const receipt = folded.deliveryReceipts.get(runId)
+      expect(receipt).toBeDefined()
+      expect(receipt?.objectId).toBe(c19Object.object)
+      expect(receipt?.jobId).toBe(claimBinding.jobId)
+      expect(receipt?.runId).toBe(claimBinding.runId)
+      expect(receipt?.sessionId).toBe(claimBinding.sessionId)
+      expect(receipt?.scheduledFor).toBe(claimBinding.scheduledFor)
+      expect(receipt?.deliveryState).toBe('delivered')
+      expect(receipt?.deliveredAt).toEqual(expect.any(String))
+      expect(receipt?.deliveryError).toBeUndefined()
+      expect(receipt?.receiptAt).toEqual(expect.any(String))
+      const prepared = folded.preparedDeliveries.get(runId)
+      expect(prepared).toMatchObject({
+        jobId,
+        runId,
+        objectId: c19Object.object,
+        text: c19Object.content.body,
+      })
+      const deliveryOwners = (await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'delivery-and-receipt.jsonl')))
+        .filter(record => record.event === 'formal_feed_content_delivery_accepted')
+      expect(deliveryOwners).toHaveLength(1)
+      expect((deliveryOwners[0]!.request as { readonly object: { readonly object: string } }).object.object)
+        .toBe(c19Object.object)
+      expect(periodBusiness.filter(record => record.event === 'candidate_disposition_accepted')).toHaveLength(2)
+      expect(periodBusiness.filter(record => record.event === 'source_disposition_state_accepted')).toHaveLength(2)
+      const deliveryReceiptRows = periodBusiness.filter(record => record.event === 'formal_content_delivery_receipt_accepted')
+      expect(deliveryReceiptRows).toHaveLength(1)
+      expect(deliveryReceiptRows[0]?.receipt).toEqual({
+        object: c19Object.object,
+        period: c19Object.period,
+        result: 'Delivered',
+      })
+      expect(periodBusiness.filter(record => record.event === 'business_finalization_accepted')).toHaveLength(1)
+      expect((await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'ordinary-business-finalizations.jsonl')))
+        .filter(record => record.event === 'ordinary_business_finalization_accepted')).toHaveLength(1)
+      const candidateLocalState = await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'candidate-local-state.jsonl'))
+      const candidateOwners = candidateLocalState.filter(record => record.event === 'candidate_disposition_accepted')
+      expect(candidateOwners).toHaveLength(2)
+      expect(candidateOwners.map(record => (record.disposition as { readonly value: unknown }).value).sort())
+        .toEqual(['ReviewedNotSelected', 'Shown'])
+      const sourceCompletions = candidateLocalState.filter(record => record.event === 'source_disposition_completion_accepted')
+      expect(sourceCompletions).toHaveLength(2)
+      expect(sourceCompletions.map(record => (record.state as { readonly state: unknown }).state).sort())
+        .toEqual(['Displayed', 'Suppressed'])
+      const finalEditingInputs = await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'editing-inputs.jsonl'))
+      const displayFacts = finalEditingInputs.filter(record => record.event === 'display_fact_accepted')
+      expect(displayFacts).toHaveLength(1)
+      expect(displayFacts[0]?.fact).toEqual(expect.objectContaining({
+        candidate: expect.objectContaining({ candidate: 'x-status:1001' }),
+        disposition: expect.objectContaining({ value: 'Shown' }),
+        receipt: expect.objectContaining({ result: 'Delivered' }),
+      }))
+      const meaningOwners = await readJsonLinesIfPresent(join(storeDir, 'run-delivery-meaning.jsonl'))
+      expect(meaningOwners.filter(record => record.event === 'external-first-lineage')).toHaveLength(1)
+      expect(meaningOwners.filter(record => record.event === 'primary-run-content-object')).toHaveLength(1)
+      const meaningRows = meaningOwners.filter(record => record.event === 'run-delivery-meaning')
+      const finalizationRows = meaningOwners.filter(record => record.event === 'primary-run-content-business-finalization')
+      expect(meaningRows).toHaveLength(1)
+      expect(finalizationRows).toHaveLength(1)
+      for (const owner of [...meaningRows, ...finalizationRows]) {
+        expect(owner.claim).toEqual(claimBinding)
+        expect(owner.objectId).toBe(c19Object.object)
+        expect(owner.businessRunId).toBe(c19Object.period.run)
+        expect(owner.businessPeriodId).toBe(c19Object.period.period)
+      }
+
+      const beforeRebuild = await Promise.all([
+        readFile(join(storeDir, 'runs.jsonl'), 'utf8'),
+        readFile(join(storeDir, 'run-delivery-meaning.jsonl'), 'utf8'),
+        readFile(join(fixture.personalFeedDataDir, 'period-business.jsonl'), 'utf8'),
+        readFile(join(fixture.personalFeedDataDir, 'delivery-and-receipt.jsonl'), 'utf8'),
+        readFile(join(fixture.personalFeedDataDir, 'candidate-local-state.jsonl'), 'utf8'),
+        readFile(join(fixture.personalFeedDataDir, 'editing-inputs.jsonl'), 'utf8'),
+        readFile(join(fixture.personalFeedDataDir, 'ordinary-business-finalizations.jsonl'), 'utf8'),
+      ])
+      await runtime.dispose()
+      runtime = new SchedulerRuntime(ctx, schedulerConfig(storeDir), {} as never, 0, new AbortController().signal, {
+        driveTurn: async () => {
+          driveCalls++
+          return { text: 'rebuild must not drive an Agent', error: undefined }
+        },
+        deliverText: async () => {
+          sends++
+          return { state: 'delivered', deliveredAt: new Date().toISOString() }
+        },
+      })
+      runtime.start()
+      await new Promise(resolve => setTimeout(resolve, 25))
+      await runtime.dispose()
+      runtime = undefined
+      expect(await Promise.all([
+        readFile(join(storeDir, 'runs.jsonl'), 'utf8'),
+        readFile(join(storeDir, 'run-delivery-meaning.jsonl'), 'utf8'),
+        readFile(join(fixture.personalFeedDataDir, 'period-business.jsonl'), 'utf8'),
+        readFile(join(fixture.personalFeedDataDir, 'delivery-and-receipt.jsonl'), 'utf8'),
+        readFile(join(fixture.personalFeedDataDir, 'candidate-local-state.jsonl'), 'utf8'),
+        readFile(join(fixture.personalFeedDataDir, 'editing-inputs.jsonl'), 'utf8'),
+        readFile(join(fixture.personalFeedDataDir, 'ordinary-business-finalizations.jsonl'), 'utf8'),
+      ])).toEqual(beforeRebuild)
+      expect(driveCalls).toBe(0)
+      expect(sends).toBe(1)
+    } finally {
+      await runtime?.dispose()
+      await setupPortDispose?.()
       unregister?.()
       if (ctx !== undefined) await ctx.fiber.dispose()
       await rm(root, { recursive: true, force: true })

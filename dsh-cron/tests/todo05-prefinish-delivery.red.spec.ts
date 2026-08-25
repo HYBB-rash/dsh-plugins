@@ -126,6 +126,7 @@ function markedJob(id: string, overrides: Partial<Extract<Job, { readonly kind?:
 function contextFor(
   events: Array<{ readonly name: string; readonly payload: unknown }>,
   registry?: ReturnType<typeof createCronAgentEnvironmentRegistry>,
+  warnings?: string[],
 ) {
   const agent = {
     session: { seq: 0, events: [] },
@@ -150,7 +151,13 @@ function contextFor(
       if (name === 'sessionPersistence') return { list: async () => [] }
       return undefined
     },
-    logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    logger: {
+      info: () => undefined,
+      warn: (...args: unknown[]) => {
+        if (warnings !== undefined) warnings.push(args.map(value => String(value)).join(' '))
+      },
+      error: () => undefined,
+    },
     parallel: async (name: string, payload: unknown) => {
       events.push({ name, payload })
     },
@@ -1721,6 +1728,67 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
       await runtime.dispose()
     }
   }, 10_000)
+
+  it('bounds a claim-only provider recovery failure warning without leaking provider details', async () => {
+    const directory = temporaryDirectory()
+    const jobId = 'todo05-claim-only-recovery-warning'
+    const claim = claimOnly(jobId)
+    const sensitive = 'proposal=secret-proposal model=secret/model candidate=secret candidate body'
+    seedJob(directory, markedJob(jobId))
+    new RunLedger(directory).claim(claim)
+    const warnings: string[] = []
+    let recoveryCalls = 0
+    let sends = 0
+    let finishes = 0
+    const provider = providerWithLease(() => ({
+      preparedDelivery: { objectId: `formal:${jobId}`, text: 'must not prepare' },
+      setupAgent: async () => undefined,
+      verifySurface: async () => undefined,
+      settleDeliveryBeforeFinish: async () => ({ status: 'accepted' as const }),
+      dispose: async () => undefined,
+    }), {
+      settleRecoveredDelivery: async () => ({ status: 'accepted' as const }),
+      recoverPreparedDelivery: async () => {
+        recoveryCalls++
+        throw new Error(`provider recovery failed: ${sensitive}`)
+      },
+    })
+    const runtime = new SchedulerRuntime(
+      contextFor([], createCronAgentEnvironmentRegistry([provider]), warnings),
+      baseConfig(directory),
+      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
+      1,
+      new AbortController().signal,
+      {
+        driveTurn: async () => ({ text: 'must not drive', error: undefined }),
+      },
+    )
+    runtime.start()
+    try {
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(recoveryCalls).toBe(1)
+      finishes = records(directory).filter(record => record.event === 'finish').length
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]).toBe(
+        `dsh-cron: claim-only recovery failed category=claim_only_recovery stage=provider_recover code=recovery_failed jobId=${jobId} runId=${claim.runId} sessionId=${claim.sessionId}`,
+      )
+      expect(warnings[0]).not.toContain(sensitive)
+      expect(warnings[0]).not.toContain('secret-proposal')
+      expect(warnings[0]).not.toContain('secret/model')
+      expect(warnings[0]).not.toContain('secret candidate body')
+      expect(recoveryCalls).toBe(1)
+      const state = records(directory)
+      expect(state.filter(record => record.event === 'claim')).toHaveLength(1)
+      expect(state.some(record => record.event === PREPARED_DELIVERY_EVENT)).toBe(false)
+      expect(state.some(record => record.event === DELIVERY_ATTEMPT_CLAIM_EVENT)).toBe(false)
+      expect(state.some(record => record.event === DELIVERY_RECEIPT_EVENT)).toBe(false)
+      expect(state.some(record => record.event === ENVIRONMENT_PREFINISH_SETTLE_EVENT)).toBe(false)
+      expect(sends).toBe(0)
+      expect(finishes).toBe(0)
+    } finally {
+      await runtime.dispose()
+    }
+  })
 
   it('invalid recovered object is rejected before prepared persistence or transport', async () => {
     const directory = temporaryDirectory()
