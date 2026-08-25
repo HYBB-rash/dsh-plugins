@@ -15,7 +15,10 @@ import type { CandidateLocalStateRuntime } from './candidate-local-state.ts'
 import type { OrdinaryBusinessFinalizationOwner } from './ordinary-business-finalization-owner.ts'
 import { createOrdinaryFeedEditingProposalValidator } from './ordinary-feed-editing-proposal.ts'
 import { createOrdinaryFeedEditorAdapter } from './ordinary-feed-editor-adapter.ts'
-import { createOrdinaryFeedEditorAgent } from './ordinary-feed-editor-agent.ts'
+import {
+  createOrdinaryFeedEditorAgent,
+  type OrdinaryFeedEditorAgentProposalPort,
+} from './ordinary-feed-editor-agent.ts'
 import { createOrdinaryFeedPostReceiptAdapter } from './ordinary-feed-post-receipt-adapter.ts'
 import { createOrdinaryFeedPreparedDeliveryAdapter } from './ordinary-feed-prepared-delivery-adapter.ts'
 
@@ -43,6 +46,134 @@ interface OrdinaryFeedRunLifecycle {
   readonly prepareOrdinaryFeed: (input: OrdinaryFeedRunInput) => Promise<CronAgentEnvironmentLease>
 }
 
+type OrdinaryFeedRecoveryDiagnosticStage =
+  | 'read_model_materials'
+  | 'structured_agent'
+  | 'proposal_validation'
+  | 'adapter'
+
+type OrdinaryFeedRecoveryDiagnosticCode =
+  | 'materials_not_accepted'
+  | 'structured_agent_failed'
+  | 'proposal_not_accepted'
+  | 'adapter_not_accepted'
+
+interface OrdinaryFeedRecoveryWarningBinding {
+  readonly jobId: string
+  readonly runId: string
+  readonly sessionId: string
+  readonly stage: OrdinaryFeedRecoveryDiagnosticStage
+  readonly code: OrdinaryFeedRecoveryDiagnosticCode
+}
+
+const ORDINARY_FEED_RECOVERY_WARNING_CAPACITY = 64
+
+function sanitizeOrdinaryFeedRecoveryWarningId(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f]/g, '?')
+}
+
+function hasSameOrdinaryFeedRecoveryWarningBinding(
+  left: OrdinaryFeedRecoveryWarningBinding,
+  right: OrdinaryFeedRecoveryWarningBinding,
+): boolean {
+  return left.jobId === right.jobId
+    && left.runId === right.runId
+    && left.sessionId === right.sessionId
+    && left.stage === right.stage
+    && left.code === right.code
+}
+
+function createOrdinaryFeedRecoveryWarningReporter(
+  logger: Context['logger'],
+): (binding: OrdinaryFeedRecoveryWarningBinding) => void {
+  const warnedBindings: OrdinaryFeedRecoveryWarningBinding[] = []
+
+  return (binding): void => {
+    if (warnedBindings.some(warned => hasSameOrdinaryFeedRecoveryWarningBinding(warned, binding))) return
+    const warning = 'x-feed: ordinary recovery failed category=ordinary_feed_recovery'
+      + ` stage=${binding.stage} code=${binding.code}`
+      + ` jobId=${sanitizeOrdinaryFeedRecoveryWarningId(binding.jobId)}`
+      + ` runId=${sanitizeOrdinaryFeedRecoveryWarningId(binding.runId)}`
+      + ` sessionId=${sanitizeOrdinaryFeedRecoveryWarningId(binding.sessionId)}`
+    try {
+      logger.warn(warning)
+    } catch {
+      return
+    }
+    if (warnedBindings.length >= ORDINARY_FEED_RECOVERY_WARNING_CAPACITY) warnedBindings.shift()
+    warnedBindings.push(binding)
+  }
+}
+
+function ordinaryFeedRecoverySessionId(context: CronAgentEnvironmentPrepareContext): string | undefined {
+  const sessionId = (context as CronAgentEnvironmentPrepareContext & { readonly sessionId?: unknown }).sessionId
+  return typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined
+}
+
+class OrdinaryFeedRecoveryDiagnosticError extends Error {
+  readonly stage: OrdinaryFeedRecoveryDiagnosticStage
+  readonly code: OrdinaryFeedRecoveryDiagnosticCode
+
+  constructor(
+    stage: OrdinaryFeedRecoveryDiagnosticStage,
+    code: OrdinaryFeedRecoveryDiagnosticCode,
+  ) {
+    super('ordinary Feed recovery failed')
+    this.name = 'OrdinaryFeedRecoveryDiagnosticError'
+    this.stage = stage
+    this.code = code
+  }
+}
+
+interface ObservedOrdinaryFeedProposal {
+  readonly proposal: OrdinaryFeedEditorAgentProposalPort
+  readonly failedStage: () => OrdinaryFeedRecoveryDiagnosticStage | undefined
+}
+
+function observeOrdinaryFeedProposal(
+  proposal: OrdinaryFeedEditorAgentProposalPort,
+): ObservedOrdinaryFeedProposal {
+  let stage: OrdinaryFeedRecoveryDiagnosticStage | undefined
+  const observed = Object.freeze({
+    readModelMaterials: () => {
+      try {
+        const result = proposal.readModelMaterials()
+        stage = result.status === 'accepted' ? undefined : 'read_model_materials'
+        return result
+      } catch (error) {
+        stage = 'read_model_materials'
+        throw error
+      }
+    },
+    validateProposal: (input: unknown) => {
+      try {
+        const result = proposal.validateProposal(input)
+        stage = result.status === 'accepted' ? undefined : 'proposal_validation'
+        return result
+      } catch (error) {
+        stage = 'proposal_validation'
+        throw error
+      }
+    },
+  })
+  return Object.freeze({ proposal: observed, failedStage: () => stage })
+}
+
+function recoveryDiagnosticFor(
+  stage: OrdinaryFeedRecoveryDiagnosticStage | undefined,
+): OrdinaryFeedRecoveryDiagnosticError {
+  if (stage === 'read_model_materials') {
+    return new OrdinaryFeedRecoveryDiagnosticError(stage, 'materials_not_accepted')
+  }
+  if (stage === 'proposal_validation') {
+    return new OrdinaryFeedRecoveryDiagnosticError(stage, 'proposal_not_accepted')
+  }
+  if (stage === 'adapter') {
+    return new OrdinaryFeedRecoveryDiagnosticError(stage, 'adapter_not_accepted')
+  }
+  return new OrdinaryFeedRecoveryDiagnosticError('structured_agent', 'structured_agent_failed')
+}
+
 export function createOrdinaryFeedRunLifecycle(
   options: OrdinaryFeedRunLifecycleOptions,
 ): OrdinaryFeedRunLifecycle {
@@ -54,6 +185,7 @@ export function createOrdinaryFeedRunLifecycle(
     || options.finalizationOwner === undefined) {
     throw new Error('ordinary Feed run lifecycle requires its delivery collaborators')
   }
+  const reportRecoveryWarning = createOrdinaryFeedRecoveryWarningReporter(options.ctx.logger)
 
   const recoverExistingOrdinaryFeed = (input: OrdinaryFeedRunInput): CronAgentEnvironmentLease | undefined => {
     const existingDelivery = options.deliveryAndReceipt.readFormalFeedContentDeliveryRequestForPeriod(input.period)
@@ -95,22 +227,41 @@ export function createOrdinaryFeedRunLifecycle(
         period: input.period,
         editor: options.editor,
       })
+      const observedProposal = observeOrdinaryFeedProposal(proposal)
       const editorAgent = createOrdinaryFeedEditorAgent({
         ctx: options.ctx,
-        proposal,
+        proposal: observedProposal.proposal,
       })
       const editor = createOrdinaryFeedEditorAdapter({
         period: input.period,
         editor: options.editor,
         finalizer: options.finalizer,
       })
+      const reportRecoveryDiagnostic = (error: OrdinaryFeedRecoveryDiagnosticError): OrdinaryFeedRecoveryDiagnosticError => {
+        const sessionId = ordinaryFeedRecoverySessionId(input.context)
+        if (sessionId !== undefined) {
+          reportRecoveryWarning({
+            jobId: input.context.jobId,
+            runId: input.context.runId,
+            sessionId,
+            stage: error.stage,
+            code: error.code,
+          })
+        }
+        return error
+      }
       const agentResult = await editorAgent.formEditingProposal()
       if (agentResult.status !== 'accepted') {
-        throw new Error('ordinary Feed editor Agent did not produce an accepted proposal')
+        throw reportRecoveryDiagnostic(recoveryDiagnosticFor(observedProposal.failedStage()))
       }
-      const contentResult = editor.acceptEditingProposal(agentResult.value.proposal)
+      let contentResult: ReturnType<typeof editor.acceptEditingProposal>
+      try {
+        contentResult = editor.acceptEditingProposal(agentResult.value.proposal)
+      } catch {
+        throw reportRecoveryDiagnostic(recoveryDiagnosticFor('adapter'))
+      }
       if (contentResult.status !== 'accepted') {
-        throw new Error('ordinary Feed editor did not produce accepted content')
+        throw reportRecoveryDiagnostic(recoveryDiagnosticFor('adapter'))
       }
       const deliveryResult = preparedDelivery.prepareAcceptedContent(contentResult.value)
       if (deliveryResult.status !== 'accepted') {

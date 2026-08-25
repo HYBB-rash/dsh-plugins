@@ -438,6 +438,9 @@ describe('TODO05 ordinary-feed claim-only recovery', () => {
         candidateReportingWindowMs: 300_000,
       } as const
       ctx = await createHarness(wire)
+      const xWarnings: string[] = []
+      const logger = ctx.logger as unknown as { warn: (...args: readonly unknown[]) => void }
+      vi.spyOn(logger, 'warn').mockImplementation((...args) => xWarnings.push(String(args[0])))
       const provider: CronAgentEnvironmentProvider = createCronEnvironmentExtension(ctx, rawConfig)
       const recoveryContext: CronPreparedDeliveryRecoveryContext = {
         jobId: 'cron-x',
@@ -504,6 +507,7 @@ describe('TODO05 ordinary-feed claim-only recovery', () => {
       expect(secondReplay).toEqual(expectedNotReady)
       await assertDurableZeroState(0)
       expect(await snapshotDirectory(directory)).toEqual(beforeReplay)
+      expect(xWarnings.filter(warning => warning.startsWith('x-feed:'))).toHaveLength(0)
     } finally {
       if (ctx !== undefined) await ctx.fiber.dispose()
       await rm(directory, { recursive: true, force: true })

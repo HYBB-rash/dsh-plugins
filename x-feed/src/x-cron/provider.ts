@@ -300,6 +300,10 @@ async function prepareXFeedRun(
           crossSourceEditor: sourceCandidateReport.crossSourceEditor!,
         })
       }
+      if (options.ordinaryFeedRunPreparationPort !== undefined
+        && acceptedReport.report.candidates.length === 0) {
+        return { kind: 'skip', outcome: { text: undefined, error: undefined } }
+      }
     }
     if (options.ordinaryFeedRunPreparationPort !== undefined) {
       return options.ordinaryFeedRunPreparationPort.prepareOrdinaryFeed()

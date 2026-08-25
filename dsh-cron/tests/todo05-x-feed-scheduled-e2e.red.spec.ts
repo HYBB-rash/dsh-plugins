@@ -18,7 +18,7 @@ import { createHash } from 'node:crypto'
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createCronEnvironmentExtension } from '../../x-feed/src/cron-extension.ts'
 import { createFileProjectionSources } from '../../x-feed/src/fact-projection/file-projection-sources.ts'
 import { FileNavigationSnapshotStore } from '../../x-feed/src/navigation/file-navigation-snapshot-store.ts'
@@ -40,7 +40,7 @@ const SUBMIT_ORDINARY_FEED_EDITING_PROPOSAL = 'submit_x_ordinary_feed_editing_pr
 class WireAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
 
-  constructor(private failBeforeProposal = false) {
+  constructor(private failBeforeProposal = false, private readonly failAlways = false) {
     super()
   }
 
@@ -55,7 +55,7 @@ class WireAdapter extends LlmAdapter {
   override async *stream(request: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(request)
     if (this.failBeforeProposal) {
-      this.failBeforeProposal = false
+      if (!this.failAlways) this.failBeforeProposal = false
       throw new Error('controlled scheduled editor failure before proposal')
     }
     const callId = CallId('todo05-scheduled-scaffold')
@@ -962,7 +962,7 @@ describe('TODO05 scheduled X E2E scaffold', () => {
         sessionMode: 'per_run',
         gate: 'forbidden',
         runDeliveryMeaningPort: setupPort.port,
-      })).rejects.toThrow('ordinary Feed editor Agent did not produce an accepted proposal')
+      })).rejects.toThrow('ordinary Feed recovery failed')
       await setupPort.dispose()
       setupPortDispose = undefined
 
@@ -1140,6 +1140,103 @@ describe('TODO05 scheduled X E2E scaffold', () => {
       await rm(root, { recursive: true, force: true })
     }
   })
+
+  it('rearms a structured-failure claim-only startup every 5s without claiming or delivering', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'todo05-scheduled-claim-only-warning-'))
+    const jobId = 'todo05-x-feed-claim-only-warning'
+    const scheduledFor = new Date(Date.now() - 2_000).toISOString()
+    const runId = `${jobId}@${scheduledFor}`
+    const sessionId = 'session-cron-warning-startup'
+    const claimedAt = new Date(Date.parse(scheduledFor) + 1_000).toISOString()
+    const claimBinding = { jobId, runId, sessionId, scheduledFor, claimedAt, trigger: 'scheduled' as const }
+    const storeDir = join(root, 'cron')
+    let ctx: Context | undefined
+    let runtime: SchedulerRuntime | undefined
+    let unregister: (() => void) | undefined
+    const driveCalls = { value: 0 }
+
+    try {
+      const fixture = await createScheduledXFixture(root, jobId, scheduledFor, runId)
+      await mkdir(storeDir, { recursive: true })
+      const job = {
+        id: jobId,
+        externalRef: 'dsh-x-feed:claim-only-warning',
+        schedule: { kind: 'once', runAt: scheduledFor },
+        prompt: 'Recover the ordinary X feed editing run.',
+        deliver: 'telegram',
+        sessionMode: 'per_run',
+        agentEnvironment: 'dsh-x-feed/v1',
+        createdAt: new Date().toISOString(),
+      } satisfies Job
+      await appendFile(join(storeDir, 'jobs.jsonl'), `${JSON.stringify({ op: 'create', ...job })}\n`, 'utf8')
+      new RunLedger(storeDir).claim({
+        schemaVersion: 2,
+        event: 'claim',
+        ...claimBinding,
+        agentEnvironment: job.agentEnvironment,
+        deliveryLifecycle: 'prepared',
+      })
+
+      const wire = new WireAdapter(true, true)
+      ctx = await createHarness(wire)
+      const warnings: string[] = []
+      const logger = ctx.logger as unknown as { warn: (...args: readonly unknown[]) => void }
+      vi.spyOn(logger, 'warn').mockImplementation((...args) => warnings.push(String(args[0])))
+      const registry = provideCronAgentEnvironmentRegistry(ctx)
+      const provider = createCronEnvironmentExtension(ctx, {
+        cronJobId: jobId,
+        dataDir: fixture.dataDir,
+        pythonBin: '/bin/sh',
+        pipelinePath: join(fixture.dataDir, 'x_insight_pipeline.py'),
+        personalFeedDataDir: fixture.personalFeedDataDir,
+        personalFeedRequiredSources: ['x'],
+        candidateReportingWindowMs: 300_000,
+      })
+      unregister = registry.register(provider)
+      provideCronRunDeliveryMeaningPortFactory(ctx, { storeDir })
+
+      runtime = new SchedulerRuntime(ctx, schedulerConfig(storeDir), {} as never, 0, new AbortController().signal, {
+        driveTurn: async () => {
+          driveCalls.value++
+          return { text: 'unexpected drive', error: undefined }
+        },
+        deliverText: async () => ({ state: 'delivered', deliveredAt: new Date().toISOString() }),
+      })
+      vi.useFakeTimers()
+      runtime.start()
+      await vi.waitFor(() => expect(wire.requests.length).toBeGreaterThanOrEqual(1), {
+        timeout: 2_000,
+        interval: 10,
+      })
+      await vi.advanceTimersByTimeAsync(5_000)
+      await vi.advanceTimersByTimeAsync(5_000)
+
+      expect(wire.requests.length).toBeGreaterThanOrEqual(3)
+      expect(driveCalls.value).toBe(0)
+      const runs = await readJsonLinesIfPresent(join(storeDir, 'runs.jsonl'))
+      expect(runs.filter(record => record.event === 'claim' && record.runId === runId)).toHaveLength(1)
+      expect(runs.filter(record => record.event === 'prepared-delivery' && record.runId === runId)).toHaveLength(0)
+      expect(runs.filter(record => record.event === 'finish' && record.runId === runId)).toHaveLength(0)
+      expect((await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'source-candidate-reports.jsonl')))
+        .filter(record => record.event === 'source_candidate_report_accepted')).toHaveLength(1)
+      expect((await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'editing-inputs.jsonl')))
+        .filter(record => record.event === 'editing_input_accepted')).toHaveLength(2)
+      expect((await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'delivery-and-receipt.jsonl')))
+        .filter(record => record.event === 'formal_feed_content_delivery_accepted')).toHaveLength(0)
+      expect((await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'period-business.jsonl')))
+        .filter(record => record.event === 'formal_content_delivery_accepted')).toHaveLength(0)
+      expect(await readJsonLinesIfPresent(join(fixture.personalFeedDataDir, 'ordinary-business-finalizations.jsonl')))
+        .toHaveLength(0)
+      const xWarnings = warnings.filter(warning => warning.startsWith('x-feed:'))
+      expect(xWarnings).toEqual([`x-feed: ordinary recovery failed category=ordinary_feed_recovery stage=structured_agent code=structured_agent_failed jobId=${jobId} runId=${runId} sessionId=${sessionId}`])
+    } finally {
+      await runtime?.dispose()
+      unregister?.()
+      if (ctx !== undefined) await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+      vi.useRealTimers()
+    }
+  }, 20_000)
 
   it('runs one manual Delivered job through the real X lifecycle without consuming its future schedule', async () => {
     const root = await mkdtemp(join(tmpdir(), 'todo05-manual-delivered-'))
