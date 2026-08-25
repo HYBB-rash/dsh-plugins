@@ -209,7 +209,6 @@ function readXMaterial(value: unknown): CurrentMaterial | undefined {
 
   const identity = parseXStatusIdentity(url)
   if (identity === undefined
-    || url !== identity.canonicalUrl
     || identity.statusId !== id
     || candidate.candidate !== `x-status:${identity.statusId}`
     || candidate.stableReference !== `x:status:${identity.statusId}`) return undefined

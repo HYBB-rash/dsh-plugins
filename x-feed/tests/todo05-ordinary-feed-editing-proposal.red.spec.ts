@@ -103,6 +103,20 @@ function xItem(id: string, text: string, user: string): XSourceCollectionItem {
   }
 }
 
+function xItemWithUrl(
+  id: string,
+  text: string,
+  user: string,
+  url: string,
+): XSourceCollectionItem {
+  return { ...xItem(id, text, user), url }
+}
+
+interface OrdinaryFeedFixtureCollections {
+  readonly target?: readonly XSourceCollectionItem[]
+  readonly other?: readonly XSourceCollectionItem[]
+}
+
 function xEvidence(suffix: string): XSourceCollectionEvidence {
   const collectionPath = `/tmp/todo05-x-editor-${suffix}/collection.jsonl`
   return {
@@ -117,6 +131,7 @@ function xEvidence(suffix: string): XSourceCollectionEvidence {
 
 async function createOrdinaryFeedFixture(
   additionalTargetItems: readonly XSourceCollectionItem[] = [],
+  collections: OrdinaryFeedFixtureCollections = {},
 ): Promise<OrdinaryFeedFixture> {
   const directory = mkdtempSync(join(tmpdir(), 'x-feed-todo05-ordinary-editor-'))
   temporaryDirectories.push(directory)
@@ -146,12 +161,12 @@ async function createOrdinaryFeedFixture(
     now: () => '2026-08-24T01:00:00.000Z',
   })
   const editor = createCrossSourceEditor({ candidatePeriodLedgerPath, editingInputLedgerPath, periodBusinessLedgerPath })
-  const targetCollection = [
+  const targetCollection = collections.target ?? [
     xItem('1001', 'A target text', 'alice'),
     xItem('1002', 'B target text', 'bob'),
     ...additionalTargetItems,
   ]
-  const otherCollection = [xItem('2001', 'C other-period text', 'carol')]
+  const otherCollection = collections.other ?? [xItem('2001', 'C other-period text', 'carol')]
   const candidatePorts = createXSourceCandidateReportPorts()
   const targetReport = await prepareAndSubmitXSourceCandidateReport({
     period: targetScope.c01.value.period,
@@ -332,10 +347,10 @@ function c10MutationCases(): readonly C10MutationCase[] {
       mutate: material => { delete nestedRecord(material, 'exactLookup').kind },
     },
     {
-      name: 'noncanonical but parseable X URL',
+      name: 'invalid X status URL parser result',
       mutate: material => {
-        nestedRecord(material, 'boundedContent').url = 'https://twitter.com/alice/status/1001'
-        nestedRecord(material, 'exactLookup').url = 'https://twitter.com/alice/status/1001'
+        nestedRecord(material, 'boundedContent').url = 'https://example.com/alice/status/1001'
+        nestedRecord(material, 'exactLookup').url = 'https://example.com/alice/status/1001'
       },
     },
     {
@@ -800,6 +815,81 @@ describe('TODO05 ordinary-feed editing proposal validator RED', () => {
     expect(result).toEqual({ status: 'failed', input })
     expect(result.input).toBe(input)
     expect(listAcceptedInputs).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('TODO05 ordinary-feed proposal X URL compatibility RED', () => {
+  it.each([
+    {
+      name: 'twitter.com host with uppercase username',
+      rawUrl: 'https://twitter.com/Alice/status/1001',
+      canonicalUrl: 'https://x.com/alice/status/1001',
+    },
+    {
+      name: 'x.com host with uppercase username',
+      rawUrl: 'https://x.com/Alice/status/1001',
+      canonicalUrl: 'https://x.com/alice/status/1001',
+    },
+  ])('accepts a real C10 row with $name and renders the derived canonical URL', async ({ rawUrl, canonicalUrl }) => {
+    const fixture = await createOrdinaryFeedFixture([], {
+      target: [
+        xItemWithUrl('1001', 'A target text', 'alice', rawUrl),
+        xItem('1002', 'B target text', 'bob'),
+      ],
+    })
+    const [first] = targetMaterials(fixture)
+    expect(first).toBeDefined()
+    expect(first!.boundedContent).toEqual(expect.objectContaining({
+      kind: 'x-status',
+      id: '1001',
+      url: rawUrl,
+    }))
+    expect(first!.exactLookup).toEqual({ kind: 'x-status-lookup', url: rawUrl })
+    expect(first!.candidate).toEqual({
+      source: 'x',
+      candidate: 'x-status:1001',
+      stableReference: 'x:status:1001',
+    })
+
+    const runtime = createOrdinaryFeedEditingProposalValidator({ period: fixture.period, editor: fixture.editor })
+    const modelResult = runtime.readModelMaterials()
+    expect(modelResult).toEqual({ status: 'accepted', value: { materials: modelMaterialsFor() } })
+    if (modelResult.status !== 'accepted') throw new Error('expected accepted model material projection')
+    for (const material of modelResult.value.materials) {
+      expect(Reflect.ownKeys(material).sort()).toEqual(['authorHandle', 'itemId', 'text'])
+      expect('url' in material).toBe(false)
+      expect('canonicalUrl' in material).toBe(false)
+    }
+
+    const result = runtime.validateProposal(editingProposalFor(fixture))
+    expect(result).toEqual({
+      status: 'accepted',
+      value: {
+        content: {
+          body: `📦 X 洞察 Ordinary target feed\n\n⭐ 高优先级\n- A target insight (${canonicalUrl})`,
+        },
+        decisions: expectedEditingDecisions(fixture),
+      },
+    })
+    if (result.status === 'accepted') {
+      expect(result.value.content.body).toContain(canonicalUrl)
+      expect(result.value.content.body).not.toContain(rawUrl)
+    }
+  })
+
+  it('does not let a real parseable noncanonical other-period C10 row poison this period', async () => {
+    const rawUrl = 'https://twitter.com/Carol/status/2001'
+    const fixture = await createOrdinaryFeedFixture([], {
+      other: [xItemWithUrl('2001', 'C other-period text', 'carol', rawUrl)],
+    })
+    const other = fixture.materials.find(material => !samePeriod(material.period, fixture.period))
+    expect(other).toBeDefined()
+    expect(other!.boundedContent).toEqual(expect.objectContaining({ id: '2001', url: rawUrl }))
+    expect(other!.exactLookup).toEqual({ kind: 'x-status-lookup', url: rawUrl })
+
+    const runtime = createOrdinaryFeedEditingProposalValidator({ period: fixture.period, editor: fixture.editor })
+    expect(runtime.readModelMaterials()).toEqual({ status: 'accepted', value: { materials: modelMaterialsFor() } })
+    expect(runtime.validateProposal(editingProposalFor(fixture)).status).toBe('accepted')
   })
 })
 
