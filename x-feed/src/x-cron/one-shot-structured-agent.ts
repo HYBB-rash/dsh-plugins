@@ -277,34 +277,32 @@ export async function runOneShotStructuredAgent<T>(
   let flushAttempted = false
   let successResult: OneShotStructuredAgentResult<T> | undefined
   let primaryError: unknown
-  let streamDeadline: OneShotStreamDeadline | undefined
   let disposeStreamGuard: (() => void) | undefined
 
   surface.capture(options.ctx, sessionId)
+  const deadline = createOneShotOperationDeadline(timeoutMs, options.signal, () => {
+    surface.dispose()
+    cancelAgent(handle, 'structured Agent total operation deadline expired')
+  })
 
   try {
-    if (options.signal?.aborted) throw createAbortError(options.signal.reason)
-    handle = await options.ctx.agents.create({
+    deadline.assertActive()
+    const creation = options.ctx.agents.create({
       sessionId,
       agentOptions: { provider: selection.provider, model: selection.model },
+      signal: deadline.signal,
       setup: agentCtx => surface.setupAgent(agentCtx),
     })
-
-    await surface.verifySurface(handle.agent)
-    const deadline = createOneShotStreamDeadline(timeoutMs, options.signal, () => surface.dispose())
-    streamDeadline = deadline
+    observeLateHandle(options.ctx, creation, deadline)
+    handle = await awaitWithinDeadline(deadline, creation)
+    await awaitWithinDeadline(deadline, surface.verifySurface(handle.agent))
     disposeStreamGuard = options.ctx.on('llm/stream', (request, next) => {
       if (request.sessionId !== sessionId) return next()
       return deadline.wrap(next())
     })
+    deadline.assertActive()
     handle.agent.followup(createDriverMessage(options.driverText ?? 'structured planner driver'))
-    await waitForAgent(handle.agent, timeoutMs, options.signal, () => {
-      try {
-        handle?.agent.cancel({ kind: 'hook', reason: 'structured Agent timeout' })
-      } catch {
-        // Cleanup below records cancellation failures without escaping timer code.
-      }
-    })
+    await awaitWithinDeadline(deadline, handle.agent.whenIdle())
     assertCompletedTurn(handle.agent, surface.failed)
     const serializedOutcome = surface.serializedOutcome
     if (serializedOutcome === undefined) throw new OneShotStructuredAgentError('missing-submission', 'structured Agent produced no valid submission')
@@ -312,27 +310,29 @@ export async function runOneShotStructuredAgent<T>(
     const wire = surface.wires[0]
     if (wire === undefined) throw new OneShotStructuredAgentError('wrong-request-count', 'structured Agent produced no captured wire')
     flushAttempted = true
-    await options.ctx.sessions.flush(handle.agent.session)
+    await awaitWithinDeadline(deadline, options.ctx.sessions.flush(handle.agent.session))
     flushed = true
     successResult = { value, sessionId, wire }
   } catch (error) {
     primaryError = error
   } finally {
-    streamDeadline?.dispose()
     disposeStreamGuard?.()
     surface.dispose()
-    const cleanupErrors = await cleanupAgent(options.ctx, handle, primaryError, flushed || flushAttempted)
-    if (cleanupErrors.length > 0 && primaryError === undefined) {
-      primaryError = new OneShotStructuredAgentError('cleanup-failed', 'structured Agent cleanup failed', {
-        cause: new AggregateError(cleanupErrors, 'structured Agent cleanup failed'),
-        wires: surface.wires,
-      })
-    } else if (cleanupErrors.length > 0 && primaryError !== undefined) {
-      primaryError = new OneShotStructuredAgentError('cleanup-failed', 'structured Agent cleanup failed', {
-        cause: new AggregateError([primaryError, ...cleanupErrors], 'structured Agent cleanup failed'),
-        wires: surface.wires,
-      })
+    if (handle !== undefined) {
+      const cleanup = startAgentCleanup(options.ctx, handle, primaryError, !(flushed || flushAttempted))
+      try {
+        const cleanupErrors = await awaitWithinDeadline(deadline, cleanup)
+        if (cleanupErrors.length > 0) {
+          primaryError = createCleanupError(
+            primaryError === undefined ? cleanupErrors : [primaryError, ...cleanupErrors],
+            surface.wires,
+          )
+        }
+      } catch (error) {
+        if (primaryError === undefined) primaryError = error
+      }
     }
+    deadline.dispose()
   }
 
   if (primaryError !== undefined) {
@@ -359,67 +359,72 @@ function assertCompletedTurn(agent: Agent, invalidSubmission: boolean): void {
   }
 }
 
-async function waitForAgent(
-  agent: Agent,
-  timeoutMs: number,
-  signal: AbortSignal | undefined,
-  onTimeout: () => void,
-): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  let removeAbort = (): void => {}
+function startAgentCleanup(
+  ctx: Context,
+  handle: AgentHandle,
+  primaryError: unknown,
+  flushRequired: boolean,
+): Promise<readonly unknown[]> {
+  const errors: unknown[] = []
   try {
-    const aborted = new Promise<never>((_resolve, reject) => {
-      const rejectAbort = (): void => reject(createAbortError(signal?.reason))
-      if (signal?.aborted) rejectAbort()
-      else if (signal !== undefined) {
-        signal.addEventListener('abort', rejectAbort, { once: true })
-        removeAbort = () => signal.removeEventListener('abort', rejectAbort)
-      }
-    })
-    const timedOut = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        onTimeout()
-        reject(new OneShotStructuredAgentError('timeout', `structured Agent timed out after ${timeoutMs}ms`))
-      }, timeoutMs)
-    })
-    await Promise.race([agent.whenIdle(), aborted, timedOut])
-  } finally {
-    if (timer !== undefined) clearTimeout(timer)
-    removeAbort()
+    if (handle.agent.status !== 'idle') {
+      handle.agent.cancel({ kind: 'hook', reason: primaryError === undefined ? 'structured Agent completed' : 'structured Agent failed' })
+    }
+  } catch (error) {
+    errors.push(error)
+  }
+  const disposal = observeCleanupTask(() => handle.dispose(), errors)
+  const idle = observeCleanupTask(() => handle.agent.whenIdle(), errors)
+  const flush = flushRequired
+    ? observeCleanupTask(() => ctx.sessions.flush(handle.agent.session), errors)
+    : Promise.resolve()
+  return Promise.all([disposal, idle, flush]).then(() => Object.freeze(errors))
+}
+
+function observeLateHandle(
+  ctx: Context,
+  creation: Promise<AgentHandle>,
+  deadline: OneShotOperationDeadline,
+): void {
+  void creation.then(handle => {
+    if (!deadline.hasFailed) return
+    void startAgentCleanup(ctx, handle, new OneShotStructuredAgentError('timeout', 'structured Agent creation settled after its operation deadline'), true)
+      .catch(() => undefined)
+  }).catch(() => undefined)
+}
+
+function observeCleanupTask(
+  start: () => PromiseLike<unknown>,
+  errors: unknown[],
+): Promise<void> {
+  try {
+    const task = Promise.resolve(start())
+    return task.then(
+      () => undefined,
+      error => { errors.push(error) },
+    )
+  } catch (error) {
+    errors.push(error)
+    return Promise.resolve()
   }
 }
 
-async function cleanupAgent(
-  ctx: Context,
-  handle: AgentHandle | undefined,
-  primaryError: unknown,
-  flushed: boolean,
-): Promise<readonly unknown[]> {
-  if (handle === undefined) return []
-  const errors: unknown[] = []
+function cancelAgent(handle: AgentHandle | undefined, reason: string): void {
   try {
-    if (handle.agent.status !== 'idle') handle.agent.cancel({ kind: 'hook', reason: primaryError === undefined ? 'structured Agent completed' : 'structured Agent failed' })
-  } catch (error) {
-    errors.push(error)
+    handle?.agent.cancel({ kind: 'hook', reason })
+  } catch {
+    // A deadline must preserve its primary error when best-effort cancellation fails.
   }
-  try {
-    await handle.agent.whenIdle()
-  } catch (error) {
-    errors.push(error)
-  }
-  if (!flushed) {
-    try {
-      await ctx.sessions.flush(handle.agent.session)
-    } catch (error) {
-      errors.push(error)
-    }
-  }
-  try {
-    await handle.dispose()
-  } catch (error) {
-    errors.push(error)
-  }
-  return Object.freeze(errors)
+}
+
+function createCleanupError(
+  cleanupErrors: readonly unknown[],
+  wires: readonly OneShotStructuredAgentWireRequest[],
+): OneShotStructuredAgentError {
+  return new OneShotStructuredAgentError('cleanup-failed', 'structured Agent cleanup failed', {
+    cause: new AggregateError(cleanupErrors, 'structured Agent cleanup failed'),
+    wires,
+  })
 }
 
 function resolveTimeout(value: number | undefined): number {
@@ -465,18 +470,24 @@ function createAbortError(reason: unknown): OneShotStructuredAgentError {
   return new OneShotStructuredAgentError('aborted', reason instanceof Error ? reason.message : 'structured Agent was aborted')
 }
 
-interface OneShotStreamDeadline {
+interface OneShotOperationDeadline {
+  readonly signal: AbortSignal
+  readonly hasFailed: boolean
+  readonly failure: Promise<never>
   readonly wrap: (source: AsyncIterable<StreamChunk>) => AsyncIterable<StreamChunk>
+  readonly assertActive: () => void
   readonly dispose: () => void
 }
 
-function createOneShotStreamDeadline(
+function createOneShotOperationDeadline(
   timeoutMs: number,
   signal: AbortSignal | undefined,
-  closeSurface: () => void,
-): OneShotStreamDeadline {
+  closeSurfaceAndCancel: () => void,
+): OneShotOperationDeadline {
+  const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
   let disposed = false
+  let failureError: OneShotStructuredAgentError | undefined
   let rejectFailure: (error: OneShotStructuredAgentError) => void = () => {}
   const failure = new Promise<never>((_resolve, reject) => { rejectFailure = reject })
   void failure.catch(() => undefined)
@@ -484,7 +495,9 @@ function createOneShotStreamDeadline(
   const fail = (error: OneShotStructuredAgentError): void => {
     if (disposed) return
     disposed = true
-    closeSurface()
+    failureError = error
+    try { closeSurfaceAndCancel() } catch { /* deadline failure must still reject */ }
+    controller.abort(error)
     rejectFailure(error)
   }
   const onAbort = (): void => fail(createAbortError(signal?.reason))
@@ -495,7 +508,13 @@ function createOneShotStreamDeadline(
   }
 
   return {
+    signal: controller.signal,
+    get hasFailed(): boolean { return failureError !== undefined },
+    failure,
     wrap: source => wrapOneShotStream(source, failure),
+    assertActive: (): void => {
+      if (failureError !== undefined) throw failureError
+    },
     dispose: () => {
       disposed = true
       if (timer !== undefined) clearTimeout(timer)
@@ -503,6 +522,12 @@ function createOneShotStreamDeadline(
       signal?.removeEventListener('abort', onAbort)
     },
   }
+}
+
+function awaitWithinDeadline<T>(deadline: OneShotOperationDeadline, source: PromiseLike<T>): Promise<T> {
+  const observed = Promise.resolve(source)
+  void observed.catch(() => undefined)
+  return Promise.race([observed, deadline.failure])
 }
 
 function wrapOneShotStream(

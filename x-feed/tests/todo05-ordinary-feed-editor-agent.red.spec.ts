@@ -306,6 +306,220 @@ describe('TODO05 ordinary-feed editor one-shot Agent bootstrap', () => {
     expect(proposal.validateProposal).not.toHaveBeenCalled()
   })
 
+  it('bounds a never-settling Agent creation inside the total 10ms budget', async () => {
+    const adapter = new WireAdapter([])
+    const ctx = await createHarness(adapter)
+    contexts.push(ctx)
+    const originalCreate = ctx.agents.create.bind(ctx.agents)
+    let capturedSignal: AbortSignal | undefined
+    let capturedSessionId: string | undefined
+    let setupEntered = false
+    let releaseSetup: (() => void) | undefined
+    const setupGate = new Promise<void>(resolve => { releaseSetup = resolve })
+    const createAgent = vi.spyOn(ctx.agents, 'create').mockImplementation(async options => {
+      capturedSignal = options.signal
+      capturedSessionId = options.sessionId
+      const originalSetup = options.setup
+      return originalCreate({
+        ...options,
+        setup: async agentCtx => {
+          setupEntered = true
+          const setupResult = await originalSetup?.(agentCtx)
+          await setupGate
+          return setupResult
+        },
+      })
+    })
+    const proposal: OrdinaryFeedEditorAgentProposalPort = {
+      readModelMaterials: vi.fn(() => ({ status: 'accepted' as const, value: { materials } })),
+      validateProposal: vi.fn(),
+    }
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    const resultPromise = createOrdinaryFeedEditorAgent({ ctx, proposal, timeoutMs: 10 }).formEditingProposal()
+    let observed: { readonly kind: 'result'; readonly result: OrdinaryFeedEditorAgentResult } | { readonly kind: 'observation-timeout' }
+    try {
+      observed = await Promise.race([
+        resultPromise.then(result => ({ kind: 'result' as const, result })),
+        new Promise<{ readonly kind: 'observation-timeout' }>(resolve => {
+          setTimeout(() => resolve({ kind: 'observation-timeout' }), 100)
+        }),
+      ])
+      expect(observed).toEqual({ kind: 'result', result: { status: 'failed' } })
+      expect(setupEntered).toBe(true)
+      expect(capturedSignal).toBeDefined()
+      expect(capturedSignal?.aborted).toBe(true)
+      releaseSetup?.()
+      await expect(resultPromise).resolves.toEqual({ status: 'failed' })
+      expect(ctx.agents.list().some(agent => agent.id === capturedSessionId)).toBe(false)
+      expect(capturedSessionId === undefined ? undefined : ctx.sessions.get(capturedSessionId)).toBeUndefined()
+      expect(proposal.validateProposal).not.toHaveBeenCalled()
+      expect(adapter.requests).toHaveLength(0)
+      expect(unhandled).toHaveLength(0)
+    } finally {
+      releaseSetup?.()
+      await resultPromise.catch(() => undefined)
+      process.off('unhandledRejection', onUnhandled)
+    }
+    expect(createAgent).toHaveBeenCalledTimes(1)
+    expect(proposal.readModelMaterials).toHaveBeenCalledTimes(1)
+  })
+
+  it('quarantines and disposes a real handle that arrives after creation timeout', async () => {
+    const adapter = new WireAdapter([])
+    const ctx = await createHarness(adapter)
+    contexts.push(ctx)
+    const originalCreate = ctx.agents.create.bind(ctx.agents)
+    let capturedSignal: AbortSignal | undefined
+    let capturedSessionId: string | undefined
+    let releaseCreate: (() => void) | undefined
+    let resolveLateHandle: (() => void) | undefined
+    let rejectLateHandle: ((reason: unknown) => void) | undefined
+    let disposeCalls = 0
+    const lateHandleReady = new Promise<void>((resolve, reject) => {
+      resolveLateHandle = resolve
+      rejectLateHandle = reject
+    })
+    const createAgent = vi.spyOn(ctx.agents, 'create').mockImplementation(async options => {
+      capturedSignal = options.signal
+      capturedSessionId = options.sessionId
+      await new Promise<void>(resolve => { releaseCreate = resolve })
+      const handle = await originalCreate({ ...options, signal: undefined })
+      const originalDispose = handle.dispose.bind(handle)
+      vi.spyOn(handle, 'dispose').mockImplementation(async () => {
+        disposeCalls++
+        return originalDispose()
+      })
+      resolveLateHandle?.()
+      return handle
+    })
+    const proposal: OrdinaryFeedEditorAgentProposalPort = {
+      readModelMaterials: vi.fn(() => ({ status: 'accepted' as const, value: { materials } })),
+      validateProposal: vi.fn(),
+    }
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    const resultPromise = createOrdinaryFeedEditorAgent({ ctx, proposal, timeoutMs: 10 }).formEditingProposal()
+    const observation = Promise.race([
+      resultPromise.then(result => ({ kind: 'result' as const, result })),
+      new Promise<{ readonly kind: 'observation-timeout' }>(resolve => {
+        setTimeout(() => resolve({ kind: 'observation-timeout' }), 100)
+      }),
+    ])
+    try {
+      const observed = await observation
+      expect(observed).toEqual({ kind: 'result', result: { status: 'failed' } })
+      expect(capturedSignal).toBeDefined()
+      expect(capturedSignal?.aborted).toBe(true)
+      releaseCreate?.()
+      await lateHandleReady
+      await vi.waitFor(() => expect(disposeCalls).toBeGreaterThanOrEqual(1), { timeout: 500, interval: 5 })
+      await expect(resultPromise).resolves.toEqual({ status: 'failed' })
+      expect(createAgent).toHaveBeenCalledTimes(1)
+      expect(proposal.validateProposal).not.toHaveBeenCalled()
+      expect(adapter.requests).toHaveLength(0)
+      expect(ctx.agents.list().some(agent => agent.id === capturedSessionId)).toBe(false)
+      expect(capturedSessionId === undefined ? undefined : ctx.sessions.get(capturedSessionId)).toBeUndefined()
+      await Promise.resolve()
+      expect(unhandled).toHaveLength(0)
+    } finally {
+      releaseCreate?.()
+      rejectLateHandle?.(new Error('late handle observation was not reached'))
+      await lateHandleReady.catch(() => undefined)
+      await resultPromise.catch(() => undefined)
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
+  it.each([
+    ['flush', 'reject', 'resolve'],
+    ['dispose', 'tool-call', 'reject'],
+  ] as const)('bounds cleanup when %s never settles after a cancelled %s stream (%s late)', async (cleanupPoint, lateOutcome, releaseOutcome) => {
+    const adapter = new NeverSettlingWireAdapter({ respondToCancel: true, lateOutcome })
+    const ctx = await createHarness(adapter)
+    contexts.push(ctx)
+    let restoreCleanup: (() => void) | undefined
+    let releaseCleanup: (() => void) | undefined
+    if (cleanupPoint === 'flush') {
+      const flush = vi.spyOn(ctx.sessions, 'flush').mockImplementation(() => new Promise<void>((resolve, reject) => {
+        releaseCleanup = releaseOutcome === 'resolve'
+          ? resolve
+          : () => reject(new Error('late cleanup flush failure'))
+      }))
+      restoreCleanup = () => flush.mockRestore()
+    } else {
+      const originalCreate = ctx.agents.create.bind(ctx.agents)
+      vi.spyOn(ctx.agents, 'create').mockImplementation(async options => {
+        const handle = await originalCreate(options)
+        const originalDispose = handle.dispose.bind(handle)
+        const dispose = vi.spyOn(handle, 'dispose').mockImplementation(() => new Promise<void>((resolve, reject) => {
+          void originalDispose().catch(() => undefined)
+          releaseCleanup = releaseOutcome === 'resolve'
+            ? resolve
+            : () => reject(new Error('late cleanup dispose failure'))
+        }))
+        restoreCleanup = () => dispose.mockRestore()
+        return handle
+      })
+    }
+    const proposal: OrdinaryFeedEditorAgentProposalPort = {
+      readModelMaterials: vi.fn(() => ({ status: 'accepted' as const, value: { materials } })),
+      validateProposal: vi.fn(),
+    }
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    const createdAgent = new Promise<{ readonly status: string; readonly whenIdle: () => Promise<void> }>(resolve => {
+      ctx.on('agent/created', ({ agent }) => resolve(agent))
+    })
+    const resultPromise = createOrdinaryFeedEditorAgent({ ctx, proposal, timeoutMs: 10 }).formEditingProposal()
+    const observation = Promise.race([
+      resultPromise.then(result => ({ kind: 'result' as const, result })),
+      new Promise<{ readonly kind: 'observation-timeout' }>(resolve => {
+        setTimeout(() => resolve({ kind: 'observation-timeout' }), 100)
+      }),
+    ])
+    let observed: Awaited<typeof observation>
+    let sessionId: string | undefined
+    try {
+      await vi.waitFor(() => expect(adapter.requests).toHaveLength(1), { timeout: 100, interval: 1 })
+      const agent = await Promise.race([
+        createdAgent,
+        new Promise<undefined>(resolve => { setTimeout(() => resolve(undefined), 200) }),
+      ])
+      expect(agent).toBeDefined()
+      if (agent === undefined) throw new Error('agent/created observation timed out')
+      sessionId = agent.id
+      const idle = await Promise.race([
+        agent.whenIdle().then(() => true),
+        new Promise<boolean>(resolve => { setTimeout(() => resolve(false), 200) }),
+      ])
+      expect(idle).toBe(true)
+      expect(agent.status).toBe('idle')
+      observed = await observation
+      expect(observed).toEqual({ kind: 'result', result: { status: 'failed' } })
+      releaseCleanup?.()
+      await Promise.resolve()
+      await expect(resultPromise).resolves.toEqual({ status: 'failed' })
+      expect(proposal.validateProposal).not.toHaveBeenCalled()
+      expect(adapter.requests).toHaveLength(1)
+      await vi.waitFor(() => {
+        expect(ctx.agents.list().some(agent => agent.id === sessionId)).toBe(false)
+        expect(sessionId === undefined ? undefined : ctx.sessions.get(sessionId)).toBeUndefined()
+      }, { timeout: 500, interval: 5 })
+      await Promise.resolve()
+      expect(unhandled).toHaveLength(0)
+    } finally {
+      releaseCleanup?.()
+      await Promise.resolve()
+      restoreCleanup?.()
+      await resultPromise.catch(() => undefined)
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
   it('forms one validated editing proposal through one isolated structured Agent request', async () => {
     const adapter = new WireAdapter([response(submission)])
     const ctx = await createHarness(adapter)
