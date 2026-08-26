@@ -783,6 +783,66 @@ describe('TODO05 ordinary-feed editing proposal validator RED', () => {
     expect(snapshotDirectory(fixture.directory)).toEqual(before)
   })
 
+  it('preserves legal bounded C10 whitespace for the model while rendering its selected canonical URL', async () => {
+    const rawText = '  A target text with intentional outer whitespace  '
+    const fixture = await createOrdinaryFeedFixture([], {
+      target: [
+        xItem('1001', rawText, 'alice'),
+        xItem('1002', 'B target text', 'bob'),
+      ],
+    })
+    const authoritativeInputs = fixture.editor.listAcceptedInputs()
+    expect(authoritativeInputs
+      .filter(material => samePeriod(material.period, fixture.period))
+      .map(material => material.boundedContent.text))
+      .toEqual([rawText, 'B target text'])
+
+    const runtime = createOrdinaryFeedEditingProposalValidator({ period: fixture.period, editor: fixture.editor })
+    const proposal = {
+      title: 'Ordinary target feed',
+      sections: [{
+        kind: 'highlight',
+        items: [{ itemId: 'item:x-status:1001', summary: 'A target insight' }],
+      }],
+      decisions: [
+        { itemId: 'item:x-status:1001', kind: 'selected' },
+        {
+          itemId: 'item:x-status:1002',
+          kind: 'not_selected',
+          semanticReason: 'Lower relevance for this period.',
+        },
+      ],
+    }
+    const before = snapshotDirectory(fixture.directory)
+
+    const modelResult = runtime.readModelMaterials()
+    expect(modelResult).toEqual({
+      status: 'accepted',
+      value: {
+        materials: [
+          { itemId: 'item:x-status:1001', text: rawText, authorHandle: 'alice' },
+          { itemId: 'item:x-status:1002', text: 'B target text', authorHandle: 'bob' },
+        ],
+      },
+    })
+    if (modelResult.status !== 'accepted') throw new Error('expected accepted whitespace-preserving model materials')
+    for (const material of modelResult.value.materials) {
+      expect(Reflect.ownKeys(material).sort()).toEqual(['authorHandle', 'itemId', 'text'])
+      expect('url' in material).toBe(false)
+    }
+
+    expect(runtime.validateProposal(proposal)).toEqual({
+      status: 'accepted',
+      value: {
+        content: {
+          body: '📦 X 洞察 Ordinary target feed\n\n⭐ 高优先级\n- A target insight (https://x.com/alice/status/1001)',
+        },
+        decisions: expectedEditingDecisions(fixture),
+      },
+    })
+    expect(snapshotDirectory(fixture.directory)).toEqual(before)
+  })
+
   it.each(proposalNegativeCases())('rejects malformed proposal: $name', async ({ mutate }) => {
     const fixture = await createOrdinaryFeedFixture()
     const runtime = createOrdinaryFeedEditingProposalValidator({ period: fixture.period, editor: fixture.editor })

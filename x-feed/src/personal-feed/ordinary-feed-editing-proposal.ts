@@ -132,7 +132,7 @@ function readCurrentMaterials(
     const registry = new CurrentRunItemRegistry(current.map(material => ({
       id: material.candidate.candidate,
       source: material.canonicalUrl,
-      content: material.text,
+      content: material.text.trim(),
       topics: [],
     })))
     return { materials: current, registry }
