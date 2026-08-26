@@ -44,14 +44,27 @@ const ORDINARY_FEED_EDITOR_TOOL_PARAMETERS = {
     decisions: {
       type: 'array',
       items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          itemId: { type: 'string' },
-          kind: { type: 'string', enum: ['selected', 'not_selected'] },
-          semanticReason: { type: 'string' },
-        },
-        required: ['itemId', 'kind'],
+        oneOf: [
+          {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              itemId: { type: 'string' },
+              kind: { type: 'string', enum: ['selected'] },
+            },
+            required: ['itemId', 'kind'],
+          },
+          {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              itemId: { type: 'string' },
+              kind: { type: 'string', enum: ['not_selected'] },
+              semanticReason: { type: 'string' },
+            },
+            required: ['itemId', 'kind', 'semanticReason'],
+          },
+        ],
       },
     },
   },

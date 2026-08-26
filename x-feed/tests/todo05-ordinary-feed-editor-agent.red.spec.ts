@@ -20,6 +20,7 @@ import {
   type OrdinaryFeedEditorAgentProposalPort,
   type OrdinaryFeedEditorAgentResult,
 } from '../src/personal-feed/ordinary-feed-editor-agent.ts'
+import { createOrdinaryFeedEditingProposalValidator } from '../src/personal-feed/ordinary-feed-editing-proposal.ts'
 
 type Equal<Left, Right> = (<Value>() => Value extends Left ? 1 : 2) extends
   (<Value>() => Value extends Right ? 1 : 2) ? true : false
@@ -109,14 +110,27 @@ const ORDINARY_FEED_EDITOR_TOOL_SCHEMA: ToolSchema = {
       decisions: {
         type: 'array',
         items: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            itemId: { type: 'string' },
-            kind: { type: 'string', enum: ['selected', 'not_selected'] },
-            semanticReason: { type: 'string' },
-          },
-          required: ['itemId', 'kind'],
+          oneOf: [
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                itemId: { type: 'string' },
+                kind: { type: 'string', enum: ['selected'] },
+              },
+              required: ['itemId', 'kind'],
+            },
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                itemId: { type: 'string' },
+                kind: { type: 'string', enum: ['not_selected'] },
+                semanticReason: { type: 'string' },
+              },
+              required: ['itemId', 'kind', 'semanticReason'],
+            },
+          ],
         },
       },
     },
@@ -144,6 +158,43 @@ const submission = {
     },
   ],
 } as const
+
+const productionProposalPeriod = {
+  run: 'todo05-ordinary-feed-editor-agent-run',
+  period: 'todo05-ordinary-feed-editor-agent-period',
+} as Parameters<typeof createOrdinaryFeedEditingProposalValidator>[0]['period']
+
+function productionProposalPort(): OrdinaryFeedEditorAgentProposalPort {
+  const c10Inputs = materials.map(({ itemId, text, authorHandle }) => {
+    const statusId = itemId.slice('item:x-status:'.length)
+    const canonicalUrl = `https://x.com/${authorHandle}/status/${statusId}`
+    const candidate = {
+      source: 'x',
+      candidate: `x-status:${statusId}`,
+      stableReference: `x:status:${statusId}`,
+    }
+    return {
+      acceptedIntoPeriod: { period: productionProposalPeriod, candidate },
+      period: productionProposalPeriod,
+      candidate,
+      boundedContent: {
+        kind: 'x-status',
+        id: statusId,
+        url: canonicalUrl,
+        text,
+        time: '2026-08-24T00:00:00.000Z',
+        media: [],
+        ts: 1_755_961_200,
+      },
+      attribution: { kind: 'x-author', handle: authorHandle },
+      exactLookup: { kind: 'x-status-lookup', url: canonicalUrl },
+    }
+  })
+  return createOrdinaryFeedEditingProposalValidator({
+    period: productionProposalPeriod,
+    editor: { listAcceptedInputs: () => c10Inputs },
+  })
+}
 
 type LateStreamOutcome = 'complete' | 'tool-call' | 'reject'
 
@@ -524,22 +575,12 @@ describe('TODO05 ordinary-feed editor one-shot Agent bootstrap', () => {
     const adapter = new WireAdapter([response(submission)])
     const ctx = await createHarness(adapter)
     contexts.push(ctx)
-    let validatedSubmission: unknown
+    const productionProposal = productionProposalPort()
+    const validateProposal = vi.fn<OrdinaryFeedEditorAgentProposalPort['validateProposal']>(input =>
+      productionProposal.validateProposal(input))
     const proposal: OrdinaryFeedEditorAgentProposalPort = {
-      readModelMaterials: vi.fn<OrdinaryFeedEditorAgentProposalPort['readModelMaterials']>(() => ({
-        status: 'accepted',
-        value: { materials },
-      })),
-      validateProposal: vi.fn<OrdinaryFeedEditorAgentProposalPort['validateProposal']>(input => {
-        validatedSubmission = input
-        return {
-          status: 'accepted',
-          value: {
-            content: { body: 'validated proposal body' },
-            decisions: { candidatesInJudgment: [], decisions: [] },
-          },
-        }
-      }),
+      readModelMaterials: productionProposal.readModelMaterials,
+      validateProposal,
     }
 
     const result = await createOrdinaryFeedEditorAgent({ ctx, proposal }).formEditingProposal()
@@ -547,11 +588,9 @@ describe('TODO05 ordinary-feed editor one-shot Agent bootstrap', () => {
     expect(result.status).toBe('accepted')
     if (result.status !== 'accepted') throw new Error('ordinary-feed editor Agent did not accept its proposal')
     expect(result).toEqual({ status: 'accepted', value: { proposal: submission } })
-    expect(result.value.proposal).toBe(validatedSubmission)
-    expect(proposal.readModelMaterials).toHaveBeenCalledTimes(1)
-    expect(proposal.validateProposal).toHaveBeenCalledTimes(1)
-    expect(proposal.validateProposal).toHaveBeenCalledWith(validatedSubmission)
-    expect(validatedSubmission).toEqual(submission)
+    expect(result.value.proposal).toEqual(submission)
+    expect(validateProposal).toHaveBeenCalledTimes(1)
+    expect(validateProposal).toHaveBeenCalledWith(submission)
     expect(adapter.requests).toHaveLength(1)
     const wire = adapter.requests[0]
     expect(wire?.system).toBe(ORDINARY_FEED_EDITOR_SYSTEM_PROMPT)
