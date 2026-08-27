@@ -752,13 +752,7 @@ describe('single-session context route through the real loop', () => {
 
     const firstQualifiedTransaction = object(qualifiedStateAfter?.transaction)
     expect(firstQualifiedTransaction?.generation).toBe(1)
-    await send(qualifiedAgent, singleFactDirect)
-    const secondQualifiedDirect = createUserMessage({
-      content: [{ type: 'text', text: updateBackgroundDirect }],
-      source: { kind: 'user' },
-    })
-    qualifiedAgent.followup(secondQualifiedDirect)
-    await qualifiedAgent.whenIdle()
+    const rollingQualifiedDirect = await send(qualifiedAgent, singleFactDirect)
     await natural.sessions.flush(qualifiedAgent.session)
     const secondQualifiedDetached = await natural.sessionPersistence.readFrom(qualifiedAgent.session.id, 0)
     const secondQualifiedState = storedFocusRecord(sqlitePath, qualifiedBackgroundSessionId)
@@ -776,13 +770,13 @@ describe('single-session context route through the real loop', () => {
       ? visibleQualifiedCanonical[0].source.generation : undefined).toBe(2)
     expect(secondQualifiedRequest.messages).toHaveLength(2)
     expect(secondQualifiedRequest.messages[0]?.source.kind).toBe('context-manager-canonical')
-    expect(secondQualifiedRequest.messages[1]).toStrictEqual(secondQualifiedDirect)
+    expect(secondQualifiedRequest.messages[1]).toStrictEqual(rollingQualifiedDirect)
     expect(qualifiedAgent.session.events.filter(event => event.type === 'user/message'
       && event.data.source.kind === 'user'
-      && String(event.data.id) === String(secondQualifiedDirect.id))).toHaveLength(1)
+      && String(event.data.id) === String(rollingQualifiedDirect.id))).toHaveLength(1)
     expect(secondQualifiedDetached.events.filter(event => event.type === 'user/message'
       && event.data.source.kind === 'user'
-      && String(event.data.id) === String(secondQualifiedDirect.id))).toHaveLength(1)
+      && String(event.data.id) === String(rollingQualifiedDirect.id))).toHaveLength(1)
     expect(qualifiedAgent.session.events.filter(event => event.type.startsWith('compaction/'))).toHaveLength(0)
   })
 

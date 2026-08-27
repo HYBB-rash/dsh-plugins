@@ -90,10 +90,12 @@ import {
   type CandidatePreparationSnapshot,
   type ExplicitBackgroundUpdateRuntimeEvidence,
   type FixedH1CandidateBudgetProof,
+  type RollingCandidateRuntimeEvidence,
 } from './candidate.ts'
-import { type CandidateQualificationIssue, type CandidateRef } from './candidate-qualification.ts'
+import { type CandidateQualificationDecision, type CandidateQualificationIssue, type CandidateRef, type C28Result } from './candidate-qualification.ts'
 import { createBackgroundStateComposition } from './background-state.ts'
 import { createQualifiedBackgroundAdapter } from './adapters/qualified-background.ts'
+import { createRollingCandidateAdapter, type RollingCandidateAdapter } from './adapters/rolling-candidate.ts'
 import {
   projectFutureCriticalPoints,
   type AuthenticatedStructuredFutureCriticalMaterial,
@@ -1945,6 +1947,7 @@ function installFocusCanary(
     }),
     semantic: auxiliary,
   })
+  let rollingCandidate: RollingCandidateAdapter | undefined
   const background = createBackgroundStateComposition({
     userAdvice: Object.freeze({
       acceptCandidateQualificationIssue<Ref extends CandidateRef>(
@@ -1978,6 +1981,14 @@ function installFocusCanary(
     focusOwner: focusAuthority,
     actionOwner: actionComposition.authority,
     transaction: stateTransaction,
+    qualifiedCandidateObserver: Object.freeze({
+      acceptOwnerQualifiedCandidate<Ref extends CandidateRef>(
+        decision: Extract<CandidateQualificationDecision<Ref>, { readonly kind: 'qualified' }>,
+        c28: C28Result<Ref>,
+      ) {
+        rollingCandidate?.acceptOwnerQualifiedCandidate(decision, c28)
+      },
+    }),
   })
   const qualification = background.qualification
   const contentReviewer = new CandidateContentReviewer({ qualification })
@@ -1997,6 +2008,10 @@ function installFocusCanary(
   const qualifiedBackground = createQualifiedBackgroundAdapter({
     formation,
     state: background.state,
+  })
+  rollingCandidate = createRollingCandidateAdapter({
+    current: qualifiedBackground.current,
+    formation,
   })
   if (!bindCandidateAdviceReceivers(candidateAdvice, { formation })) {
     throw new Error('ui-context-compactor: candidate advice binding failed')
@@ -2026,7 +2041,10 @@ function installFocusCanary(
     formation: Object.freeze({
       acceptActionFactBoundary(boundary: ActionFactBoundary) {
         const report = formation.acceptActionFactBoundary(boundary)
-        if (report.kind === 'business_result') candidateActionBasis.set(boundary.chat, boundary)
+        if (report.kind === 'business_result') {
+          candidateActionBasis.set(boundary.chat, boundary)
+          rollingCandidate?.acceptActionFactBoundary(boundary)
+        }
         return report
       },
     }),
@@ -2035,7 +2053,10 @@ function installFocusCanary(
     formation: Object.freeze({
       acceptEvidenceConclusions(conclusions: EvidenceConclusionSet) {
         const report = formation.acceptEvidenceConclusions(conclusions)
-        if (report.kind === 'business_result') candidateEvidenceBasis.set(conclusions.chat, conclusions)
+        if (report.kind === 'business_result') {
+          candidateEvidenceBasis.set(conclusions.chat, conclusions)
+          rollingCandidate?.acceptEvidenceConclusions(conclusions)
+        }
         return report
       },
     }),
@@ -2095,13 +2116,15 @@ function installFocusCanary(
     message: UserMessage,
     boundaryMessages: readonly Message[],
     signal: AbortSignal,
-  ): Promise<ExplicitBackgroundUpdateRuntimeEvidence | undefined> => {
+    exactText?: '请更新当前背景',
+  ): Promise<(RollingCandidateRuntimeEvidence & { readonly text: string }) | undefined> => {
     const chat = String(agent.session.id) as ChatRef
     const text = textOf(message)
     const messageId = String(message.id)
     const originHash = text === undefined ? undefined : directExpressionHash(messageId, text)
     const matchingBoundaryMessages = boundaryMessages.filter(candidate => String(candidate.id) === messageId)
-    if (text !== '请更新当前背景'
+    if (text === undefined
+      || exactText !== undefined && text !== exactText
       || originHash === undefined
       || matchingBoundaryMessages.length !== 1
       || matchingBoundaryMessages[0] !== message
@@ -2334,6 +2357,10 @@ function installFocusCanary(
           ? current : undefined
       })()
       if (established === undefined) throw new Error('evidence precommit focus restoration is not exact')
+      if (currentBackground !== undefined
+        && rollingCandidate?.acceptCurrent(sessionId as ChatRef, stored) !== true) {
+        throw new Error('rolling candidate has no exact current C41 state')
+      }
       const request = createBoundedActionFactNeedProposalRequest(
         createExplicitUserExpression(text, sessionId as ChatRef, origin), origin, established,
       )
@@ -2375,6 +2402,70 @@ function installFocusCanary(
         if (projection === undefined) throw new Error('evidence actionable presentation was not exact')
         if (signal.aborted) return await failClosed()
         if (currentBackground !== undefined) {
+          const runtimeEvidence = await buildCandidateRuntimeEvidence(
+            agent, message, [message, projection], signal,
+          )
+          if (runtimeEvidence === undefined || rollingCandidate === undefined
+            || !rollingCandidate.requestRollingCandidate({
+              chat: sessionId as ChatRef,
+              generation: currentBackground.generation,
+              runtimeEvidence,
+            })) {
+            throw new Error('rolling candidate formation did not receive exact C41/C14/C15 evidence')
+          }
+          const terminal = candidateTerminals.get(sessionId)
+          candidateTerminals.delete(sessionId)
+          if (terminal?.kind === 'failed') {
+            throw new Error('rolling candidate qualification did not close exactly')
+          }
+          if (terminal?.kind === 'issue') {
+            await preserveClaimedInput(ctx, agent, message)
+            await publishCandidateResult(agent, terminal.text)
+            return { kind: 'enter', messages: [] }
+          }
+          const rolling = rollingCandidate.takeQualification(sessionId as ChatRef)
+          if (rolling === undefined) throw new Error('rolling candidate has no owner-qualified C28 outcome')
+          if (rolling.kind === 'identical') {
+            if (!background.state.discardObservedQualification(sessionId, rolling.decision, rolling.c28)) {
+              throw new Error('identical qualified candidate is not the retained owner C28')
+            }
+          } else {
+            const sessions = sessionsFlushPort(ctx)
+            const persistence = sessionPersistencePort(ctx)
+            if (sessions === undefined || persistence === undefined || signal.aborted) {
+              throw new Error('rolling candidate has no exact live transaction inputs')
+            }
+            const currentHeader = agent.session.requestHeader()
+            if (currentHeader === undefined
+              || tokenMeter.measure(agent.session, currentHeader).logRevision
+                !== runtimeEvidence.budget.firstAssembly.revision) {
+              throw new Error('rolling background writer revision changed after formation')
+            }
+            const committed = await qualifiedBackground.apply.apply({
+              sessionId,
+              session: agent.session,
+              record: currentBackground === undefined ? { family: 'background' } : stored as BackgroundStateRecord,
+              focus: established,
+              boundary: candidateActionBasis.get(sessionId) ?? completion.boundary,
+              origin: runtimeEvidence.origin,
+              save: async value => {
+                const exact = backgroundStateRecordSchema.safeParse(value)
+                if (!exact.success) throw new Error('rolling background live sidecar record failed exact schema validation')
+                await table.put(sessionId, exact.data)
+              },
+              flush: async () => await sessions.flush(agent.session),
+              readFrom: async fromSeq => await persistence.readFrom(sessionId, fromSeq),
+            })
+            const visible = agent.session.deriveMessages()
+            const canonical = visible[0]
+            if (committed.record.phase !== 'finalized'
+              || committed.record.generation !== currentBackground.generation + 1
+              || visible.length !== 1 || canonical === undefined
+              || canonical.source.kind !== 'context-manager-canonical'
+              || canonical.source.machine.kind !== 'background') {
+              throw new Error('rolling background finalized publication is not uniquely visible')
+            }
+          }
           const directIds = postCanonicalBasisDirects.get(sessionId) ?? new Set<string>()
           directIds.add(origin.messageId)
           postCanonicalBasisDirects.set(sessionId, directIds)
@@ -3266,11 +3357,13 @@ function installFocusCanary(
           if (unqualifiedDirect) throw new Error('post-canonical direct work is not present in the new basis')
         }
         const runtimeEvidence = await buildCandidateRuntimeEvidence(
-          agent, message, base.messages, signal,
+          agent, message, base.messages, signal, '请更新当前背景',
         )
-        if (runtimeEvidence === undefined) throw new Error('candidate runtime evidence was not exact')
+        if (runtimeEvidence === undefined || runtimeEvidence.text !== '请更新当前背景') {
+          throw new Error('candidate runtime evidence was not exact')
+        }
         candidateTerminals.delete(sessionId)
-        candidateRuntimeEvidence.set(sessionId, runtimeEvidence)
+        candidateRuntimeEvidence.set(sessionId, runtimeEvidence as ExplicitBackgroundUpdateRuntimeEvidence)
         const c38 = candidateAdvice.requestExplicitBackgroundUpdate({ chat: sessionId as ChatRef })
         candidateRuntimeEvidence.delete(sessionId)
         const terminal = candidateTerminals.get(sessionId)

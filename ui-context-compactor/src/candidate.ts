@@ -111,6 +111,20 @@ export interface ExplicitBackgroundUpdateRuntimeEvidence {
   readonly futureCriticalPoints?: FutureCriticalPointProjection
 }
 
+/** @internal Evidence measured for one admitted rolling C14/C15 update. */
+export interface RollingCandidateRuntimeEvidence {
+  readonly chat: ChatRef
+  readonly origin: ExactBackgroundUpdateOrigin
+  readonly budget: FixedH1CandidateBudgetProof
+  readonly futureCriticalPoints?: FutureCriticalPointProjection
+}
+
+export interface RollingCandidateRequest {
+  readonly chat: ChatRef
+  readonly generation: number
+  readonly runtimeEvidence: RollingCandidateRuntimeEvidence
+}
+
 /**
  * @internal A destructive per-chat read.  W4 binds it to the real current
  * Context/Session assembly; Formation has no provider or state dependency.
@@ -364,7 +378,7 @@ function samePreparation(left: CandidatePreparationSnapshot, right: CandidatePre
 export function evaluateFixedH1CandidateBudget(
   proof: FixedH1CandidateBudgetProof | undefined,
   body: SelfContainedBackgroundText,
-  evidence: Pick<ExplicitBackgroundUpdateRuntimeEvidence, 'chat' | 'text' | 'origin'>,
+  evidence: Pick<RollingCandidateRuntimeEvidence, 'chat' | 'origin'>,
 ): CandidateBudgetResult {
   if (proof?.kind !== 'fixed_h1_known_envelope') return { kind: 'unknown' }
   const assembly = proof.firstAssembly
@@ -381,9 +395,7 @@ export function evaluateFixedH1CandidateBudget(
     || !safeInteger(assembly.revision)
     || assembly.directChat !== evidence.chat
     || assembly.directMessageId !== evidence.origin.messageId
-    || assembly.directText !== evidence.text
     || assembly.directHash !== evidence.origin.hash
-    || evidence.origin.hash !== directDigest(evidence.origin.messageId, evidence.text)
     || !safeInteger(assembly.baseInputTokens)
     || !nonblank(preparation.fingerprint)
     || preparation.provider !== assembly.provider
@@ -650,7 +662,7 @@ export class BackgroundCandidateFormation {
     if (!completeFocus(focus)) return rejected('C03', focus.ref) as C03Result
     this.#focus.set(focus.chat, focus)
     if (this.#actions.has(focus.chat) && this.#evidence.has(focus.chat)) {
-      this.#formOrReport(focus.chat, undefined)
+      this.#formOrReport(focus.chat, undefined, false)
     }
     return accepted('C03', focus.ref, focus) as C03Result
   }
@@ -663,7 +675,7 @@ export class BackgroundCandidateFormation {
       const trigger = `C10\0${decision.ref}`
       if (!this.#triggers.has(trigger)) {
         this.#triggers.add(trigger)
-        this.#formOrReport(decision.chat, undefined)
+        this.#formOrReport(decision.chat, undefined, false)
       }
     }
     return accepted('C10', decision.ref, decision) as C10Result
@@ -738,7 +750,7 @@ export class BackgroundCandidateFormation {
         })) as C38Result
       }
       this.#triggers.add(trigger)
-      this.#formOrReport(request.chat, evidence)
+      this.#formOrReport(request.chat, evidence, false)
       return accepted('C38', request.chat, Object.freeze({
         kind: 'trigger_accepted',
         chat: request.chat,
@@ -751,6 +763,26 @@ export class BackgroundCandidateFormation {
     }
   }
 
+  /**
+   * C41-associated C14/C15 rolling entry.  It deliberately has no C38 or
+   * direct-message semantics: the caller must supply measurement captured for
+   * the already-admitted action/evidence event.
+   */
+  requestRollingCandidate(request: RollingCandidateRequest): boolean {
+    const current = this.#currentCanonical.get(request.chat)
+    const evidence = request.runtimeEvidence
+    if (current === undefined
+      || current.generation !== request.generation
+      || evidence.chat !== request.chat
+      || !nonblank(evidence.origin.messageId)
+      || !nonblank(evidence.origin.hash)) return false
+    const trigger = `rolling\0${request.chat}\0${request.generation}\0${evidence.origin.hash}`
+    if (this.#triggers.has(trigger)) return false
+    this.#triggers.add(trigger)
+    this.#formOrReport(request.chat, evidence, true)
+    return true
+  }
+
   #basis(chat: ChatRef): FormationBasis | undefined {
     const focus = this.#focus.get(chat)
     const action = this.#actions.get(chat)
@@ -760,7 +792,11 @@ export class BackgroundCandidateFormation {
     return { focus, action, evidence }
   }
 
-  #formOrReport(chat: ChatRef, evidence: ExplicitBackgroundUpdateRuntimeEvidence | undefined): void {
+  #formOrReport(
+    chat: ChatRef,
+    evidence: (ExplicitBackgroundUpdateRuntimeEvidence | RollingCandidateRuntimeEvidence) | undefined,
+    rolling: boolean,
+  ): void {
     const basis = this.#basis(chat)
     if (basis === undefined) {
       this.#dependencies.qualification.acceptFormationResult({
@@ -772,7 +808,7 @@ export class BackgroundCandidateFormation {
     }
     const lastExplicitBasis = this.#lastExplicitBasis.get(chat)
     const currentCanonical = this.#currentCanonical.get(chat)
-    if (lastExplicitBasis !== undefined
+    if (!rolling && lastExplicitBasis !== undefined
       && (currentCanonical === undefined || sameBasis(lastExplicitBasis, {
         focus: basis.focus.ref,
         actionFacts: basis.action.ref,
@@ -842,6 +878,7 @@ export class BackgroundCandidateFormation {
       focus: candidateBasis.focus,
       action: candidateBasis.actionFacts,
       evidence: candidateBasis.evidence,
+      rollingGeneration: rolling ? currentCanonical?.generation : undefined,
     }))}` as CandidateRef
     const candidate: CandidateEnvelope<typeof ref> = deepFreeze({
       ref,

@@ -35,6 +35,14 @@ interface PendingQualification {
   readonly c28: C28Result
 }
 
+/** @internal The owner-authorized C28 observation point used by F01-T4. */
+export interface OwnerQualifiedCandidateObserver {
+  acceptOwnerQualifiedCandidate<Ref extends CandidateRef>(
+    decision: QualifiedDecision<Ref>,
+    c28: C28Result<Ref>,
+  ): void
+}
+
 /** The formation/reviewer-facing facade cannot consume or authenticate C28. */
 export interface BackgroundQualificationInputPort {
   acceptFormationResult<Ref extends CandidateRef>(result: CandidateFormationResult<Ref>): C25Result<Ref>
@@ -71,6 +79,11 @@ export interface RecoveredBackgroundState {
 /** Index receives only complete live and recovery operations. */
 export interface BackgroundStatePort {
   apply(input: BackgroundStateLiveInput): Promise<FinalizedCanonicalBackground>
+  discardObservedQualification<Ref extends CandidateRef>(
+    sessionId: string,
+    decision: QualifiedDecision<Ref>,
+    c28: C28Result<Ref>,
+  ): boolean
   recover(input: BackgroundStateRecoveryInput): Promise<RecoveredBackgroundState | undefined>
 }
 
@@ -84,6 +97,7 @@ export interface BackgroundStateDependencies {
   readonly focusOwner: FocusAuthority
   readonly actionOwner: ActionFactBoundaryAuthority
   readonly transaction: CanonicalStateTransaction
+  readonly qualifiedCandidateObserver?: OwnerQualifiedCandidateObserver
 }
 
 function rejectedC28<Ref extends CandidateRef>(decision: QualifiedDecision<Ref>): C28Result<Ref> {
@@ -130,6 +144,7 @@ export function createBackgroundStateComposition(
       if (pending.has(target)) return rejectedC28(decision)
       const c28 = acceptedC28(decision)
       pending.set(target, Object.freeze({ decision, c28 }))
+      dependencies.qualifiedCandidateObserver?.acceptOwnerQualifiedCandidate(decision, c28)
       return c28
     },
   })
@@ -176,6 +191,16 @@ export function createBackgroundStateComposition(
         readFrom: input.readFrom,
         material: createCanonicalBackgroundMaterial(handoff.decision.candidate.background, input.origin),
       })
+    },
+    discardObservedQualification<Ref extends CandidateRef>(
+      sessionId: string,
+      decision: QualifiedDecision<Ref>,
+      c28: C28Result<Ref>,
+    ): boolean {
+      const handoff = pending.get(sessionId)
+      if (handoff?.decision !== decision || handoff.c28 !== c28) return false
+      pending.delete(sessionId)
+      return true
     },
     async recover(input: BackgroundStateRecoveryInput): Promise<RecoveredBackgroundState | undefined> {
       const parsed = parseCanonicalBackgroundStateRecord(input.record)
