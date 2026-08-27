@@ -50,3 +50,4 @@
 ## 经验记录
 
 - 2026-08-27：根 `AGENTS.md` 曾混入项目现状、历史实验和精确测试数量，导致每轮注入既长又容易过时。稳定规则留在 `AGENTS.md`；可复用经验改记此文件，并在使用前按任务关键词检索、以现场状态复核。
+- 2026-08-27：Docker 首次切换完成真实验收后，旧 DSH systemd units、旧远端发布树、本地 `deployment/herman-hermes` 与第一次切换兼容代码均已退役；随后完成一次真实 Docker→Docker 发布与显式回退演练，证明发布、健康检查和数据恢复不再依赖旧系统。A12 完整 UI 回归所需的 `context-manager-telegram-canary` 只作为已提交构建验证 fixture 保留，不是生产发布运行时。
