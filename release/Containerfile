@@ -37,7 +37,7 @@ RUN set -eu; \
       cp -a "/opt/dsh/plugins-src/$package" "/opt/dsh/harness/local-plugins/$package"; \
     done; \
     cp -a /opt/dsh/plugins-src/release/profiles/. /opt/dsh/harness/local-profiles/; \
-    printf '\n  - "local-plugins/*"\n  - "local-profiles/*"\n' >> /opt/dsh/harness/pnpm-workspace.yaml
+    sed -i '/^packages:$/a\  - local-profiles/*\n  - local-plugins/*' /opt/dsh/harness/pnpm-workspace.yaml
 
 WORKDIR /opt/dsh/harness
 RUN pnpm install --no-frozen-lockfile \
