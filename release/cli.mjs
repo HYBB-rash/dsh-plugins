@@ -10,7 +10,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -450,10 +449,10 @@ function releasePlan(candidate) {
     imageId: candidate.imageId,
     archiveSha256: candidate.archiveSha256,
     target,
-    writersToStop: ['dsh-web.service', 'dsh-web-lan.service/socket', 'dsh-telegram-gateway.service', 'Docker Compose project dsh'],
+    writersToStop: ['Docker Compose project dsh'],
     preservedOutOfScope: ['openclaw-gateway.service', '~/.openclaw', 'OpenClaw Telegram token'],
     snapshotRoot: '/home/herman/.local/share/dsh-container/snapshots',
-    rollbackBoundary: '停机前完整 ~/.dsh 快照 + 上一运行版本（首次为旧 systemd，以后为上一 Docker release）',
+    rollbackBoundary: '停机前完整 ~/.dsh 快照 + 上一个 accepted Docker release',
     next: `获得停机许可后重新执行，并添加 --approved-stop`,
   }
 }
@@ -526,32 +525,22 @@ printf 'openclaw=%s\\n' "$(systemctl --user show openclaw-gateway.service -p Mai
   const remoteRoot = '/home/herman/.local/share/dsh-container'
   const previousText = ssh(`set -Eeuo pipefail
 root=${shellQuote(remoteRoot)}
-if test -f "$root/current/release.json"; then
-  cat "$root/current/release.json"
-else
-  printf '%s\\n' '{"mode":"legacy-systemd"}'
-fi
+test -f "$root/current/release.json" || { echo '当前生产不是可识别的 Docker release' >&2; exit 42; }
+cat "$root/current/release.json"
 `)
   const currentRelease = JSON.parse(previousText)
-  // A failed first-cutover may have created evidence before production ever
-  // became current. Its rollback boundary, not the failed candidate, remains
-  // the actual previous production version.
-  const previousRelease = currentRelease.status === 'failed' && currentRelease.previous
-    ? currentRelease.previous
-    : currentRelease
-  const previous = previousRelease.mode === 'legacy-systemd'
-    ? { mode: 'legacy-systemd', releaseId: null }
-    : {
-        mode: 'docker',
-        releaseId: previousRelease.releaseId,
-        remoteDir: `${remoteRoot}/releases/${previousRelease.releaseId}`,
-        candidate: {
-          imageId: previousRelease.candidate?.imageId,
-          imageTag: previousRelease.candidate?.imageTag,
-        },
-        engineImageId: previousRelease.production?.engineImageId,
-      }
-  if (previous.mode === 'docker' && (!previous.releaseId || !previous.candidate.imageId || !previous.candidate.imageTag || !previous.engineImageId)) {
+  if (currentRelease.status !== 'accepted') fail(`当前 Docker release 尚未 accepted，状态是 ${currentRelease.status ?? 'missing'}`, exitCodes.production)
+  const previous = {
+    mode: 'docker',
+    releaseId: currentRelease.releaseId,
+    remoteDir: `${remoteRoot}/releases/${currentRelease.releaseId}`,
+    candidate: {
+      imageId: currentRelease.candidate?.imageId,
+      imageTag: currentRelease.candidate?.imageTag,
+    },
+    engineImageId: currentRelease.production?.engineImageId,
+  }
+  if (!previous.releaseId || !previous.candidate.imageId || !previous.candidate.imageTag || !previous.engineImageId) {
     fail('当前 Docker release.json 缺少回退所需镜像身份', exitCodes.production)
   }
   const remoteReleaseDir = `${remoteRoot}/releases/${releaseId}`
@@ -563,12 +552,10 @@ release_id=${shellQuote(releaseId)}
 mkdir -p "$root/releases/$release_id" "$root/snapshots"
 if test -f "$root/current/compose.production.yml"; then
   DSH_IMAGE=dummy DSH_IMAGE_ID=dummy docker compose -p dsh -f "$root/current/compose.production.yml" down --timeout 30 || true
+else
+  echo '当前 Docker release 缺少 compose.production.yml' >&2
+  exit 43
 fi
-systemctl --user stop dsh-telegram-gateway.service dsh-web-lan.socket dsh-web-lan.service dsh-web.service 2>/dev/null || true
-for unit in dsh-telegram-gateway.service dsh-web.service dsh-web-lan.service dsh-web-lan.socket; do
-  state="$(systemctl --user is-active "$unit" 2>/dev/null || true)"
-  test "$state" != active && test "$state" != activating || { echo "writer still active: $unit" >&2; exit 42; }
-done
 if docker ps --format '{{.Names}}' | grep -Eq '^dsh-(web|telegram|lan-proxy)$'; then echo 'DSH container writer still active' >&2; exit 43; fi
 if pgrep -u "$(id -u)" -af 'apps/cli/(src/bin\\.ts|lib/bin\\.js).*(web|--profile telegram)' >/dev/null; then
   echo 'DSH Harness writer process still active' >&2; exit 44
@@ -716,7 +703,7 @@ test -f "$release_dir/release.json"
 ln -sfn "$release_dir" "$root/last-good.next"
 mv -Tf "$root/last-good.next" "$root/last-good"
 `)
-  out({ result: 'accepted', releaseId: release.releaseId, imageId: release.candidate.imageId, next: '旧系统仍保留；只有确认隔壁任务不再使用后才能执行 retire-legacy。' })
+  out({ result: 'accepted', releaseId: release.releaseId, imageId: release.candidate.imageId, next: '该 release 已固定为 current 和 last-good。' })
 }
 
 function commandRollback(options) {
@@ -726,21 +713,10 @@ function commandRollback(options) {
     process.exitCode = exitCodes.approval
     return
   }
-  if (!['legacy-systemd', 'docker'].includes(release.previous?.mode)) fail('release 没有可识别的回退目标', exitCodes.safety)
+  if (release.previous?.mode !== 'docker') fail('release 没有可识别的上一 Docker release', exitCodes.safety)
   const remoteRoot = '/home/herman/.local/share/dsh-container'
   const remoteSnapshot = release.snapshot.remoteArchivePath
-  const restartPrevious = release.previous.mode === 'legacy-systemd'
-    ? `
-if test -L "$root/current"; then unlink "$root/current"; fi
-systemctl --user start dsh-web.service dsh-web-lan.socket dsh-telegram-gateway.service
-for attempt in $(seq 1 24); do curl --fail --silent --max-time 2 http://127.0.0.1:3080/ >/dev/null && break; sleep 5; done
-curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
-systemctl --user is-active --quiet dsh-web.service
-systemctl --user is-active --quiet dsh-telegram-gateway.service
-legacy_release="$(readlink -f /home/herman/.local/share/dsh-deploy/current)"
-/home/herman/.local/node/bin/node "$legacy_release/deployment/check-cron-control-ready.cjs" "$legacy_release/plugins/dsh-cron/lib/index.js" /home/herman/.dsh/storages/dsh-cron/control.sock >/dev/null
-`
-    : `
+  const restartPrevious = `
 previous_dir=${shellQuote(release.previous.remoteDir)}
 previous_image=${shellQuote(release.previous.candidate.imageTag)}
 previous_image_id=${shellQuote(release.previous.candidate.imageId)}
@@ -798,59 +774,10 @@ if command -v docker >/dev/null 2>&1; then
 else
   echo 'docker=not-installed'
 fi
-for unit in dsh-web.service dsh-telegram-gateway.service; do printf '%s=' "$unit"; systemctl --user is-active "$unit" 2>/dev/null || true; done
+printf 'current='; readlink -f /home/herman/.local/share/dsh-container/current 2>/dev/null || true
+printf 'last-good='; readlink -f /home/herman/.local/share/dsh-container/last-good 2>/dev/null || true
 ` })
   out({ local: { stateRoot, latestCandidate: localCandidate }, remote: { target, reachable: remoteResult.status === 0, output: String(remoteResult.stdout ?? '').trim(), error: String(remoteResult.stderr ?? '').trim() } })
-}
-
-function commandRetireLegacy(options) {
-  const { path, release } = findRelease(options.release)
-  if (release.status !== 'accepted') fail('只有 accepted release 才能清理旧系统', exitCodes.safety)
-  if (!options.approved) {
-    out({ status: 'waiting-for-destructive-cleanup-authorization', releaseId: release.releaseId, next: '确认隔壁任务不再依赖旧流程后加 --approved' })
-    process.exitCode = exitCodes.approval
-    return
-  }
-  const retiredAt = new Date().toISOString()
-  const retirement = ssh(`set -Eeuo pipefail
-root=/home/herman/.local/share/dsh-container
-release_dir="$root/releases/${release.releaseId}"
-test "$(readlink -f "$root/current")" = "$release_dir"
-test "$(readlink -f "$root/last-good")" = "$release_dir"
-test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
-test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
-test "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
-test "$(docker image inspect ${shellQuote(release.candidate.imageTag)} --format '{{.Id}}')" = ${shellQuote(release.production.engineImageId)}
-test "$(docker inspect dsh-web --format '{{.Image}}')" = ${shellQuote(release.production.engineImageId)}
-test "$(docker inspect dsh-telegram --format '{{.Image}}')" = ${shellQuote(release.production.engineImageId)}
-test "$(docker inspect dsh-lan-proxy --format '{{.Image}}')" = ${shellQuote(release.production.engineImageId)}
-curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
-curl --fail --silent --max-time 3 http://192.168.6.240:3080/ >/dev/null
-docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs >/dev/null
-openclaw_before="$(systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ',')"
-test -n "$openclaw_before"
-printf '%s' "$openclaw_before"
-`)
-  ssh(`set -Eeuo pipefail
-systemctl --user disable --now dsh-web.service dsh-telegram-gateway.service dsh-web-lan.service dsh-web-lan.socket 2>/dev/null || true
-for unit in dsh-web.service dsh-telegram-gateway.service dsh-web-lan.service dsh-web-lan.socket dsh-canary.slice; do
-  rm -f -- "/home/herman/.config/systemd/user/$unit"
-done
-systemctl --user daemon-reload
-rm -rf -- /home/herman/.local/share/dsh-deploy
-find /home/herman/.dsh/profiles -type l -lname '/home/herman/.local/share/dsh-deploy/*' -delete
-find /home/herman/Projects /home/herman/.local/bin -xdev -type l -lname '/home/herman/.local/share/dsh-deploy/*' -delete 2>/dev/null || true
-openclaw_after="$(systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ',')"
-test "$openclaw_after" = ${shellQuote(retirement)}
-`)
-  const legacyLocal = realpathSync(process.env.DSH_LEGACY_LOCAL_ROOT ?? '/home/herman/Projects/dsh-plugins/deployment/herman-hermes')
-  if (legacyLocal !== '/home/herman/Projects/dsh-plugins/deployment/herman-hermes') fail(`拒绝删除非预期目录: ${legacyLocal}`, exitCodes.safety)
-  rmSync(legacyLocal, { recursive: true, force: true })
-  release.legacyRetirement = { retiredAt, openclaw: retirement, remotePathRemoved: '/home/herman/.local/share/dsh-deploy', localPathRemoved: legacyLocal }
-  writeJson(path, release)
-  const remoteDir = `/home/herman/.local/share/dsh-container/releases/${release.releaseId}`
-  run('scp', ['-p', path, `${target}:${remoteDir}/release.json`], { code: exitCodes.production })
-  out({ result: 'legacy-runtime-retired', releaseId: release.releaseId, retiredAt, openclaw: retirement, note: '旧运行时已删除；下一步从源码删除一次性兼容代码并完成 Docker→Docker 演练。' })
 }
 
 function usage() {
@@ -865,7 +792,6 @@ function usage() {
   ./release/dsh status
   ./release/dsh accept --release <release-id|release.json> --evidence <说明|文件>
   ./release/dsh rollback --release <release-id|release.json> [--approved]
-  ./release/dsh retire-legacy --release <accepted-release-id|release.json> [--approved]
 
 退出码：2 参数错误；3 等待授权；4 安全门；5 测试失败；6 生产验收失败。`)
 }
@@ -881,7 +807,6 @@ async function main() {
   if (command === 'status') return commandStatus(options)
   if (command === 'accept') return commandAccept(options)
   if (command === 'rollback') return commandRollback(options)
-  if (command === 'retire-legacy') return commandRetireLegacy(options)
   if (!command || ['help', '--help', '-h'].includes(command)) return usage()
   fail(`未知命令: ${command}`, exitCodes.usage)
 }

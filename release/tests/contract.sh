@@ -55,7 +55,13 @@ cat >"$release_dir/release.json" <<EOF
   "status": "awaiting-user-acceptance",
   "candidate": $(cat "$candidate"),
   "snapshot": {"archivePath": "$test_root/snapshot.tar.zst"},
-  "previous": {"mode": "legacy-systemd"}
+  "previous": {
+    "mode": "docker",
+    "releaseId": "last-good",
+    "remoteDir": "/home/herman/.local/share/dsh-container/releases/last-good",
+    "candidate": {"imageId": "sha256:old", "imageTag": "dsh-candidate:old"},
+    "engineImageId": "sha256:engine-old"
+  }
 }
 EOF
 
@@ -64,20 +70,6 @@ grep -q 'waiting-for-rollback-authorization' "$test_root/stdout"
 
 run_expect 2 accept --release fixture
 grep -q -- '--evidence' "$test_root/stderr"
-
-cat >"$release_dir/release.json" <<EOF
-{
-  "schemaVersion": 1,
-  "releaseId": "fixture",
-  "status": "accepted",
-  "candidate": $(cat "$candidate"),
-  "snapshot": {"archivePath": "$test_root/snapshot.tar.zst"},
-  "previous": {"mode": "legacy-systemd"}
-}
-EOF
-
-run_expect 3 retire-legacy --release fixture
-grep -q 'waiting-for-destructive-cleanup-authorization' "$test_root/stdout"
 
 run_expect 2 build --harness-ref main --plugins-ref main
 grep -q '40 位 Git commit' "$test_root/stderr"

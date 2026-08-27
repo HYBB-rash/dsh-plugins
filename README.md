@@ -16,7 +16,7 @@
 ./release/dsh
 ```
 
-开发、上线前测试和生产运行使用同一个不可变 Docker/OCI 镜像；镜像只能从明确的 Harness commit 和插件 commit 构建。禁止直接同步源码、修改线上 selector、在线安装依赖，也禁止恢复或扩展旧 `deploy.sh` 流程。停机、快照、上线、真实验收、正式接受和回退的完整边界见 [`release/README.md`](release/README.md)。
+开发、上线前测试和生产运行使用同一个不可变 Docker/OCI 镜像；镜像只能从明确的 Harness commit 和插件 commit 构建。禁止直接同步源码、修改线上 selector、在线安装依赖，也禁止恢复或扩展已退役的源码发版系统。停机、快照、上线、真实验收、正式接受和回退的完整边界见 [`release/README.md`](release/README.md)。
 
 ## 仓库总览
 
