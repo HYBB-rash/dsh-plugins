@@ -61,6 +61,7 @@ RUN set -eu; \
       cp -a "/opt/dsh/plugins-src/$package/." "/opt/dsh/harness/local-plugins/$package/"; \
     done; \
     cp -a /opt/dsh/plugins-src/release/profiles/. /opt/dsh/harness/local-profiles/; \
+    cp /opt/dsh/plugins-src/release/vitest.external.config.ts /opt/dsh/harness/vitest.external.config.ts; \
     for package in telegram-gateway dsh-cron dsh-assistant personal-feed x-feed ui-context-compactor; do \
       (cd "local-plugins/$package" \
        && pnpm exec tsc -b \
@@ -71,10 +72,12 @@ RUN set -eu; \
 RUN set -eu; \
     for package in telegram-gateway dsh-cron dsh-assistant personal-feed x-feed ui-context-compactor; do \
       if [ -d "local-plugins/$package/tests" ]; then \
-        (cd "local-plugins/$package" \
-         && DSH_HARNESS_ROOT=/opt/dsh/harness \
+        (cd "local-plugins/$package"; \
+         config=vitest.config.ts; \
+         if [ ! -f "$config" ]; then config=/opt/dsh/harness/vitest.external.config.ts; fi; \
+         DSH_HARNESS_ROOT=/opt/dsh/harness \
             node /opt/dsh/harness/node_modules/vitest/vitest.mjs run \
-              --maxWorkers=1 --no-file-parallelism); \
+              --config "$config" --maxWorkers=1 --no-file-parallelism); \
       fi; \
     done; \
     (cd local-plugins/x-feed/python \
