@@ -40,19 +40,12 @@ WORKDIR /opt/dsh/harness
 ENV DSH_CLIENT_COMMIT_HASH=${DSH_HARNESS_COMMIT}
 RUN pnpm install --no-frozen-lockfile \
  && pnpm run build \
- && pnpm exec tsc -b \
-      local-plugins/dsh-assistant/tsconfig.json \
-      local-plugins/dsh-cron/tsconfig.json \
-      local-plugins/telegram-gateway/tsconfig.json \
-      local-plugins/ui-context-compactor/tsconfig.json \
-      local-plugins/personal-feed/tsconfig.json \
-      local-plugins/x-feed/tsconfig.json \
- && pnpm --filter @deepseek-ai/dsh-assistant run bundle \
- && pnpm --filter @deepseek-ai/dsh-cron run bundle \
- && pnpm --filter @deepseek-ai/dsh-telegram-gateway run bundle \
- && pnpm --filter @deepseek-ai/dsh-client-ui-context-compactor exec tsdown \
- && pnpm --filter @herman/personal-feed run bundle \
- && pnpm --filter @herman/x-feed run bundle
+ && for package in telegram-gateway dsh-cron dsh-assistant personal-feed x-feed ui-context-compactor; do \
+      (cd "local-plugins/$package" \
+       && pnpm exec tsc -b \
+       && pnpm exec tsdown \
+       && pnpm exec tsc -b); \
+    done
 
 RUN pnpm exec vitest run \
       local-plugins/dsh-assistant/tests \
