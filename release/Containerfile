@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 FROM docker.io/library/node:24.13.0-bookworm-slim@sha256:46feb5752989c05b8606e6323fbbc3db667d14ade1c24f5d0d44d9ca9909d607
 
+COPY plugins/automations/requirements.lock /opt/dsh/automations-requirements.lock
+
 # Keep the numeric identity aligned with the host mount while also making the
 # container's passwd home authoritative.  HOME alone is insufficient because
 # OpenSSH resolves its default ~/.ssh paths from the passwd database.
@@ -20,9 +22,9 @@ RUN apt-get update \
       jq less netcat-openbsd openssh-client openssl procps python3 python3-pip \
       ripgrep rsync socat sqlite3 tini util-linux xz-utils zstd \
  && python3 -m pip install --break-system-packages --no-cache-dir \
-      bleak dbus-fast paho-mqtt websocket-client \
+      --requirement /opt/dsh/automations-requirements.lock \
  && npm install --global pnpm@11.7.0 \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* /opt/dsh/automations-requirements.lock
 
 # Source identities are declared after the expensive, source-independent OS
 # layer so ordinary plugin releases do not reinstall the whole toolchain.
@@ -63,6 +65,7 @@ RUN pnpm install --no-frozen-lockfile \
 COPY plugins/ /opt/dsh/plugins-src/
 COPY release-system/release/ /opt/dsh/release-system/
 RUN set -eu; \
+    ln -s /opt/dsh/plugins-src/automations /opt/dsh/automations; \
     for package in telegram-gateway dsh-cron dsh-assistant personal-feed x-feed ui-context-compactor; do \
       cp -a "/opt/dsh/plugins-src/$package/." "/opt/dsh/harness/local-plugins/$package/"; \
     done; \
@@ -126,7 +129,15 @@ RUN set -eu; \
     trap 'rm -rf "$python_data"' EXIT; \
     (cd local-plugins/x-feed/python \
      && DSH_X_FEED_DATA_DIR="$python_data" PYTHONWARNINGS=ignore \
-        python3 -m unittest discover -p 'test_x_*.py')
+        python3 -m unittest discover -p 'test_x_*.py' \
+     && DSH_X_FEED_DATA_DIR="$python_data" PYTHONWARNINGS=ignore \
+        python3 -m unittest test_insight_engine.py); \
+    (cd /opt/dsh/automations \
+     && python3 -m unittest discover -s tests -p 'test_*.py'); \
+    (cd /opt/dsh/automations/scripts \
+     && python3 -m unittest test_bzp_ble_read_until_success.py); \
+    python3 -m compileall -q /opt/dsh/automations/scripts; \
+    for script in /opt/dsh/automations/scripts/*.sh; do bash -n "$script"; done
 
 # A historical product commit may name the verification fixture by its path at
 # that revision.  The temporary alias is strictly a build-test input and must

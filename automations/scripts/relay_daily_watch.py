@@ -18,9 +18,11 @@ import json
 import subprocess
 import concurrent.futures
 
+from automation_paths import state_file
+
 HOME = os.path.expanduser("~")
 KNOWN_FILE = os.path.join(HOME, "sub2api_sites.md")
-STATE_FILE = os.path.join(HOME, ".openclaw/relay_watch_state.json")
+STATE_FILE = state_file("relay_watch_state.json")
 UA = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 
 SUB2_PATTERN = re.compile(
@@ -57,6 +59,7 @@ def load_state():
 
 def save_state(reported):
     try:
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
         json.dump({"reported": sorted(set(reported))}, open(STATE_FILE, "w"))
     except Exception:
         pass

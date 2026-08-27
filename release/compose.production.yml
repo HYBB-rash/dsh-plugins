@@ -14,11 +14,11 @@ x-dsh-common: &dsh-common
     TINI_SUBREAPER: "1"
   volumes:
     - /home/herman:/home/herman:rw
-    - /home/herman/.openclaw:/home/herman/.openclaw:ro
     - /home/herman/task-inbox-workflow:/home/herman/task-inbox-workflow:ro
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=512m
     - /run:rw,nosuid,size=64m
+    - /home/herman/.openclaw:rw,noexec,nosuid,size=1m
   pids_limit: 256
   mem_limit: 1g
 
@@ -66,7 +66,6 @@ services:
     privileged: true
     volumes:
       - /home/herman:/home/herman:rw
-      - /home/herman/.openclaw:/home/herman/.openclaw:ro
       - /home/herman/task-inbox-workflow:/home/herman/task-inbox-workflow:ro
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:rw
     command: ["telegram"]

@@ -6,7 +6,7 @@ set -u
 
 REPO="${MYWECHAT_DIR:-}"
 if [ -z "$REPO" ]; then
-    for cand in "$HOME/my-wechat" "$HOME/.hermes/workspace/my-wechat" "/home/rita/my-wechat"; do
+    for cand in "$HOME/my-wechat"; do
         if [ -d "$cand/.git" ] && [ -x "$cand/.venv/bin/python" ]; then
             REPO="$cand"
             break

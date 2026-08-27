@@ -67,6 +67,8 @@ from typing import Optional
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlparse
 
+from automation_paths import state_dir
+
 # ---------------------------------------------------------------------------
 # 常量 (全部来自逆向资产, 见 PROTOCOL.md)
 # ---------------------------------------------------------------------------
@@ -1421,7 +1423,7 @@ def parse_args(argv=None):
                    help="最多轮数, 0=无限 (默认)")
     p.add_argument("--backend", choices=["auto", "bleak", "gatttool"], default="auto",
                    help="BLE 后端")
-    p.add_argument("--log-dir", default="./logs", help="日志目录")
+    p.add_argument("--log-dir", default=str(state_dir() / "bzp-ble"), help="日志目录")
     p.add_argument("--result-file", default=None,
                    help="结果文件路径 (默认 <log-dir>/bzp_ble_read_result.json)")
     p.add_argument("--auth-file", default="~/.local/share/bzp-ble/auth.json",

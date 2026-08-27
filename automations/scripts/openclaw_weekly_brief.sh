@@ -1,7 +1,7 @@
 #!/bin/bash
 # OpenClaw 上游代码库周报(command payload,零模型成本,每周一 09:10)
 # 汇总近 7 天:提交数/类型/合并PR/Release/贡献者;gh 已授权则含 PR+Release 数据,未授权自动降级 git-only
-REPO=/home/herman/openclaw-upstream
+REPO="${OPENCLAW_UPSTREAM_DIR:-$HOME/openclaw-upstream}"
 LOG=$REPO/.weekly-update.log
 
 cd "$REPO" || { echo "NO_REPLY"; exit 0; }

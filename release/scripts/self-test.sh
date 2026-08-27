@@ -16,6 +16,8 @@ test -f /opt/dsh/harness/apps/cli/lib/bin.js
 for package in dsh-assistant dsh-cron telegram-gateway ui-context-compactor x-feed personal-feed; do
   test -d "/opt/dsh/harness/local-plugins/$package/lib"
 done
+test -d /opt/dsh/automations/scripts
+test -f /opt/dsh/automations/requirements.lock
 
 for executable in bash bluetoothctl curl git node openssl python3 rg socat ssh; do
   command -v "$executable" >/dev/null

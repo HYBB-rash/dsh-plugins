@@ -6,6 +6,9 @@
 
 基线 `main`：`d3b430acd06a118fd5ac90ddd46131711686008b`
 
+> 这是一份开始修改前的现场基线；14 个漂移副本的逐项裁决和仓库化结果见
+> [`openclaw-script-drift-resolution.md`](openclaw-script-drift-resolution.md)。
+
 ## 盘点口径
 
 本次盘点对象不是“哪些 cron 任务还在 OpenClaw”，而是当前项目的脚本及其传递运行依赖：

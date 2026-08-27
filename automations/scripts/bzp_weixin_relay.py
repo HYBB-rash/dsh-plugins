@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Rita-side stdin relay for a direct OpenClaw WeChat send.
+"""Rita-side stdin relay for a repository-independent WeChat sender.
 
 This helper prints nothing.  It reads one bounded UTF-8 message from stdin and
-passes it as one argv element to OpenClaw without invoking a shell.  OpenClaw's
-own stdout/stderr are suppressed so internal errors cannot become wife-facing
-content through a no-agent output delivery path.
+passes the exact bytes on stdin to one explicitly configured sender executable.
+The sender's stdout/stderr are suppressed so internal errors cannot become
+wife-facing content through a command-output delivery path.
 """
 from __future__ import annotations
 
 import argparse
-import io
 import re
 import subprocess
 import sys
@@ -24,11 +23,16 @@ def _safe_token(value: str) -> str:
     return value
 
 
+def _safe_path(value: str) -> str:
+    if not value.startswith("/") or not re.fullmatch(r"/[A-Za-z0-9_./-]+", value):
+        raise argparse.ArgumentTypeError("sender executable must be a safe absolute path")
+    return value
+
+
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="stdin to OpenClaw WeChat relay")
-    parser.add_argument("--openclaw-bin",
-                        default="/home/rita/.npm-global/bin/openclaw")
-    parser.add_argument("--channel", default="openclaw-weixin", type=_safe_token)
+    parser = argparse.ArgumentParser(description="stdin to external WeChat sender relay")
+    parser.add_argument("--sender-bin", required=True, type=_safe_path,
+                        help="executable accepting --target and message bytes on stdin")
     parser.add_argument("--target", required=True, type=_safe_token)
     parser.add_argument("--max-bytes", type=int, default=65536)
     parser.add_argument("--send-timeout", type=float, default=30.0)
@@ -49,11 +53,8 @@ def relay_once(opts, stdin_buffer, _stdout) -> int:
         return 64
     try:
         result = subprocess.run([
-            opts.openclaw_bin, "message", "send",
-            "--channel", opts.channel,
-            "--target", opts.target,
-            "--message", message,
-        ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            opts.sender_bin, "--target", opts.target,
+        ], input=message.encode("utf-8"), stdout=subprocess.DEVNULL,
            stderr=subprocess.DEVNULL, timeout=opts.send_timeout,
            check=False, shell=False)
     except (OSError, subprocess.TimeoutExpired):

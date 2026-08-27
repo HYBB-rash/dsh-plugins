@@ -98,16 +98,16 @@ python3 insight_engine.py set-theme --last <状态文件> --theme <主题>
    代码最多输出 `wander_suggested` 建议信号。
 5. **新信息源 = 新增 jsonl + 可选关键词表**, 不修改引擎核心逻辑。
    若必须改核心逻辑, 走完整流程: 架构评审 → TDD → 重构 → 终审。
-6. **数据文件放 `~/.openclaw/workspace/data/`**, 脚本放 `scripts/`, 测试同名 `test_*.py`。
+6. **数据文件放 `DSH_X_FEED_DATA_DIR`**, 脚本和测试放在本仓库 `x-feed/python/`。
 
 ## 7. 相关文件
 
 | 文件 | 角色 |
 |---|---|
-| `scripts/insight_engine.py` | 通用引擎(唯一核心) |
-| `scripts/test_insight_engine.py` | 引擎测试(19 用例) |
-| `scripts/x_timeline_collector.py` | X 源采集器(示例) |
-| `scripts/x_topic_search.py` / `x_explorer.py` | X 搜索/探索工具 |
+| `x-feed/python/insight_engine.py` | 通用引擎(唯一核心) |
+| `x-feed/python/test_insight_engine.py` | 引擎测试(19 用例) |
+| `x-feed/python/x_timeline_collector.py` | X 源采集器(示例) |
+| `x-feed/python/x_topic_search.py` / `x_explorer.py` | X 搜索/探索工具 |
 | `data/x_timeline.jsonl` | X 源数据 |
 | `data/x_last_theme.json` | X 源主题状态 |
 | 已退役: `x_wander.py` | 被 insight_engine 取代(勿恢复) |

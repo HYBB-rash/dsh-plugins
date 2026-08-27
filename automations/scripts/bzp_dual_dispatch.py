@@ -24,6 +24,8 @@ import re
 import subprocess
 import sys
 
+from automation_paths import state_file
+
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9_.@:-]+$")
@@ -78,10 +80,10 @@ def parse_args(argv=None):
     parser.add_argument("--ssh-bin", default="/usr/bin/ssh")
     parser.add_argument("--ssh-host", required=True, type=_safe_host)
     parser.add_argument("--remote-helper", required=True, type=_safe_path)
+    parser.add_argument("--weixin-sender-bin", required=True, type=_safe_path)
     parser.add_argument("--weixin-target", required=True, type=_safe_token)
-    parser.add_argument("--weixin-channel", default="openclaw-weixin", type=_safe_token)
     parser.add_argument("--log-file",
-                        default=os.path.join(SCRIPT_DIR, "bzp_dual_dispatch.jsonl"))
+                        default=state_file("bzp_dual_dispatch.jsonl"))
     parser.add_argument("--monitor-timeout", type=float, default=90.0)
     parser.add_argument("--ssh-timeout", type=float, default=30.0)
     parser.add_argument("monitor_args", nargs=argparse.REMAINDER,
@@ -107,8 +109,8 @@ def _ssh_command(opts) -> list[str]:
         "-o", "ConnectTimeout=10",
         "--", opts.ssh_host,
         opts.remote_helper,
+        "--sender-bin", opts.weixin_sender_bin,
         "--target", opts.weixin_target,
-        "--channel", opts.weixin_channel,
     ]
 
 

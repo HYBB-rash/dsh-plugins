@@ -7,8 +7,8 @@ Collection day is determined exclusively from ``ts`` in Asia/Shanghai;
 ``time`` is retained only as tweet metadata for the semantic report layer.
 
 Examples:
-    python3 scripts/x_daily_report.py --day 2026-08-13 --out data/x_daily/2026-08-13.json
-    python3 scripts/x_daily_report.py --timeline data/x_timeline.jsonl --dry-run
+    python3 x-feed/python/x_daily_report.py --day 2026-08-13 --out data/x_daily/2026-08-13.json
+    python3 x-feed/python/x_daily_report.py --timeline data/x_timeline.jsonl --dry-run
 """
 
 from __future__ import annotations
@@ -25,12 +25,11 @@ from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 import insight_engine
+import x_paths
 import x_timeline_store
 
 
-HERE = Path(__file__).resolve().parent
-WORKSPACE = HERE.parent
-DEFAULT_TIMELINE = WORKSPACE / "data" / "x_timeline.jsonl"
+DEFAULT_TIMELINE = Path(x_paths.data_dir()) / "x_timeline.jsonl"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SOURCE = "x"
 CORE_FIELDS = ("id", "url", "text")

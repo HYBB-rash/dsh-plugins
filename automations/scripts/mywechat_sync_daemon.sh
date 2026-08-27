@@ -5,7 +5,7 @@ set -u
 
 MYWECHAT_DIR="${MYWECHAT_DIR:-}"
 if [ -z "$MYWECHAT_DIR" ]; then
-    for cand in "$HOME/my-wechat" "$HOME/.hermes/workspace/my-wechat" "/home/rita/my-wechat"; do
+    for cand in "$HOME/my-wechat"; do
         if [ -d "$cand" ] && [ -x "$cand/.venv/bin/python" ]; then
             MYWECHAT_DIR="$cand"
             break

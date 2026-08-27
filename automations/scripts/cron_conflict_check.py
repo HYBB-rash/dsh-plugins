@@ -7,7 +7,7 @@
   python3 cron_conflict_check.py "every 2h"       # 或直接给 cron schedule 字符串
 
 逻辑:
-  - 读取 ~/.hermes/cron/jobs.json 里所有任务的 schedule/next_run_at
+  - 折叠 DSH cron 的 jobs.jsonl，并读取 runs.jsonl 的最新 nextRunAt
   - 计算候选时间与每个任务下次投递时刻的最小间隔
   - 微信 iLink 冷却墙 = 30s; 稳妥建议错开 ≥60s(1 分钟)
   - 输出: 安全 / ⚠️ 紧贴 / ❌ 冲突 + 建议时间
@@ -19,31 +19,65 @@ import re
 import sys
 from datetime import datetime, timedelta
 
-JOBS_FILE = os.path.expanduser("~/.hermes/cron/jobs.json")
+DSH_HOME = os.path.expanduser(os.environ.get("DSH_HOME", "~/.dsh"))
+JOBS_FILE = os.environ.get(
+    "DSH_CRON_JOBS_FILE", os.path.join(DSH_HOME, "storages/dsh-cron/jobs.jsonl"))
+RUNS_FILE = os.environ.get(
+    "DSH_CRON_RUNS_FILE", os.path.join(DSH_HOME, "storages/dsh-cron/runs.jsonl"))
 COOLDOWN_S = 30      # 微信 iLink 冷却墙
 SAFE_GAP_S = 60      # 建议的最小安全间隔
 
 CRON_FIELD_RE = re.compile(r"^([0-9*/,-]+) ([0-9*/,-]+) ([0-9*/,-]+) ([0-9*/,-]+) ([0-9*/,-]+)$")
 
 
-def load_jobs():
-    """读取所有 cron 任务及其下次运行时间。"""
+def _read_jsonl(path):
+    """Read valid JSON objects, ignoring blank or partially written rows."""
     try:
-        with open(JOBS_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        print(f"⚠️ 无法读取 {JOBS_FILE}: {e}")
+        with open(path, encoding="utf-8") as f:
+            rows = f.readlines()
+    except OSError as exc:
+        print(f"⚠️ 无法读取 {path}: {exc}")
         return []
-    jobs = []
-    for j in data.get("jobs", []):
-        if not j.get("enabled", True):
+    parsed = []
+    for row in rows:
+        try:
+            value = json.loads(row)
+        except json.JSONDecodeError:
             continue
-        nxt = j.get("next_run_at") or ""
+        if isinstance(value, dict):
+            parsed.append(value)
+    return parsed
+
+
+def load_jobs(jobs_file=JOBS_FILE, runs_file=RUNS_FILE):
+    """Fold the DSH append-only ledgers into active Telegram job schedules."""
+    active = {}
+    for row in _read_jsonl(jobs_file):
+        job_id = row.get("id")
+        if not isinstance(job_id, str):
+            continue
+        if row.get("op") == "create":
+            active[job_id] = row
+        elif row.get("op") == "delete":
+            active.pop(job_id, None)
+
+    next_runs = {}
+    for row in _read_jsonl(runs_file):
+        job_id = row.get("jobId")
+        next_run = row.get("nextRunAt")
+        if isinstance(job_id, str) and isinstance(next_run, str):
+            next_runs[job_id] = next_run
+
+    jobs = []
+    for job_id, row in active.items():
+        if row.get("deliver") != "telegram" or not isinstance(row.get("schedule"), dict):
+            continue
         jobs.append({
-            "id": j.get("id", "?"),
-            "name": j.get("name", j.get("prompt", "?")[:30]),
-            "schedule": j.get("schedule_display", j.get("schedule", "?")),
-            "next_run_at": nxt,
+            "id": job_id,
+            "name": row.get("externalRef") or job_id,
+            "schedule": row["schedule"],
+            "created_at": row.get("createdAt", ""),
+            "next_run_at": next_runs.get(job_id, ""),
         })
     return jobs
 
@@ -73,7 +107,7 @@ def cron_matches_in_range(cron_expr, start, end, step_s=30):
         return []
 
     matches = []
-    t = start
+    t = start.replace(second=0, microsecond=0)
     while t <= end:
         ok_min = (mf is None or
                   (mf[0] == "step" and t.minute % mf[1] == 0) or
@@ -113,6 +147,54 @@ def cron_to_next(cron_expr, now):
         if ok_min and ok_hour:
             return t
     return None
+
+
+def _parse_iso(value):
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def events_for_job(job, start, end):
+    """Return DSH schedule occurrences in a bounded local-time window."""
+    schedule = job.get("schedule") or {}
+    kind = schedule.get("kind")
+    if kind == "cron":
+        return cron_matches_in_range(schedule.get("expr", ""), start, end)
+    if kind == "once":
+        run_at = _parse_iso(schedule.get("runAt"))
+        return [run_at] if run_at is not None and start <= run_at <= end else []
+    if kind != "interval":
+        return []
+    try:
+        period = timedelta(minutes=int(schedule["minutes"]))
+    except (KeyError, TypeError, ValueError):
+        return []
+    if period.total_seconds() <= 0:
+        return []
+    cursor = _parse_iso(job.get("next_run_at"))
+    if cursor is None:
+        created = _parse_iso(job.get("created_at"))
+        cursor = created + period if created is not None else None
+    if cursor is None:
+        return []
+    while cursor < start:
+        cursor += period
+    events = []
+    while cursor <= end:
+        events.append(cursor)
+        cursor += period
+    return events
+
+
+def next_event(job, now):
+    end = now + timedelta(days=8)
+    events = events_for_job(job, now, end)
+    return min(events) if events else None
 
 
 def parse_candidate(text, now):
@@ -171,39 +253,19 @@ def main():
             return
     else:
         # 不带参数: 只看当前时刻表
-        cand = None
         for j in jobs:
-            nxt = j.get("next_run_at") or ""
-            try:
-                t = datetime.fromisoformat(nxt) if nxt else None
-            except ValueError:
-                t = None
+            t = next_event(j, now)
             if t:
-                if t.tzinfo is not None:
-                    t = t.astimezone().replace(tzinfo=None)
                 print(f"  {t.strftime('%m-%d %H:%M')}  {j['name']}")
         return
 
     # 收集所有任务在候选时间 ±90 分钟内的所有投递时刻(周期任务会多次命中)
     schedule_events = []
     for j in jobs:
-        cron_expr = j.get("schedule", "")
-        events = cron_matches_in_range(
-            cron_expr, cand - timedelta(minutes=90), cand + timedelta(minutes=90))
+        events = events_for_job(
+            j, cand - timedelta(minutes=90), cand + timedelta(minutes=90))
         for t in events:
-            if t.tzinfo is not None:
-                t = t.astimezone().replace(tzinfo=None)
             schedule_events.append((j["name"], t))
-        # 兜底: next_run_at 若不在枚举范围内(如 ISO 一次性任务)也加入
-        nxt = j.get("next_run_at") or ""
-        if nxt and not events:
-            try:
-                t = datetime.fromisoformat(nxt)
-                if t.tzinfo is not None:
-                    t = t.astimezone().replace(tzinfo=None)
-                schedule_events.append((j["name"], t))
-            except ValueError:
-                pass
 
     if not schedule_events:
         print("\n(无法解析任何 cron 时刻, 检查失败)")

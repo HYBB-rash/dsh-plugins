@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# my-wechat 同步监控看门狗 + 投递失败自动补发(双机通用: herman 机 / rita 机)
+# my-wechat 同步监控看门狗(双机通用: herman 机 / rita 机)
 # 1) 微信进程 / sync 守护 / 心跳新鲜度 监控(异常输出告警)
-# 2) cron 投递失败自动补发: 检测到 cron 任务 last_delivery_error 非空时,
-#    把该任务最新输出文件里的 ## Response 内容重新输出(触发再次投递)
-# 3) 告警通道: 本机有 send_tg_ops.sh(ops profile)时走 TG ops bot(stdout 静默),
-#    否则回退 stdout → no_agent cron 投递
+# 2) 告警通道: 显式配置 ops bot 时走 Telegram(stdout 静默),
+#    否则回退 stdout，由调度器负责投递
 # 路径自适应: 按 $HOME 探测仓库目录与健康文件, 可用环境变量覆盖(双机共用, 勿硬编码路径)
 set -u
 
 # ── 机器路径自适应 ──
 MYWECHAT_DIR="${MYWECHAT_DIR:-}"
 if [ -z "$MYWECHAT_DIR" ]; then
-    for cand in "$HOME/my-wechat" "$HOME/.hermes/workspace/my-wechat"; do
+    for cand in "$HOME/my-wechat"; do
         if [ -d "$cand" ] && ls "$cand"/published_*.db >/dev/null 2>&1; then
             MYWECHAT_DIR="$cand"
             break
@@ -25,10 +23,8 @@ fi
 
 HEALTH_FILE="${MYWECHAT_HEALTH_FILE:-$(ls "$MYWECHAT_DIR"/sync_health_*.json 2>/dev/null | grep -v 'qq' | head -1)}"
 QQ_HEALTH_FILE="${MYWECHAT_QQ_HEALTH_FILE:-$(ls "$MYWECHAT_DIR"/sync_health_qq_*.json 2>/dev/null | head -1)}"
-CRON_JOBS="$HOME/.hermes/cron/jobs.json"
-CRON_OUT="$HOME/.hermes/cron/output"
-RETRY_MARK="/tmp/mywechat_cron_retry"   # 已补发标记(防重复补发)
-SEND_TG="$HOME/.hermes/scripts/send_tg_ops.sh"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SEND_TG="${SEND_TG:-$SCRIPT_DIR/send_tg_ops.sh}"
 
 WX_PATTERN="WeChatAppEx|wechat"
 SYNC_PATTERN="sync.py --interval"
@@ -85,9 +81,6 @@ else
     alerts="${alerts}⚠️ 健康状态文件缺失(sync 可能从未成功运行)\n"
 fi
 
-# ── 4. cron 投递失败自动补发 【已停用 2026-08-05: weixin-retry-queue 接管"失败→重试"(30s 重试+台账),
-#     看门狗补发会双重发送并掩盖队列重试记录。恢复: 取消下行 RETRY_CONTENT 注释。】──
-RETRY_CONTENT=""
 # ── 输出: TG 优先(本机有 ops profile 时), 失败/缺失回退 stdout → cron 投递 ──
 if [ -n "$alerts" ]; then
     body="$(printf '📡 my-wechat 同步监控:\n%b' "$alerts")"

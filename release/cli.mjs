@@ -655,6 +655,7 @@ function containerBaseArgs(homePath) {
   return [
     '--read-only', '--user', localUser,
     '--tmpfs', '/tmp:rw,noexec,nosuid,size=512m', '--tmpfs', '/run:rw,nosuid,size=64m',
+    '--tmpfs', '/home/herman/.openclaw:rw,noexec,nosuid,size=1m',
     '--volume', `${homePath}:/home/herman:rw`,
     '--env', 'HOME=/home/herman', '--env', 'DSH_HOME=/home/herman/.dsh', '--env', 'DSH_CWD=/home/herman/.dsh/workspace',
   ]
@@ -1195,7 +1196,7 @@ function releasePlan(candidate) {
     archiveSha256: candidate.archiveSha256,
     target,
     writersToStop: ['Docker Compose project dsh'],
-    preservedOutOfScope: ['openclaw-gateway.service', '~/.openclaw', 'OpenClaw Telegram token'],
+    excludedExternalSystems: ['OpenClaw is neither required nor managed by this release'],
     snapshotRoot: '/home/herman/.local/share/dsh-container/snapshots',
     rollbackBoundary: '停机前完整 ~/.dsh 快照 + 上一个 accepted Docker release',
     next: `获得停机许可后重新执行，并添加 --approved-stop`,
@@ -1269,7 +1270,6 @@ function performProductionReleaseUnsafe(candidate, candidatePath, releaseId, sta
 command -v docker >/dev/null || { echo 'Docker 未安装；请先在 herman.hermes 安装 docker.io 和 docker-compose-v2' >&2; exit 41; }
 docker compose version >/dev/null
 docker info >/dev/null
-printf 'openclaw=%s\\n' "$(systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ',')"
 `)
 
   const remoteRoot = '/home/herman/.local/share/dsh-container'
@@ -1310,12 +1310,11 @@ if docker ps --format '{{.Names}}' | grep -Eq '^dsh-(web|telegram|lan-proxy)$'; 
 if pgrep -u "$(id -u)" -af 'apps/cli/(src/bin\\.ts|lib/bin\\.js).*(web|--profile telegram)' >/dev/null; then
   echo 'DSH Harness writer process still active' >&2; exit 44
 fi
-openclaw_before="$(systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ',')"
 tar --acls --xattrs -C /home/herman -cf - .dsh | zstd -T0 -10 -o ${shellQuote(remoteSnapshot)}
 chmod 600 ${shellQuote(remoteSnapshot)}
 sha="sha256:$(sha256sum ${shellQuote(remoteSnapshot)} | awk '{print $1}')"
 cat >"$root/releases/$release_id/stop.json" <<EOF
-{"releaseId":"$release_id","archivePath":${JSON.stringify(remoteSnapshot)},"archiveSha256":"$sha","openclawBefore":"$openclaw_before"}
+{"releaseId":"$release_id","archivePath":${JSON.stringify(remoteSnapshot)},"archiveSha256":"$sha"}
 EOF
 cat "$root/releases/$release_id/stop.json"
 `)
@@ -1400,15 +1399,12 @@ test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')"
 test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs >/dev/null
-openclaw_after="$(systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ',')"
 ln -sfn "$release_dir" ${shellQuote(remoteRoot)}/current.next
 mv -Tf ${shellQuote(remoteRoot)}/current.next ${shellQuote(remoteRoot)}/current
-printf '{"imageId":"%s","engineImageId":"%s","web":"%s","telegram":"%s","lan":"%s","cronControl":"ready","openclawAfter":"%s"}\\n' "$expected_image" "$engine_image" "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" "$openclaw_after"
+printf '{"imageId":"%s","engineImageId":"%s","web":"%s","telegram":"%s","lan":"%s","cronControl":"ready"}\\n' "$expected_image" "$engine_image" "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')"
 `)
   let productionReceipt
   try { productionReceipt = JSON.parse(startOutput.split('\n').at(-1)) } catch { fail(`无法解析生产启动回执: ${startOutput}`, exitCodes.production) }
-  if (stopMeta.openclawBefore !== productionReceipt.openclawAfter) fail('OpenClaw PID 或重启计数发生变化；不得宣告发版完成', exitCodes.production)
-
   const release = {
     schemaVersion: 1,
     releaseId,
@@ -1510,7 +1506,6 @@ docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-read
   ssh(`set -Eeuo pipefail
 root=${shellQuote(remoteRoot)}
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-openclaw_before="$(systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ',')"
 if test -f "$root/current/compose.production.yml"; then
   cd "$root/current"
   DSH_IMAGE=${shellQuote(release.candidate.imageTag)} DSH_IMAGE_ID=${shellQuote(release.candidate.imageId)} docker compose -p dsh -f compose.production.yml down --timeout 30
@@ -1523,8 +1518,6 @@ test -d "$restore/.dsh"
 mv /home/herman/.dsh "$root/failed-dsh-$timestamp"
 mv "$restore/.dsh" /home/herman/.dsh
 ${restartPrevious}
-openclaw_after="$(systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ',')"
-test "$openclaw_before" = "$openclaw_after"
 `)
   release.status = 'rolled-back'
   release.currentStage = 'rolled-back'
@@ -1538,7 +1531,6 @@ function commandStatus() {
   const localCandidate = existsSync(join(stateRoot, 'candidates/latest.json')) ? readJson(join(stateRoot, 'candidates/latest.json')) : null
   const developmentCandidate = existsSync(developmentCandidatePointerPath()) ? readJson(developmentCandidatePointerPath()) : null
   const remoteResult = runStatus('ssh', ['-o', 'BatchMode=yes', target, 'bash', '-s'], { input: `set -u
-printf 'openclaw='; systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ','; printf '\\n'
 if command -v docker >/dev/null 2>&1; then
   docker ps --filter name='^dsh-' --format '{{.Names}} {{.Image}} {{.Status}}' 2>/dev/null || true
 else

@@ -21,10 +21,13 @@ import hashlib
 import urllib.request
 import urllib.error
 
-INBOX = os.path.expanduser("~/task-inbox-workflow/inbox.md")
+from automation_paths import state_dir
+
+INBOX = os.path.expanduser(os.environ.get(
+    "NOTION_INBOX_FILE", "~/task-inbox-workflow/inbox.md"))
 PAGE_ID = "3b059c119f80803cb8ace3ead7eefc81"  # 任务拆解 → 任务(子页面)
-ENV_FILE = os.path.expanduser("~/.openclaw/.env")
-STATE_DIR = os.path.expanduser("~/.openclaw/state")
+ENV_FILE = os.path.expanduser(os.environ.get("NOTION_ENV_FILE", ""))
+STATE_DIR = str(state_dir() / "notion-inbox-sync")
 LAST_INBOX_FILE = os.path.join(STATE_DIR, "notion_inbox_sync.last_inbox.md5")   # 上次同步后本地内容指纹
 LAST_NOTION_FILE = os.path.join(STATE_DIR, "notion_inbox_sync.last_notion.md5")  # 上次同步后 Notion 实际内容指纹(冲突基准)
 PENDING_FILE = os.path.join(STATE_DIR, "notion_inbox_sync.pending")
@@ -37,7 +40,7 @@ def md5s(s: str) -> str:
 
 
 def load_key():
-    if os.path.exists(ENV_FILE):
+    if ENV_FILE and os.path.exists(ENV_FILE):
         with open(ENV_FILE, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()

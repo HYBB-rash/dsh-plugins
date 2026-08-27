@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """browser_search.py — drive the user's research Chrome (CDP :9222).
 
-Channel: ~/.config/openclaw-browser (copy of the user's real profile → keeps
-Google login state). Chrome must be running with --remote-debugging-port=9222
-(see browser_start.py). Pure stdlib — no pip deps.
+Channel: an operator-managed Chrome profile with an existing login state.
+Chrome must be running with --remote-debugging-port=9222 (see the repository's
+``x-feed/python/browser_start.py``). Pure stdlib — no pip deps.
 
 Commands:
   status                       list tabs

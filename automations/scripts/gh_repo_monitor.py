@@ -5,8 +5,10 @@
 """
 import json, os, subprocess, time
 
+from automation_paths import state_file
+
 REPO = "HYBB-rash/chatgpt-linux-nix"
-STATE = "/home/herman/.openclaw/workspace/data/gh_repo_state.json"
+STATE = state_file("gh_repo_state.json")
 GH = os.path.expanduser("~/.local/bin/gh")
 
 def gh_api(path):

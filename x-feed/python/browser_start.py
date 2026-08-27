@@ -10,7 +10,7 @@ import json, os, shutil, signal, subprocess, sys, time, urllib.request
 
 PORT = 9222
 # Keep one profile for every X entry point.  The old collector/pipeline used
-# google-chrome-debug while this helper used openclaw-browser, which made a
+# google-chrome-debug while this helper used a separate browser profile, which made a
 # recovery launch look like a fresh, logged-out browser.
 PROFILE = os.path.expanduser(
     os.environ.get("HERMES_BROWSER_PROFILE", "~/.config/google-chrome-debug")

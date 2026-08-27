@@ -1,29 +1,31 @@
 #!/usr/bin/env bash
 # send_tg_ops.sh — 通过 ops 监控 bot 发送 Telegram 告警(后台通道专用)
 # 用法: send_tg_ops.sh "消息文本"
-# 从 ops profile 的 .env 读取 token/chat, 不经过 cron 投递(cron 走主 bot, 无法按 profile 路由)
-# 双机通用: OPS_ENV 按 $HOME 定位(可用 OPS_ENV 覆盖); 失败时退出码非 0, 调用方决定是否回退
+# 从显式环境变量或 OPS_ENV 读取 token/chat，不绑定任何已安装运行时。
+# 失败时退出码非 0，由调用方决定是否回退。
 # 注意: 成功路径完全静默(不输出到 stdout), 避免污染 cron no_agent 投递
 set -u
 
-OPS_ENV="${OPS_ENV:-$HOME/.openclaw/profiles/ops/.env}"
-TOKEN=""
-CHAT=""
+OPS_ENV="${OPS_ENV:-}"
+TOKEN="${TELEGRAM_OPS_BOT_TOKEN:-}"
+CHAT="${TELEGRAM_OPS_CHAT_ID:-}"
 
-if [ ! -r "$OPS_ENV" ]; then
+if [ -n "$OPS_ENV" ] && [ ! -r "$OPS_ENV" ]; then
     echo "❌ send_tg_ops: 无法读取 $OPS_ENV" >&2
     exit 1
 fi
 
-while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-        TELEGRAM_BOT_TOKEN=*) TOKEN="${line#*=}" ;;
-        TELEGRAM_HOME_CHANNEL=*) CHAT="${line#*=}" ;;
-    esac
-done < "$OPS_ENV"
+if [ -n "$OPS_ENV" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            TELEGRAM_BOT_TOKEN=*) TOKEN="${line#*=}" ;;
+            TELEGRAM_HOME_CHANNEL=*) CHAT="${line#*=}" ;;
+        esac
+    done < "$OPS_ENV"
+fi
 
 if [ -z "$TOKEN" ] || [ -z "$CHAT" ]; then
-    echo "❌ send_tg_ops: $OPS_ENV 缺少 TELEGRAM_BOT_TOKEN/TELEGRAM_HOME_CHANNEL" >&2
+    echo "❌ send_tg_ops: 需设置 TELEGRAM_OPS_BOT_TOKEN/TELEGRAM_OPS_CHAT_ID，或显式 OPS_ENV" >&2
     exit 1
 fi
 

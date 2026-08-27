@@ -18,52 +18,32 @@ import html as htmllib
 import subprocess
 import urllib.parse
 
+from automation_paths import state_dir
+
 HOME = os.path.expanduser("~")
-PYTHON = os.path.join(HOME, ".openclaw/workspace/scripts/search_env/bin/python")
-GECKO = "/snap/bin/geckodriver"
-FF_BIN = "/snap/firefox/current/usr/lib/firefox/firefox"
+HERE = os.path.dirname(os.path.abspath(__file__))
+PYTHON = os.environ.get("WEB_SEARCH_PYTHON", sys.executable)
+GECKO = os.environ.get("WEB_SEARCH_GECKODRIVER", "/snap/bin/geckodriver")
+FF_BIN = os.environ.get(
+    "WEB_SEARCH_FIREFOX", "/snap/firefox/current/usr/lib/firefox/firefox")
+SEARCH_STATE_DIR = os.environ.get(
+    "WEB_SEARCH_STATE_DIR", str(state_dir() / "web-search"))
 # Google cookie 复用的 profile: 优先用户解锁过的 snap firefox 默认 profile,
 # 回退到本工具自建 profile
 USER_FF_PROFILE = os.path.join(HOME, "snap/firefox/common/.mozilla/firefox/4ql60qce.default")
-PROFILE = USER_FF_PROFILE if os.path.isdir(USER_FF_PROFILE) else os.path.join(HOME, ".openclaw/workspace/scripts/search_profile")
+PROFILE = os.environ.get(
+    "WEB_SEARCH_PROFILE",
+    USER_FF_PROFILE if os.path.isdir(USER_FF_PROFILE) else os.path.join(SEARCH_STATE_DIR, "firefox-profile"),
+)
 UA = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
-LOCK_FLAG = os.path.join(HOME, ".openclaw/workspace/scripts/search_profile/google_locked")
+LOCK_FLAG = os.path.join(SEARCH_STATE_DIR, "google_locked")
+COOKIE_JAR = os.path.join(SEARCH_STATE_DIR, "bing_cookies.txt")
 
 
 # ── 浏览器搜索(selenium + xvfb + firefox) ─────────────────────
-_SELENIUM_SCRIPT = r'''
-import sys, time, json, re, os
-from selenium import webdriver
-from selenium.webdriver.firefox.options import Options
-from selenium.webdriver.firefox.service import Service
-
-opts = Options()
-opts.binary_location = sys.argv[1]
-opts.add_argument("--headless")
-opts.set_preference("general.useragent.override", sys.argv[2])
-opts.set_preference("dom.webdriver.enabled", False)
-opts.set_preference("useAutomationExtension", False)
-if sys.argv[3] and os.path.isdir(sys.argv[3]):
-    opts.profile = sys.argv[3]
-
-svc = Service(sys.argv[4], log_output="/dev/null")
-drv = webdriver.Firefox(options=opts, service=svc)
-try:
-    drv.get(sys.argv[5])
-    time.sleep(float(sys.argv[6]))
-    print("__CURL__=" + drv.current_url)
-    print(drv.page_source)
-finally:
-    drv.quit()
-'''
-
-
 def _browser_get(url: str, profile: str = "", wait: float = 6.0) -> tuple:
     """返回 (final_url, html)"""
-    script = os.path.join(HOME, ".openclaw/workspace/scripts/search_profile/_sel.py")
-    os.makedirs(os.path.dirname(script), exist_ok=True)
-    with open(script, "w") as f:
-        f.write(_SELENIUM_SCRIPT)
+    script = os.path.join(HERE, "search_profile", "_sel.py")
     cmd = ["xvfb-run", "-a", PYTHON, script, FF_BIN, UA, profile, GECKO, url, str(wait)]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
     out = r.stdout
@@ -76,6 +56,7 @@ def _browser_get(url: str, profile: str = "", wait: float = 6.0) -> tuple:
 
 # ── Google ─────────────────────────────────────────────────────
 def search_google(q: str, n: int = 8):
+    os.makedirs(SEARCH_STATE_DIR, exist_ok=True)
     url = "https://www.google.com/search?q=" + urllib.parse.quote(q) + f"&num={n}&hl=zh-CN"
     final_url, html = _browser_get(url, profile=PROFILE, wait=7.0)
     if "sorry" in final_url or "sorry" in html[:2000].lower():
@@ -121,12 +102,13 @@ def search_ddg(q: str, n: int = 8):
 
 # ── Bing (curl 快通道) ───────────────────────────────────────
 def search_bing(q: str, n: int = 8):
+    os.makedirs(SEARCH_STATE_DIR, exist_ok=True)
     url = "https://www.bing.com/search?q=" + urllib.parse.quote(q) + f"&count={n}"
     r = subprocess.run(
         ["curl", "-s", "-m", "12", "-A", UA,
          "-H", "Accept-Language: zh-CN,zh;q=0.9",
-         "-c", os.path.join(HOME, ".openclaw/workspace/scripts/search_profile/bing_cookies.txt"),
-         "-b", os.path.join(HOME, ".openclaw/workspace/scripts/search_profile/bing_cookies.txt"),
+         "-c", COOKIE_JAR,
+         "-b", COOKIE_JAR,
          url],
         capture_output=True, text=True, timeout=20)
     body = r.stdout

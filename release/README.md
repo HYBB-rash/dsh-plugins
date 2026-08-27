@@ -7,7 +7,7 @@
 - `build` 只接受 Harness 和产品插件两个完整 Git commit，并分别用 `git archive` 取源码。Dockerfile、Profiles 和验收脚本单独取当前分支 HEAD 的精确发版工具 commit。候选清单同时记录三者，未提交文件、旧 `node_modules` 和原工作树里的旧部署目录不会进入镜像。
 - `release` 默认只打印停机影响和回退边界，退出码为 `3`。只有明确添加 `--approved-stop` 才会停止生产写入者。
 - `rollback` 默认只报告方案。只有明确添加 `--approved` 才会恢复数据和旧运行版本。
-- 发版脚本不停止、不重启、不配置 OpenClaw；生产切换前后会比较 OpenClaw PID 和重启计数。
+- 发版脚本不要求 OpenClaw 存在，也不会停止、重启或配置它；DSH 容器用空 tmpfs 遮蔽 `.openclaw`，避免残留目录成为隐式依赖。
 
 ## 常用流程
 
@@ -98,7 +98,7 @@
 - 明确属于挂载、权限、Compose、路径或启动参数的发版小问题，可在限定现场窗口内修正后重新验收；需要改 Harness、插件、数据语义或原因不清时，先向用户报告。只有用户批准后才能回退。
 - 上线后状态先是 `awaiting-user-acceptance`。真实 Telegram 与 Web 验收通过并执行 `accept` 后，该镜像才成为 `last-good`。
 - 回退默认只打印恢复对象、快照和影响；只有显式 `--approved` 才能恢复上一 Docker 镜像及对应停机前数据。
-- OpenClaw 始终在流程外：不得停止、重启、改配置或接管其写入权。
+- OpenClaw 始终在流程外且可完全不存在：不得停止、重启、改配置或接管其写入权，DSH 也不得读取它的目录、凭据、CLI、插件或状态。
 
 ## 已完成的切换
 

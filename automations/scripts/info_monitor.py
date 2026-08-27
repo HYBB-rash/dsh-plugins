@@ -5,7 +5,9 @@
 """
 import json, os, re, sys, time, urllib.request, urllib.parse
 
-STATE = "/home/herman/.openclaw/workspace/data/info_monitor_state.json"
+from automation_paths import state_file
+
+STATE = state_file("info_monitor_state.json")
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"}
 
 def fetch(url, timeout=12):

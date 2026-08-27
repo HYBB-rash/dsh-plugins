@@ -55,6 +55,8 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from automation_paths import state_file
+
 try:
     from zoneinfo import ZoneInfo
     _TZ = ZoneInfo("Asia/Shanghai")
@@ -444,7 +446,7 @@ class Opts:
 
 def default_opts(**kw) -> Opts:
     o = Opts()
-    o.state_file = os.path.join(SCRIPT_DIR, "bzp_ble_monitor_state.json")
+    o.state_file = state_file("bzp_ble_monitor_state.json")
     o.lock_file = None  # 解析时默认 state_file + ".lock"
     o.reader_script = os.path.join(SCRIPT_DIR, "bzp_ble_read_until_success.py")
     o.auth_file = "~/.local/share/bzp-ble/auth.json"
@@ -475,7 +477,7 @@ def parse_args(argv=None) -> Opts:
     p = argparse.ArgumentParser(
         description="包租婆 BLE 电表低成本监控 (cron 每 5 分钟; stdout 即投递内容)")
     p.add_argument("--state-file",
-                   default=os.path.join(SCRIPT_DIR, "bzp_ble_monitor_state.json"),
+                   default=state_file("bzp_ble_monitor_state.json"),
                    help="状态文件 (原子写入, Asia/Shanghai)")
     p.add_argument("--lock-file", default=None,
                    help="flock 锁文件 (默认 <state-file>.lock)")

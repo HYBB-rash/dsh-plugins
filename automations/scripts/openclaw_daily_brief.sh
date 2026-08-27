@@ -1,7 +1,7 @@
 #!/bin/bash
 # OpenClaw 上游代码库每日更新简报(command payload,零模型成本)
 # 每天由 cron 调用:git pull 保持镜像最新;有新提交则输出简报(announce 投递到 Telegram),无更新输出 NO_REPLY 静默
-REPO=/home/herman/openclaw-upstream
+REPO="${OPENCLAW_UPSTREAM_DIR:-$HOME/openclaw-upstream}"
 STATE=$REPO/.last-brief-sha
 LOG=$REPO/.daily-update.log
 
