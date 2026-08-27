@@ -9,7 +9,8 @@ import {
 import type { CandidateEnvelope, CandidateRef, C28Result } from '../candidate-qualification.ts'
 import type { EvidenceConclusionSet } from '../fact-resolution.ts'
 import type { ChatRef } from '../focus.ts'
-import type { ExactBackgroundUpdateOrigin, RollingCandidateRuntimeEvidence } from '../candidate.ts'
+import type { ExactBackgroundUpdateOrigin } from '../candidate.ts'
+import type { FutureCriticalPointProjection } from '../future-critical-candidate.ts'
 import type { OwnerQualifiedCandidateObserver } from '../background-state.ts'
 import type { QualifiedBackgroundCurrentPort } from './qualified-background.ts'
 import { parseCanonicalBackgroundStateRecord } from '../state-transaction.ts'
@@ -26,6 +27,7 @@ type QualifiedDecision<Ref extends CandidateRef = CandidateRef> = Extract<
 
 interface CurrentRollingAssociation {
   readonly generation: number
+  readonly canonicalRef: string
   readonly body: string
   readonly machineProjection: string
   actionRef?: string
@@ -38,6 +40,7 @@ export interface RollingCandidatePending {
   readonly actionRef: string
   readonly evidenceRef: string
   readonly producer: ExactBackgroundUpdateOrigin
+  readonly futureCriticalPoints?: FutureCriticalPointProjection
 }
 
 export type RollingQualification<Ref extends CandidateRef = CandidateRef> =
@@ -49,7 +52,11 @@ export interface RollingCandidateAdapter extends OwnerQualifiedCandidateObserver
   acceptActionFactBoundary(boundary: ActionFactBoundary): void
   acceptEvidenceConclusions(conclusions: EvidenceConclusionSet): void
   requestRollingCandidate(request: RollingCandidateRequest): boolean
-  stagePending(chat: ChatRef, producer: ExactBackgroundUpdateOrigin): boolean
+  stagePending(
+    chat: ChatRef,
+    producer: ExactBackgroundUpdateOrigin,
+    futureCriticalPoints?: FutureCriticalPointProjection,
+  ): boolean
   takePending(chat: ChatRef, consumer: ExactBackgroundUpdateOrigin): RollingCandidatePending | undefined
   takeQualification(chat: ChatRef): RollingQualification | undefined
 }
@@ -62,14 +69,27 @@ interface RollingCandidateAdapterDependencies {
 function machineProjection(candidate: CandidateEnvelope): string {
   return JSON.stringify({
     target: candidate.target,
-    basis: candidate.basis,
+    focusBasis: candidate.basis.focus,
     formationFocus: candidate.formationFocus,
-    formationActionBoundary: candidate.formationActionBoundary,
-    formationEvidence: candidate.formationEvidence,
+    formationActionBoundary: {
+      kind: candidate.formationActionBoundary.kind,
+      requiredFacts: candidate.formationActionBoundary.requiredFacts.requirements,
+      usableFacts: candidate.formationActionBoundary.usableFacts,
+      unresolvedFacts: candidate.formationActionBoundary.unresolvedFacts,
+      preciselyBlockedActions: candidate.formationActionBoundary.preciselyBlockedActions,
+      safelyContinuableActions: candidate.formationActionBoundary.safelyContinuableActions,
+    },
+    formationEvidence: candidate.formationEvidence.conclusions,
     actionableFacts: candidate.actionableFacts,
     uncertainties: candidate.uncertainties,
     knownFutureCriticalPoints: candidate.knownFutureCriticalPoints,
   })
+}
+
+function deepFreeze<Value>(value: Value): Value {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value
+  for (const child of Object.values(value)) deepFreeze(child)
+  return Object.freeze(value)
 }
 
 function currentAssociation(record: unknown, chat: ChatRef): CurrentRollingAssociation | undefined {
@@ -81,6 +101,7 @@ function currentAssociation(record: unknown, chat: ChatRef): CurrentRollingAssoc
   if (candidate === undefined || transaction.body !== candidate.background) return undefined
   return {
     generation: transaction.generation,
+    canonicalRef: transaction.canonicalRef,
     body: transaction.body,
     machineProjection: machineProjection(candidate),
   }
@@ -92,12 +113,17 @@ export function createRollingCandidateAdapter(
   const current = new Map<ChatRef, CurrentRollingAssociation>()
   const outcomes = new Map<ChatRef, RollingQualification>()
   const pending = new Map<ChatRef, RollingCandidatePending>()
+  const active = new Map<ChatRef, number>()
   return Object.freeze({
     acceptCurrent(chat: ChatRef, record: unknown): boolean {
       const association = currentAssociation(record, chat)
       const existing = current.get(chat)
       if (association === undefined) return false
-      if (existing?.generation === association.generation) return true
+      if (existing?.generation === association.generation) {
+        return existing.canonicalRef === association.canonicalRef
+          && existing.body === association.body
+          && existing.machineProjection === association.machineProjection
+      }
       const c41 = dependencies.current.acceptCurrent(chat, record)
       if (c41?.kind !== 'business_result'
         || c41.identity.contract !== 'C41'
@@ -121,16 +147,32 @@ export function createRollingCandidateAdapter(
       if (association === undefined
         || association.generation !== request.generation
         || association.actionRef === undefined
-        || association.evidenceRef === undefined) return false
-      return dependencies.formation.requestRollingCandidate(request)
+        || association.evidenceRef === undefined
+        || association.actionRef !== request.actionRef
+        || association.evidenceRef !== request.evidenceRef) return false
+      active.set(request.chat, request.generation)
+      try {
+        return dependencies.formation.requestRollingCandidate(request)
+      } finally {
+        if (active.get(request.chat) === request.generation) active.delete(request.chat)
+      }
     },
-    stagePending(chat: ChatRef, producer: ExactBackgroundUpdateOrigin): boolean {
+    stagePending(
+      chat: ChatRef,
+      producer: ExactBackgroundUpdateOrigin,
+      futureCriticalPoints?: FutureCriticalPointProjection,
+    ): boolean {
       const association = current.get(chat)
       if (association === undefined || association.actionRef === undefined
         || association.evidenceRef === undefined || pending.has(chat)
         || producer.messageId.trim().length === 0 || producer.hash.trim().length === 0) return false
       pending.set(chat, Object.freeze({ chat, generation: association.generation,
-        actionRef: association.actionRef, evidenceRef: association.evidenceRef, producer }))
+        actionRef: association.actionRef, evidenceRef: association.evidenceRef,
+        producer: Object.freeze({ ...producer }),
+        ...futureCriticalPoints === undefined
+          ? {}
+          : { futureCriticalPoints: deepFreeze(structuredClone(futureCriticalPoints)) },
+      }))
       return true
     },
     takePending(chat: ChatRef, consumer: ExactBackgroundUpdateOrigin): RollingCandidatePending | undefined {
@@ -149,10 +191,12 @@ export function createRollingCandidateAdapter(
     ): void {
       const association = current.get(decision.candidate.target)
       if (association === undefined
+        || active.get(decision.candidate.target) !== association.generation
         || rollingCandidateGeneration(decision.candidate) !== association.generation
         || c28.kind !== 'business_result'
         || c28.value.kind !== 'accepted_for_contract'
         || c28.value.value !== decision) return
+      active.delete(decision.candidate.target)
       const identical = decision.candidate.background === association.body
         && machineProjection(decision.candidate) === association.machineProjection
       outcomes.set(decision.candidate.target, identical

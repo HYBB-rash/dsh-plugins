@@ -95,7 +95,11 @@ import {
 import { type CandidateQualificationDecision, type CandidateQualificationIssue, type CandidateRef, type C28Result } from './candidate-qualification.ts'
 import { createBackgroundStateComposition } from './background-state.ts'
 import { createQualifiedBackgroundAdapter } from './adapters/qualified-background.ts'
-import { createRollingCandidateAdapter, type RollingCandidateAdapter } from './adapters/rolling-candidate.ts'
+import {
+  createRollingCandidateAdapter,
+  type RollingCandidateAdapter,
+  type RollingCandidatePending,
+} from './adapters/rolling-candidate.ts'
 import {
   projectFutureCriticalPoints,
   type AuthenticatedStructuredFutureCriticalMaterial,
@@ -2083,6 +2087,10 @@ function installFocusCanary(
   const noSafeRecovery = noSafeAction.createRecoveryPort()
   const inserted = new Map<string, Set<string>>()
   const insertedMessages = new WeakMap<Agent, Map<string, UserMessage>>()
+  const claimedManagedDirects = new WeakMap<Agent, Map<string, {
+    readonly message: UserMessage
+    readonly origin: { readonly messageId: string; readonly hash: string }
+  }>>()
   const claimedNoFocusMessages = new WeakMap<Agent, Map<string, UserMessage>>()
   const claimedDirects = new WeakMap<Agent, Map<string, ClaimedStructuredDirect>>()
   const recoveryGates = new WeakMap<Agent, { kind: NoFocusRecoveryGate['kind'] }>()
@@ -2091,6 +2099,9 @@ function installFocusCanary(
     const exact = insertedMessages.get(agent)
     exact?.delete(messageId)
     if (exact?.size === 0) insertedMessages.delete(agent)
+    const managedClaims = claimedManagedDirects.get(agent)
+    managedClaims?.delete(messageId)
+    if (managedClaims?.size === 0) claimedManagedDirects.delete(agent)
     const admitted = claimedDirects.get(agent)
     admitted?.delete(messageId)
     if (admitted?.size === 0) claimedDirects.delete(agent)
@@ -2117,6 +2128,7 @@ function installFocusCanary(
     boundaryMessages: readonly Message[],
     signal: AbortSignal,
     exactText?: '请更新当前背景',
+    rollingPending?: RollingCandidatePending,
   ): Promise<(RollingCandidateRuntimeEvidence & { readonly text: string }) | undefined> => {
     const chat = String(agent.session.id) as ChatRef
     const text = textOf(message)
@@ -2192,7 +2204,9 @@ function installFocusCanary(
       const baseInputTokens = firstMeasurement.totalTokens
         + boundaryTokens.reduce((total, value) => total + value, 0)
       if (!Number.isSafeInteger(baseInputTokens) || baseInputTokens < 0) return undefined
-      const futureCriticalPoints = candidateFutureCriticalPoints.get(chat)
+      const futureCriticalPoints = rollingPending === undefined
+        ? candidateFutureCriticalPoints.get(chat)
+        : rollingPending.futureCriticalPoints
       const body = renderCandidateBackground({
         target: chat,
         focus: withoutChat(focus),
@@ -2403,7 +2417,7 @@ function installFocusCanary(
         if (signal.aborted) return await failClosed()
         if (currentBackground !== undefined) {
           if (rollingCandidate === undefined || !rollingCandidate.stagePending(
-            sessionId as ChatRef, origin,
+            sessionId as ChatRef, origin, candidateFutureCriticalPoints.get(sessionId),
           )) throw new Error('rolling producer did not establish one C41/C14/C15 pending record')
           const directIds = postCanonicalBasisDirects.get(sessionId) ?? new Set<string>()
           directIds.add(origin.messageId)
@@ -3140,6 +3154,14 @@ function installFocusCanary(
     const messageId = String(message.id)
     const registered = insertedMessages.get(agent)?.get(messageId)
     const text = textOf(message)
+    if (registered === message && text !== undefined) {
+      const exact = claimedManagedDirects.get(agent) ?? new Map()
+      exact.set(messageId, Object.freeze({
+        message,
+        origin: Object.freeze({ messageId, hash: directExpressionHash(messageId, text) }),
+      }))
+      claimedManagedDirects.set(agent, exact)
+    }
     if (sessionId === 'session-telegram' && registered === message && text === '这件事结束了') {
       const exact = claimedNoFocusMessages.get(agent) ?? new Map<string, UserMessage>()
       exact.set(messageId, message)
@@ -3179,6 +3201,221 @@ function installFocusCanary(
     claimedDirects.set(agent, claims)
   }, { prepend: true })
 
+  type RollingConsumerResult =
+    | { readonly kind: 'none' }
+    | { readonly kind: 'consumed' }
+    | { readonly kind: 'handled'; readonly decision: PreStepDecision }
+
+  const consumeRollingCandidate = async (
+    agent: Agent,
+    message: UserMessage,
+    baseMessages: readonly Message[],
+    signal: AbortSignal,
+    preNextRecord: ReturnType<ReturnType<typeof domain.table>['get']>,
+  ): Promise<RollingConsumerResult> => {
+    if (rollingCandidate === undefined
+      || preNextRecord === undefined
+      || !isBackgroundStateRecord(preNextRecord)) return { kind: 'none' }
+    const sessionId = String(agent.session.id)
+    const chat = sessionId as ChatRef
+    const messageId = String(message.id)
+    const text = textOf(message)
+    const claim = claimedManagedDirects.get(agent)?.get(messageId)
+    const exactBase = baseMessages.filter(candidate => String(candidate.id) === messageId)
+    if (text === undefined
+      || claim?.message !== message
+      || claim.origin.messageId !== messageId
+      || claim.origin.hash !== directExpressionHash(messageId, text)
+      || insertedMessages.get(agent)?.get(messageId) !== message
+      || exactBase.length !== 1
+      || exactBase[0] !== message
+      || agent.session.events.some(event => event.type === 'user/message'
+        && String(event.data.id) === messageId)) return { kind: 'none' }
+
+    const pending = rollingCandidate.takePending(chat, claim.origin)
+    if (pending === undefined) return { kind: 'none' }
+    const prior = parseCanonicalBackgroundStateRecord(preNextRecord)?.transaction
+    const table = domain.table('focus_precanonical')
+    const persisted = table.get(sessionId)
+    const currentRecord = persisted !== undefined && isBackgroundStateRecord(persisted)
+      ? persisted : undefined
+    const current = currentRecord === undefined
+      ? undefined
+      : parseCanonicalBackgroundStateRecord(currentRecord)?.transaction
+    const focus = candidateFocusBasis.get(sessionId)
+    const action = candidateActionBasis.get(sessionId)
+    const evidence = candidateEvidenceBasis.get(sessionId)
+    if (currentRecord === undefined
+      || prior?.phase !== 'finalized'
+      || current?.phase !== 'finalized'
+      || current.generation !== prior.generation
+      || current.canonicalRef !== prior.canonicalRef
+      || current.body !== prior.body
+      || pending.chat !== chat
+      || pending.generation !== prior.generation
+      || focus?.kind !== 'focus_established'
+      || focus.chat !== chat
+      || action?.chat !== chat
+      || action.ref !== pending.actionRef
+      || evidence?.chat !== chat
+      || evidence.ref !== pending.evidenceRef
+      || rollingCandidate.acceptCurrent(chat, currentRecord) !== true) {
+      throw new Error('rolling consumer lost its exact C41/C14/C15 association')
+    }
+    const producerEvents = agent.session.events.filter(event => event.type === 'user/message'
+      && event.data.source.kind === 'user'
+      && String(event.data.id) === pending.producer.messageId)
+    const producerEvent = producerEvents.length === 1 ? producerEvents[0] : undefined
+    const producerText = producerEvent?.type === 'user/message' ? textOf(producerEvent.data) : undefined
+    if (producerText === undefined
+      || directExpressionHash(pending.producer.messageId, producerText) !== pending.producer.hash) {
+      throw new Error('rolling producer origin is not exactly durable')
+    }
+    const finalizedReplaceSeq = prior.finalizedReplaceSeq
+    if (typeof finalizedReplaceSeq !== 'number' || !Number.isSafeInteger(finalizedReplaceSeq)) {
+      throw new Error('rolling C41 state has no finalized writer revision')
+    }
+    const acceptedDirects = postCanonicalBasisDirects.get(sessionId)
+    const acceptedNonBasisUpdates = postCanonicalNonBasisUpdates.get(sessionId)
+    if (acceptedDirects?.has(pending.producer.messageId) !== true
+      || agent.session.events.some(event => event.type === 'user/message'
+        && event.seq > finalizedReplaceSeq
+        && event.data.source.kind === 'user'
+        && String(event.data.id) !== prior.machine.originMessageId
+        && String(event.data.id) !== pending.producer.messageId
+        && (acceptedNonBasisUpdates?.generation !== prior.generation
+          || !acceptedNonBasisUpdates.directIds.has(String(event.data.id))))) {
+      throw new Error('post-canonical direct work is not present in the rolling basis')
+    }
+    const runtimeEvidence = await buildCandidateRuntimeEvidence(
+      agent, message, baseMessages, signal, undefined, pending,
+    )
+    if (runtimeEvidence === undefined
+      || runtimeEvidence.origin.messageId !== claim.origin.messageId
+      || runtimeEvidence.origin.hash !== claim.origin.hash) {
+      throw new Error('rolling consumer runtime evidence was not exact')
+    }
+    candidateTerminals.delete(sessionId)
+    const requested = rollingCandidate.requestRollingCandidate({
+      chat,
+      generation: pending.generation,
+      actionRef: action.ref,
+      evidenceRef: evidence.ref,
+      runtimeEvidence,
+    })
+    const terminal = candidateTerminals.get(sessionId)
+    candidateTerminals.delete(sessionId)
+    if (!requested || terminal?.kind === 'failed') {
+      throw new Error('rolling candidate qualification did not close exactly')
+    }
+    if (terminal?.kind === 'issue') {
+      await preserveClaimedInput(ctx, agent, message)
+      await publishCandidateResult(agent, terminal.text)
+      return { kind: 'handled', decision: { kind: 'enter', messages: [] } }
+    }
+    const outcome = rollingCandidate.takeQualification(chat)
+    if (outcome === undefined) throw new Error('rolling C28 owner outcome is absent')
+    if (outcome.kind === 'identical') {
+      if (!background.state.discardObservedQualification(
+        sessionId, outcome.decision, outcome.c28,
+      )) throw new Error('identical rolling C28 handoff was not discarded exactly')
+      // Identical C28 authorizes neither a new state nor a generation bump.
+      // Re-publish only the already finalized owner-authenticated canonical
+      // message so the accepted consumer enters one canonical-only root.
+      const visible = agent.session.deriveMessages()
+      const canonical = visible[0]
+      const sessions = sessionsFlushPort(ctx)
+      const persistence = sessionPersistencePort(ctx)
+      const nodes = [...agent.session.surface.nodes]
+      if (canonical === undefined || canonical.role !== 'user') {
+        throw new Error('identical rolling candidate has no exact canonical message')
+      }
+      const exactCanonical = canonical as UserMessage
+      const source = exactCanonical.source
+      if (source.kind !== 'context-manager-canonical'
+        || source.phase !== 'finalized'
+        || source.machine.kind !== 'background'
+        || source.canonicalStateRef !== prior.canonicalRef
+        || source.generation !== prior.generation
+        || source.machine.candidateRef !== prior.machine.candidateRef
+        || textOf(exactCanonical) !== prior.body
+        || nodes.length === 0
+        || sessions === undefined
+        || persistence === undefined
+        || signal.aborted) {
+        throw new Error('identical rolling candidate has no exact canonical surface')
+      }
+      const reasserted = freezeMessage({
+        ...exactCanonical,
+        id: MessageId(`rolling-identical:${fingerprint(
+          `${prior.canonicalRef}\0${messageId}\0${claim.origin.hash}`,
+        )}`),
+      })
+      const appended = agent.session.append('user/message', reasserted, {
+        surfaceOp: { op: 'replace', start: nodes[0]!, end: nodes.at(-1)! },
+        sourceEventSeqs: nodes,
+      })
+      if (!await sessions.flush(agent.session)) {
+        throw new Error('identical rolling canonical reassertion is not durable')
+      }
+      const detached = await persistence.readFrom(sessionId, appended.seq)
+      const exact = detached.events.filter(event => event.seq === appended.seq)
+      const retained = agent.session.deriveMessages()
+      if (exact.length !== 1
+        || exact[0]?.type !== 'user/message'
+        || String(exact[0].data.id) !== String(reasserted.id)
+        || exact[0].data.source.kind !== 'context-manager-canonical'
+        || retained.length !== 1
+        || retained[0]?.id !== reasserted.id) {
+        throw new Error('identical rolling canonical reassertion readback is not exact')
+      }
+      return { kind: 'consumed' }
+    }
+    const sessions = sessionsFlushPort(ctx)
+    const persistence = sessionPersistencePort(ctx)
+    if (sessions === undefined || persistence === undefined || signal.aborted) {
+      throw new Error('rolling qualified background has no live transaction inputs')
+    }
+    const currentHeader = agent.session.requestHeader()
+    if (currentHeader === undefined
+      || tokenMeter.measure(agent.session, currentHeader).logRevision
+        !== runtimeEvidence.budget.firstAssembly.revision) {
+      throw new Error('rolling background writer revision changed after formation')
+    }
+    const committed = await qualifiedBackground.apply.apply({
+      sessionId,
+      session: agent.session,
+      record: currentRecord,
+      focus,
+      boundary: action,
+      origin: runtimeEvidence.origin,
+      save: async value => {
+        const exact = backgroundStateRecordSchema.safeParse(value)
+        if (!exact.success) throw new Error('rolling background sidecar failed exact schema validation')
+        await table.put(sessionId, exact.data)
+      },
+      flush: async () => await sessions.flush(agent.session),
+      readFrom: async fromSeq => await persistence.readFrom(sessionId, fromSeq),
+    })
+    const visible = agent.session.deriveMessages()
+    const canonical = visible[0]
+    if (signal.aborted
+      || committed.record.phase !== 'finalized'
+      || committed.record.generation !== prior.generation + 1
+      || visible.length !== 1
+      || canonical === undefined
+      || canonical.role !== 'user'
+      || canonical.source.kind !== 'context-manager-canonical'
+      || canonical.source.machine.kind !== 'background'
+      || agent.session.events.some(event => event.type === 'user/message'
+        && String(event.data.id) === messageId)) {
+      throw new Error('rolling background publication is not uniquely visible')
+    }
+    postCanonicalBasisDirects.delete(sessionId)
+    postCanonicalNonBasisUpdates.delete(sessionId)
+    return { kind: 'consumed' }
+  }
+
   ctx.on('agent/pre-step', async ({ agent, messages, signal }, next): Promise<PreStepDecision> => {
     if (!managed(agent, classifier)) return await next()
     const sessionId = String(agent.session.id)
@@ -3217,6 +3454,44 @@ function installFocusCanary(
       return await canaryFailure(ctx, agent, message)
     }
     const messageId = String(message.id)
+    let preNextRecord: ReturnType<ReturnType<typeof domain.table>['get']>
+    try {
+      preNextRecord = domain.table('focus_precanonical').get(sessionId)
+    } catch {
+      finishClaimTracking(agent, messageId)
+      return await canaryFailure(ctx, agent, message)
+    }
+    if (preNextRecord !== undefined && isLocalRestrictionStateRecord(preNextRecord)
+      && (recoveryGate?.kind !== 'ready'
+        || preNextRecord.transaction?.phase !== 'finalized'
+        || textOf(message) !== '继续')) {
+      finishClaimTracking(agent, messageId)
+      return await closedRecoveryInput(ctx, agent, message, managedFailure)
+    }
+    if (preNextRecord !== undefined && isNoSafeActionStateRecord(preNextRecord)) {
+      finishClaimTracking(agent, messageId)
+      return await closedRecoveryInput(ctx, agent, message, managedFailure)
+    }
+    const base = await next()
+    if (base.kind === 'reject') {
+      finishClaimTracking(agent, messageId)
+      return base
+    }
+    let rollingConsumer: RollingConsumerResult
+    try {
+      rollingConsumer = await consumeRollingCandidate(
+        agent, message, base.messages, signal, preNextRecord,
+      )
+    } catch {
+      candidateRuntimeEvidence.delete(sessionId)
+      candidateTerminals.delete(sessionId)
+      finishClaimTracking(agent, messageId)
+      return await closedRecoveryInput(ctx, agent, message, managedFailure)
+    }
+    if (rollingConsumer.kind === 'handled') {
+      finishClaimTracking(agent, messageId)
+      return rollingConsumer.decision
+    }
     if (evidenceWeb !== undefined && isF03EvidenceDirect(textOf(message))) {
       const claimedDirect = claimedDirects.get(agent)?.get(messageId)
       try {
@@ -3241,39 +3516,16 @@ function installFocusCanary(
         finishClaimTracking(agent, messageId)
       }
     }
-    let preNextRecord: ReturnType<ReturnType<typeof domain.table>['get']>
-    try {
-      preNextRecord = domain.table('focus_precanonical').get(sessionId)
-    } catch {
+    if (rollingConsumer.kind === 'consumed' && textOf(message) !== '请更新当前背景') {
       finishClaimTracking(agent, messageId)
-      return await canaryFailure(ctx, agent, message)
-    }
-    if (preNextRecord !== undefined && isLocalRestrictionStateRecord(preNextRecord)
-      && (recoveryGate?.kind !== 'ready'
-        || preNextRecord.transaction?.phase !== 'finalized'
-        || textOf(message) !== '继续')) {
-      finishClaimTracking(agent, messageId)
-      return await closedRecoveryInput(ctx, agent, message, managedFailure)
-    }
-    if (preNextRecord !== undefined && isNoSafeActionStateRecord(preNextRecord)) {
-      finishClaimTracking(agent, messageId)
-      return await closedRecoveryInput(ctx, agent, message, managedFailure)
-    }
-    const base = await next()
-    if (base.kind === 'reject') {
-      finishClaimTracking(agent, messageId)
-      return base
+      return { kind: 'enter', messages: [message] }
     }
     if (textOf(message) === '请更新当前背景') {
       try {
         const prior = preNextRecord !== undefined && isBackgroundStateRecord(preNextRecord)
           ? parseCanonicalBackgroundStateRecord(preNextRecord)?.transaction
           : undefined
-        const rollingPending = rollingCandidate?.takePending(sessionId as ChatRef, {
-          messageId,
-          hash: directExpressionHash(messageId, '请更新当前背景'),
-        })
-        if (rollingPending === undefined && preNextRecord !== undefined && isBackgroundStateRecord(preNextRecord)) {
+        if (preNextRecord !== undefined && isBackgroundStateRecord(preNextRecord)) {
           const c41 = qualifiedBackground.current.acceptCurrent(sessionId as ChatRef, preNextRecord)
           if (prior?.phase !== 'finalized'
             || c41?.kind !== 'business_result'
@@ -3307,13 +3559,7 @@ function installFocusCanary(
         }
         candidateTerminals.delete(sessionId)
         candidateRuntimeEvidence.set(sessionId, runtimeEvidence as ExplicitBackgroundUpdateRuntimeEvidence)
-        const c38 = rollingPending === undefined
-          ? candidateAdvice.requestExplicitBackgroundUpdate({ chat: sessionId as ChatRef })
-          : formation.requestRollingCandidate({
-              chat: sessionId as ChatRef,
-              generation: rollingPending.generation,
-              runtimeEvidence,
-            })
+        const c38 = candidateAdvice.requestExplicitBackgroundUpdate({ chat: sessionId as ChatRef })
         candidateRuntimeEvidence.delete(sessionId)
         const terminal = candidateTerminals.get(sessionId)
         candidateTerminals.delete(sessionId)

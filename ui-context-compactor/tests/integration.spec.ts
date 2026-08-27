@@ -25,6 +25,7 @@ import {
   type LlmResolvedModelInfo,
   type Message,
   type StreamChunk,
+  type UserMessage,
 } from '@deepseek-ai/dsh-llm'
 import * as SessionInvariant from '@deepseek-ai/dsh-session/invariant'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -163,6 +164,7 @@ class NaturalEvidenceAdapter extends LlmAdapter {
   focusCalls = 0
   actionCalls = 0
   evidenceCalls = 0
+  singleVersion = '1.4.2'
   evidenceMode: 'single' | 'multi_fact' | 'multi_source' = 'single'
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -238,7 +240,7 @@ class NaturalEvidenceAdapter extends LlmAdapter {
         kind: 'direct_fact',
         fact,
         meaning: fact === releaseFact
-          ? 'DeepSeek Harness 当前最新稳定版本为 1.4.2'
+          ? `DeepSeek Harness 当前最新稳定版本为 ${this.singleVersion}`
           : 'DeepSeek Harness 1.4.2 要求 Node.js 22 或更新版本',
         source: material?.source,
         degree: 'established',
@@ -431,12 +433,14 @@ async function harness(config: ContextRouteConfig = {}): Promise<Harness> {
   return { ctx, agent, adapter, compaction }
 }
 
-async function send(agent: Agent, text: string): Promise<void> {
-  agent.followup(createUserMessage({
+async function send(agent: Agent, text: string): Promise<UserMessage> {
+  const message = createUserMessage({
     content: [{ type: 'text', text }],
     source: { kind: 'user' },
-  }))
+  })
+  agent.followup(message)
   await agent.whenIdle()
+  return message
 }
 
 describe('single-session context route through the real loop', () => {
@@ -752,7 +756,13 @@ describe('single-session context route through the real loop', () => {
 
     const firstQualifiedTransaction = object(qualifiedStateAfter?.transaction)
     expect(firstQualifiedTransaction?.generation).toBe(1)
-    const rollingQualifiedDirect = await send(qualifiedAgent, singleFactDirect)
+    naturalAdapter.singleVersion = '1.5.0'
+    const rollingProducerDirect = await send(qualifiedAgent, singleFactDirect)
+    const pendingQualifiedState = storedFocusRecord(sqlitePath, qualifiedBackgroundSessionId)
+    expect(object(pendingQualifiedState?.transaction)?.generation).toBe(1)
+    const rollingQualifiedDirect = await send(
+      qualifiedAgent, '按刚核清的版本继续准备升级。',
+    )
     await natural.sessions.flush(qualifiedAgent.session)
     const secondQualifiedDetached = await natural.sessionPersistence.readFrom(qualifiedAgent.session.id, 0)
     const secondQualifiedState = storedFocusRecord(sqlitePath, qualifiedBackgroundSessionId)
@@ -774,9 +784,15 @@ describe('single-session context route through the real loop', () => {
     expect(qualifiedAgent.session.events.filter(event => event.type === 'user/message'
       && event.data.source.kind === 'user'
       && String(event.data.id) === String(rollingQualifiedDirect.id))).toHaveLength(1)
+    expect(qualifiedAgent.session.events.filter(event => event.type === 'user/message'
+      && event.data.source.kind === 'user'
+      && String(event.data.id) === String(rollingProducerDirect.id))).toHaveLength(1)
     expect(secondQualifiedDetached.events.filter(event => event.type === 'user/message'
       && event.data.source.kind === 'user'
       && String(event.data.id) === String(rollingQualifiedDirect.id))).toHaveLength(1)
+    expect(secondQualifiedDetached.events.filter(event => event.type === 'user/message'
+      && event.data.source.kind === 'user'
+      && String(event.data.id) === String(rollingProducerDirect.id))).toHaveLength(1)
     expect(qualifiedAgent.session.events.filter(event => event.type.startsWith('compaction/'))).toHaveLength(0)
   })
 

@@ -122,6 +122,8 @@ export interface RollingCandidateRuntimeEvidence {
 export interface RollingCandidateRequest {
   readonly chat: ChatRef
   readonly generation: number
+  readonly actionRef: ActionFactBoundary['ref']
+  readonly evidenceRef: EvidenceConclusionSet['ref']
   readonly runtimeEvidence: RollingCandidateRuntimeEvidence
 }
 
@@ -355,7 +357,9 @@ export function renderCandidateBackground(material: CandidateRenderMaterial): Se
     },
     actionableFacts: material.action.usableFacts,
     uncertainties: material.action.unresolvedFacts,
-    requiredFacts: material.action.requiredFacts,
+    requiredFacts: {
+      requirements: material.action.requiredFacts.requirements,
+    },
     actionBoundary: {
       kind: material.action.kind,
       preciselyBlockedActions: material.action.preciselyBlockedActions,
@@ -773,6 +777,8 @@ export class BackgroundCandidateFormation {
     const evidence = request.runtimeEvidence
     if (current === undefined
       || current.generation !== request.generation
+      || this.#actions.get(request.chat)?.ref !== request.actionRef
+      || this.#evidence.get(request.chat)?.ref !== request.evidenceRef
       || evidence.chat !== request.chat
       || !nonblank(evidence.origin.messageId)
       || !nonblank(evidence.origin.hash)) return false
@@ -896,7 +902,7 @@ export class BackgroundCandidateFormation {
       rollingCandidateGenerations.set(candidate, currentCanonical.generation)
       this.#currentCanonical.delete(chat)
     }
-    this.#lastExplicitBasis.set(chat, candidateBasis)
+    if (!rolling) this.#lastExplicitBasis.set(chat, candidateBasis)
     formedFutureCriticalPoints.set(candidate, knownFutureCriticalPoints)
     const formed: CandidateFormationResult<typeof ref> = Object.freeze({ kind: 'formed', candidate })
     const formationReport = this.#dependencies.qualification.acceptFormationResult(formed)
