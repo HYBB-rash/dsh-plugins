@@ -22,7 +22,6 @@ RUN apt-get update \
 # layer so ordinary plugin releases do not reinstall the whole toolchain.
 ARG DSH_HARNESS_COMMIT
 ARG DSH_HARNESS_PATCH_SHA256
-ARG DSH_PLUGINS_COMMIT
 
 WORKDIR /opt/dsh
 COPY harness/ /opt/dsh/harness/
@@ -94,6 +93,7 @@ RUN set -eu; \
     (cd local-plugins/x-feed/python \
      && PYTHONWARNINGS=ignore python3 -m unittest discover -p 'test_x_*.py')
 
+ARG DSH_PLUGINS_COMMIT
 LABEL org.opencontainers.image.title="DSH private-assistant runtime" \
       org.opencontainers.image.revision="${DSH_PLUGINS_COMMIT}" \
       io.dsh.harness.revision="${DSH_HARNESS_COMMIT}" \
