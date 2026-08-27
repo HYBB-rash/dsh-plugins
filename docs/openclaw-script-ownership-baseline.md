@@ -4,7 +4,7 @@
 
 分支：`feat/repository-managed-openclaw-scripts`
 
-基线 `main`：`93e8e91aaad410f1416f9fc25fa4dd2af6affb58`
+基线 `main`：`d3b430acd06a118fd5ac90ddd46131711686008b`
 
 ## 盘点口径
 
