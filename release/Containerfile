@@ -72,6 +72,22 @@ RUN set -eu; \
     cp -a /opt/dsh/release-system/fixtures/context-manager-telegram-canary/. \
       /opt/dsh/harness/local-plugins/release/fixtures/context-manager-telegram-canary/; \
     chmod 755 /opt/dsh/harness/local-plugins/release/fixtures/context-manager-telegram-canary/prepare-profile.sh; \
+    test_file=/opt/dsh/harness/local-plugins/ui-context-compactor/tests/focus-telegram-new.spec.ts; \
+    test_fixture_path="$(sed -n "s/.*prepareProfile = join(projectRoot, '\([^']*\)').*/\1/p" "$test_file")"; \
+    case "$test_fixture_path" in \
+      */context-manager-telegram-canary/prepare-profile.sh) ;; \
+      *) echo "unexpected context-manager verification fixture path: $test_fixture_path" >&2; exit 1 ;; \
+    esac; \
+    canonical_fixture_dir=/opt/dsh/harness/local-plugins/release/fixtures/context-manager-telegram-canary; \
+    canonical_fixture="$canonical_fixture_dir/prepare-profile.sh"; \
+    requested_fixture="/opt/dsh/harness/local-plugins/$test_fixture_path"; \
+    : > /opt/dsh/verification-fixture-compat-path; \
+    if [ "$requested_fixture" != "$canonical_fixture" ]; then \
+      requested_fixture_dir="$(dirname "$requested_fixture")"; \
+      mkdir -p "$(dirname "$requested_fixture_dir")"; \
+      ln -s "$canonical_fixture_dir" "$requested_fixture_dir"; \
+      printf '%s\n' "$requested_fixture_dir" > /opt/dsh/verification-fixture-compat-path; \
+    fi; \
     cp /opt/dsh/plugins-src/runtime-package-topology.json /opt/dsh/harness/local-plugins/runtime-package-topology.json; \
     mkdir -p /opt/dsh/harness/local-plugins/scripts; \
     cp /opt/dsh/plugins-src/scripts/materialize-runtime-topology.mjs \
@@ -111,6 +127,19 @@ RUN set -eu; \
     (cd local-plugins/x-feed/python \
      && DSH_X_FEED_DATA_DIR="$python_data" PYTHONWARNINGS=ignore \
         python3 -m unittest discover -p 'test_x_*.py')
+
+# A historical product commit may name the verification fixture by its path at
+# that revision.  The temporary alias is strictly a build-test input and must
+# not survive in the immutable runtime image.
+USER root
+RUN set -eu; \
+    compat_path="$(cat /opt/dsh/verification-fixture-compat-path)"; \
+    if [ -n "$compat_path" ]; then \
+      rm "$compat_path"; \
+      rmdir --ignore-fail-on-non-empty -p "$(dirname "$compat_path")" 2>/dev/null || true; \
+    fi; \
+    rm /opt/dsh/verification-fixture-compat-path
+USER 1000:1000
 
 ARG DSH_PLUGINS_COMMIT
 ARG DSH_RELEASE_COMMIT
