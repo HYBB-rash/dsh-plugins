@@ -218,10 +218,19 @@ function commandBuild(options) {
     '--build-arg', `DSH_HARNESS_COMMIT=${harnessCommit}`,
     '--build-arg', `DSH_HARNESS_PATCH_SHA256=${patchSha256}`,
     '--build-arg', `DSH_PLUGINS_COMMIT=${pluginsCommit}`,
+    '--label', `org.opencontainers.image.revision=${pluginsCommit}`,
+    '--label', `io.dsh.harness.revision=${harnessCommit}`,
+    '--label', `io.dsh.harness.patch-sha256=${patchSha256}`,
     '--tag', imageTag, '--file', join(pluginsTarget, 'release/Containerfile'), context,
   ], { code: exitCodes.test })
 
   const builtImageId = imageId(imageTag)
+  const imageLabels = JSON.parse(run(engine, ['image', 'inspect', imageTag, '--format', '{{json .Config.Labels}}'], { capture: true, code: exitCodes.safety }))
+  if (imageLabels['org.opencontainers.image.revision'] !== pluginsCommit
+    || imageLabels['io.dsh.harness.revision'] !== harnessCommit
+    || imageLabels['io.dsh.harness.patch-sha256'] !== patchSha256) {
+    fail('镜像标签没有绑定到本次 Harness/插件源码身份', exitCodes.safety)
+  }
   const testStartedAt = new Date().toISOString()
   const testOutput = run(engine, [
     'run', '--rm', '--read-only', '--user', '1000:1000',

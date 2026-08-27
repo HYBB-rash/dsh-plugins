@@ -5,11 +5,6 @@ ARG DSH_HARNESS_COMMIT
 ARG DSH_HARNESS_PATCH_SHA256
 ARG DSH_PLUGINS_COMMIT
 
-LABEL org.opencontainers.image.title="DSH private-assistant runtime" \
-      org.opencontainers.image.revision="${DSH_PLUGINS_COMMIT}" \
-      io.dsh.harness.revision="${DSH_HARNESS_COMMIT}" \
-      io.dsh.harness.patch-sha256="${DSH_HARNESS_PATCH_SHA256}"
-
 ENV DEBIAN_FRONTEND=noninteractive \
     CI=1 \
     DSH_HOME=/home/herman/.dsh \
@@ -40,6 +35,7 @@ RUN set -eu; \
     sed -i '/^packages:$/a\  - local-profiles/*\n  - local-plugins/*' /opt/dsh/harness/pnpm-workspace.yaml
 
 WORKDIR /opt/dsh/harness
+ENV DSH_CLIENT_COMMIT_HASH=${DSH_HARNESS_COMMIT}
 RUN pnpm install --no-frozen-lockfile \
  && pnpm run build \
  && pnpm --filter @deepseek-ai/dsh-assistant run bundle \
@@ -56,6 +52,11 @@ RUN pnpm exec vitest run \
       local-plugins/ui-context-compactor/tests \
       local-plugins/personal-feed/tests \
       local-plugins/x-feed/tests
+
+LABEL org.opencontainers.image.title="DSH private-assistant runtime" \
+      org.opencontainers.image.revision="${DSH_PLUGINS_COMMIT}" \
+      io.dsh.harness.revision="${DSH_HARNESS_COMMIT}" \
+      io.dsh.harness.patch-sha256="${DSH_HARNESS_PATCH_SHA256}"
 
 RUN mkdir -p /home/herman/.dsh /home/herman/.dsh/workspace \
  && chown -R 1000:1000 /home/herman
