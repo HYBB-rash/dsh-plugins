@@ -373,12 +373,15 @@ function commandDev(options) {
     }
     run(engine, ['run', '--rm', ...containerBaseArgs(homePath), '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'prepare'], { code: exitCodes.test })
     run(engine, ['network', 'create', '--internal', 'dsh-dev-internal'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-fake-telegram', '--network', 'dsh-dev-internal', '--read-only', '--tmpfs', '/tmp:rw', candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
+    run(engine, ['run', '--detach', '--name', 'dsh-dev-fake-telegram', '--network', 'dsh-dev-internal', '--network-alias', 'fake-telegram', '--read-only', '--tmpfs', '/tmp:rw', candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
     run(engine, ['run', '--detach', '--name', 'dsh-dev-telegram', '--network', 'dsh-dev-internal', ...containerBaseArgs(homePath),
       '--env', 'TELEGRAM_BOT_TOKEN=test-token', '--env', 'TELEGRAM_ALLOWED_CHAT_ID=1', '--env', 'DEEPSEEK_API_KEY=test-key',
       candidate.imageTag, 'telegram-test'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-web', '--network', 'dsh-dev-internal', '--publish', '127.0.0.1:13080:13080', ...containerBaseArgs(homePath),
-      '--env', 'DSH_WEB_HOST=0.0.0.0', '--env', 'DSH_WEB_PORT=13080', '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
+    // Harness intentionally binds Web only to loopback.  Keep it on the host
+    // network for local browser access; the Telegram/cron writer remains on
+    // the egress-free internal network with only the fake Bot API.
+    run(engine, ['run', '--detach', '--name', 'dsh-dev-web', '--network', 'host', ...containerBaseArgs(homePath),
+      '--env', 'DSH_WEB_PORT=13080', '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
     const verification = verifyDev(candidate, homePath)
     out({ result: 'dev-started', web: 'http://127.0.0.1:13080', homePath, data: reuseData ? 'reused' : 'materialized', network: 'dsh-dev-internal', ...verification })
     return
