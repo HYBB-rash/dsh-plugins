@@ -1,0 +1,11 @@
+diff --git a/apps/cli/config/agent-presets/minimal/agent.cordis.yml b/apps/cli/config/agent-presets/minimal/agent.cordis.yml
+index 0e1f2b0f5d..8698642b01 100644
+--- a/apps/cli/config/agent-presets/minimal/agent.cordis.yml
++++ b/apps/cli/config/agent-presets/minimal/agent.cordis.yml
+@@ -30,5 +30,6 @@
+     - id: terminal-bash
+       name: '@deepseek-ai/dsh-terminal-bash'
+       disabled: !!js process.platform === 'win32'
+       config:
++        shellPath: bash
+         timeoutMs: 300000

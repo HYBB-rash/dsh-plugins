@@ -1,0 +1,62 @@
+name: dsh
+
+x-dsh-common: &dsh-common
+  image: ${DSH_IMAGE:?DSH_IMAGE must name the admitted immutable image}
+  user: "1000:1000"
+  read_only: true
+  privileged: true
+  pid: host
+  restart: unless-stopped
+  environment:
+    HOME: /home/herman
+    DSH_HOME: /home/herman/.dsh
+    DSH_CWD: /home/herman/.dsh/workspace
+    DSH_IMAGE_ID: ${DSH_IMAGE_ID:?DSH_IMAGE_ID is required}
+  volumes:
+    - /home/herman:/home/herman:rw
+    - /home/herman/.openclaw:/home/herman/.openclaw:ro
+    - /home/herman/task-inbox-workflow:/home/herman/task-inbox-workflow:ro
+    - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:rw
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=512m
+    - /run:rw,nosuid,size=64m
+  pids_limit: 256
+  mem_limit: 1g
+
+services:
+  prepare:
+    <<: *dsh-common
+    restart: "no"
+    command: ["prepare"]
+
+  web:
+    <<: *dsh-common
+    network_mode: host
+    command: ["web"]
+    depends_on:
+      prepare:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "2", "http://127.0.0.1:3080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  lan-proxy:
+    <<: *dsh-common
+    network_mode: host
+    command: ["lan-proxy"]
+    mem_limit: 64m
+    pids_limit: 32
+    depends_on:
+      web:
+        condition: service_healthy
+
+  telegram:
+    <<: *dsh-common
+    network_mode: host
+    command: ["telegram"]
+    depends_on:
+      web:
+        condition: service_healthy

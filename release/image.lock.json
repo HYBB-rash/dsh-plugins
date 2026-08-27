@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "platform": "linux/amd64",
+  "image": "docker.io/library/node:24.13.0-bookworm-slim@sha256:46feb5752989c05b8606e6323fbbc3db667d14ade1c24f5d0d44d9ca9909d607",
+  "digest": "sha256:46feb5752989c05b8606e6323fbbc3db667d14ade1c24f5d0d44d9ca9909d607"
+}

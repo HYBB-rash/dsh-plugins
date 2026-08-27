@@ -1,0 +1,30 @@
+# Side-effect-contained profile used only on an internal test network.
+- id: hmr
+  disabled: true
+- id: session-persistence-jsonl
+  disabled: true
+- insert:
+    - id: session-persistence-sqlite
+      name: '@deepseek-ai/dsh-session-persistence-sqlite'
+      config:
+        path: !!js dshHomePath('storages/session-persistence.sqlite')
+    - id: telegram-gateway
+      name: '@deepseek-ai/dsh-telegram-gateway'
+      config:
+        sessionId: session-telegram-test
+        cwd: !!js process.env.DSH_CWD ?? process.cwd()
+        apiBaseUrl: 'http://fake-telegram:8080'
+    - id: dsh-cron
+      name: '@deepseek-ai/dsh-cron'
+      config:
+        mode: scheduler
+        pollIntervalMs: 10000
+        maxConcurrent: 1
+        deliverOnError: false
+        apiBaseUrl: 'http://fake-telegram:8080'
+    - id: dsh-assistant
+      name: '@deepseek-ai/dsh-assistant'
+      config:
+        mode: telegram
+        pollIntervalMs: 5000
+        telegramParentSessionId: session-telegram-test

@@ -1,0 +1,66 @@
+# Versioned production Telegram profile. Secrets resolve from external credentials.
+- id: hmr
+  disabled: true
+
+- id: compaction-basic
+  disabled: false
+  config:
+    auto: true
+    thresholdRatio: 0.278
+    retainRatio: 0.12
+- id: command-compact
+  disabled: false
+
+- id: session-persistence-jsonl
+  disabled: true
+- insert:
+    - id: session-persistence-sqlite
+      name: '@deepseek-ai/dsh-session-persistence-sqlite'
+      config:
+        path: !!js dshHomePath('storages/session-persistence.sqlite')
+
+- id: session-query-sqlite
+  config:
+    path: !!js dshHomePath('storages/session-query.sqlite')
+    openAt: first-search
+
+- insert:
+    - id: ui-context-compactor
+      name: '@deepseek-ai/dsh-client-ui-context-compactor'
+      config:
+        reasoningEffort: off
+        maxOutputTokens: 8192
+        largeToolResultPreprocessing:
+          enabled: true
+          minChars: 2500
+        compactEveryTurns: 5
+    - id: ui-context-compactor-invariant-registry
+      name: '@deepseek-ai/dsh-invariants'
+    - id: ui-context-compactor-invariant
+      name: '@deepseek-ai/dsh-client-ui-context-compactor/invariant'
+    - id: tool-session-query
+      name: '@deepseek-ai/dsh-tool-session-query'
+    - id: telegram-gateway
+      name: '@deepseek-ai/dsh-telegram-gateway'
+      config:
+        sessionId: session-telegram
+        cwd: !!js process.env.DSH_CWD ?? process.cwd()
+        extensions:
+          - modulePath: '@herman/x-feed'
+            configJson: '{"telegramSessionId":"session-telegram"}'
+    - id: dsh-cron
+      name: '@deepseek-ai/dsh-cron'
+      config:
+        mode: scheduler
+        pollIntervalMs: 10000
+        maxConcurrent: 3
+        deliverOnError: true
+        environmentModules:
+          - modulePath: '@herman/x-feed'
+            configJson: '{"cronJobId":"cron-af33aa98","personalFeedDataDir":"/home/herman/.dsh/storages/personal-feed","personalFeedRequiredSources":["x"],"candidateReportingWindowMs":300000}'
+    - id: dsh-assistant
+      name: '@deepseek-ai/dsh-assistant'
+      config:
+        mode: telegram
+        pollIntervalMs: 5000
+        telegramParentSessionId: session-telegram

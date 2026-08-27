@@ -1,0 +1,21 @@
+{
+  "name": "dsh-profile-telegram-test-container",
+  "private": true,
+  "dependencies": {
+    "@deepseek-ai/dsh-assistant": "workspace:*",
+    "@deepseek-ai/dsh-client-ui-context-compactor": "workspace:*",
+    "@deepseek-ai/dsh-cron": "workspace:*",
+    "@deepseek-ai/dsh-session-persistence-sqlite": "workspace:*",
+    "@deepseek-ai/dsh-telegram-gateway": "workspace:*",
+    "@deepseek-ai/dsh-tool-session-query": "workspace:*",
+    "@herman/personal-feed": "workspace:*",
+    "@herman/x-feed": "workspace:*"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base"
+      ]
+    }
+  }
+}
