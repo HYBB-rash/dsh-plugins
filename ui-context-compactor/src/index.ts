@@ -47,6 +47,7 @@ import { ManagedAwareBasicCompactionEngine } from './managed-compaction.ts'
 import { ManagedFailurePresenter, isManagedFailure } from './managed-failure.ts'
 import { NoFocusHarness } from './no-focus-harness.ts'
 import { NoFocusRecovery } from './no-focus-recovery.ts'
+import { classifyTelegramStateRecovery } from './state-recovery.ts'
 import {
   proveTelegramNoFocusAdmission,
   qualifyTelegramNoFocusAdmission,
@@ -881,17 +882,18 @@ function hasDetachedFinalizedRecoveryProof(
     && sameCanonical(finalized[0]!, 'finalized', finalizedSeq)
 }
 
-function hasExpectedNoFocusWithoutTransaction(agent: Agent): boolean {
-  return agent.session.events.some(event => event.type === 'user/message'
-    && event.data.source.kind === 'user'
-    && textOf(event.data) === '这件事结束了')
-}
-
 interface ExactClosureOnlyProofTranscript {
   readonly close: UserMessage
   readonly closeSeq: number
   readonly continuationId?: string
   readonly continuationSeq?: number
+}
+
+/** A retained direct close without its later state material is not a fresh chat. */
+function hasExpectedNoFocusWithoutTransaction(agent: Agent): boolean {
+  return agent.session.events.some(event => event.type === 'user/message'
+    && event.data.source.kind === 'user'
+    && textOf(event.data) === '这件事结束了')
 }
 
 function sameDirectPayload(left: UserMessage, right: UserMessage): boolean {
@@ -2718,11 +2720,33 @@ function installFocusCanary(
       recoveryGates.set(agent, { kind: 'closed' })
       return
     }
+    const stateClass = classifyTelegramStateRecovery({
+      sessionId,
+      events: agent.session.events,
+      hasPreCanonicalFocus: record !== undefined && focusCanaryRecordSchema.safeParse(record).success,
+      // The storage domain accepted this H1/H1R row as an exact known family.
+      // Its owner still performs all phase/material/identity checks below;
+      // T2 only distinguishes an actually absent sidecar from a new chat.
+      hasCanonicalStateMaterial: record !== undefined,
+      hasExpectedNoFocusEvidence: record === undefined && hasExpectedNoFocusWithoutTransaction(agent),
+    })
+    // A context-manager source on the physical log without its exact state
+    // material is an incident, never a new or legacy route chat.  This gate
+    // deliberately leaves legacy route migration to the ordinary direct-user
+    // F02/F01/F06-F09 paths below; route body is never decoded here.
+    if (stateClass === 'expected_missing') {
+      recoveryGates.set(agent, { kind: 'closed' })
+      return
+    }
     // A genuinely fresh chat has neither sidecar state nor a durable H2 close.
     // It remains ordinary H1/T3 behavior; H1R-F never signs a new-chat result.
     if (record === undefined) {
-      if (hasExpectedNoFocusWithoutTransaction(agent)
-        || hasExpectedBackgroundWithoutTransaction(agent)) recoveryGates.set(agent, { kind: 'closed' })
+      // T2 owns the Telegram four-way split. The older canary roots still
+      // retain their established visible-background missing-state closure.
+      if (hasExpectedBackgroundWithoutTransaction(agent)
+        || sessionId !== 'session-telegram' && hasExpectedNoFocusWithoutTransaction(agent)) {
+        recoveryGates.set(agent, { kind: 'closed' })
+      }
       return
     }
     const proofOnly = closureOnlyProofRecordSchema.safeParse(record)
