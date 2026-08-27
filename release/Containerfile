@@ -26,21 +26,42 @@ ARG DSH_PLUGINS_COMMIT
 
 WORKDIR /opt/dsh
 COPY harness/ /opt/dsh/harness/
-COPY plugins/ /opt/dsh/plugins-src/
 
-RUN set -eu; \
-    mkdir -p /opt/dsh/harness/local-plugins /opt/dsh/harness/local-profiles; \
-    for package in dsh-assistant dsh-cron telegram-gateway ui-context-compactor x-feed personal-feed; do \
-      cp -a "/opt/dsh/plugins-src/$package" "/opt/dsh/harness/local-plugins/$package"; \
-    done; \
-    cp -a /opt/dsh/plugins-src/release/profiles/. /opt/dsh/harness/local-profiles/; \
-    sed -i '/^packages:$/a\  - local-profiles/*\n  - local-plugins/*' /opt/dsh/harness/pnpm-workspace.yaml
+# Dependency metadata is copied before frequently changing source.  A normal
+# plugin release can therefore reuse the dependency and Harness build layers.
+RUN mkdir -p \
+      /opt/dsh/harness/local-plugins/telegram-gateway \
+      /opt/dsh/harness/local-plugins/dsh-cron \
+      /opt/dsh/harness/local-plugins/dsh-assistant \
+      /opt/dsh/harness/local-plugins/personal-feed \
+      /opt/dsh/harness/local-plugins/x-feed \
+      /opt/dsh/harness/local-plugins/ui-context-compactor \
+      /opt/dsh/harness/local-profiles/web \
+      /opt/dsh/harness/local-profiles/telegram \
+      /opt/dsh/harness/local-profiles/telegram-test
+COPY plugins/telegram-gateway/package.json /opt/dsh/harness/local-plugins/telegram-gateway/package.json
+COPY plugins/dsh-cron/package.json /opt/dsh/harness/local-plugins/dsh-cron/package.json
+COPY plugins/dsh-assistant/package.json /opt/dsh/harness/local-plugins/dsh-assistant/package.json
+COPY plugins/personal-feed/package.json /opt/dsh/harness/local-plugins/personal-feed/package.json
+COPY plugins/x-feed/package.json /opt/dsh/harness/local-plugins/x-feed/package.json
+COPY plugins/ui-context-compactor/package.json /opt/dsh/harness/local-plugins/ui-context-compactor/package.json
+COPY plugins/release/profiles/web/package.json /opt/dsh/harness/local-profiles/web/package.json
+COPY plugins/release/profiles/telegram/package.json /opt/dsh/harness/local-profiles/telegram/package.json
+COPY plugins/release/profiles/telegram-test/package.json /opt/dsh/harness/local-profiles/telegram-test/package.json
+RUN sed -i '/^packages:$/a\  - local-profiles/*\n  - local-plugins/*' /opt/dsh/harness/pnpm-workspace.yaml
 
 WORKDIR /opt/dsh/harness
 ENV DSH_CLIENT_COMMIT_HASH=${DSH_HARNESS_COMMIT}
 RUN pnpm install --no-frozen-lockfile \
- && pnpm run build \
- && for package in telegram-gateway dsh-cron dsh-assistant personal-feed x-feed ui-context-compactor; do \
+ && pnpm run build
+
+COPY plugins/ /opt/dsh/plugins-src/
+RUN set -eu; \
+    for package in telegram-gateway dsh-cron dsh-assistant personal-feed x-feed ui-context-compactor; do \
+      cp -a "/opt/dsh/plugins-src/$package/." "/opt/dsh/harness/local-plugins/$package/"; \
+    done; \
+    cp -a /opt/dsh/plugins-src/release/profiles/. /opt/dsh/harness/local-profiles/; \
+    for package in telegram-gateway dsh-cron dsh-assistant personal-feed x-feed ui-context-compactor; do \
       (cd "local-plugins/$package" \
        && pnpm exec tsc -b \
        && pnpm exec tsdown \
