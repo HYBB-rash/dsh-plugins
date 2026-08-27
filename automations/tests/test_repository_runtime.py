@@ -14,7 +14,6 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "automations" / "scripts"
-LEGACY = ROOT / "automations" / "legacy-openclaw"
 sys.path.insert(0, str(SCRIPTS))
 
 import automation_paths
@@ -43,15 +42,26 @@ class RepositoryIndependenceTests(unittest.TestCase):
                     offenders.append(f"{path.relative_to(ROOT)}: {marker}")
         self.assertEqual(offenders, [])
 
-    def test_openclaw_specific_sources_are_quarantined_as_legacy(self):
-        self.assertTrue((LEGACY / "x-delivery-receipt" / "index.cjs").is_file())
-        self.assertEqual(len(list((LEGACY / "triggers").glob("*.js"))), 6)
-        combined = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in LEGACY.rglob("*") if path.is_file()
+    def test_retired_openclaw_sources_are_not_shipped(self):
+        retired = (
+            ROOT / "automations" / "legacy-openclaw" / "templates" / "sentinel-reminder.sh",
+            ROOT / "automations" / "legacy-openclaw" / "triggers" / "codex-linux-monitor.js",
+            ROOT / "automations" / "legacy-openclaw" / "triggers" / "information-feed.js",
+            ROOT / "automations" / "legacy-openclaw" / "triggers" / "openclaw-daily-brief.js",
+            ROOT / "automations" / "legacy-openclaw" / "triggers" / "openclaw-daily-trigger.js",
+            ROOT / "automations" / "legacy-openclaw" / "triggers" / "openclaw-weekly-brief.js",
+            ROOT / "automations" / "legacy-openclaw" / "triggers" / "x-insight-random.js",
+            ROOT / "automations" / "legacy-openclaw" / "x-delivery-receipt" / "index.cjs",
+            SCRIPTS / "baozupo_ble_reminder.sh",
+            SCRIPTS / "relay_shutdown_reminder.sh",
+            SCRIPTS / "trade_system_reminder.sh",
+            SCRIPTS / "rest_break_alarm.sh",
+            SCRIPTS / "openclaw_daily_brief.sh",
+            SCRIPTS / "openclaw_weekly_brief.sh",
+            SCRIPTS / "info_monitor.py",
+            SCRIPTS / "mywechat_sync_daemon.sh",
         )
-        self.assertIn("tools.call", combined)
-        self.assertIn("cron_changed", combined)
+        self.assertEqual([str(path.relative_to(ROOT)) for path in retired if path.exists()], [])
 
 
 class PathTests(unittest.TestCase):

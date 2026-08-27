@@ -50,6 +50,7 @@
 ## 经验记录
 
 - 2026-08-28：开发容器的最小生命周期单位应是 worktree 环境，不是每次交互 shell。`dev prepare` 为每个 worktree 创建一个带明确归属的固定 toolbox，`dev shell` 只 exec 进入它；多个终端共用该 toolbox，不创建或登记额外容器。`dev down`、`dev retire`、main 镜像换代和发版验收都按 worktree 整体停止并清理，避免 shell 状态、孤儿识别和人工资源窗口。
+- 2026-08-28：Git 的 `100644` 只约束可执行位，不会自动修复工作树实际为 `0600` 的读权限；rootless 容器挂载源码时，这种权限漂移会让宿主可读文件在容器测试中报 `EACCES`。`dev prepare` 前应核对版本化运行输入对容器映射用户可读。旧 OpenClaw 代码可以先按原字节导入用于审计，但调用者确认已 disabled、被替代或只能在 OpenClaw 内执行后，原始提交已足够保留证据，不应继续用 `legacy` 目录把它们伪装成当前可交付资产。
 - 2026-08-28：Docker 发版清理不能依赖无边界的 engine prune。构建命令只清理自己创建的临时目录、失败候选、暂存归档和唯一标签；开发底座与正式候选必须有不同用途身份，每个任务 worktree 持有独立开发租约。main 更新时先让新底座通过完整准备再换租约、删旧底座，release、latest 或其他任务仍引用的镜像必须保留；正式 release 一旦 accepted，则全部旧开发环境失效，清理其隔离数据、租约和无 release 引用的开发镜像，但保留源码 worktree 供 rebase 后重建。
 - 2026-08-28：容器已挂载整个 `/home/herman` 时，只删除 `.openclaw` 的单独 bind mount 仍会通过父挂载暴露宿主目录；要验证 OpenClaw 可完全不存在，需在开发和生产容器中用空 tmpfs 遮蔽该子路径，并让活动脚本测试拒绝 OpenClaw CLI、目录和插件 API 标记。
 - 2026-08-28：容器与宿主只有数值 UID/GID 相同仍不够；OpenSSH 等工具会从容器的 passwd 记录解析默认用户目录，而不只看 `HOME`。挂载 `/home/herman` 的运行镜像必须让 UID 1000 在 passwd 中对应 `herman:/home/herman`，并在镜像自测中同时验证 `id`、`getent passwd`、`HOME` 和 `ssh -G` 的默认 `known_hosts` 路径。

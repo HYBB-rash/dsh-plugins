@@ -9,6 +9,8 @@
 > 这是一份开始修改前的现场基线；14 个漂移副本的逐项裁决和仓库化结果见
 > [`openclaw-script-drift-resolution.md`](openclaw-script-drift-resolution.md)。
 
+> 清理结果：完成调用者复核后，OpenClaw 专属插件、trigger、模板及 8 个无人负责或已被替代的脚本已从当前工作树删除；原始字节保留在导入提交 `01f6355`，详见上述裁决文档。下表继续保留删除前事实，不能当作当前文件清单。
+
 ## 盘点口径
 
 本次盘点对象不是“哪些 cron 任务还在 OpenClaw”，而是当前项目的脚本及其传递运行依赖：

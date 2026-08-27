@@ -47,8 +47,10 @@ from DSH `runs.jsonl`.
 ## Direct OpenClaw code
 
 The old `x-delivery-receipt` plugin, reminder template and six trigger source
-files are preserved under `automations/legacy-openclaw/`. They are quarantined,
-not ported by renaming APIs:
+files were first imported byte-for-byte in commit `01f6355` so their behavior
+could be audited, then removed from the current tree once caller verification
+showed that they were disabled, superseded or executable only inside OpenClaw.
+They were not ported by renaming APIs:
 
 - X delivery receipts already have a DSH-native implementation under
   `x-feed/src/receipt.ts` and the repository X pipeline.
@@ -58,6 +60,12 @@ not ported by renaming APIs:
   or an Agent job with an explicit provider contract.
 - Rita delivery now calls an explicit external sender adapter; the repository
   relay no longer invokes `openclaw message send`.
+
+The same retirement removed four orphaned one-shot reminders, the unused daily
+and weekly OpenClaw upstream briefs, the disabled `info_monitor.py` path and the
+`mywechat_sync_daemon.sh` wrapper superseded by the systemd unit's direct
+`sync.py` invocation. Their pre-retirement sources remain recoverable from
+`01f6355`; none is shipped as an active automation.
 
 ## Remaining production cutover
 
