@@ -65,3 +65,11 @@
 - 上线后状态先是 `awaiting-user-acceptance`。真实 Telegram 与 Web 验收通过并执行 `accept` 后，该镜像才成为 `last-good`。
 - 回退默认只打印恢复对象、快照和影响；只有显式 `--approved` 才能恢复上一 Docker 镜像及对应停机前数据。
 - OpenClaw 始终在流程外：不得停止、重启、改配置或接管其写入权。
+
+## 已完成的切换
+
+2026-08-27，首个 Docker release `20260827T124411650Z-a12dfe07e92b` 已通过真实验收并固定为 `current`/`last-good`。旧 systemd units、旧远端发布树、旧本地 `deployment/herman-hermes` 和第一次切换兼容代码均已删除。
+
+同日使用候选 `20260827T143452209Z-a12dfe07e92b` 完成了一次真实 Docker→Docker 发布与回退演练：候选以同一镜像完成上线前测试和生产启动，随后经显式授权恢复到上述 `last-good`；容器、Web loopback/LAN、Telegram/cron、SQLite、offset 和 JSONL 均通过回退后验证，OpenClaw 未发生变化。以后发布和回退不再依赖旧源码发布树或旧 DSH systemd unit。
+
+镜像仍包含 `context-manager-telegram-canary` 的已提交验证 fixture，因为 A12 完整 UI 回归明确依赖它；它只在镜像构建测试阶段使用，不进入生产 profile、持久化数据或运行时回退边界。
