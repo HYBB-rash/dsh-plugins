@@ -30,8 +30,14 @@ function readJson(path, label) {
 }
 
 function assertPackageName(value, label) {
-  if (typeof value !== 'string' || !/^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/iu.test(value)) {
-    fail(`${label} must be one scoped package name`)
+  const scopedPackageName = /^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/u
+  const unscopedPackageName = /^[a-z0-9][a-z0-9._-]*$/u
+  const reservedUnscopedNames = new Set(['node_modules', 'favicon.ico'])
+  if (typeof value !== 'string'
+    || value.length > 214
+    || (!scopedPackageName.test(value)
+      && (!unscopedPackageName.test(value) || reservedUnscopedNames.has(value)))) {
+    fail(`${label} must be one npm package name`)
   }
   return value
 }

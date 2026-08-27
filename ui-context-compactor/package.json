@@ -17,6 +17,10 @@
       "types": "./lib/types/invariant.d.ts",
       "default": "./lib/invariant.js"
     },
+    "./managed-compaction": {
+      "types": "./lib/types/managed-compaction.d.ts",
+      "default": "./lib/managed-compaction.js"
+    },
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
@@ -24,13 +28,22 @@
     "lib/*.js",
     "lib/types/**/*.d.ts"
   ],
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-compaction": "*",
+    "@deepseek-ai/dsh-compaction-basic": "*",
+    "@deepseek-ai/dsh-commands": "*",
     "@deepseek-ai/dsh-invariants": "*",
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-storage": "*",
+    "@deepseek-ai/dsh-storage-domain": "*",
     "@deepseek-ai/dsh-system-prompt": "*",
+    "@deepseek-ai/dsh-token-meter": "*",
+    "@deepseek-ai/dsh-web": "*",
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/schemastery": "*"
   },
@@ -40,16 +53,26 @@
     "@deepseek-ai/dsh-agent-loop-testkit": "*",
     "@deepseek-ai/dsh-compaction": "*",
     "@deepseek-ai/dsh-compaction-basic": "*",
+    "@deepseek-ai/dsh-command-compact": "*",
+    "@deepseek-ai/dsh-commands": "*",
     "@deepseek-ai/dsh-invariants": "*",
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-session-query": "*",
     "@deepseek-ai/dsh-session-query-sqlite": "*",
+    "@deepseek-ai/dsh-session-persistence": "*",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "*",
+    "@deepseek-ai/dsh-storage": "*",
+    "@deepseek-ai/dsh-storage-domain": "*",
+    "@deepseek-ai/dsh-storage-sqlite": "*",
     "@deepseek-ai/dsh-system-prompt": "*",
     "@deepseek-ai/dsh-token-meter": "*",
     "@deepseek-ai/dsh-tool-session-query": "*",
     "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-web": "*",
     "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/cordis-plugin-include": "*",
+    "@deepseek-ai/cordis-plugin-loader": "*",
     "@deepseek-ai/schemastery": "*"
   }
 }
