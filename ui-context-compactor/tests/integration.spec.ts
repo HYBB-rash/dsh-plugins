@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
+import Include from '@deepseek-ai/cordis-plugin-include'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -20,12 +27,20 @@ import {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import * as SessionInvariant from '@deepseek-ai/dsh-session/invariant'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
+import Storage from '@deepseek-ai/dsh-storage'
+import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
+import * as StorageSqlite from '@deepseek-ai/dsh-storage-sqlite'
+import CommandRuntime from '@deepseek-ai/dsh-commands'
+import * as commandCompact from '@deepseek-ai/dsh-command-compact'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as ToolSessionQuery from '@deepseek-ai/dsh-tool-session-query'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
+import WebRuntime, { type WebSearchRequest } from '@deepseek-ai/dsh-web'
 import * as ContextRoutePlugin from '../src/index.ts'
+import { ManagedAwareBasicCompactionEngine } from '../src/managed-compaction.ts'
 import * as RouteInvariant from '../src/invariant.ts'
 import {
   assertRouteFreshForCompaction,
@@ -38,10 +53,31 @@ import {
 } from '../src/index.ts'
 
 const contexts: Context[] = []
+const roots: string[] = []
+
+const focusDirect = '准备升级 DeepSeek Harness'
+const singleFactDirect = '查一下 DeepSeek Harness 当前最新版本；确认后再决定是否升级。'
+const multiFactDirect = '查一下 DeepSeek Harness 当前最新版本和该版本要求的 Node.js 版本；分别确认后再决定是否升级。'
+const multiSourceDirect = '查一下 DeepSeek Harness 当前最新版本的两个来源；如果结论冲突，说明冲突并只限制依赖版本结论的行动。'
+const releaseFact = 'DeepSeek Harness 最新版本'
+const nodeFact = 'DeepSeek Harness 最新版本的 Node.js 版本要求'
+const upgradeAction = '升级 DeepSeek Harness'
+const compatibilityAction = '核对当前 Node.js 是否兼容'
+const readOnlyAction = '列出已确认的只读升级前检查'
+const releaseQuery = 'DeepSeek Harness latest version'
+const nodeQuery = 'DeepSeek Harness latest version Node.js requirements'
+const releaseUrl = 'https://example.test/deepseek-harness/releases/latest'
+const secondReleaseUrl = 'https://second.example.test/deepseek-harness/releases/latest'
+const nodeUrl = 'https://example.test/deepseek-harness/releases/latest/node-requirements'
+const rawMultiSourceEnvelope = 'PRIVATE-RAW-MULTI-SOURCE-ENVELOPE'
+const updateBackgroundDirect = '请更新当前背景'
+const qualifiedBackgroundSessionId = ContextRoutePlugin.FOCUS_CANARY_IDS[1]!
+const unprovableCandidatePresentation = '尚未形成候选目前无法证明合格：完整候选超出已知安全余量。影响范围：候选资格整体。'
 
 afterEach(async () => {
   vi.restoreAllMocks()
   for (const ctx of contexts.splice(0)) await ctx.fiber.dispose()
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
 })
 
 function textChunks(text: string): StreamChunk[] {
@@ -80,6 +116,141 @@ function messageText(messages: readonly Message[]): string {
 
 function modelInput(options: GenerateOptions): string {
   return messageText(options.messages)
+}
+
+function hasSchema(options: GenerateOptions, plugin: string): boolean {
+  return options.messages.some(message => message.source.kind === 'plugin'
+    && message.source.plugin === plugin)
+}
+
+function candidateQualificationMessages(events: readonly SessionEvent[]): readonly Message[] {
+  return events.flatMap(event => event.type === 'user/message'
+    && event.data.source.kind === 'plugin'
+    && event.data.source.plugin === 'ui-context-compactor:candidate-qualification'
+    ? [event.data]
+    : [])
+}
+
+function canonicalMessages(events: readonly SessionEvent[]): readonly Message[] {
+  return events.flatMap(event => event.type === 'user/message'
+    && event.data.source.kind === 'context-manager-canonical'
+    ? [event.data]
+    : [])
+}
+
+function object(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+function storedFocusRecord(path: string, key: string): Record<string, unknown> | undefined {
+  const database = new DatabaseSync(path, { readOnly: true })
+  try {
+    const row = object(database.prepare(
+      'SELECT value FROM "u_context_manager_focus_precanonical" WHERE key = ?',
+    ).get(key))
+    if (row === undefined) return undefined
+    if (typeof row.value !== 'string') throw new Error('stored focus record is not JSON text')
+    return object(JSON.parse(row.value))
+  } finally {
+    database.close()
+  }
+}
+
+class NaturalEvidenceAdapter extends LlmAdapter {
+  readonly rootRequests: GenerateOptions[] = []
+  focusCalls = 0
+  actionCalls = 0
+  evidenceCalls = 0
+  evidenceMode: 'single' | 'multi_fact' | 'multi_source' = 'single'
+
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({ provider, id: model, name: model, context: { contextWindow: 16_384 } })
+  }
+
+  override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (hasSchema(options, 'ui-context-compactor:focus-canary-schema')) {
+      this.focusCalls += 1
+      yield* textChunks(JSON.stringify({ kind: 'focus', subject: focusDirect, relation: 'new' }))
+      return
+    }
+    if (hasSchema(options, 'ui-context-compactor:action-fact-need-schema')) {
+      this.actionCalls += 1
+      const multi = modelInput(options).includes(multiFactDirect)
+      const multiSource = modelInput(options).includes(multiSourceDirect)
+      this.evidenceMode = multiSource ? 'multi_source' : multi ? 'multi_fact' : 'single'
+      yield* textChunks(JSON.stringify(multiSource ? {
+        actions: [upgradeAction, readOnlyAction],
+        proposedRequirements: [{ fact: releaseFact, neededFor: [upgradeAction] }],
+        usableInputs: [],
+        unresolvedInputs: [
+          { fact: releaseFact, meaning: '版本尚未核清', source: 'direct-user', degree: 'unknown', affected: upgradeAction },
+        ],
+      } : multi ? {
+        actions: [upgradeAction, compatibilityAction, readOnlyAction],
+        proposedRequirements: [
+          { fact: releaseFact, neededFor: [upgradeAction] },
+          { fact: nodeFact, neededFor: [upgradeAction, compatibilityAction] },
+        ],
+        usableInputs: [],
+        unresolvedInputs: [
+          { fact: releaseFact, meaning: '版本尚未核清', source: 'direct-user', degree: 'unknown', affected: upgradeAction },
+          { fact: nodeFact, meaning: 'Node.js 要求尚未核清', source: 'direct-user', degree: 'unknown', affected: `${upgradeAction}|${compatibilityAction}` },
+        ],
+      } : {
+        actions: [upgradeAction],
+        proposedRequirements: [{ fact: releaseFact, neededFor: [upgradeAction] }],
+        usableInputs: [],
+        unresolvedInputs: [
+          { fact: releaseFact, meaning: '版本尚未核清', source: 'direct-user', degree: 'unknown', affected: upgradeAction },
+        ],
+      }))
+      return
+    }
+    if (hasSchema(options, 'ui-context-compactor:evidence-schema')) {
+      this.evidenceCalls += 1
+      const projectionMessage = options.messages[1]
+      const projection = object(JSON.parse(messageText(
+        projectionMessage === undefined ? options.messages : [projectionMessage],
+      )))
+      const material = object(projection?.material)
+      const fact = projection?.fact
+      if (this.evidenceMode === 'multi_source') {
+        const second = material?.url === secondReleaseUrl
+        yield* textChunks(JSON.stringify({
+          kind: 'direct_fact',
+          fact,
+          conclusion: second ? 'DeepSeek Harness preview 当前版本为 1.5.0-beta' : 'DeepSeek Harness 当前稳定版本为 1.4.2',
+          appliesWhen: second ? 'preview channel' : 'stable channel',
+          observedAt: material?.observedAt,
+          publishedAt: material?.publishedAt ?? null,
+          futureUse: second ? '仅用于 preview 版本行动' : '仅用于 stable 版本行动',
+          source: material?.source,
+          degree: 'established',
+          request: projection?.request,
+          material: material?.ref,
+          factNeeds: projection?.factNeeds,
+        }))
+        return
+      }
+      yield* textChunks(JSON.stringify({
+        kind: 'direct_fact',
+        fact,
+        meaning: fact === releaseFact
+          ? 'DeepSeek Harness 当前最新稳定版本为 1.4.2'
+          : 'DeepSeek Harness 1.4.2 要求 Node.js 22 或更新版本',
+        source: material?.source,
+        degree: 'established',
+        request: projection?.request,
+        material: material?.ref,
+        factNeeds: projection?.factNeeds,
+      }))
+      return
+    }
+    this.rootRequests.push(options)
+    yield* textChunks('natural root response')
+  }
 }
 
 function sourceSeqs(material: string, source: 'user' | 'assistant'): number[] {
@@ -269,6 +440,352 @@ async function send(agent: Agent, text: string): Promise<void> {
 }
 
 describe('single-session context route through the real loop', () => {
+  it('uses the public web service and keeps the evidence canary subordinate to focus enforce', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await mountAgentLoopTestDependencies(ctx)
+    await ctx.plugin(WebRuntime, { searchProvider: 'integration-search' })
+    const requests: WebSearchRequest[] = []
+    ctx.web.registerSearchProvider({
+      id: 'integration-search',
+      available: () => true,
+      search: async (request) => {
+        requests.push(request)
+        return { sources: [{ url: 'https://example.com/release' }], truncated: false }
+      },
+    })
+
+    expect(typeof ctx.get('web')?.search).toBe('function')
+    await expect(ctx.web.search({ query: 'release', maxResults: 1 }))
+      .resolves.toEqual({ sources: [{ url: 'https://example.com/release' }], truncated: false })
+    expect(requests).toEqual([{ query: 'release', maxResults: 1 }])
+    await expect(ctx.plugin(ContextRoutePlugin, { evidenceCanary: { mode: 'enforce' } }))
+      .rejects.toThrow('evidence canary requires focus canary enforce mode')
+
+    const packageMetadata = object(JSON.parse(await readFile(
+      new URL('../package.json', import.meta.url), 'utf8',
+    )))
+    const publicExports = object(packageMetadata?.exports)
+    expect(Object.keys(publicExports ?? {}).sort()).toStrictEqual([
+      '.', './invariant', './managed-compaction', './package.json', './src/*',
+    ])
+    expect(publicExports?.['./multi-fact-resolution']).toBeUndefined()
+    expect(publicExports?.['./fact-resolution']).toBeUndefined()
+    expect(publicExports?.['./action-boundary']).toBeUndefined()
+    expect(publicExports?.['./future-critical-candidate']).toBeUndefined()
+    expect(publicExports?.['./candidate']).toBeUndefined()
+
+    const root = await mkdtemp(join(tmpdir(), 'context-manager-f03-loader-'))
+    roots.push(root)
+    const configPath = join(root, 'cordis.yml')
+    const sqlitePath = join(root, 'context-manager.sqlite')
+    const sessionRoot = join(root, 'sessions')
+    await mkdir(sessionRoot, { recursive: true })
+    await writeFile(configPath, [
+      '- name: cordis:context-manager',
+      '  config:',
+      '    focusCanary:',
+      '      mode: enforce',
+      '      safeUpdateMarginTokens: 64',
+      '      allowlist:',
+      `        - ${ContextRoutePlugin.FOCUS_CANARY_IDS[0]}`,
+      `        - ${ContextRoutePlugin.FOCUS_CANARY_IDS[1]}`,
+      '      auxiliary:',
+      '        provider: natural-evidence-test',
+      '        model: natural-evidence-test',
+      '        maxOutputTokens: 256',
+      '        timeoutMs: 500',
+      '        maxExpressionChars: 240',
+      '        maxProjectionTokens: 2048',
+      '        safetyMarginTokens: 128',
+      '    nativeWriterArbitration:',
+      '      mode: enforce',
+      '    evidenceCanary:',
+      '      mode: enforce',
+      '',
+    ].join('\n'))
+
+    const natural = new Context()
+    contexts.push(natural)
+    await mountAgentLoopTestDependencies(natural)
+    await natural.plugin(Storage)
+    await natural.plugin(StorageSqlite, { path: sqlitePath })
+    await natural.plugin(StorageDomain, { backend: 'sqlite' })
+    await natural.plugin(TokenMeter)
+    await natural.plugin(JsonlSessionPersistence, { root: sessionRoot, compression: 'none' })
+    await natural.plugin(CommandRuntime)
+    const managedRuntime = {
+      mode: 'enforce' as const,
+      safeUpdateMarginTokens: 64,
+      allowlist: [...ContextRoutePlugin.FOCUS_CANARY_IDS],
+    }
+    await natural.plugin(ManagedAwareBasicCompactionEngine, {
+      auto: true, thresholdRatio: .99, retainRatio: .1, managedRuntime,
+    })
+    await natural.plugin(commandCompact)
+    await natural.plugin(WebRuntime, { searchProvider: 'natural-evidence-search' })
+    const naturalSearches: WebSearchRequest[] = []
+    natural.web.registerSearchProvider({
+      id: 'natural-evidence-search',
+      available: () => true,
+      search: async request => {
+        naturalSearches.push(request)
+        return request.query === releaseQuery
+          ? request.maxResults === 2
+            ? {
+                content: rawMultiSourceEnvelope,
+                sources: [
+                  {
+                    url: releaseUrl,
+                    snippet: 'RAW-STABLE-MATERIAL DeepSeek Harness 当前稳定版本为 1.4.2。',
+                    publishedAt: '2026-08-25T09:30:00.000Z',
+                  },
+                  {
+                    url: secondReleaseUrl,
+                    snippet: 'RAW-PREVIEW-MATERIAL DeepSeek Harness preview 当前版本为 1.5.0-beta。',
+                    publishedAt: '2026-08-25T10:30:00.000Z',
+                  },
+                ],
+                truncated: false,
+              }
+            : {
+                content: 'raw release provider answer',
+                sources: [{
+                  url: releaseUrl,
+                  snippet: 'DeepSeek Harness 当前最新稳定版本为 1.4.2。',
+                  publishedAt: '2026-08-25T09:30:00.000Z',
+                }],
+                truncated: false,
+              }
+          : request.query === nodeQuery
+            ? {
+                content: 'raw Node.js provider answer',
+                sources: [{
+                  url: nodeUrl,
+                  snippet: 'DeepSeek Harness 1.4.2 要求 Node.js 22 或更新版本。',
+                  publishedAt: '2026-08-25T09:35:00.000Z',
+                }],
+                truncated: false,
+              }
+            : { content: 'foreign query', sources: [], truncated: false }
+      },
+    })
+    const naturalAdapter = new NaturalEvidenceAdapter()
+    natural.llm.registerAdapter(['natural-evidence-test'], naturalAdapter)
+    natural.baseUrl = pathToFileURL(root).href + '/'
+    await natural.plugin(Loader)
+    natural.loader.builtins.include = Include
+    natural.loader.builtins['context-manager'] = ContextRoutePlugin
+    await natural.loader.create({
+      name: 'cordis:include', config: { path: pathToFileURL(configPath).href },
+    })
+    await natural.loader.await()
+    await natural.plugin(AgentLoop, { agents: [] })
+    const agent = natural.agentLoop.create(
+      SessionId(ContextRoutePlugin.FOCUS_CANARY_IDS[0]),
+      { provider: 'natural-evidence-test', model: 'natural-evidence-test', maxTokens: 256 },
+    )
+
+    await send(agent, focusDirect)
+    const afterFocusRoot = naturalAdapter.rootRequests.length
+    await send(agent, singleFactDirect)
+    const afterSingle = {
+      action: naturalAdapter.actionCalls,
+      evidence: naturalAdapter.evidenceCalls,
+      search: naturalSearches.length,
+      root: naturalAdapter.rootRequests.length,
+    }
+    const singlePresentation = modelInput(naturalAdapter.rootRequests.at(-1)!)
+    const unprovableProviderBefore = {
+      focus: naturalAdapter.focusCalls,
+      action: naturalAdapter.actionCalls,
+      evidence: naturalAdapter.evidenceCalls,
+      root: naturalAdapter.rootRequests.length,
+    }
+    const unprovableStateBefore = storedFocusRecord(sqlitePath, String(agent.session.id))
+    const overBudget = vi.spyOn(TokenMeter.prototype, 'estimateMessage').mockReturnValue(100_000)
+    await send(agent, updateBackgroundDirect)
+    overBudget.mockRestore()
+    await natural.sessions.flush(agent.session)
+    const unprovableDetached = await natural.sessionPersistence.readFrom(agent.session.id, 0)
+    const unprovableProviderAfter = {
+      focus: naturalAdapter.focusCalls,
+      action: naturalAdapter.actionCalls,
+      evidence: naturalAdapter.evidenceCalls,
+      root: naturalAdapter.rootRequests.length,
+    }
+    const unprovableSessionMessages = candidateQualificationMessages(agent.session.events)
+    const unprovableDetachedMessages = candidateQualificationMessages(unprovableDetached.events)
+    expect(unprovableProviderAfter).toStrictEqual(unprovableProviderBefore)
+    expect(unprovableSessionMessages.map(message => messageText([message])))
+      .toStrictEqual([unprovableCandidatePresentation])
+    expect(unprovableDetachedMessages.map(message => messageText([message])))
+      .toStrictEqual([unprovableCandidatePresentation])
+    expect(String(unprovableSessionMessages[0]?.id)).toBe(String(unprovableDetachedMessages[0]?.id))
+    expect(canonicalMessages(agent.session.events)).toHaveLength(0)
+    expect(canonicalMessages(unprovableDetached.events)).toHaveLength(0)
+    expect(storedFocusRecord(sqlitePath, String(agent.session.id))).toStrictEqual(unprovableStateBefore)
+
+    await send(agent, multiFactDirect)
+    const afterMulti = {
+      action: naturalAdapter.actionCalls,
+      evidence: naturalAdapter.evidenceCalls,
+      search: naturalSearches.length,
+      root: naturalAdapter.rootRequests.length,
+    }
+    const multiPresentation = modelInput(naturalAdapter.rootRequests.at(-1)!)
+    await send(agent, multiSourceDirect)
+    const afterMultiSource = {
+      action: naturalAdapter.actionCalls,
+      evidence: naturalAdapter.evidenceCalls,
+      search: naturalSearches.length,
+      root: naturalAdapter.rootRequests.length,
+    }
+    const multiSourcePresentation = modelInput(naturalAdapter.rootRequests.at(-1)!)
+    await send(agent, '只记录一句普通备注，不查询版本。')
+    await natural.sessions.flush(agent.session)
+    const persisted = await natural.sessionPersistence.readFrom(agent.session.id, 0)
+    const qualifiedAgent = natural.agentLoop.create(
+      SessionId(qualifiedBackgroundSessionId),
+      { provider: 'natural-evidence-test', model: 'natural-evidence-test', maxTokens: 256 },
+    )
+    await send(qualifiedAgent, focusDirect)
+    await send(qualifiedAgent, singleFactDirect)
+    const qualifiedProviderBefore = {
+      focus: naturalAdapter.focusCalls,
+      action: naturalAdapter.actionCalls,
+      evidence: naturalAdapter.evidenceCalls,
+      root: naturalAdapter.rootRequests.length,
+    }
+    const qualifiedStateBefore = storedFocusRecord(sqlitePath, qualifiedBackgroundSessionId)
+    const qualifiedDirect = createUserMessage({
+      content: [{ type: 'text', text: updateBackgroundDirect }],
+      source: { kind: 'user' },
+    })
+    qualifiedAgent.followup(qualifiedDirect)
+    await qualifiedAgent.whenIdle()
+    await natural.sessions.flush(qualifiedAgent.session)
+    const qualifiedDetached = await natural.sessionPersistence.readFrom(qualifiedAgent.session.id, 0)
+    const sqliteBytes = await readFile(sqlitePath)
+    const qualifiedProviderAfter = {
+      focus: naturalAdapter.focusCalls,
+      action: naturalAdapter.actionCalls,
+      evidence: naturalAdapter.evidenceCalls,
+      root: naturalAdapter.rootRequests.length,
+    }
+    const qualifiedRequest = naturalAdapter.rootRequests.at(-1)!
+    const qualifiedSessionMessages = candidateQualificationMessages(qualifiedAgent.session.events)
+    const qualifiedDetachedMessages = candidateQualificationMessages(qualifiedDetached.events)
+    const qualifiedSessionCanonical = canonicalMessages(qualifiedAgent.session.events)
+    const qualifiedDetachedCanonical = canonicalMessages(qualifiedDetached.events)
+
+    expect(naturalAdapter.focusCalls).toBe(2)
+    expect(afterFocusRoot).toBe(1)
+    expect(afterSingle).toStrictEqual({ action: 1, evidence: 1, search: 1, root: 2 })
+    expect(afterMulti).toStrictEqual({ action: 2, evidence: 3, search: 3, root: 3 })
+    expect(afterMultiSource).toStrictEqual({ action: 3, evidence: 5, search: 4, root: 4 })
+    expect(naturalSearches.map(request => request.query)).toStrictEqual([
+      releaseQuery, releaseQuery, nodeQuery, releaseQuery, releaseQuery,
+    ])
+    expect(naturalSearches[3]).toStrictEqual({ query: releaseQuery, maxResults: 2 })
+    expect(singlePresentation).toContain(`fact: ${releaseFact}`)
+    expect(singlePresentation).not.toContain('fact[1]:')
+    expect(singlePresentation).toContain(`url: ${releaseUrl}`)
+    expect(multiPresentation).toContain(`fact[1]: ${releaseFact}`)
+    expect(multiPresentation).toContain(`fact[2]: ${nodeFact}`)
+    expect(multiPresentation.indexOf(`url[1]: ${releaseUrl}`))
+      .toBeLessThan(multiPresentation.indexOf(`url[2]: ${nodeUrl}`))
+    expect(multiSourcePresentation).toContain('多来源事实核对：conditional')
+    expect(multiSourcePresentation).toContain(`fact: ${releaseFact}`)
+    expect(multiSourcePresentation).toContain(`url: ${releaseUrl}`)
+    expect(multiSourcePresentation).toContain(`url: ${secondReleaseUrl}`)
+    expect(multiSourcePresentation).toContain('appliesWhen: stable channel')
+    expect(multiSourcePresentation).toContain('appliesWhen: preview channel')
+    expect(multiSourcePresentation).toContain('safeActions: 升级 DeepSeek Harness、列出已确认的只读升级前检查')
+    expect(naturalAdapter.actionCalls).toBe(afterMultiSource.action + 1)
+    expect(naturalAdapter.evidenceCalls).toBe(afterMultiSource.evidence + 1)
+    expect(naturalSearches).toHaveLength(afterMultiSource.search + 1)
+    expect(qualifiedProviderAfter).toStrictEqual({
+      ...qualifiedProviderBefore,
+      root: qualifiedProviderBefore.root + 1,
+    })
+    expect(qualifiedSessionMessages).toHaveLength(0)
+    expect(qualifiedDetachedMessages).toHaveLength(0)
+    expect(qualifiedSessionCanonical.map(message => message.source.kind === 'context-manager-canonical'
+      ? message.source.phase : undefined)).toStrictEqual(['current', 'finalized'])
+    expect(qualifiedDetachedCanonical.map(message => message.source.kind === 'context-manager-canonical'
+      ? message.source.phase : undefined)).toStrictEqual(['current', 'finalized'])
+    expect(qualifiedRequest.messages).toHaveLength(2)
+    expect(qualifiedRequest.messages[0]?.source.kind).toBe('context-manager-canonical')
+    expect(qualifiedRequest.messages[0]?.source.kind === 'context-manager-canonical'
+      ? qualifiedRequest.messages[0].source.machine.kind : undefined).toBe('background')
+    expect(qualifiedRequest.messages[1]).toStrictEqual(qualifiedDirect)
+    expect(qualifiedAgent.session.events.filter(event => event.type === 'user/message'
+      && event.data.source.kind === 'user'
+      && String(event.data.id) === String(qualifiedDirect.id))).toHaveLength(1)
+    expect(qualifiedDetached.events.filter(event => event.type === 'user/message'
+      && event.data.source.kind === 'user'
+      && String(event.data.id) === String(qualifiedDirect.id))).toHaveLength(1)
+    expect(persisted.events.flatMap(event => event.type === 'user/message'
+      && event.data.source.kind === 'user' ? [messageText([event.data])] : [])).toEqual([
+      focusDirect, singleFactDirect, updateBackgroundDirect, multiFactDirect, multiSourceDirect,
+      '只记录一句普通备注，不查询版本。',
+    ])
+    expect(qualifiedDetached.events.flatMap(event => event.type === 'user/message'
+      && event.data.source.kind === 'user' ? [messageText([event.data])] : [])).toEqual([
+      focusDirect, singleFactDirect, updateBackgroundDirect,
+    ])
+    expect(sqliteBytes.byteLength).toBeGreaterThan(0)
+    expect(qualifiedStateBefore?.family).not.toBe('background')
+    const qualifiedStateAfter = storedFocusRecord(sqlitePath, qualifiedBackgroundSessionId)
+    expect(qualifiedStateAfter?.family).toBe('background')
+    expect(object(qualifiedStateAfter?.transaction)?.phase).toBe('finalized')
+    expect(singlePresentation).not.toContain(releaseQuery)
+    expect(multiPresentation).not.toContain(releaseQuery)
+    expect(multiPresentation).not.toContain(nodeQuery)
+    expect(multiSourcePresentation).not.toContain(releaseQuery)
+    expect(multiSourcePresentation).not.toContain(rawMultiSourceEnvelope)
+    expect(multiSourcePresentation).not.toContain('RAW-STABLE-MATERIAL')
+    expect(multiSourcePresentation).not.toContain('RAW-PREVIEW-MATERIAL')
+    expect(multiSourcePresentation).not.toMatch(/preferred|rank|score|winner|trusted/i)
+    expect(JSON.stringify(agent.session.events)).not.toContain(nodeQuery)
+
+    const firstQualifiedTransaction = object(qualifiedStateAfter?.transaction)
+    expect(firstQualifiedTransaction?.generation).toBe(1)
+    await send(qualifiedAgent, singleFactDirect)
+    const secondQualifiedDirect = createUserMessage({
+      content: [{ type: 'text', text: updateBackgroundDirect }],
+      source: { kind: 'user' },
+    })
+    qualifiedAgent.followup(secondQualifiedDirect)
+    await qualifiedAgent.whenIdle()
+    await natural.sessions.flush(qualifiedAgent.session)
+    const secondQualifiedDetached = await natural.sessionPersistence.readFrom(qualifiedAgent.session.id, 0)
+    const secondQualifiedState = storedFocusRecord(sqlitePath, qualifiedBackgroundSessionId)
+    const secondQualifiedTransaction = object(secondQualifiedState?.transaction)
+    const secondQualifiedRequest = naturalAdapter.rootRequests.at(-1)!
+    const visibleQualifiedCanonical = qualifiedAgent.session.deriveMessages().filter(message =>
+      message.source.kind === 'context-manager-canonical'
+      && message.source.machine.kind === 'background')
+    expect(secondQualifiedState?.family).toBe('background')
+    expect(secondQualifiedTransaction?.phase).toBe('finalized')
+    expect(secondQualifiedTransaction?.generation).toBe(2)
+    expect(secondQualifiedTransaction?.canonicalRef).not.toBe(firstQualifiedTransaction?.canonicalRef)
+    expect(visibleQualifiedCanonical).toHaveLength(1)
+    expect(visibleQualifiedCanonical[0]?.source.kind === 'context-manager-canonical'
+      ? visibleQualifiedCanonical[0].source.generation : undefined).toBe(2)
+    expect(secondQualifiedRequest.messages).toHaveLength(2)
+    expect(secondQualifiedRequest.messages[0]?.source.kind).toBe('context-manager-canonical')
+    expect(secondQualifiedRequest.messages[1]).toStrictEqual(secondQualifiedDirect)
+    expect(qualifiedAgent.session.events.filter(event => event.type === 'user/message'
+      && event.data.source.kind === 'user'
+      && String(event.data.id) === String(secondQualifiedDirect.id))).toHaveLength(1)
+    expect(secondQualifiedDetached.events.filter(event => event.type === 'user/message'
+      && event.data.source.kind === 'user'
+      && String(event.data.id) === String(secondQualifiedDirect.id))).toHaveLength(1)
+    expect(qualifiedAgent.session.events.filter(event => event.type.startsWith('compaction/'))).toHaveLength(0)
+  })
+
   it('updates on progress and correction, survives two real compactions, and retrieves shadowed detail by seq', async () => {
     const h = await harness()
     await send(h.agent, '根目标：让长会话在多次压缩后仍知道正确路线。')
