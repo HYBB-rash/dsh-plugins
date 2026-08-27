@@ -44,9 +44,9 @@ COPY plugins/dsh-assistant/package.json /opt/dsh/harness/local-plugins/dsh-assis
 COPY plugins/personal-feed/package.json /opt/dsh/harness/local-plugins/personal-feed/package.json
 COPY plugins/x-feed/package.json /opt/dsh/harness/local-plugins/x-feed/package.json
 COPY plugins/ui-context-compactor/package.json /opt/dsh/harness/local-plugins/ui-context-compactor/package.json
-COPY plugins/release/profiles/web/package.json /opt/dsh/harness/local-profiles/web/package.json
-COPY plugins/release/profiles/telegram/package.json /opt/dsh/harness/local-profiles/telegram/package.json
-COPY plugins/release/profiles/telegram-test/package.json /opt/dsh/harness/local-profiles/telegram-test/package.json
+COPY release-system/release/profiles/web/package.json /opt/dsh/harness/local-profiles/web/package.json
+COPY release-system/release/profiles/telegram/package.json /opt/dsh/harness/local-profiles/telegram/package.json
+COPY release-system/release/profiles/telegram-test/package.json /opt/dsh/harness/local-profiles/telegram-test/package.json
 RUN sed -i '/^packages:$/a\  - local-profiles/*\n  - local-plugins/*' /opt/dsh/harness/pnpm-workspace.yaml
 
 WORKDIR /opt/dsh/harness
@@ -55,12 +55,13 @@ RUN pnpm install --no-frozen-lockfile \
  && pnpm run build
 
 COPY plugins/ /opt/dsh/plugins-src/
+COPY release-system/release/ /opt/dsh/release-system/
 RUN set -eu; \
     for package in telegram-gateway dsh-cron dsh-assistant personal-feed x-feed ui-context-compactor; do \
       cp -a "/opt/dsh/plugins-src/$package/." "/opt/dsh/harness/local-plugins/$package/"; \
     done; \
-    cp -a /opt/dsh/plugins-src/release/profiles/. /opt/dsh/harness/local-profiles/; \
-    cp /opt/dsh/plugins-src/release/vitest.external.config.ts /opt/dsh/harness/vitest.external.config.ts; \
+    cp -a /opt/dsh/release-system/profiles/. /opt/dsh/harness/local-profiles/; \
+    cp /opt/dsh/release-system/vitest.external.config.ts /opt/dsh/harness/vitest.external.config.ts; \
     cp /opt/dsh/plugins-src/runtime-package-topology.json /opt/dsh/harness/local-plugins/runtime-package-topology.json; \
     mkdir -p /opt/dsh/harness/local-plugins/scripts; \
     cp /opt/dsh/plugins-src/scripts/materialize-runtime-topology.mjs \
@@ -98,11 +99,13 @@ RUN set -eu; \
         python3 -m unittest discover -p 'test_x_*.py')
 
 ARG DSH_PLUGINS_COMMIT
+ARG DSH_RELEASE_COMMIT
 LABEL org.opencontainers.image.title="DSH private-assistant runtime" \
       org.opencontainers.image.revision="${DSH_PLUGINS_COMMIT}" \
+      io.dsh.release.revision="${DSH_RELEASE_COMMIT}" \
       io.dsh.harness.revision="${DSH_HARNESS_COMMIT}" \
       io.dsh.harness.patch-sha256="${DSH_HARNESS_PATCH_SHA256}"
 
 WORKDIR /home/herman/.dsh/workspace
-ENTRYPOINT ["/usr/bin/tini", "--", "/opt/dsh/plugins-src/release/scripts/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/dsh/release-system/scripts/entrypoint.sh"]
 CMD ["help"]

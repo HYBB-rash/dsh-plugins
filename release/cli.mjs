@@ -126,22 +126,28 @@ function requireFullCommit(repo, ref, name) {
 function candidateFrom(value) {
   const path = value ? resolve(value) : join(stateRoot, 'candidates/latest.json')
   const candidate = readJson(path, 'candidate')
-  for (const field of ['imageId', 'imageTag', 'archivePath', 'archiveSha256', 'pluginsCommit', 'harnessCommit']) {
+  for (const field of ['imageId', 'imageTag', 'archivePath', 'archiveSha256', 'pluginsCommit', 'releaseToolCommit', 'harnessCommit']) {
     if (!candidate[field]) fail(`candidate 缺少 ${field}`, exitCodes.usage)
   }
   if (candidate.status !== 'tested') fail(`candidate 尚未通过镜像测试，当前状态是 ${candidate.status ?? 'missing'}`, exitCodes.safety)
   if (!existsSync(candidate.archivePath)) fail(`candidate 镜像归档不存在: ${candidate.archivePath}`, exitCodes.safety)
   if (sha256File(candidate.archivePath) !== candidate.archiveSha256) fail('candidate 镜像归档摘要不匹配', exitCodes.safety)
   const manifestText = run('tar', ['-xOf', candidate.archivePath, 'manifest.json'], { capture: true, announce: false, code: exitCodes.safety })
-  let archiveImageIds
+  let archiveEntries
   try {
-    archiveImageIds = JSON.parse(manifestText).map(({ Config }) => basename(Config, '.json').replace(/^sha256:/u, ''))
+    archiveEntries = JSON.parse(manifestText).map(({ Config, RepoTags = [] }) => ({
+      imageId: basename(Config, '.json').replace(/^sha256:/u, ''),
+      repoTags: RepoTags,
+    }))
   } catch (error) {
     fail(`无法读取 candidate 镜像归档身份: ${error.message}`, exitCodes.safety)
   }
-  if (!archiveImageIds.includes(candidate.imageId.replace(/^sha256:/u, ''))) {
+  const archiveEntry = archiveEntries.find(({ imageId: value }) => value === candidate.imageId.replace(/^sha256:/u, ''))
+  if (archiveEntry === undefined) {
     fail(`candidate 声明的 image ID 不在镜像归档中: ${candidate.imageId}`, exitCodes.safety)
   }
+  const acceptedTags = new Set([candidate.imageTag, `localhost/${candidate.imageTag}`])
+  if (!archiveEntry.repoTags.some((tag) => acceptedTags.has(tag))) fail(`candidate 声明的镜像标签不在归档中: ${candidate.imageTag}`, exitCodes.safety)
   return { candidate, path }
 }
 
@@ -262,29 +268,35 @@ function verifyDev(candidate, homePath) {
 function commandBuild(options) {
   const harnessCommit = requireFullCommit(harnessRepo, options['harness-ref'], '--harness-ref')
   const pluginsCommit = requireFullCommit(repoRoot, options['plugins-ref'], '--plugins-ref')
+  const releaseToolCommit = requireFullCommit(repoRoot, run('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { capture: true, announce: false }), 'release tool commit')
   const lock = readJson(join(releaseRoot, 'image.lock.json'), 'image lock')
   const buildId = `${nowId()}-${pluginsCommit.slice(0, 12)}`
   const buildRoot = join(stateRoot, 'builds', buildId)
   const context = join(buildRoot, 'context')
   const harnessTarget = join(context, 'harness')
   const pluginsTarget = join(context, 'plugins')
+  const releaseTarget = join(context, 'release-system')
   ensureDir(harnessTarget)
   ensureDir(pluginsTarget)
+  ensureDir(releaseTarget)
 
   const harnessTar = join(buildRoot, 'harness.tar')
   const pluginsTar = join(buildRoot, 'plugins.tar')
+  const releaseTar = join(buildRoot, 'release-system.tar')
   run('git', ['-C', harnessRepo, 'archive', '--format=tar', `--output=${harnessTar}`, harnessCommit], { code: exitCodes.safety })
   run('git', ['-C', repoRoot, 'archive', '--format=tar', `--output=${pluginsTar}`, pluginsCommit], { code: exitCodes.safety })
+  run('git', ['-C', repoRoot, 'archive', '--format=tar', `--output=${releaseTar}`, releaseToolCommit, 'release'], { code: exitCodes.safety })
   run('tar', ['-xf', harnessTar, '-C', harnessTarget], { code: exitCodes.safety })
   run('tar', ['-xf', pluginsTar, '-C', pluginsTarget], { code: exitCodes.safety })
-  const archivedPatch = join(pluginsTarget, 'release/patches/harness-minimal-shell-path.patch')
-  if (!existsSync(join(pluginsTarget, 'release/Containerfile')) || !existsSync(archivedPatch)) {
-    fail('插件 commit 不包含受 Git 管理的 Docker 发版系统；请先提交实现再构建', exitCodes.safety)
+  run('tar', ['-xf', releaseTar, '-C', releaseTarget], { code: exitCodes.safety })
+  const archivedPatch = join(releaseTarget, 'release/patches/harness-minimal-shell-path.patch')
+  if (!existsSync(join(releaseTarget, 'release/Containerfile')) || !existsSync(archivedPatch)) {
+    fail('release tool commit 不包含受 Git 管理的 Docker 发版系统', exitCodes.safety)
   }
   run('git', ['-C', harnessTarget, 'apply', '--verbose', archivedPatch], { code: exitCodes.safety })
   const patchSha256 = sha256File(archivedPatch)
   const imageTag = `dsh-candidate:${pluginsCommit.slice(0, 12)}-${buildId.slice(0, 15).toLowerCase()}`
-  const signaturePolicy = join(pluginsTarget, 'release/containers-policy.json')
+  const signaturePolicy = join(releaseTarget, 'release/containers-policy.json')
   const engineBuildOptions = engine === 'podman'
     ? ['--signature-policy', signaturePolicy]
     : []
@@ -297,15 +309,18 @@ function commandBuild(options) {
     '--build-arg', `DSH_HARNESS_COMMIT=${harnessCommit}`,
     '--build-arg', `DSH_HARNESS_PATCH_SHA256=${patchSha256}`,
     '--build-arg', `DSH_PLUGINS_COMMIT=${pluginsCommit}`,
+    '--build-arg', `DSH_RELEASE_COMMIT=${releaseToolCommit}`,
     '--label', `org.opencontainers.image.revision=${pluginsCommit}`,
+    '--label', `io.dsh.release.revision=${releaseToolCommit}`,
     '--label', `io.dsh.harness.revision=${harnessCommit}`,
     '--label', `io.dsh.harness.patch-sha256=${patchSha256}`,
-    '--tag', imageTag, '--file', join(pluginsTarget, 'release/Containerfile'), context,
+    '--tag', imageTag, '--file', join(releaseTarget, 'release/Containerfile'), context,
   ], { code: exitCodes.test })
 
   const builtImageId = imageId(imageTag)
   const imageLabels = JSON.parse(run(engine, ['image', 'inspect', imageTag, '--format', '{{json .Config.Labels}}'], { capture: true, code: exitCodes.safety }))
   if (imageLabels['org.opencontainers.image.revision'] !== pluginsCommit
+    || imageLabels['io.dsh.release.revision'] !== releaseToolCommit
     || imageLabels['io.dsh.harness.revision'] !== harnessCommit
     || imageLabels['io.dsh.harness.patch-sha256'] !== patchSha256) {
     fail('镜像标签没有绑定到本次 Harness/插件源码身份', exitCodes.safety)
@@ -350,6 +365,7 @@ function commandBuild(options) {
     harnessCommit,
     harnessPatchSha256: patchSha256,
     pluginsCommit,
+    releaseToolCommit,
     baseImage: lock.image,
     baseImageDigest: lock.digest,
     builtAt: new Date().toISOString(),
@@ -431,10 +447,10 @@ function releasePlan(candidate) {
     imageId: candidate.imageId,
     archiveSha256: candidate.archiveSha256,
     target,
-    writersToStop: ['dsh-web.service', 'dsh-telegram-gateway.service', 'Docker Compose project dsh'],
+    writersToStop: ['dsh-web.service', 'dsh-web-lan.service/socket', 'dsh-telegram-gateway.service', 'Docker Compose project dsh'],
     preservedOutOfScope: ['openclaw-gateway.service', '~/.openclaw', 'OpenClaw Telegram token'],
     snapshotRoot: '/home/herman/.local/share/dsh-container/snapshots',
-    rollbackBoundary: '停机前完整 ~/.dsh 快照 + 旧 systemd units/release tree（首次切换）',
+    rollbackBoundary: '停机前完整 ~/.dsh 快照 + 上一运行版本（首次为旧 systemd，以后为上一 Docker release）',
     next: `获得停机许可后重新执行，并添加 --approved-stop`,
   }
 }
@@ -615,10 +631,13 @@ cd "$release_dir"
 DSH_IMAGE=${shellQuote(candidate.imageTag)} DSH_IMAGE_ID="$expected_image" docker compose -p dsh -f compose.production.yml up -d
 for attempt in $(seq 1 24); do curl --fail --silent --max-time 2 http://127.0.0.1:3080/ >/dev/null && break; sleep 5; done
 curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
+curl --fail --silent --max-time 3 http://192.168.6.240:3080/ >/dev/null
 test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
+test "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
+docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs >/dev/null
 openclaw_after="$(systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ',')"
-printf '{"imageId":"%s","web":"%s","telegram":"%s","openclawAfter":"%s"}\\n' "$actual_image" "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" "$openclaw_after"
+printf '{"imageId":"%s","web":"%s","telegram":"%s","lan":"%s","cronControl":"ready","openclawAfter":"%s"}\\n' "$actual_image" "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" "$openclaw_after"
 `)
   let productionReceipt
   try { productionReceipt = JSON.parse(startOutput.split('\n').at(-1)) } catch { fail(`无法解析生产启动回执: ${startOutput}`, exitCodes.production) }
@@ -659,7 +678,10 @@ function commandAccept(options) {
 test "$(docker image inspect ${shellQuote(release.candidate.imageTag)} --format '{{.Id}}')" = ${shellQuote(release.candidate.imageId)}
 test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
+test "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
+curl --fail --silent --max-time 3 http://192.168.6.240:3080/ >/dev/null
+docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs >/dev/null
 printf '%s\n' 'containers-and-web-healthy'
 `)
   release.status = 'accepted'
@@ -697,6 +719,8 @@ for attempt in $(seq 1 24); do curl --fail --silent --max-time 2 http://127.0.0.
 curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
 systemctl --user is-active --quiet dsh-web.service
 systemctl --user is-active --quiet dsh-telegram-gateway.service
+legacy_release="$(readlink -f /home/herman/.local/share/dsh-deploy/current)"
+/home/herman/.local/node/bin/node "$legacy_release/deployment/check-cron-control-ready.cjs" "$legacy_release/plugins/dsh-cron/lib/index.js" /home/herman/.dsh/storages/dsh-cron/control.sock >/dev/null
 `
     : `
 previous_dir=${shellQuote(release.previous.remoteDir)}
@@ -716,6 +740,8 @@ for attempt in $(seq 1 24); do curl --fail --silent --max-time 2 http://127.0.0.
 curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
 test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
+test "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
+docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs >/dev/null
 `
   ssh(`set -Eeuo pipefail
 root=${shellQuote(remoteRoot)}
@@ -790,7 +816,7 @@ function usage() {
   out(`DSH Docker 发版唯一入口
 
   ./release/dsh snapshot latest
-  ./release/dsh dev up --snapshot latest|synthetic [--candidate candidate.json]
+  ./release/dsh dev up --snapshot latest|synthetic [--candidate candidate.json] [--reset]
   ./release/dsh dev shell [--candidate candidate.json]
   ./release/dsh dev down
   ./release/dsh build --harness-ref <40位commit> --plugins-ref <40位commit>

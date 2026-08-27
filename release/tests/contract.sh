@@ -23,6 +23,7 @@ cat >"$candidate" <<EOF
   "archivePath": "$archive",
   "archiveSha256": "$archive_sha",
   "pluginsCommit": "1111111111111111111111111111111111111111",
+  "releaseToolCommit": "3333333333333333333333333333333333333333",
   "harnessCommit": "2222222222222222222222222222222222222222"
 }
 EOF

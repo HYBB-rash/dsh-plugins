@@ -31,7 +31,7 @@ cleanup() {
   rm -rf -- "$tmp_home"
 }
 trap cleanup EXIT
-DSH_HOME="$tmp_home/.dsh" /opt/dsh/plugins-src/release/scripts/prepare-runtime.sh >/dev/null
+DSH_HOME="$tmp_home/.dsh" /opt/dsh/release-system/scripts/prepare-runtime.sh >/dev/null
 DSH_HOME="$tmp_home/.dsh" node /opt/dsh/harness/apps/cli/lib/bin.js --profile web --dump-config >/dev/null
 DSH_HOME="$tmp_home/.dsh" node /opt/dsh/harness/apps/cli/lib/bin.js --profile telegram --dump-config >/dev/null
 DSH_HOME="$tmp_home/.dsh" node /opt/dsh/harness/apps/cli/lib/bin.js --profile telegram-test --dump-config >/dev/null

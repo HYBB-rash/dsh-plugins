@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-release_root=/opt/dsh/plugins-src/release
+release_root=/opt/dsh/release-system
 harness_bin=/opt/dsh/harness/apps/cli/lib/bin.js
 
 case "${1:-help}" in

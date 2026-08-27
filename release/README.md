@@ -6,7 +6,7 @@
 
 ## 不会偷偷发生的事
 
-- `build` 只接受两个完整 Git commit，并分别用 `git archive` 取源码。未提交文件、旧 `node_modules` 和原工作树里的旧部署目录不会进入镜像。
+- `build` 只接受 Harness 和产品插件两个完整 Git commit，并分别用 `git archive` 取源码。Dockerfile、Profiles 和验收脚本单独取当前分支 HEAD 的精确发版工具 commit。候选清单同时记录三者，未提交文件、旧 `node_modules` 和原工作树里的旧部署目录不会进入镜像。
 - `release` 默认只打印停机影响和回退边界，退出码为 `3`。只有明确添加 `--approved-stop` 才会停止生产写入者。
 - `rollback` 默认只报告方案。只有明确添加 `--approved` 才会恢复数据和旧运行版本。
 - `retire-legacy` 同时要求 release 已经是 `accepted`，并再次添加 `--approved`。它不能在第一次真实验收前运行。
@@ -17,6 +17,9 @@
 ```bash
 # 第一次没有生产快照时，用合成数据启动开发环境
 ./release/dsh dev up --snapshot synthetic --candidate /path/to/candidate.json
+
+# 同一候选再次 up 会复用开发数据；确实要从快照重建时才加 --reset
+./release/dsh dev up --snapshot synthetic --candidate /path/to/candidate.json --reset
 
 # 从两个精确提交构建唯一候选镜像
 ./release/dsh build \
@@ -31,11 +34,16 @@
 
 # 真实 Telegram 和 Web 验收通过后
 ./release/dsh accept --release <release-id> --evidence '真实 Telegram 单条回复且 Web 正常'
+
+# 两类事故注入：挂载问题可现场恢复；业务源码错误必须阻止候选生成
+./release/tests/fault-injection.sh /path/to/candidate.json
 ```
 
 状态默认存放在 `~/.local/share/dsh-container`。可以用 `DSH_RELEASE_STATE_ROOT` 指向测试目录。本地默认使用 Podman；生产默认通过 SSH 连接 `herman.hermes` 并使用 Docker Compose。镜像不经过镜像仓库。
 
 本机 Podman 构建显式使用目录内的 `containers-policy.json`，不修改用户全局容器配置。该策略不额外要求镜像签名；基础镜像身份由 `image.lock.json` 中不可变的完整 digest 锁定。
+
+开发态的 Telegram/cron 容器只连接无外网的内部网络和假 Bot API；Web 由于 Harness 强制只绑定 loopback，使用宿主网络供本机浏览器访问，但只持有测试凭据，不承担 Telegram 或 cron 写入。生产容器固定使用 `1000:1000`；本机 rootless Podman 为了让快照副本保持宿主用户可读写，在容器内显示为 uid 0，但仍映射为宿主普通用户，不获得宿主 root 权限。
 
 ## 退出码
 
