@@ -38,6 +38,13 @@ WORKDIR /opt/dsh/harness
 ENV DSH_CLIENT_COMMIT_HASH=${DSH_HARNESS_COMMIT}
 RUN pnpm install --no-frozen-lockfile \
  && pnpm run build \
+ && pnpm exec tsc -b \
+      local-plugins/dsh-assistant/tsconfig.json \
+      local-plugins/dsh-cron/tsconfig.json \
+      local-plugins/telegram-gateway/tsconfig.json \
+      local-plugins/ui-context-compactor/tsconfig.json \
+      local-plugins/personal-feed/tsconfig.json \
+      local-plugins/x-feed/tsconfig.json \
  && pnpm --filter @deepseek-ai/dsh-assistant run bundle \
  && pnpm --filter @deepseek-ai/dsh-cron run bundle \
  && pnpm --filter @deepseek-ai/dsh-telegram-gateway run bundle \
