@@ -79,9 +79,10 @@ function ssh(script, { capture = true, code = exitCodes.production } = {}) {
 }
 
 function sha256File(path) {
-  const hash = createHash('sha256')
-  hash.update(readFileSync(path))
-  return `sha256:${hash.digest('hex')}`
+  const result = run('sha256sum', ['--', path], { capture: true, announce: false, code: exitCodes.safety })
+  const match = /^([0-9a-f]{64})\s/u.exec(result)
+  if (match === null) fail(`无法解析 ${path} 的 SHA-256`, exitCodes.safety)
+  return `sha256:${match[1]}`
 }
 
 function sha256Text(text) {
