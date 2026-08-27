@@ -126,7 +126,7 @@ import {
 export const name = 'ui-context-compactor'
 
 /** Services used by route reduction and the stable model-facing policy. */
-export const inject = ['llm', 'systemPrompt']
+export const inject = ['llm', 'systemPrompt', 'agents']
 
 /** Deployment policy for the auxiliary route reducer. */
 export interface Config {
@@ -1842,6 +1842,8 @@ async function closedRecoveryInput(
 }
 
 type ClosureOnlyLiveStage = 'bounded-proposal' | 'decision-and-carrier' | 'canonical-transaction'
+
+const PROOF_ONLY_COLD_RECOVERY_MODULE = 'proof-only-cold-recovery'
 type ClosureOnlyLiveErrorName = 'Error' | 'TypeError' | 'RangeError' | 'AbortError' | 'UnknownError'
 
 function fixedClosureOnlyLiveErrorName(error: unknown): ClosureOnlyLiveErrorName {
@@ -1861,6 +1863,13 @@ function fixedClosureOnlyLiveErrorName(error: unknown): ClosureOnlyLiveErrorName
 function warnClosureOnlyLiveFailure(ctx: Context, stage: ClosureOnlyLiveStage, error: unknown): void {
   ctx.logger.warn(
     `ui-context-compactor: closure-only-live failure module=closure-only-live stage=${stage} error=${fixedClosureOnlyLiveErrorName(error)}`,
+  )
+}
+
+/** Fixed-code failure only: never log the caught value, record, or user text. */
+function warnProofOnlyColdRecoveryPutFailure(ctx: Context, error: unknown): void {
+  ctx.logger.warn(
+    `module=${PROOF_ONLY_COLD_RECOVERY_MODULE} stage=put-fail error=${fixedClosureOnlyLiveErrorName(error)}`,
   )
 }
 
@@ -2618,7 +2627,10 @@ function installFocusCanary(
     postCanonicalNonBasisUpdates.delete(String(agent.session.id))
   })
 
-  ctx.on('agent/created', ({ agent }) => {
+  const recoveryInstalled = new WeakSet<Agent>()
+  const installAgentRecovery = (agent: Agent): void => {
+    if (recoveryInstalled.has(agent)) return
+    recoveryInstalled.add(agent)
     if (!managed(agent, classifier)) return
     const sessionId = String(agent.session.id)
     const tools = agent.ctx.get('tools')
@@ -2727,8 +2739,9 @@ function installFocusCanary(
               .decideFocus(createExplicitUserExpression(closeText, sessionId as ChatRef, origin))
             const decision = result.kind === 'business_result' ? result.value : undefined
             if (result.kind !== 'business_result' || decision?.kind !== 'no_focus'
-              || decision.chat !== sessionId
-              || candidateAdvice.acceptMatterRelation(decision).kind !== 'business_result') return
+              || decision.chat !== sessionId) return
+            const advice = candidateAdvice.acceptMatterRelation(decision)
+            if (advice.kind !== 'business_result') return
             const carrier: ClosureOnlyNoFocusRecord = {
               closure: {
                 ...proofOnly.data.closure,
@@ -2756,7 +2769,12 @@ function installFocusCanary(
               save: async value => {
                 const parsed = closureOnlyNoFocusRecordSchema.safeParse(value)
                 if (!parsed.success) throw new Error('closure-only recovery transaction row failed exact schema validation')
-                await domain.table('focus_precanonical').put(sessionId, parsed.data)
+                try {
+                  await domain.table('focus_precanonical').put(sessionId, parsed.data)
+                } catch (error) {
+                  warnProofOnlyColdRecoveryPutFailure(ctx, error)
+                  throw error
+                }
               },
               flush: async () => await sessions.flush(agent.session),
               readFrom: async fromSeq => await persistence.readFrom(sessionId, fromSeq),
@@ -3007,7 +3025,10 @@ function installFocusCanary(
     } catch {
       gate.kind = 'closed'
     }
-  }, { prepend: true })
+  }
+
+  ctx.on('agent/created', ({ agent }) => { installAgentRecovery(agent) }, { prepend: true })
+  for (const agent of ctx.agents.roots()) installAgentRecovery(agent)
 
   ctx.on('agent/inbox/inserted', ({ agent, message }) => {
     if (!managed(agent, classifier) || !isDirectUserSource(message.source)) return

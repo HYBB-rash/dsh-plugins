@@ -154,7 +154,8 @@ async function mount(
   target = sessionId,
   resume = true,
   initialRow?: Readonly<Record<string, unknown>>,
-  beforeAgent?: (adapter: Adapter) => void,
+  beforeAgent?: (adapter: Adapter, ctx: Context) => void,
+  installAfterAgent = false,
 ): Promise<Mounted> {
   const ctx = new Context()
   contexts.push(ctx)
@@ -225,20 +226,24 @@ async function mount(
   })
   const adapter = new Adapter()
   ctx.llm.registerAdapter(['telegram-no-focus-test'], adapter)
-  beforeAgent?.(adapter)
+  beforeAgent?.(adapter, ctx)
   await ctx.plugin(AgentDefaultModel, { provider: 'telegram-no-focus-test', model: 'telegram-no-focus-test' })
   ctx.baseUrl = pathToFileURL(root).href + '/'
   await ctx.plugin(Loader)
   ctx.loader.builtins.include = Include
   ctx.loader.builtins['context-manager'] = ContextManager
-  await ctx.loader.create({ name: 'cordis:include', config: { path: pathToFileURL(configPath).href } })
-  await ctx.loader.await()
+  const installContextManager = async (): Promise<void> => {
+    await ctx.loader.create({ name: 'cordis:include', config: { path: pathToFileURL(configPath).href } })
+    await ctx.loader.await()
+  }
+  if (!installAfterAgent) await installContextManager()
   await ctx.plugin(AgentLoop, { agents: [] })
   const agent = resume
     ? (await ctx.agents.resume({ resumeSessionId: SessionId(target), agentOptions: {
         provider: 'telegram-no-focus-test', model: 'telegram-no-focus-test',
       } })).agent
     : ctx.agentLoop.create(SessionId(target), { provider: 'telegram-no-focus-test', model: 'telegram-no-focus-test' })
+  if (installAfterAgent) await installContextManager()
   return { ctx, agent, adapter, root, sqlitePath }
 }
 
@@ -337,6 +342,31 @@ function pollutePending(
 function canonicalMessages(events: readonly SessionEvent[]): number {
   return events.filter(event => event.type === 'user/message'
     && event.data.source.kind === 'context-manager-canonical').length
+}
+
+function emitDuplicateCreated(ctx: Context, agent: Agent): void {
+  try {
+    ctx.emit('agent/created', { agent })
+  } catch (error) {
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain('already registered')
+  }
+}
+
+const proofOnlyPutFailurePattern = /^module=proof-only-cold-recovery stage=put-fail error=(?:Error|TypeError|RangeError|AbortError|UnknownError)$/
+
+function captureProofOnlyRecoveryWarnings(ctx: Context, warnings: string[]): void {
+  vi.spyOn(ctx.logger, 'warn').mockImplementation((message: unknown): undefined => {
+    if (typeof message === 'string' && message.startsWith('module=proof-only-cold-recovery ')) {
+      warnings.push(message)
+    }
+  })
+}
+
+function expectProofOnlyWarningsWhitelisted(warnings: readonly string[], secret: string): void {
+  expect(warnings.every(message => proofOnlyPutFailurePattern.test(message))).toBe(true)
+  expect(JSON.stringify(warnings)).not.toContain(closeText)
+  expect(JSON.stringify(warnings)).not.toContain(secret)
 }
 
 describe('F07-T1 exact Telegram no-focus admission', () => {
@@ -559,6 +589,7 @@ describe('F07-T1 exact Telegram no-focus admission', () => {
     await send(missing.agent, closeText)
     expect(missing.adapter.rootCalls).toBe(0)
     expect(missing.adapter.auxiliaryCalls).toBe(0)
+
   })
 
   it('negative: pending identity, hash, chat, or generation pollution cannot replay', async () => {
@@ -695,8 +726,13 @@ describe('F07-T1 exact Telegram no-focus admission', () => {
     expect(continueIds).toHaveLength(1)
     await second.ctx.fiber.dispose()
     contexts.splice(contexts.indexOf(second.ctx), 1)
-    const recovered = await mount(h.root)
+    const recoveryWarnings: string[] = []
+    const recovered = await mount(h.root, sessionId, true, undefined, (_adapter, ctx) => {
+      captureProofOnlyRecoveryWarnings(ctx, recoveryWarnings)
+    }, true)
+    emitDuplicateCreated(recovered.ctx, recovered.agent)
     await recovered.agent.whenIdle()
+    expect(recoveryWarnings).toEqual([])
     expect(ledger(recovered)).toStrictEqual(Object.freeze({
       auxiliaryCalls: 1, rootCalls: 0, canonical: 2, directClose: 1,
       phase: 'finalized', familyKeys: Object.freeze(['closure', 'transaction']),
@@ -710,9 +746,12 @@ describe('F07-T1 exact Telegram no-focus admission', () => {
     const finalized = row(recovered.sqlitePath)
     const canonicalBefore = recovered.agent.session.events.filter(event => event.type === 'user/message'
       && event.data.source.kind === 'context-manager-canonical').map(event => ({ seq: event.seq, id: String(event.data.id) }))
+    const assistantBefore = recovered.agent.session.events.filter(event => event.type === 'assistant/message').length
+    const outboxBefore = recovered.agent.session.events.filter(event => String(event.type).includes('outbox')).length
     await recovered.ctx.fiber.dispose()
     contexts.splice(contexts.indexOf(recovered.ctx), 1)
-    const idempotent = await mount(h.root)
+    const idempotent = await mount(h.root, sessionId, true, undefined, undefined, true)
+    emitDuplicateCreated(idempotent.ctx, idempotent.agent)
     await idempotent.agent.whenIdle()
     expect(row(idempotent.sqlitePath)).toEqual(finalized)
     expect(idempotent.adapter.auxiliaryCalls).toBe(0)
@@ -726,6 +765,8 @@ describe('F07-T1 exact Telegram no-focus admission', () => {
     expect(idempotent.agent.session.events.filter(event => event.type === 'user/message'
       && event.data.source.kind === 'user' && text(event.data) === '继续').map(event => String(event.data.id)))
       .toEqual(continueIds)
+    expect(idempotent.agent.session.events.filter(event => event.type === 'assistant/message')).toHaveLength(assistantBefore)
+    expect(idempotent.agent.session.events.filter(event => String(event.type).includes('outbox'))).toHaveLength(outboxBefore)
   })
 
   it('negative: polluted proof identity, hash, chat, missing direct, or extra tail stays closed', async () => {
@@ -861,6 +902,7 @@ describe('F07-T1 exact Telegram no-focus admission', () => {
   })
 
   it('positive: proof-only transaction storage failure stays closed and completes on the next restart', async () => {
+    const secret = 'proof-only-put-secret-must-not-leak'
     const first = await freshHistoric()
     const database = new DatabaseSync(first.sqlitePath)
     try {
@@ -869,7 +911,7 @@ describe('F07-T1 exact Telegram no-focus admission', () => {
         BEFORE UPDATE ON "u_context_manager_focus_precanonical"
         WHEN json_type(NEW.value, '$.transaction') IS NOT NULL
         BEGIN
-          SELECT RAISE(FAIL, 'fixture');
+          SELECT RAISE(FAIL, '${secret}');
         END;
       `)
     } finally {
@@ -878,8 +920,16 @@ describe('F07-T1 exact Telegram no-focus admission', () => {
     await send(first.agent, closeText)
     await first.ctx.fiber.dispose()
     contexts.splice(contexts.indexOf(first.ctx), 1)
-    const failed = await mount(first.root)
+    const warnings: string[] = []
+    const failed = await mount(first.root, sessionId, true, undefined, (_adapter, ctx) => {
+      captureProofOnlyRecoveryWarnings(ctx, warnings)
+    })
+    emitDuplicateCreated(failed.ctx, failed.agent)
     await failed.agent.whenIdle()
+    expect(warnings).toEqual([
+      'module=proof-only-cold-recovery stage=put-fail error=Error',
+    ])
+    expectProofOnlyWarningsWhitelisted(warnings, secret)
     expect(failed.adapter.auxiliaryCalls).toBe(1)
     expect(failed.adapter.rootCalls).toBe(0)
     expect(canonicalMessages(failed.agent.session.events)).toBe(0)
