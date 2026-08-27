@@ -47,13 +47,17 @@ RUN pnpm install --no-frozen-lockfile \
        && pnpm exec tsc -b); \
     done
 
-RUN pnpm exec vitest run \
-      local-plugins/dsh-assistant/tests \
-      local-plugins/dsh-cron/tests \
-      local-plugins/telegram-gateway/tests \
-      local-plugins/ui-context-compactor/tests \
-      local-plugins/personal-feed/tests \
-      local-plugins/x-feed/tests
+RUN set -eu; \
+    for package in telegram-gateway dsh-cron dsh-assistant personal-feed x-feed ui-context-compactor; do \
+      if [ -d "local-plugins/$package/tests" ]; then \
+        (cd "local-plugins/$package" \
+         && DSH_HARNESS_ROOT=/opt/dsh/harness \
+            node /opt/dsh/harness/node_modules/vitest/vitest.mjs run \
+              --maxWorkers=1 --no-file-parallelism); \
+      fi; \
+    done; \
+    (cd local-plugins/x-feed/python \
+     && PYTHONWARNINGS=ignore python3 -m unittest discover -p 'test_x_*.py')
 
 LABEL org.opencontainers.image.title="DSH private-assistant runtime" \
       org.opencontainers.image.revision="${DSH_PLUGINS_COMMIT}" \
