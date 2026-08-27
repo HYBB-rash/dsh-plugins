@@ -62,10 +62,10 @@ RUN set -eu; \
     done; \
     cp -a /opt/dsh/release-system/profiles/. /opt/dsh/harness/local-profiles/; \
     cp /opt/dsh/release-system/vitest.external.config.ts /opt/dsh/harness/vitest.external.config.ts; \
-    mkdir -p /opt/dsh/harness/local-plugins/deployment/herman-hermes/context-manager-telegram-canary; \
+    mkdir -p /opt/dsh/harness/local-plugins/release/fixtures/context-manager-telegram-canary; \
     cp -a /opt/dsh/release-system/fixtures/context-manager-telegram-canary/. \
-      /opt/dsh/harness/local-plugins/deployment/herman-hermes/context-manager-telegram-canary/; \
-    chmod 755 /opt/dsh/harness/local-plugins/deployment/herman-hermes/context-manager-telegram-canary/prepare-profile.sh; \
+      /opt/dsh/harness/local-plugins/release/fixtures/context-manager-telegram-canary/; \
+    chmod 755 /opt/dsh/harness/local-plugins/release/fixtures/context-manager-telegram-canary/prepare-profile.sh; \
     cp /opt/dsh/plugins-src/runtime-package-topology.json /opt/dsh/harness/local-plugins/runtime-package-topology.json; \
     mkdir -p /opt/dsh/harness/local-plugins/scripts; \
     cp /opt/dsh/plugins-src/scripts/materialize-runtime-topology.mjs \

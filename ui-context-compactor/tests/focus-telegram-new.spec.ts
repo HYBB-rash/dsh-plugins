@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite'
 
 const projectRoot = join(import.meta.dirname, '..', '..')
 const harnessRoot = process.env.DSH_HARNESS_ROOT ?? '/home/herman/Documents/Codex/2026-08-14/deepseek-harness'
-const prepareProfile = join(projectRoot, 'deployment/herman-hermes/context-manager-telegram-canary/prepare-profile.sh')
+const prepareProfile = join(projectRoot, 'release/fixtures/context-manager-telegram-canary/prepare-profile.sh')
 const canarySession = 'session-context-manager-focus-canary-a'
 const roots: string[] = []
 const servers: Server[] = []
