@@ -136,7 +136,8 @@ RUN set -eu; \
      && python3 -m unittest discover -s tests -p 'test_*.py'); \
     (cd /opt/dsh/automations/scripts \
      && python3 -m unittest test_bzp_ble_read_until_success.py); \
-    python3 -m compileall -q /opt/dsh/automations/scripts; \
+    PYTHONPYCACHEPREFIX="$python_data/pycache" \
+      python3 -m compileall -q /opt/dsh/automations/scripts; \
     for script in /opt/dsh/automations/scripts/*.sh; do bash -n "$script"; done
 
 # A historical product commit may name the verification fixture by its path at
