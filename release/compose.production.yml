@@ -53,7 +53,7 @@ services:
     cap_drop: ["ALL"]
     command: ["lan-proxy"]
     mem_limit: 64m
-    pids_limit: 32
+    pids_limit: 256
     depends_on:
       web:
         condition: service_healthy
