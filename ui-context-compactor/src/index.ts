@@ -2470,7 +2470,13 @@ function installFocusCanary(
           directIds.add(origin.messageId)
           postCanonicalBasisDirects.set(sessionId, directIds)
         }
-        return { kind: 'enter', messages: [message, projection] }
+        // A rolling C28 either installed the new canonical state or proved its
+        // exact identity.  In both cases this admitted direct is the sole
+        // post-canonical request input; its evidence projection is already in
+        // the qualified background and must not be duplicated in the request.
+        return currentBackground === undefined
+          ? { kind: 'enter', messages: [message, projection] }
+          : { kind: 'enter', messages: [message] }
       }
 
       const sessions = sessionsFlushPort(ctx)
