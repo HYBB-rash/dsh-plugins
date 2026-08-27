@@ -1048,7 +1048,7 @@ function commandDev(options) {
     materializeSnapshot('latest', homePath)
     const sourceArgs = developmentSourceArgs(source.sourcePath)
     run(engine, ['run', '--rm', ...containerBaseArgs(homePath), ...sourceArgs,
-      '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'dev-source-check'], { code: exitCodes.test })
+      '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'dev-source-build'], { code: exitCodes.test })
     run(engine, ['run', '--rm', ...containerBaseArgs(homePath), ...sourceArgs,
       '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'prepare'], { code: exitCodes.test })
     run(engine, ['network', 'create', '--internal', runtime.network], { code: exitCodes.test })
@@ -1082,6 +1082,11 @@ function commandDev(options) {
       originMain: completionSource.originMain,
       runtime,
       createdAt: new Date().toISOString(),
+      qualification: {
+        editableSourceBuild: 'passed',
+        productTests: 'shared-main-image-build',
+        imageTestReceiptSha256: candidate.testReceiptSha256,
+      },
       verification,
     }
     writeJson(devMetaPath, metadata)

@@ -13,14 +13,14 @@
 
 ```bash
 # 请求最新 main 的唯一开发基础镜像。同一 main 重复调用会直接复用，
-# 只有 main 前进后第一次调用才真正构建；这不是正式发版候选。
+# 只有 main 前进后第一次调用才真正构建并完成全量测试；这不是正式发版候选。
 ./release/dsh build \
   --purpose development \
   --harness-ref b150a551b8d465e31e418e1b2eaf5e79bbb7d28e \
   --plugins-ref "$(git rev-parse origin/main)"
 
-# 每个 worktree 从上述共享镜像创建自己的容器、网络、端口和数据副本；
-# 不再为每个任务重新生成镜像。
+# 每个 worktree 从上述已测试镜像创建自己的容器、网络、端口和数据副本；
+# 只编译被挂载覆盖的可编辑源码，不重复运行全量测试。
 ./release/dsh dev prepare \
   --source "$(git rev-parse --show-toplevel)"
 
@@ -66,7 +66,7 @@
 
 正式发版候选仍会在删除其唯一标签后重载 Docker archive，证明归档可以恢复同一个 image ID。这个共享存储敏感段和所有镜像构建、验收清理都由 `release/dsh` 的全局锁自动排队，不需要 Agent 人工协调窗口。若 `/dev/shm` 至少有 8 GiB 可用空间，正式归档会自动在那里暂存，重载成功后再复制到证据目录；也可用 `DSH_RELEASE_ARCHIVE_STAGING_ROOT` 指定其他临时文件系统。暂存归档未完成摘要校验前不会生成正式 `candidate.json`。
 
-构建工作目录、未完成候选、失败构建标签和归档暂存文件都会由本次命令清理。开发底座与正式候选用途严格分开，开发底座不能发布。development 不生成、保存或重载 Docker archive；它按完整 `origin/main` commit 使用稳定身份，本机始终只保留最新 main 的一份开发镜像。同一 main 的重复 build 在锁内确认镜像和测试回执后直接复用。main 前进时先完成新镜像构建和自检，再停止并删除所有旧开发容器、隔离数据、租约、旧候选和旧开发镜像；源码 worktree 始终保留。
+构建工作目录、未完成候选、失败构建标签和归档暂存文件都会由本次命令清理。开发底座与正式候选用途严格分开，开发底座不能发布。development 在镜像构建阶段完成六个包的构建、TypeScript/Python 全量测试和镜像自检，但不生成、保存或重载 Docker archive；它按完整 `origin/main` commit 使用稳定身份，本机始终只保留最新 main 的一份开发镜像。同一 main 的重复 build 在锁内确认镜像和测试回执后直接复用。main 前进时先完成新镜像构建和自检，再停止并删除所有旧开发容器、隔离数据、租约、旧候选和旧开发镜像；源码 worktree 始终保留。
 
 每个 worktree 的开发环境使用路径摘要派生的独立容器名和内部网络，并在一个短状态锁内分配独立 Web 端口。因此多个任务可以从同一只读 main 镜像并行运行；`dev down` 和 `dev retire` 只作用于指定 worktree。不得恢复固定的全局 `dsh-dev-web`、`dsh-dev-telegram`、`dsh-dev-fake-telegram` 或 `dsh-dev-internal` 名称。
 
@@ -76,7 +76,7 @@
 
 开发态的 Telegram/cron 容器只连接无外网的内部网络和假 Bot API；Web 由于 Harness 强制只绑定 loopback，使用宿主网络供本机浏览器访问，但只持有测试凭据，不承担 Telegram 或 cron 写入。生产容器固定使用 `1000:1000`；本机 rootless Podman 为了让快照副本保持宿主用户可读写，在容器内显示为 uid 0，但仍映射为宿主普通用户，不获得宿主 root 权限。
 
-`dev prepare` 是源码开发入口，不是发版入口。它在准备开始和完成后都会重新 fetch：独立任务分支必须包含最新 `origin/main`，开发基础镜像的插件 commit 也必须精确等于该 `origin/main`；期间 main 一旦更新，就停止并要求 rebase、重建基础镜像和重跑门禁。正式 `build` 和 `release` 也会拒绝任何没有基于最新 `origin/main` 的产品或发版工具 commit。它只下载已有的一致生产快照，不会为开发申请停机或在线生成快照；远端没有快照、摘要不匹配或下载失败都会停止，不会退回合成数据。Harness 始终使用 `harness.lock.json` 的只读固定 commit。六个插件、Skills、Profiles、runtime topology、materializer 和镜像运行脚本都从独立 worktree 可写挂入；镜像根文件系统仍为只读，编译产物留在 worktree 的忽略目录。生产目录和真实凭据不会被挂载。
+`dev prepare` 是源码开发入口，不是测试或发版入口。它在准备开始和完成后都会重新 fetch：独立任务分支必须包含最新 `origin/main`，开发基础镜像的插件 commit 也必须精确等于该 `origin/main`；期间 main 一旦更新，就停止并要求 rebase、重建基础镜像和重新准备环境。正式 `build` 和 `release` 也会拒绝任何没有基于最新 `origin/main` 的产品或发版工具 commit。它只下载已有的一致生产快照，不会为开发申请停机或在线生成快照；远端没有快照、摘要不匹配或下载失败都会停止，不会退回合成数据。Harness 始终使用 `harness.lock.json` 的只读固定 commit。六个插件、Skills、Profiles、runtime topology、materializer 和镜像运行脚本都从独立 worktree 可写挂入；镜像根文件系统仍为只读，编译产物留在 worktree 的忽略目录。由于可编辑挂载会遮住镜像内预构建的 `lib`，`prepare` 只快速重新编译六个包，然后检查 Web、假 Telegram、空 cron、真实 Telegram 阻断和镜像身份；它不重复 Vitest 或 Python unittest。生产目录和真实凭据不会被挂载。
 
 ## 退出码
 

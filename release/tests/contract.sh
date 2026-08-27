@@ -101,4 +101,14 @@ grep -q '开发基础镜像不是最新 main' "$test_root/stderr"
 
 node --check "$repo_root/release/cli.mjs"
 bash -n "$repo_root/release/dsh" "$repo_root"/release/scripts/*.sh
+
+# Full product tests qualify the one shared main image.  Per-worktree prepare
+# may rebuild editable outputs hidden by mounts, but must not repeat test suites.
+test ! -e "$repo_root/release/scripts/dev-source-check.sh"
+grep -q "'dev-source-build'" "$repo_root/release/cli.mjs"
+! grep -q "'dev-source-check'" "$repo_root/release/cli.mjs"
+grep -q "productTests: 'shared-main-image-build'" "$repo_root/release/cli.mjs"
+! grep -Eq 'vitest|unittest' "$repo_root/release/scripts/dev-source-build.sh"
+grep -q 'vitest/vitest.mjs' "$repo_root/release/Containerfile"
+grep -q "unittest discover" "$repo_root/release/Containerfile"
 printf 'release command contract passed\n'
