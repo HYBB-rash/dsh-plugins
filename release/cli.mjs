@@ -209,8 +209,12 @@ function commandBuild(options) {
   run('git', ['-C', harnessTarget, 'apply', '--verbose', archivedPatch], { code: exitCodes.safety })
   const patchSha256 = sha256File(archivedPatch)
   const imageTag = `dsh-candidate:${pluginsCommit.slice(0, 12)}-${buildId.slice(0, 15).toLowerCase()}`
+  const signaturePolicy = join(pluginsTarget, 'release/containers-policy.json')
   const engineBuildOptions = engine === 'podman'
-    ? ['--signature-policy', join(pluginsTarget, 'release/containers-policy.json')]
+    ? ['--signature-policy', signaturePolicy]
+    : []
+  const engineArchiveOptions = engine === 'podman'
+    ? ['--signature-policy', signaturePolicy]
     : []
 
   run(engine, [
@@ -250,13 +254,13 @@ function commandBuild(options) {
   const receiptPath = join(candidateDir, 'image-tests.json')
   writeJson(receiptPath, testReceipt)
   const archivePath = join(candidateDir, 'image.tar')
-  run(engine, ['save', '--format', 'docker-archive', '--output', archivePath, imageTag], { code: exitCodes.test })
+  run(engine, ['save', ...engineArchiveOptions, '--format', 'docker-archive', '--output', archivePath, imageTag], { code: exitCodes.test })
   const archiveSha256 = sha256File(archivePath)
 
   // Prove the artifact can recreate the admitted identity. This only removes
   // the unique candidate tag created above; no user image is targeted.
   run(engine, ['image', 'rm', imageTag], { code: exitCodes.test })
-  run(engine, ['load', '--input', archivePath], { code: exitCodes.test })
+  run(engine, ['load', ...engineArchiveOptions, '--input', archivePath], { code: exitCodes.test })
   const loadedImageId = imageId(imageTag)
   if (loadedImageId !== builtImageId) fail(`归档重载后的 image ID 改变: ${builtImageId} -> ${loadedImageId}`, exitCodes.test)
 
