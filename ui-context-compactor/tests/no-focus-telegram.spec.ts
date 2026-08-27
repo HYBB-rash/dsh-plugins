@@ -156,6 +156,7 @@ async function mount(
   initialRow?: Readonly<Record<string, unknown>>,
   beforeAgent?: (adapter: Adapter, ctx: Context) => void,
   installAfterAgent = false,
+  afterAgentBeforeInstall?: (agent: Agent) => void,
 ): Promise<Mounted> {
   const ctx = new Context()
   contexts.push(ctx)
@@ -243,6 +244,7 @@ async function mount(
         provider: 'telegram-no-focus-test', model: 'telegram-no-focus-test',
       } })).agent
     : ctx.agentLoop.create(SessionId(target), { provider: 'telegram-no-focus-test', model: 'telegram-no-focus-test' })
+  afterAgentBeforeInstall?.(agent)
   if (installAfterAgent) await installContextManager()
   return { ctx, agent, adapter, root, sqlitePath }
 }
@@ -727,11 +729,22 @@ describe('F07-T1 exact Telegram no-focus admission', () => {
     await second.ctx.fiber.dispose()
     contexts.splice(contexts.indexOf(second.ctx), 1)
     const recoveryWarnings: string[] = []
+    let maintenanceAttempts = 0
     const recovered = await mount(h.root, sessionId, true, undefined, (_adapter, ctx) => {
       captureProofOnlyRecoveryWarnings(ctx, recoveryWarnings)
-    }, true)
+    }, true, agent => {
+      const runMaintenance = agent.runMaintenance.bind(agent)
+      vi.spyOn(agent, 'runMaintenance').mockImplementation(task => {
+        maintenanceAttempts += 1
+        if (maintenanceAttempts === 1) throw new Error('fixture busy race')
+        return runMaintenance(task)
+      })
+    })
     emitDuplicateCreated(recovered.ctx, recovered.agent)
+    recovered.ctx.emit('agent/status', { agent: recovered.agent, status: 'idle' })
     await recovered.agent.whenIdle()
+    await vi.waitFor(() => { expect(ledger(recovered).phase).toBe('finalized') })
+    expect(maintenanceAttempts).toBe(2)
     expect(recoveryWarnings).toEqual([])
     expect(ledger(recovered)).toStrictEqual(Object.freeze({
       auxiliaryCalls: 1, rootCalls: 0, canonical: 2, directClose: 1,

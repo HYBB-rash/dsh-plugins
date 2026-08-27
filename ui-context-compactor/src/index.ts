@@ -15,7 +15,7 @@ import { createUserMessage, freezeMessage, MessageId, ReasoningEffortId, type Me
 import { assembleContextFor, type Agent, type PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-compaction'
 import type {} from '@deepseek-ai/dsh-commands'
-import { canonicalHeader, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { canonicalHeader, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { WebSearchRequest, WebSearchResult } from '@deepseek-ai/dsh-web'
@@ -2627,62 +2627,35 @@ function installFocusCanary(
     postCanonicalNonBasisUpdates.delete(String(agent.session.id))
   })
 
+  type RecoveryLifecycle = {
+    phase: 'pending' | 'inFlight' | 'settled'
+    waitingForIdle: boolean
+  }
+  type RecoveryAttemptStart = 'async' | 'retry' | undefined
   const recoveryInstalled = new WeakSet<Agent>()
-  const installAgentRecovery = (agent: Agent): void => {
-    if (recoveryInstalled.has(agent)) return
-    recoveryInstalled.add(agent)
-    if (!managed(agent, classifier)) return
-    const sessionId = String(agent.session.id)
-    const tools = agent.ctx.get('tools')
-    if (tools === undefined) throw new Error('ui-context-compactor: managed no-safe policy requires the tools service')
-    tools.guard(() => {
-      let current: H1CanaryRecord | undefined
-      try {
-        current = domain.table('focus_precanonical').get(sessionId)
-      } catch {
-        const expected = expectedMissingNoSafeActionDenial(agent)
-        if (expected !== undefined) {
-          noSafeDenials.set(agent, expected)
-          recoveryGates.set(agent, { kind: 'closed' })
-        }
-        return NO_SAFE_ACTION_TOOL_DENIAL
+  const recoveryLifecycles = new WeakMap<Agent, RecoveryLifecycle>()
+
+  const finishRecoveryAttempt = (
+    agent: Agent,
+    lifecycle: RecoveryLifecycle,
+    gate: { kind: NoFocusRecoveryGate['kind'] },
+    maintenance: Promise<unknown>,
+  ): void => {
+    void maintenance.then(() => {
+      if (recoveryLifecycles.get(agent) !== lifecycle) return
+      if (gate.kind === 'ready') {
+        lifecycle.phase = 'settled'
+        recoveryLifecycles.delete(agent)
+      } else {
+        lifecycle.phase = 'pending'
       }
-      const gate = recoveryGates.get(agent)
-      const denied = noSafeDenials.get(agent)
-      if (denied !== undefined) {
-        if (current !== undefined
-          && provesNewCompleteNonNoSafeState(agent, current, denied.generation)) {
-          noSafeDenials.delete(agent)
-          recoveryGates.set(agent, { kind: 'ready' })
-          return undefined
-        }
-        const currentNoSafe = current === undefined ? undefined : exactNoSafeActionDenial(agent, current)
-        if (currentNoSafe !== undefined) {
-          if (currentNoSafe.generation > denied.generation
-            || denied.evidence === 'visible_expected_missing'
-              && sameNoSafeActionDenial(currentNoSafe, denied)) noSafeDenials.set(agent, currentNoSafe)
-          return NO_SAFE_ACTION_TOOL_DENIAL
-        }
-        if (gate !== undefined && gate.kind !== 'ready') return NO_SAFE_ACTION_TOOL_DENIAL
-        return NO_SAFE_ACTION_TOOL_DENIAL
-      }
-      if (gate !== undefined && gate.kind !== 'ready') return NO_SAFE_ACTION_TOOL_DENIAL
-      const established = current === undefined ? undefined : exactNoSafeActionDenial(agent, current)
-      if (established !== undefined) {
-        noSafeDenials.set(agent, established)
-        return NO_SAFE_ACTION_TOOL_DENIAL
-      }
-      if (current !== undefined && isNoSafeActionStateRecord(current)) {
-        return NO_SAFE_ACTION_TOOL_DENIAL
-      }
-      const expected = expectedMissingNoSafeActionDenial(agent)
-      if (expected === undefined) return undefined
-      noSafeDenials.set(agent, expected)
-      recoveryGates.set(agent, { kind: 'closed' })
-      // Exact no-safe state denies the body. A malformed no-safe row also
-      // denies, but cannot replace the last exact monotonic identity.
-      return NO_SAFE_ACTION_TOOL_DENIAL
+    }, () => {
+      if (recoveryLifecycles.get(agent) === lifecycle) lifecycle.phase = 'pending'
     })
+  }
+
+  const attemptAgentRecovery = (agent: Agent, lifecycle: RecoveryLifecycle): RecoveryAttemptStart => {
+    const sessionId = String(agent.session.id)
     let record: H1CanaryRecord | undefined
     try {
       record = domain.table('focus_precanonical').get(sessionId)
@@ -2788,13 +2761,12 @@ function installFocusCanary(
             if (recoveryGates.get(agent) === gate && gate.kind !== 'ready') gate.kind = 'closed'
           }
         })
-        void maintenance.catch(() => {
-          if (recoveryGates.get(agent) === gate) gate.kind = 'closed'
-        })
+        finishRecoveryAttempt(agent, lifecycle, gate, maintenance)
+        return 'async'
       } catch {
         gate.kind = 'closed'
+        return 'retry'
       }
-      return
     }
     if (isBackgroundStateRecord(record)) {
       const exact = parseCanonicalBackgroundStateRecord(record)
@@ -2833,13 +2805,12 @@ function installFocusCanary(
             if (recoveryGates.get(agent) === gate && gate.kind !== 'ready') gate.kind = 'closed'
           }
         })
-        void maintenance.catch(() => {
-          if (recoveryGates.get(agent) === gate) gate.kind = 'closed'
-        })
+        finishRecoveryAttempt(agent, lifecycle, gate, maintenance)
+        return 'async'
       } catch {
         gate.kind = 'closed'
+        return 'retry'
       }
-      return
     }
     if (isNoSafeActionStateRecord(record)) {
       const exact = parseCanonicalNoSafeActionStateRecord(record)
@@ -2880,13 +2851,12 @@ function installFocusCanary(
             if (recoveryGates.get(agent) === gate && gate.kind !== 'ready') gate.kind = 'closed'
           }
         })
-        void maintenance.catch(() => {
-          if (recoveryGates.get(agent) === gate) gate.kind = 'closed'
-        })
+        finishRecoveryAttempt(agent, lifecycle, gate, maintenance)
+        return 'async'
       } catch {
         gate.kind = 'closed'
+        return 'retry'
       }
-      return
     }
     if (isLocalRestrictionStateRecord(record)) {
       const exact = parseCanonicalLocalRestrictionStateRecord(record)
@@ -2925,13 +2895,12 @@ function installFocusCanary(
             if (recoveryGates.get(agent) === gate && gate.kind !== 'ready') gate.kind = 'closed'
           }
         })
-        void maintenance.catch(() => {
-          if (recoveryGates.get(agent) === gate) gate.kind = 'closed'
-        })
+        finishRecoveryAttempt(agent, lifecycle, gate, maintenance)
+        return 'async'
       } catch {
         gate.kind = 'closed'
+        return 'retry'
       }
-      return
     }
     if (!isNoFocusCanaryRecord(record) && !isClosureOnlyNoFocusRecord(record)) {
       if (isAnyNoFocusRecord(record)) recoveryGates.set(agent, { kind: 'closed' })
@@ -2979,13 +2948,12 @@ function installFocusCanary(
             if (recoveryGates.get(agent) === gate && gate.kind !== 'ready') gate.kind = 'closed'
           }
         })
-        void maintenance.catch(() => {
-          if (recoveryGates.get(agent) === gate) gate.kind = 'closed'
-        })
+        finishRecoveryAttempt(agent, lifecycle, gate, maintenance)
+        return 'async'
       } catch {
         gate.kind = 'closed'
+        return 'retry'
       }
-      return
     }
     if (parsed.data.transaction?.phase !== 'finalized') {
       recoveryGates.set(agent, { kind: 'closed' })
@@ -3019,16 +2987,110 @@ function installFocusCanary(
           if (recoveryGates.get(agent) === gate && gate.kind !== 'ready') gate.kind = 'closed'
         }
       })
-      void maintenance.catch(() => {
-        if (recoveryGates.get(agent) === gate) gate.kind = 'closed'
-      })
+      finishRecoveryAttempt(agent, lifecycle, gate, maintenance)
+      return 'async'
     } catch {
       gate.kind = 'closed'
+      return 'retry'
     }
   }
 
+  const scheduleAgentRecovery = (agent: Agent): void => {
+    const lifecycle = recoveryLifecycles.get(agent)
+    if (lifecycle === undefined || lifecycle.phase !== 'pending' || lifecycle.waitingForIdle) return
+    lifecycle.waitingForIdle = true
+    void agent.whenIdle().then(() => {
+      lifecycle.waitingForIdle = false
+      if (recoveryLifecycles.get(agent) !== lifecycle || lifecycle.phase !== 'pending') return
+      lifecycle.phase = 'inFlight'
+      let started: RecoveryAttemptStart
+      try {
+        started = attemptAgentRecovery(agent, lifecycle)
+      } catch {
+        lifecycle.phase = 'pending'
+        return
+      }
+      if (started === 'async') return
+      if (started === 'retry') {
+        lifecycle.phase = 'pending'
+        return
+      }
+      lifecycle.phase = 'settled'
+      recoveryLifecycles.delete(agent)
+    }, () => {
+      lifecycle.waitingForIdle = false
+      if (recoveryLifecycles.get(agent) === lifecycle) lifecycle.phase = 'pending'
+    })
+  }
+
+  const installAgentRecovery = (agent: Agent): void => {
+    if (recoveryInstalled.has(agent)) return
+    recoveryInstalled.add(agent)
+    if (!managed(agent, classifier)) return
+    const sessionId = String(agent.session.id)
+    const tools = agent.ctx.get('tools')
+    if (tools === undefined) throw new Error('ui-context-compactor: managed no-safe policy requires the tools service')
+    tools.guard(() => {
+      let current: H1CanaryRecord | undefined
+      try {
+        current = domain.table('focus_precanonical').get(sessionId)
+      } catch {
+        const expected = expectedMissingNoSafeActionDenial(agent)
+        if (expected !== undefined) {
+          noSafeDenials.set(agent, expected)
+          recoveryGates.set(agent, { kind: 'closed' })
+        }
+        return NO_SAFE_ACTION_TOOL_DENIAL
+      }
+      const gate = recoveryGates.get(agent)
+      const denied = noSafeDenials.get(agent)
+      if (denied !== undefined) {
+        if (current !== undefined
+          && provesNewCompleteNonNoSafeState(agent, current, denied.generation)) {
+          noSafeDenials.delete(agent)
+          recoveryGates.set(agent, { kind: 'ready' })
+          return undefined
+        }
+        const currentNoSafe = current === undefined ? undefined : exactNoSafeActionDenial(agent, current)
+        if (currentNoSafe !== undefined) {
+          if (currentNoSafe.generation > denied.generation
+            || denied.evidence === 'visible_expected_missing'
+              && sameNoSafeActionDenial(currentNoSafe, denied)) noSafeDenials.set(agent, currentNoSafe)
+          return NO_SAFE_ACTION_TOOL_DENIAL
+        }
+        if (gate !== undefined && gate.kind !== 'ready') return NO_SAFE_ACTION_TOOL_DENIAL
+        return NO_SAFE_ACTION_TOOL_DENIAL
+      }
+      if (gate !== undefined && gate.kind !== 'ready') return NO_SAFE_ACTION_TOOL_DENIAL
+      const established = current === undefined ? undefined : exactNoSafeActionDenial(agent, current)
+      if (established !== undefined) {
+        noSafeDenials.set(agent, established)
+        return NO_SAFE_ACTION_TOOL_DENIAL
+      }
+      if (current !== undefined && isNoSafeActionStateRecord(current)) {
+        return NO_SAFE_ACTION_TOOL_DENIAL
+      }
+      const expected = expectedMissingNoSafeActionDenial(agent)
+      if (expected === undefined) return undefined
+      noSafeDenials.set(agent, expected)
+      recoveryGates.set(agent, { kind: 'closed' })
+      // Exact no-safe state denies the body. A malformed no-safe row also
+      // denies, but cannot replace the last exact monotonic identity.
+      return NO_SAFE_ACTION_TOOL_DENIAL
+    })
+    recoveryLifecycles.set(agent, { phase: 'pending', waitingForIdle: false })
+    scheduleAgentRecovery(agent)
+  }
+
+  ctx.on('agent/status', ({ agent, status }) => {
+    if (status === 'idle') scheduleAgentRecovery(agent)
+  })
   ctx.on('agent/created', ({ agent }) => { installAgentRecovery(agent) }, { prepend: true })
-  for (const agent of ctx.agents.roots()) installAgentRecovery(agent)
+  for (const id of config.allowlist) {
+    const agent = ctx.agents.get(SessionId(id))
+    if (agent !== undefined) installAgentRecovery(agent)
+  }
+  ctx.on('agent/disposed', ({ agent }) => { recoveryLifecycles.delete(agent) })
 
   ctx.on('agent/inbox/inserted', ({ agent, message }) => {
     if (!managed(agent, classifier) || !isDirectUserSource(message.source)) return
