@@ -7,9 +7,11 @@ import {
   copyFileSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   renameSync,
   rmSync,
   statSync,
@@ -122,6 +124,20 @@ function requireFullCommit(repo, ref, name) {
   return resolved
 }
 
+function requireLatestMainAncestor(commit, label) {
+  run('git', ['-C', repoRoot, 'fetch', 'origin'], { code: exitCodes.safety })
+  const originMain = run('git', ['-C', repoRoot, 'rev-parse', 'origin/main'], {
+    capture: true,
+    announce: false,
+    code: exitCodes.safety,
+  })
+  const basedOnLatestMain = runStatus('git', ['-C', repoRoot, 'merge-base', '--is-ancestor', originMain, commit])
+  if (basedOnLatestMain.status !== 0) {
+    fail(`${label} ${commit} 没有基于最新 origin/main ${originMain}；请先 rebase 后再继续`, exitCodes.safety)
+  }
+  return originMain
+}
+
 function candidateFrom(value) {
   const path = value ? resolve(value) : join(stateRoot, 'candidates/latest.json')
   const candidate = readJson(path, 'candidate')
@@ -152,6 +168,24 @@ function candidateFrom(value) {
 
 function imageId(name) {
   return run(engine, ['image', 'inspect', name, '--format', '{{.Id}}'], { capture: true, code: exitCodes.safety })
+}
+
+function archiveStagingRoot(candidateDir) {
+  if (process.env.DSH_RELEASE_ARCHIVE_STAGING_ROOT) {
+    const configured = resolve(process.env.DSH_RELEASE_ARCHIVE_STAGING_ROOT)
+    ensureDir(configured)
+    return configured
+  }
+  if (existsSync('/dev/shm')) {
+    const availableText = run('df', ['--output=avail', '--block-size=1', '/dev/shm'], { capture: true, announce: false, code: exitCodes.safety })
+    const available = Number(availableText.split(/\s+/u).at(-1))
+    if (Number.isFinite(available) && available >= 8 * 1024 ** 3) {
+      const automatic = '/dev/shm/dsh-release-staging'
+      ensureDir(automatic)
+      return automatic
+    }
+  }
+  return candidateDir
 }
 
 function stopDev() {
@@ -217,6 +251,78 @@ function containerBaseArgs(homePath) {
   ]
 }
 
+const developmentPackages = Object.freeze([
+  'telegram-gateway',
+  'dsh-cron',
+  'dsh-assistant',
+  'personal-feed',
+  'x-feed',
+  'ui-context-compactor',
+])
+
+function developmentSourceArgs(sourcePath) {
+  const args = ['--volume', `${sourcePath}:/workspace/dsh-plugins:ro`]
+  const imageNodeModules = '/opt/dsh/harness/node_modules/.pnpm/node_modules'
+  for (const packageName of developmentPackages) {
+    const localNodeModules = join(sourcePath, packageName, 'node_modules')
+    try {
+      const entry = lstatSync(localNodeModules)
+      if (!entry.isSymbolicLink() || readlinkSync(localNodeModules) !== imageNodeModules) {
+        fail(`拒绝覆盖已有开发依赖目录: ${localNodeModules}`, exitCodes.safety)
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+      symlinkSync(imageNodeModules, localNodeModules, 'dir')
+    }
+    args.push('--volume', `${join(sourcePath, packageName)}:/opt/dsh/harness/local-plugins/${packageName}:rw`)
+  }
+  args.push(
+    '--volume', `${join(sourcePath, 'release/scripts')}:/opt/dsh/release-system/scripts:rw`,
+    '--volume', `${join(sourcePath, 'release/fixtures/context-manager-telegram-canary')}:/opt/dsh/harness/local-plugins/deployment/herman-hermes/context-manager-telegram-canary:ro`,
+    '--volume', `${join(sourcePath, 'release/vitest.external.config.ts')}:/opt/dsh/harness/vitest.external.config.ts:ro`,
+    '--volume', `${join(sourcePath, 'runtime-package-topology.json')}:/opt/dsh/harness/local-plugins/runtime-package-topology.json:rw`,
+    '--volume', `${join(sourcePath, 'scripts/materialize-runtime-topology.mjs')}:/opt/dsh/harness/local-plugins/scripts/materialize-runtime-topology.mjs:rw`,
+  )
+  args.push('--volume', `${join(sourcePath, 'skills')}:/opt/dsh/plugins-src/skills:rw`)
+  for (const profile of ['web', 'telegram', 'telegram-test']) {
+    for (const file of ['package.json', 'cordis.patch.yml']) {
+      args.push('--volume', `${join(sourcePath, 'release/profiles', profile, file)}:/opt/dsh/harness/local-profiles/${profile}/${file}:rw`)
+    }
+  }
+  return args
+}
+
+function inspectDevelopmentSource(value) {
+  if (!value) fail('dev prepare 必须提供 --source <独立任务 worktree>', exitCodes.usage)
+  const sourcePath = resolve(value)
+  const topLevel = run('git', ['-C', sourcePath, 'rev-parse', '--show-toplevel'], { capture: true, announce: false, code: exitCodes.usage })
+  if (resolve(topLevel) !== sourcePath) fail(`--source 必须指向 worktree 根目录: ${sourcePath}`, exitCodes.usage)
+  const branch = run('git', ['-C', sourcePath, 'branch', '--show-current'], { capture: true, announce: false, code: exitCodes.safety })
+  if (!branch || ['main', 'master'].includes(branch)) fail('开发必须在独立任务分支，不能直接使用 main/master', exitCodes.safety)
+  run('git', ['-C', sourcePath, 'fetch', 'origin'], { code: exitCodes.safety })
+  const head = run('git', ['-C', sourcePath, 'rev-parse', 'HEAD'], { capture: true, announce: false, code: exitCodes.safety })
+  const originMain = run('git', ['-C', sourcePath, 'rev-parse', 'origin/main'], { capture: true, announce: false, code: exitCodes.safety })
+  const containsLatestMain = runStatus('git', ['-C', sourcePath, 'merge-base', '--is-ancestor', originMain, head]).status === 0
+  if (!containsLatestMain) {
+    fail(`任务分支没有基于最新 origin/main ${originMain}；请先 rebase 后再继续`, exitCodes.safety)
+  }
+  for (const packageName of developmentPackages) {
+    if (!existsSync(join(sourcePath, packageName, 'package.json'))) fail(`开发源码缺少 ${packageName}/package.json`, exitCodes.safety)
+  }
+  for (const required of [
+    'release/scripts',
+    'skills',
+    'release/profiles/web/cordis.patch.yml',
+    'release/profiles/telegram/cordis.patch.yml',
+    'release/profiles/telegram-test/cordis.patch.yml',
+    'runtime-package-topology.json',
+    'scripts/materialize-runtime-topology.mjs',
+  ]) {
+    if (!existsSync(join(sourcePath, required))) fail(`开发源码缺少镜像运行输入: ${required}`, exitCodes.safety)
+  }
+  return { sourcePath, branch, head, originMain }
+}
+
 function sleepSync(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
 }
@@ -268,6 +374,11 @@ function commandBuild(options) {
   const harnessCommit = requireFullCommit(harnessRepo, options['harness-ref'], '--harness-ref')
   const pluginsCommit = requireFullCommit(repoRoot, options['plugins-ref'], '--plugins-ref')
   const releaseToolCommit = requireFullCommit(repoRoot, run('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { capture: true, announce: false }), 'release tool commit')
+  const originMain = requireLatestMainAncestor(pluginsCommit, '插件 commit')
+  const releaseToolBasedOnMain = runStatus('git', ['-C', repoRoot, 'merge-base', '--is-ancestor', originMain, releaseToolCommit])
+  if (releaseToolBasedOnMain.status !== 0) {
+    fail(`发版工具 commit ${releaseToolCommit} 没有基于最新 origin/main ${originMain}；请先 rebase 后再继续`, exitCodes.safety)
+  }
   const lock = readJson(join(releaseRoot, 'image.lock.json'), 'image lock')
   const buildId = `${nowId()}-${pluginsCommit.slice(0, 12)}`
   const buildRoot = join(stateRoot, 'builds', buildId)
@@ -346,15 +457,23 @@ function commandBuild(options) {
   const receiptPath = join(candidateDir, 'image-tests.json')
   writeJson(receiptPath, testReceipt)
   const archivePath = join(candidateDir, 'image.tar')
-  run(engine, ['save', ...engineArchiveOptions, '--format', 'docker-archive', '--output', archivePath, imageTag], { code: exitCodes.test })
-  const archiveSha256 = sha256File(archivePath)
+  const stagingRoot = archiveStagingRoot(candidateDir)
+  const stagedArchivePath = stagingRoot === candidateDir ? archivePath : join(stagingRoot, `${buildId}.image.tar`)
+  rmSync(stagedArchivePath, { force: true })
+  run(engine, ['save', ...engineArchiveOptions, '--format', 'docker-archive', '--output', stagedArchivePath, imageTag], { code: exitCodes.test })
+  const archiveSha256 = sha256File(stagedArchivePath)
 
   // Prove the artifact can recreate the admitted identity. This only removes
   // the unique candidate tag created above; no user image is targeted.
   run(engine, ['image', 'rm', imageTag], { code: exitCodes.test })
-  run(engine, ['load', ...engineArchiveOptions, '--input', archivePath], { code: exitCodes.test })
+  run(engine, ['load', ...engineArchiveOptions, '--input', stagedArchivePath], { code: exitCodes.test })
   const loadedImageId = imageId(imageTag)
   if (loadedImageId !== builtImageId) fail(`归档重载后的 image ID 改变: ${builtImageId} -> ${loadedImageId}`, exitCodes.test)
+  if (stagedArchivePath !== archivePath) {
+    copyFileSync(stagedArchivePath, archivePath)
+    if (sha256File(archivePath) !== archiveSha256) fail('暂存归档复制后的摘要改变', exitCodes.safety)
+    rmSync(stagedArchivePath, { force: true })
+  }
 
   const candidate = {
     schemaVersion: 1,
@@ -416,12 +535,75 @@ function commandDev(options) {
     out(result)
     return result
   }
+  if (action === 'prepare') {
+    const source = inspectDevelopmentSource(options.source)
+    const harnessLock = readJson(join(releaseRoot, 'harness.lock.json'), 'Harness lock')
+    if (candidate.pluginsCommit !== source.originMain) {
+      fail(`开发基础镜像不是最新 main：candidate=${candidate.pluginsCommit}，origin/main=${source.originMain}`, exitCodes.safety)
+    }
+    if (candidate.harnessCommit !== harnessLock.commit) {
+      fail(`开发基础镜像没有使用固定 Harness commit：candidate=${candidate.harnessCommit}，lock=${harnessLock.commit}`, exitCodes.safety)
+    }
+    stopDev()
+    commandSnapshot({ _: ['latest'] })
+    materializeSnapshot('latest', homePath)
+    const sourceArgs = developmentSourceArgs(source.sourcePath)
+    run(engine, ['run', '--rm', ...containerBaseArgs(homePath), ...sourceArgs,
+      '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'dev-source-check'], { code: exitCodes.test })
+    run(engine, ['run', '--rm', ...containerBaseArgs(homePath), ...sourceArgs,
+      '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'prepare'], { code: exitCodes.test })
+    run(engine, ['network', 'create', '--internal', 'dsh-dev-internal'], { code: exitCodes.test })
+    run(engine, ['run', '--detach', '--name', 'dsh-dev-fake-telegram', '--network', 'dsh-dev-internal', '--network-alias', 'fake-telegram',
+      '--read-only', '--tmpfs', '/tmp:rw', ...sourceArgs, candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
+    run(engine, ['run', '--detach', '--name', 'dsh-dev-telegram', '--network', 'dsh-dev-internal', ...containerBaseArgs(homePath), ...sourceArgs,
+      '--env', 'TELEGRAM_BOT_TOKEN=test-token', '--env', 'TELEGRAM_ALLOWED_CHAT_ID=1', '--env', 'DEEPSEEK_API_KEY=test-key',
+      candidate.imageTag, 'telegram-test'], { code: exitCodes.test })
+    run(engine, ['run', '--detach', '--name', 'dsh-dev-web', '--network', 'host', ...containerBaseArgs(homePath), ...sourceArgs,
+      '--env', 'DSH_WEB_PORT=13080', '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
+    const verification = verifyDev(candidate, homePath)
+    let completionSource
+    try {
+      completionSource = inspectDevelopmentSource(source.sourcePath)
+      if (candidate.pluginsCommit !== completionSource.originMain) {
+        fail(`开发准备期间 main 已更新：candidate=${candidate.pluginsCommit}，origin/main=${completionSource.originMain}；请先 rebase 并重建开发基础镜像`, exitCodes.safety)
+      }
+    } catch (error) {
+      stopDev()
+      throw error
+    }
+    const metadata = {
+      schemaVersion: 2,
+      mode: 'editable-source',
+      candidateId: candidate.candidateId,
+      imageId: candidate.imageId,
+      snapshot: 'latest',
+      sourcePath: completionSource.sourcePath,
+      branch: completionSource.branch,
+      sourceHead: completionSource.head,
+      originMain: completionSource.originMain,
+      createdAt: new Date().toISOString(),
+      verification,
+    }
+    writeJson(devMetaPath, metadata)
+    const result = {
+      result: 'dev-source-ready',
+      web: 'http://127.0.0.1:13080',
+      homePath,
+      data: 'fresh-isolated-production-snapshot',
+      network: 'dsh-dev-internal',
+      ...metadata,
+    }
+    out(result)
+    return result
+  }
   if (action === 'shell') {
     if (!existsSync(homePath)) fail('开发数据副本不存在；请先执行 dev up', exitCodes.usage)
-    run(engine, ['run', '--rm', '--interactive', '--tty', '--network', 'dsh-dev-internal', ...containerBaseArgs(homePath), candidate.imageTag, 'shell'], { code: exitCodes.test })
+    const prior = existsSync(devMetaPath) ? readJson(devMetaPath, 'development metadata') : null
+    const sourceArgs = prior?.mode === 'editable-source' ? developmentSourceArgs(resolve(prior.sourcePath)) : []
+    run(engine, ['run', '--rm', '--interactive', '--tty', '--network', 'dsh-dev-internal', ...containerBaseArgs(homePath), ...sourceArgs, candidate.imageTag, 'shell'], { code: exitCodes.test })
     return
   }
-  fail('用法: dsh dev up --snapshot latest|synthetic；dsh dev shell；dsh dev down', exitCodes.usage)
+  fail('用法: dsh dev prepare --source <worktree> --candidate <candidate.json>；dsh dev up --snapshot latest|synthetic；dsh dev shell；dsh dev down', exitCodes.usage)
 }
 
 function commandSnapshot(options) {
@@ -459,6 +641,8 @@ function releasePlan(candidate) {
 
 function commandRelease(options) {
   const { candidate, path: candidatePath } = candidateFrom(options.candidate)
+  requireLatestMainAncestor(candidate.pluginsCommit, '候选插件 commit')
+  requireLatestMainAncestor(candidate.releaseToolCommit, '候选发版工具 commit')
   if (!options['approved-stop']) {
     out({ status: 'waiting-for-downtime-authorization', ...releasePlan(candidate) })
     process.exitCode = exitCodes.approval
@@ -784,6 +968,7 @@ function usage() {
   out(`DSH Docker 发版唯一入口
 
   ./release/dsh snapshot latest
+  ./release/dsh dev prepare --source <独立任务worktree> --candidate <latest-main-candidate.json>
   ./release/dsh dev up --snapshot latest|synthetic [--candidate candidate.json] [--reset]
   ./release/dsh dev shell [--candidate candidate.json]
   ./release/dsh dev down

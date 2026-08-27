@@ -1,0 +1,4 @@
+interface:
+  display_name: "DSH Development"
+  short_description: "Prepare isolated editable Docker development"
+  default_prompt: "Use $dsh-dev to prepare this repository for safe Docker-based development."

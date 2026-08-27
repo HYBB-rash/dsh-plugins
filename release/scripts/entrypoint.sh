@@ -11,6 +11,9 @@ case "${1:-help}" in
   self-test)
     exec "$release_root/scripts/self-test.sh"
     ;;
+  dev-source-check)
+    exec "$release_root/scripts/dev-source-check.sh"
+    ;;
   validate-state)
     shift
     exec node "$release_root/scripts/validate-state.mjs" "$@"
@@ -42,7 +45,7 @@ case "${1:-help}" in
     ;;
   help|--help|-h)
     cat <<'EOF'
-Container commands: prepare, self-test, validate-state, fake-telegram,
+Container commands: prepare, self-test, dev-source-check, validate-state, fake-telegram,
 web, telegram, telegram-test, lan-proxy, shell
 EOF
     ;;
