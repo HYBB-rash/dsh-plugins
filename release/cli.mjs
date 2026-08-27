@@ -107,7 +107,7 @@ function parseOptions(tokens) {
     const token = tokens[index]
     if (!token.startsWith('--')) { options._.push(token); continue }
     const key = token.slice(2)
-    if (['approved-stop', 'approved', 'synthetic'].includes(key)) { options[key] = true; continue }
+    if (['approved-stop', 'approved', 'synthetic', 'reset'].includes(key)) { options[key] = true; continue }
     const value = tokens[index + 1]
     if (value === undefined || value.startsWith('--')) fail(`参数 ${token} 缺少值`, exitCodes.usage)
     options[key] = value
@@ -145,13 +145,24 @@ function stopDev() {
   runStatus(engine, ['network', 'rm', 'dsh-dev-internal'])
 }
 
+function writeTestCredentials(path) {
+  writeFileSync(path, [
+    'version: 1',
+    'refs:',
+    '  DEEPSEEK_API_KEY: test-key',
+    '  TELEGRAM_BOT_TOKEN: test-token',
+    '  TELEGRAM_ALLOWED_CHAT_ID: "1"',
+    '',
+  ].join('\n'), { mode: 0o600 })
+}
+
 function makeSyntheticHome(homePath) {
   ensureDir(join(homePath, '.dsh/storages/dsh-cron'))
   ensureDir(join(homePath, '.dsh/storages/personal-feed'))
   ensureDir(join(homePath, '.dsh/sessions'))
   ensureDir(join(homePath, '.dsh/workspace'))
   writeFileSync(join(homePath, '.dsh/storages/dsh-cron/jobs.jsonl'), '')
-  writeFileSync(join(homePath, '.dsh/.credentials.yaml'), 'providers: {}\n', { mode: 0o600 })
+  writeTestCredentials(join(homePath, '.dsh/.credentials.yaml'))
   writeFileSync(join(homePath, '.dsh/settings.yaml'), '{}\n', { mode: 0o600 })
 }
 
@@ -172,17 +183,69 @@ function materializeSnapshot(snapshot, homePath) {
     writeFileSync(prodCron, '')
   }
   rmSync(join(dshHome, '.credentials.yaml'), { force: true })
-  writeFileSync(join(dshHome, '.credentials.yaml'), 'providers: {}\n', { mode: 0o600 })
+  writeTestCredentials(join(dshHome, '.credentials.yaml'))
   for (const name of ['telegram-offset.json', 'scheduler.lock', 'worker.lock']) rmSync(join(dshHome, 'storages', name), { force: true })
 }
 
 function containerBaseArgs(homePath) {
+  // Rootless Podman maps container uid 0 to the invoking host user. Running
+  // the local development/preflight containers as uid 1000 would instead map
+  // to a subordinate host uid and make the freshly copied snapshot unwritable.
+  // Production uses Docker and remains fixed at the required 1000:1000.
+  const localUser = engine === 'podman' ? '0:0' : '1000:1000'
   return [
-    '--read-only', '--user', '1000:1000',
+    '--read-only', '--user', localUser,
     '--tmpfs', '/tmp:rw,noexec,nosuid,size=512m', '--tmpfs', '/run:rw,nosuid,size=64m',
     '--volume', `${homePath}:/home/herman:rw`,
     '--env', 'HOME=/home/herman', '--env', 'DSH_HOME=/home/herman/.dsh', '--env', 'DSH_CWD=/home/herman/.dsh/workspace',
   ]
+}
+
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
+}
+
+function devContainerRunning(name) {
+  const result = runStatus(engine, ['inspect', name, '--format', '{{.State.Running}}'])
+  return result.status === 0 && String(result.stdout).trim() === 'true'
+}
+
+function devLogs(name) {
+  const result = runStatus(engine, ['logs', '--tail', '160', name])
+  return `${String(result.stdout ?? '')}${String(result.stderr ?? '')}`.trim()
+}
+
+function verifyDev(candidate, homePath) {
+  let ready = false
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const web = runStatus('curl', ['--fail', '--silent', '--max-time', '2', 'http://127.0.0.1:13080/'])
+    if (web.status === 0 && devContainerRunning('dsh-dev-web') && devContainerRunning('dsh-dev-telegram')
+      && devContainerRunning('dsh-dev-fake-telegram')) {
+      ready = true
+      break
+    }
+    if (!devContainerRunning('dsh-dev-web') || !devContainerRunning('dsh-dev-telegram')) break
+    sleepSync(1000)
+  }
+  if (!ready) {
+    fail(`开发环境启动失败\n--- web ---\n${devLogs('dsh-dev-web')}\n--- telegram ---\n${devLogs('dsh-dev-telegram')}`, exitCodes.test)
+  }
+
+  for (const name of ['dsh-dev-web', 'dsh-dev-telegram']) {
+    const identity = run(engine, ['inspect', name, '--format', '{{.Image}}|{{.HostConfig.ReadonlyRootfs}}'], { capture: true, announce: false, code: exitCodes.test })
+    if (identity !== `${candidate.imageId}|true`) fail(`${name} 没有运行同一个只读候选镜像: ${identity}`, exitCodes.test)
+  }
+  run(engine, ['exec', 'dsh-dev-fake-telegram', 'curl', '--fail', '--silent', 'http://127.0.0.1:8080/bottest-token/getMe'], { capture: true, announce: false, code: exitCodes.test })
+  run(engine, ['exec', 'dsh-dev-fake-telegram', 'curl', '--fail', '--silent', '--request', 'POST', 'http://127.0.0.1:8080/bottest-token/sendMessage'], { capture: true, announce: false, code: exitCodes.test })
+  const requests = run(engine, ['exec', 'dsh-dev-fake-telegram', 'curl', '--fail', '--silent', 'http://127.0.0.1:8080/bottest-token/getRequests'], { capture: true, announce: false, code: exitCodes.test })
+  for (const method of ['getMe', 'getUpdates', 'sendMessage']) {
+    if (!requests.includes(`/${method}`)) fail(`假 Telegram 没有观察到 ${method}`, exitCodes.test)
+  }
+  const realTelegram = runStatus(engine, ['exec', 'dsh-dev-telegram', 'curl', '--silent', '--show-error', '--max-time', '2', 'https://api.telegram.org'])
+  if (realTelegram.status === 0) fail('开发 Telegram 容器可以访问真实 Telegram；内部网络隔离失效', exitCodes.test)
+  const cronLedger = join(homePath, '.dsh/storages/dsh-cron/jobs.jsonl')
+  if (existsSync(cronLedger) && readFileSync(cronLedger, 'utf8').trim() !== '') fail('开发 cron 台账不是空的，拒绝启动真实任务', exitCodes.test)
+  return { requests: ['getMe', 'getUpdates', 'sendMessage'], realTelegramReachable: false, cronJobs: 0 }
 }
 
 function commandBuild(options) {
@@ -298,18 +361,26 @@ function commandDev(options) {
   const { candidate } = candidateFrom(options.candidate)
   const devRoot = join(stateRoot, 'dev', candidate.candidateId)
   const homePath = join(devRoot, 'home/herman')
+  const devMetaPath = join(devRoot, 'dev.json')
   if (action === 'up') {
     stopDev()
-    materializeSnapshot(options.snapshot ?? 'latest', homePath)
+    const snapshot = options.snapshot ?? 'latest'
+    const prior = existsSync(devMetaPath) ? readJson(devMetaPath, 'development metadata') : null
+    const reuseData = !options.reset && prior?.snapshot === snapshot && existsSync(join(homePath, '.dsh'))
+    if (!reuseData) {
+      materializeSnapshot(snapshot, homePath)
+      writeJson(devMetaPath, { schemaVersion: 1, candidateId: candidate.candidateId, snapshot, createdAt: new Date().toISOString() })
+    }
     run(engine, ['run', '--rm', ...containerBaseArgs(homePath), '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'prepare'], { code: exitCodes.test })
     run(engine, ['network', 'create', '--internal', 'dsh-dev-internal'], { code: exitCodes.test })
     run(engine, ['run', '--detach', '--name', 'dsh-dev-fake-telegram', '--network', 'dsh-dev-internal', '--read-only', '--tmpfs', '/tmp:rw', candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
     run(engine, ['run', '--detach', '--name', 'dsh-dev-telegram', '--network', 'dsh-dev-internal', ...containerBaseArgs(homePath),
       '--env', 'TELEGRAM_BOT_TOKEN=test-token', '--env', 'TELEGRAM_ALLOWED_CHAT_ID=1', '--env', 'DEEPSEEK_API_KEY=test-key',
       candidate.imageTag, 'telegram-test'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-web', '--network', 'host', ...containerBaseArgs(homePath),
-      '--env', 'DSH_WEB_PORT=13080', '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
-    out({ result: 'dev-started', web: 'http://127.0.0.1:13080', homePath, network: 'dsh-dev-internal', realTelegramReachable: false })
+    run(engine, ['run', '--detach', '--name', 'dsh-dev-web', '--network', 'dsh-dev-internal', '--publish', '127.0.0.1:13080:13080', ...containerBaseArgs(homePath),
+      '--env', 'DSH_WEB_HOST=0.0.0.0', '--env', 'DSH_WEB_PORT=13080', '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
+    const verification = verifyDev(candidate, homePath)
+    out({ result: 'dev-started', web: 'http://127.0.0.1:13080', homePath, data: reuseData ? 'reused' : 'materialized', network: 'dsh-dev-internal', ...verification })
     return
   }
   if (action === 'shell') {

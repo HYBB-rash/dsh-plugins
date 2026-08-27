@@ -21,17 +21,17 @@ case "${1:-help}" in
   web)
     shift
     test -f "${DSH_HOME:-/home/herman/.dsh}/profiles/web/package.json"
-    exec node "$harness_bin" web --host 127.0.0.1 --port "${DSH_WEB_PORT:-3080}" --no-open "$@"
+    exec node --expose-internals "$harness_bin" web --host "${DSH_WEB_HOST:-127.0.0.1}" --port "${DSH_WEB_PORT:-3080}" --no-open "$@"
     ;;
   telegram)
     shift
     test -f "${DSH_HOME:-/home/herman/.dsh}/profiles/telegram/package.json"
-    exec node "$harness_bin" --profile telegram "$@"
+    exec node --expose-internals "$harness_bin" --profile telegram "$@"
     ;;
   telegram-test)
     shift
     test -f "${DSH_HOME:-/home/herman/.dsh}/profiles/telegram-test/package.json"
-    exec node "$harness_bin" --profile telegram-test "$@"
+    exec node --expose-internals "$harness_bin" --profile telegram-test "$@"
     ;;
   lan-proxy)
     exec socat TCP-LISTEN:3080,bind="${DSH_LAN_ADDRESS:-192.168.6.240}",reuseaddr,fork TCP:127.0.0.1:3080
