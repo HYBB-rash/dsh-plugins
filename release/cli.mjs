@@ -295,7 +295,10 @@ function commandBuild(options) {
   }
   run('git', ['-C', harnessTarget, 'apply', '--verbose', archivedPatch], { code: exitCodes.safety })
   const patchSha256 = sha256File(archivedPatch)
-  const imageTag = `dsh-candidate:${pluginsCommit.slice(0, 12)}-${buildId.slice(0, 15).toLowerCase()}`
+  // Podman canonicalizes unqualified image names to localhost/ in a Docker
+  // archive. Record that canonical name up front so Docker loads and Compose
+  // address the exact same tag instead of relying on engine-specific aliases.
+  const imageTag = `localhost/dsh-candidate:${pluginsCommit.slice(0, 12)}-${buildId.slice(0, 15).toLowerCase()}`
   const signaturePolicy = join(releaseTarget, 'release/containers-policy.json')
   const engineBuildOptions = engine === 'podman'
     ? ['--signature-policy', signaturePolicy]
@@ -529,7 +532,13 @@ else
   printf '%s\\n' '{"mode":"legacy-systemd"}'
 fi
 `)
-  const previousRelease = JSON.parse(previousText)
+  const currentRelease = JSON.parse(previousText)
+  // A failed first-cutover may have created evidence before production ever
+  // became current. Its rollback boundary, not the failed candidate, remains
+  // the actual previous production version.
+  const previousRelease = currentRelease.status === 'failed' && currentRelease.previous
+    ? currentRelease.previous
+    : currentRelease
   const previous = previousRelease.mode === 'legacy-systemd'
     ? { mode: 'legacy-systemd', releaseId: null }
     : {
@@ -540,8 +549,9 @@ fi
           imageId: previousRelease.candidate?.imageId,
           imageTag: previousRelease.candidate?.imageTag,
         },
+        engineImageId: previousRelease.production?.engineImageId,
       }
-  if (previous.mode === 'docker' && (!previous.releaseId || !previous.candidate.imageId || !previous.candidate.imageTag)) {
+  if (previous.mode === 'docker' && (!previous.releaseId || !previous.candidate.imageId || !previous.candidate.imageTag || !previous.engineImageId)) {
     fail('当前 Docker release.json 缺少回退所需镜像身份', exitCodes.production)
   }
   const remoteReleaseDir = `${remoteRoot}/releases/${releaseId}`
@@ -620,15 +630,18 @@ mv -Tf "$root/snapshots/latest.json.next" "$root/snapshots/latest.json"
 release_dir=${shellQuote(remoteReleaseDir)}
 expected_archive=${shellQuote(candidate.archiveSha256)}
 expected_image=${shellQuote(candidate.imageId)}
+expected_tag=${shellQuote(candidate.imageTag)}
 actual_archive="sha256:$(sha256sum "$release_dir/image.tar" | awk '{print $1}')"
 test "$actual_archive" = "$expected_archive" || { echo 'archive sha256 mismatch' >&2; exit 51; }
+archive_identity="$(tar -xOf "$release_dir/image.tar" manifest.json | python3 -c 'import json,sys; entry=json.load(sys.stdin)[0]; print(entry["Config"]+"|"+entry["RepoTags"][0])')"
+test "$archive_identity" = "${candidate.imageId.replace(/^sha256:/u, '')}.json|$expected_tag" || { echo "archive identity mismatch: $archive_identity" >&2; exit 52; }
 docker load --input "$release_dir/image.tar"
-actual_image="$(docker image inspect ${shellQuote(candidate.imageTag)} --format '{{.Id}}')"
-test "$actual_image" = "$expected_image" || { echo "image ID mismatch: $actual_image" >&2; exit 52; }
-ln -sfn "$release_dir" ${shellQuote(remoteRoot)}/current.next
-mv -Tf ${shellQuote(remoteRoot)}/current.next ${shellQuote(remoteRoot)}/current
+engine_image="$(docker image inspect "$expected_tag" --format '{{.Id}}')"
+test "$(docker image inspect "$expected_tag" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = ${shellQuote(candidate.pluginsCommit)}
+test "$(docker image inspect "$expected_tag" --format '{{index .Config.Labels "io.dsh.release.revision"}}')" = ${shellQuote(candidate.releaseToolCommit)}
+test "$(docker image inspect "$expected_tag" --format '{{index .Config.Labels "io.dsh.harness.revision"}}')" = ${shellQuote(candidate.harnessCommit)}
 cd "$release_dir"
-DSH_IMAGE=${shellQuote(candidate.imageTag)} DSH_IMAGE_ID="$expected_image" docker compose -p dsh -f compose.production.yml up -d
+DSH_IMAGE="$expected_tag" DSH_IMAGE_ID="$expected_image" docker compose -p dsh -f compose.production.yml up -d
 for attempt in $(seq 1 24); do curl --fail --silent --max-time 2 http://127.0.0.1:3080/ >/dev/null && break; sleep 5; done
 curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
 curl --fail --silent --max-time 3 http://192.168.6.240:3080/ >/dev/null
@@ -637,7 +650,9 @@ test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount
 test "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs >/dev/null
 openclaw_after="$(systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ',')"
-printf '{"imageId":"%s","web":"%s","telegram":"%s","lan":"%s","cronControl":"ready","openclawAfter":"%s"}\\n' "$actual_image" "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" "$openclaw_after"
+ln -sfn "$release_dir" ${shellQuote(remoteRoot)}/current.next
+mv -Tf ${shellQuote(remoteRoot)}/current.next ${shellQuote(remoteRoot)}/current
+printf '{"imageId":"%s","engineImageId":"%s","web":"%s","telegram":"%s","lan":"%s","cronControl":"ready","openclawAfter":"%s"}\\n' "$expected_image" "$engine_image" "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" "$openclaw_after"
 `)
   let productionReceipt
   try { productionReceipt = JSON.parse(startOutput.split('\n').at(-1)) } catch { fail(`无法解析生产启动回执: ${startOutput}`, exitCodes.production) }
@@ -675,7 +690,10 @@ function commandAccept(options) {
   const evidence = existsSync(options.evidence) ? readFileSync(options.evidence, 'utf8').trim() : options.evidence
   if (!evidence) fail('验收证据不能为空', exitCodes.usage)
   const acceptanceHealth = ssh(`set -Eeuo pipefail
-test "$(docker image inspect ${shellQuote(release.candidate.imageTag)} --format '{{.Id}}')" = ${shellQuote(release.candidate.imageId)}
+test "sha256:$(sha256sum ${shellQuote(`/home/herman/.local/share/dsh-container/releases/${release.releaseId}/image.tar`)} | awk '{print $1}')" = ${shellQuote(release.candidate.archiveSha256)}
+test "$(docker image inspect ${shellQuote(release.candidate.imageTag)} --format '{{.Id}}')" = ${shellQuote(release.production.engineImageId)}
+test "$(docker inspect dsh-web --format '{{.Image}}')" = ${shellQuote(release.production.engineImageId)}
+test "$(docker inspect dsh-telegram --format '{{.Image}}')" = ${shellQuote(release.production.engineImageId)}
 test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
@@ -726,12 +744,13 @@ legacy_release="$(readlink -f /home/herman/.local/share/dsh-deploy/current)"
 previous_dir=${shellQuote(release.previous.remoteDir)}
 previous_image=${shellQuote(release.previous.candidate.imageTag)}
 previous_image_id=${shellQuote(release.previous.candidate.imageId)}
+previous_engine_image_id=${shellQuote(release.previous.engineImageId)}
 test -f "$previous_dir/compose.production.yml"
 if ! docker image inspect "$previous_image" >/dev/null 2>&1; then
   test -f "$previous_dir/image.tar"
   docker load --input "$previous_dir/image.tar"
 fi
-test "$(docker image inspect "$previous_image" --format '{{.Id}}')" = "$previous_image_id"
+test "$(docker image inspect "$previous_image" --format '{{.Id}}')" = "$previous_engine_image_id"
 ln -sfn "$previous_dir" "$root/current.next"
 mv -Tf "$root/current.next" "$root/current"
 cd "$previous_dir"
@@ -795,7 +814,7 @@ function commandRetireLegacy(options) {
   const healthy = ssh(`set -Eeuo pipefail
 test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
-test "$(docker image inspect ${shellQuote(release.candidate.imageTag)} --format '{{.Id}}')" = ${shellQuote(release.candidate.imageId)}
+test "$(docker image inspect ${shellQuote(release.candidate.imageTag)} --format '{{.Id}}')" = ${shellQuote(release.production.engineImageId)}
 `)
   void healthy
   ssh(`set -Eeuo pipefail
