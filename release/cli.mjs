@@ -209,9 +209,12 @@ function commandBuild(options) {
   run('git', ['-C', harnessTarget, 'apply', '--verbose', archivedPatch], { code: exitCodes.safety })
   const patchSha256 = sha256File(archivedPatch)
   const imageTag = `dsh-candidate:${pluginsCommit.slice(0, 12)}-${buildId.slice(0, 15).toLowerCase()}`
+  const engineBuildOptions = engine === 'podman'
+    ? ['--signature-policy', join(pluginsTarget, 'release/containers-policy.json')]
+    : []
 
   run(engine, [
-    'build', '--format', 'docker', '--pull=missing',
+    'build', ...engineBuildOptions, '--format', 'docker', '--pull=missing',
     '--build-arg', `DSH_HARNESS_COMMIT=${harnessCommit}`,
     '--build-arg', `DSH_HARNESS_PATCH_SHA256=${patchSha256}`,
     '--build-arg', `DSH_PLUGINS_COMMIT=${pluginsCommit}`,
