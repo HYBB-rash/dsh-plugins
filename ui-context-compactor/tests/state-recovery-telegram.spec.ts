@@ -61,7 +61,7 @@ describe('F07-T2 Telegram cold-state classification', () => {
     })).toBe('new')
   })
 
-  it('negative: treats a finalized canonical log without sidecar material as expected-missing', () => {
+  it('negative: sends a finalized canonical log without an owner row to expected-missing', () => {
     expect(classifyTelegramStateRecovery({
       sessionId: chat,
       events: [finalizedCanonical('finalized-1')],

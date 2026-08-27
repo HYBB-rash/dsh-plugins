@@ -157,7 +157,7 @@ flowchart LR
 - 可成对指定 reducer 的 `provider` 和 `model`，或使用默认宿主选择。
 - 只服务单个 session；摘要仍可能错，不能替代原始会话记录或跨会话知识库。
 - 对受管 Telegram canary，已有唯一背景后的同 chat、同 generation C14/C15 事实更新会重新走同一份确定性候选、双 reviewer 与 C28；只有候选正文和机器投影逐字节相同，才保留 identical-qualified 证明而不换入背景。assistant 文本、普通 direct 和任意触发都不能取得这条资格链。
-- Telegram 冷启动只按结构化来源区分真正新聊天、已保全的 pre-canonical 焦点、待迁移旧 route 与缺失应有 state；旧 route 正文不成为候选或规范状态，日志已有 context-manager 状态而 sidecar 缺失时走既有受管错误面，不冒充新聊天。
+- Telegram 冷启动只按结构化来源区分真正新聊天、已保全的 pre-canonical 焦点、待迁移旧 route 与缺失应有 state；已完整保全的 canonical state 继续由既有 owner 恢复，不进入这四分；旧 route 正文不成为候选或规范状态，日志已有 context-manager state 而 owner material 缺失时走既有受管错误面，不冒充新聊天。
 
 ## 构建、测试与本地开发
 

@@ -20,8 +20,6 @@ export interface TelegramStateRecoveryInput {
   readonly events: readonly SessionEvent[]
   /** Already exact-schema-validated F02 sidecar projection; never decoded here. */
   readonly hasPreCanonicalFocus: boolean
-  /** Existing finalized state material was validated by its owning recovery path. */
-  readonly hasCanonicalStateMaterial?: boolean
   /** H2 physically retained a direct close, but its later state material is absent. */
   readonly hasExpectedNoFocusEvidence?: boolean
 }
@@ -53,7 +51,7 @@ export function classifyTelegramStateRecovery(
   input: TelegramStateRecoveryInput,
 ): TelegramStateRecoveryClass {
   if (input.sessionId !== 'session-telegram') return 'new'
-  if (hasCanonicalState(input.events) && input.hasCanonicalStateMaterial !== true) return 'expected_missing'
+  if (hasCanonicalState(input.events)) return 'expected_missing'
   if (input.hasPreCanonicalFocus) return 'precanonical_focus'
   if (hasLegacyRoute(input.events)) return 'legacy_route'
   if (input.hasExpectedNoFocusEvidence === true) return 'expected_missing'

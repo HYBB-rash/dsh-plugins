@@ -2720,23 +2720,34 @@ function installFocusCanary(
       recoveryGates.set(agent, { kind: 'closed' })
       return
     }
-    const stateClass = classifyTelegramStateRecovery({
-      sessionId,
-      events: agent.session.events,
-      hasPreCanonicalFocus: record !== undefined && focusCanaryRecordSchema.safeParse(record).success,
-      // The storage domain accepted this H1/H1R row as an exact known family.
-      // Its owner still performs all phase/material/identity checks below;
-      // T2 only distinguishes an actually absent sidecar from a new chat.
-      hasCanonicalStateMaterial: record !== undefined,
-      hasExpectedNoFocusEvidence: record === undefined && hasExpectedNoFocusWithoutTransaction(agent),
-    })
-    // A context-manager source on the physical log without its exact state
-    // material is an incident, never a new or legacy route chat.  This gate
-    // deliberately leaves legacy route migration to the ordinary direct-user
-    // F02/F01/F06-F09 paths below; route body is never decoded here.
-    if (stateClass === 'expected_missing') {
-      recoveryGates.set(agent, { kind: 'closed' })
-      return
+    // focus_precanonical is already parsed by h1CanaryRecordSchema. Reuse its
+    // strict-union alternatives rather than reparsing one row through every
+    // owner schema: only a root original is pre-canonical focus; proof-only
+    // is the one closure alternative without a proved proposal/decision.
+    const preCanonicalFocus = record !== undefined && 'original' in record
+    const proofOnly: ClosureOnlyProofRecord | undefined = record !== undefined
+      && 'closure' in record && !('proposal' in record.closure)
+      ? record as ClosureOnlyProofRecord
+      : undefined
+    // A complete canonical owner, and the established proof-only recovery
+    // branch below, are outside T2's cold-state input domain. Their existing
+    // branches alone own phase, material, identity, and any repair.
+    const existingCanonicalOwner = record !== undefined
+      && !preCanonicalFocus && proofOnly === undefined
+    if (!existingCanonicalOwner && proofOnly === undefined) {
+      const stateClass = classifyTelegramStateRecovery({
+        sessionId,
+        events: agent.session.events,
+        hasPreCanonicalFocus: preCanonicalFocus,
+        hasExpectedNoFocusEvidence: record === undefined && hasExpectedNoFocusWithoutTransaction(agent),
+      })
+      // A context-manager source on the physical log without an exact owner
+      // row is an incident, never a new or legacy route chat. Route body is
+      // never decoded here.
+      if (stateClass === 'expected_missing') {
+        recoveryGates.set(agent, { kind: 'closed' })
+        return
+      }
     }
     // A genuinely fresh chat has neither sidecar state nor a durable H2 close.
     // It remains ordinary H1/T3 behavior; H1R-F never signs a new-chat result.
@@ -2749,9 +2760,8 @@ function installFocusCanary(
       }
       return
     }
-    const proofOnly = closureOnlyProofRecordSchema.safeParse(record)
-    if (proofOnly.success) {
-      if (proofOnly.data.closure.phase !== 'physically_proved') {
+    if (proofOnly !== undefined) {
+      if (proofOnly.closure.phase !== 'physically_proved') {
         recoveryGates.set(agent, { kind: 'closed' })
         return
       }
@@ -2766,14 +2776,14 @@ function installFocusCanary(
             if (sessions === undefined || persistence === undefined
               || !await sessions.flush(agent.session)) return
             const detached = await persistence.readFrom(sessionId, 0)
-            const liveTranscript = exactClosureOnlyProofTranscript(sessionId, agent.session.events, proofOnly.data)
-            const detachedTranscript = exactClosureOnlyProofTranscript(sessionId, detached.events, proofOnly.data)
+            const liveTranscript = exactClosureOnlyProofTranscript(sessionId, agent.session.events, proofOnly)
+            const detachedTranscript = exactClosureOnlyProofTranscript(sessionId, detached.events, proofOnly)
             if (liveTranscript === undefined || detachedTranscript === undefined
               || !sameClosureOnlyProofTranscript(liveTranscript, detachedTranscript)
               || signal.aborted) return
             const closeText = textOf(liveTranscript.close)
             if (closeText !== '这件事结束了') return
-            const origin = proofOnly.data.closure.original
+            const origin = proofOnly.closure.original
             const proposal = await auxiliary.proposeProofOnlyColdRecovery(closeText, origin, signal)
             if (proposal.kind !== 'proposal' || proposal.value.kind !== 'close') return
             const result = focusAuthority.fromBoundProposal(proposal)
@@ -2785,7 +2795,7 @@ function installFocusCanary(
             if (advice.kind !== 'business_result') return
             const carrier: ClosureOnlyNoFocusRecord = {
               closure: {
-                ...proofOnly.data.closure,
+                ...proofOnly.closure,
                 phase: 'physically_proved',
                 proposal: { kind: proposal.value.kind, relation: proposal.value.relation },
                 decision: {
