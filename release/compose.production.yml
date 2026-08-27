@@ -12,6 +12,7 @@ x-dsh-common: &dsh-common
     DSH_HOME: /home/herman/.dsh
     DSH_CWD: /home/herman/.dsh/workspace
     DSH_IMAGE_ID: ${DSH_IMAGE_ID:?DSH_IMAGE_ID is required}
+    DSH_X_FEED_DATA_DIR: /home/herman/.dsh/storages/dsh-x-feed
   volumes:
     - /home/herman:/home/herman:rw
     - /home/herman/.openclaw:/home/herman/.openclaw:ro

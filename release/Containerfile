@@ -91,8 +91,11 @@ RUN set -eu; \
               --maxWorkers=1 --no-file-parallelism); \
       fi; \
     done; \
+    python_data="$(mktemp -d)"; \
+    trap 'rm -rf "$python_data"' EXIT; \
     (cd local-plugins/x-feed/python \
-     && PYTHONWARNINGS=ignore python3 -m unittest discover -p 'test_x_*.py')
+     && DSH_X_FEED_DATA_DIR="$python_data" PYTHONWARNINGS=ignore \
+        python3 -m unittest discover -p 'test_x_*.py')
 
 ARG DSH_PLUGINS_COMMIT
 LABEL org.opencontainers.image.title="DSH private-assistant runtime" \
