@@ -92,5 +92,6 @@ run_expect 4 dev prepare --source "$repo_root" --candidate "$stale_candidate"
 grep -q '开发基础镜像不是最新 main' "$test_root/stderr"
 
 node --check "$repo_root/release/cli.mjs"
+node --test "$repo_root/release/tests/dev-runtime-identity.spec.mjs"
 bash -n "$repo_root/release/dsh" "$repo_root"/release/scripts/*.sh
 printf 'release command contract passed\n'

@@ -22,6 +22,8 @@ import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { devRuntimeIdentity } from './dev-runtime-identity.mjs'
+
 const releaseRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = dirname(releaseRoot)
 const stateRoot = resolve(process.env.DSH_RELEASE_STATE_ROOT ?? join(homedir(), '.local/share/dsh-container'))
@@ -31,6 +33,7 @@ const engine = process.env.DSH_CONTAINER_ENGINE ?? 'podman'
 const composePath = join(releaseRoot, 'compose.production.yml')
 const patchPath = join(releaseRoot, 'patches/harness-minimal-shell-path.patch')
 const exitCodes = Object.freeze({ usage: 2, approval: 3, safety: 4, test: 5, production: 6 })
+const devRuntime = devRuntimeIdentity(repoRoot)
 
 class DshError extends Error {
   constructor(message, code = exitCodes.safety) {
@@ -189,10 +192,10 @@ function archiveStagingRoot(candidateDir) {
 }
 
 function stopDev() {
-  for (const name of ['dsh-dev-telegram', 'dsh-dev-fake-telegram', 'dsh-dev-web']) {
+  for (const name of [devRuntime.containers.telegram, devRuntime.containers.fakeTelegram, devRuntime.containers.web]) {
     runStatus(engine, ['rm', '--force', name])
   }
-  runStatus(engine, ['network', 'rm', 'dsh-dev-internal'])
+  runStatus(engine, ['network', 'rm', devRuntime.network])
 }
 
 function writeTestCredentials(path) {
@@ -340,30 +343,30 @@ function devLogs(name) {
 function verifyDev(candidate, homePath) {
   let ready = false
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    const web = runStatus('curl', ['--fail', '--silent', '--max-time', '2', 'http://127.0.0.1:13080/'])
-    if (web.status === 0 && devContainerRunning('dsh-dev-web') && devContainerRunning('dsh-dev-telegram')
-      && devContainerRunning('dsh-dev-fake-telegram')) {
+    const web = runStatus('curl', ['--fail', '--silent', '--max-time', '2', `${devRuntime.webUrl}/`])
+    if (web.status === 0 && devContainerRunning(devRuntime.containers.web) && devContainerRunning(devRuntime.containers.telegram)
+      && devContainerRunning(devRuntime.containers.fakeTelegram)) {
       ready = true
       break
     }
-    if (!devContainerRunning('dsh-dev-web') || !devContainerRunning('dsh-dev-telegram')) break
+    if (!devContainerRunning(devRuntime.containers.web) || !devContainerRunning(devRuntime.containers.telegram)) break
     sleepSync(1000)
   }
   if (!ready) {
-    fail(`开发环境启动失败\n--- web ---\n${devLogs('dsh-dev-web')}\n--- telegram ---\n${devLogs('dsh-dev-telegram')}`, exitCodes.test)
+    fail(`开发环境启动失败\n--- web ---\n${devLogs(devRuntime.containers.web)}\n--- telegram ---\n${devLogs(devRuntime.containers.telegram)}`, exitCodes.test)
   }
 
-  for (const name of ['dsh-dev-web', 'dsh-dev-telegram']) {
+  for (const name of [devRuntime.containers.web, devRuntime.containers.telegram]) {
     const identity = run(engine, ['inspect', name, '--format', '{{.Image}}|{{.HostConfig.ReadonlyRootfs}}'], { capture: true, announce: false, code: exitCodes.test })
     if (identity !== `${candidate.imageId}|true`) fail(`${name} 没有运行同一个只读候选镜像: ${identity}`, exitCodes.test)
   }
-  run(engine, ['exec', 'dsh-dev-fake-telegram', 'curl', '--fail', '--silent', 'http://127.0.0.1:8080/bottest-token/getMe'], { capture: true, announce: false, code: exitCodes.test })
-  run(engine, ['exec', 'dsh-dev-fake-telegram', 'curl', '--fail', '--silent', '--request', 'POST', 'http://127.0.0.1:8080/bottest-token/sendMessage'], { capture: true, announce: false, code: exitCodes.test })
-  const requests = run(engine, ['exec', 'dsh-dev-fake-telegram', 'curl', '--fail', '--silent', 'http://127.0.0.1:8080/bottest-token/getRequests'], { capture: true, announce: false, code: exitCodes.test })
+  run(engine, ['exec', devRuntime.containers.fakeTelegram, 'curl', '--fail', '--silent', 'http://127.0.0.1:8080/bottest-token/getMe'], { capture: true, announce: false, code: exitCodes.test })
+  run(engine, ['exec', devRuntime.containers.fakeTelegram, 'curl', '--fail', '--silent', '--request', 'POST', 'http://127.0.0.1:8080/bottest-token/sendMessage'], { capture: true, announce: false, code: exitCodes.test })
+  const requests = run(engine, ['exec', devRuntime.containers.fakeTelegram, 'curl', '--fail', '--silent', 'http://127.0.0.1:8080/bottest-token/getRequests'], { capture: true, announce: false, code: exitCodes.test })
   for (const method of ['getMe', 'getUpdates', 'sendMessage']) {
     if (!requests.includes(`/${method}`)) fail(`假 Telegram 没有观察到 ${method}`, exitCodes.test)
   }
-  const realTelegram = runStatus(engine, ['exec', 'dsh-dev-telegram', 'curl', '--silent', '--show-error', '--max-time', '2', 'https://api.telegram.org'])
+  const realTelegram = runStatus(engine, ['exec', devRuntime.containers.telegram, 'curl', '--silent', '--show-error', '--max-time', '2', 'https://api.telegram.org'])
   if (realTelegram.status === 0) fail('开发 Telegram 容器可以访问真实 Telegram；内部网络隔离失效', exitCodes.test)
   const cronLedger = join(homePath, '.dsh/storages/dsh-cron/jobs.jsonl')
   if (existsSync(cronLedger) && readFileSync(cronLedger, 'utf8').trim() !== '') fail('开发 cron 台账不是空的，拒绝启动真实任务', exitCodes.test)
@@ -507,7 +510,7 @@ function commandDev(options) {
     return
   }
   const { candidate } = candidateFrom(options.candidate)
-  const devRoot = join(stateRoot, 'dev', candidate.candidateId)
+  const devRoot = join(stateRoot, 'dev', devRuntime.id, candidate.candidateId)
   const homePath = join(devRoot, 'home/herman')
   const devMetaPath = join(devRoot, 'dev.json')
   if (action === 'up') {
@@ -520,18 +523,18 @@ function commandDev(options) {
       writeJson(devMetaPath, { schemaVersion: 1, candidateId: candidate.candidateId, snapshot, createdAt: new Date().toISOString() })
     }
     run(engine, ['run', '--rm', ...containerBaseArgs(homePath), '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'prepare'], { code: exitCodes.test })
-    run(engine, ['network', 'create', '--internal', 'dsh-dev-internal'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-fake-telegram', '--network', 'dsh-dev-internal', '--network-alias', 'fake-telegram', '--read-only', '--tmpfs', '/tmp:rw', candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-telegram', '--network', 'dsh-dev-internal', ...containerBaseArgs(homePath),
+    run(engine, ['network', 'create', '--internal', devRuntime.network], { code: exitCodes.test })
+    run(engine, ['run', '--detach', '--name', devRuntime.containers.fakeTelegram, '--network', devRuntime.network, '--network-alias', 'fake-telegram', '--read-only', '--tmpfs', '/tmp:rw', candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
+    run(engine, ['run', '--detach', '--name', devRuntime.containers.telegram, '--network', devRuntime.network, ...containerBaseArgs(homePath),
       '--env', 'TELEGRAM_BOT_TOKEN=test-token', '--env', 'TELEGRAM_ALLOWED_CHAT_ID=1', '--env', 'DEEPSEEK_API_KEY=test-key',
       candidate.imageTag, 'telegram-test'], { code: exitCodes.test })
     // Harness intentionally binds Web only to loopback.  Keep it on the host
     // network for local browser access; the Telegram/cron writer remains on
     // the egress-free internal network with only the fake Bot API.
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-web', '--network', 'host', ...containerBaseArgs(homePath),
-      '--env', 'DSH_WEB_PORT=13080', '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
+    run(engine, ['run', '--detach', '--name', devRuntime.containers.web, '--network', 'host', ...containerBaseArgs(homePath),
+      '--env', `DSH_WEB_PORT=${devRuntime.webPort}`, '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
     const verification = verifyDev(candidate, homePath)
-    const result = { result: 'dev-started', web: 'http://127.0.0.1:13080', homePath, data: reuseData ? 'reused' : 'materialized', network: 'dsh-dev-internal', ...verification }
+    const result = { result: 'dev-started', runtimeId: devRuntime.id, web: devRuntime.webUrl, homePath, data: reuseData ? 'reused' : 'materialized', network: devRuntime.network, containers: devRuntime.containers, ...verification }
     out(result)
     return result
   }
@@ -552,14 +555,14 @@ function commandDev(options) {
       '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'dev-source-check'], { code: exitCodes.test })
     run(engine, ['run', '--rm', ...containerBaseArgs(homePath), ...sourceArgs,
       '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'prepare'], { code: exitCodes.test })
-    run(engine, ['network', 'create', '--internal', 'dsh-dev-internal'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-fake-telegram', '--network', 'dsh-dev-internal', '--network-alias', 'fake-telegram',
+    run(engine, ['network', 'create', '--internal', devRuntime.network], { code: exitCodes.test })
+    run(engine, ['run', '--detach', '--name', devRuntime.containers.fakeTelegram, '--network', devRuntime.network, '--network-alias', 'fake-telegram',
       '--read-only', '--tmpfs', '/tmp:rw', ...sourceArgs, candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-telegram', '--network', 'dsh-dev-internal', ...containerBaseArgs(homePath), ...sourceArgs,
+    run(engine, ['run', '--detach', '--name', devRuntime.containers.telegram, '--network', devRuntime.network, ...containerBaseArgs(homePath), ...sourceArgs,
       '--env', 'TELEGRAM_BOT_TOKEN=test-token', '--env', 'TELEGRAM_ALLOWED_CHAT_ID=1', '--env', 'DEEPSEEK_API_KEY=test-key',
       candidate.imageTag, 'telegram-test'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-web', '--network', 'host', ...containerBaseArgs(homePath), ...sourceArgs,
-      '--env', 'DSH_WEB_PORT=13080', '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
+    run(engine, ['run', '--detach', '--name', devRuntime.containers.web, '--network', 'host', ...containerBaseArgs(homePath), ...sourceArgs,
+      '--env', `DSH_WEB_PORT=${devRuntime.webPort}`, '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
     const verification = verifyDev(candidate, homePath)
     let completionSource
     try {
@@ -587,10 +590,12 @@ function commandDev(options) {
     writeJson(devMetaPath, metadata)
     const result = {
       result: 'dev-source-ready',
-      web: 'http://127.0.0.1:13080',
+      runtimeId: devRuntime.id,
+      web: devRuntime.webUrl,
       homePath,
       data: 'fresh-isolated-production-snapshot',
-      network: 'dsh-dev-internal',
+      network: devRuntime.network,
+      containers: devRuntime.containers,
       ...metadata,
     }
     out(result)
@@ -600,7 +605,7 @@ function commandDev(options) {
     if (!existsSync(homePath)) fail('开发数据副本不存在；请先执行 dev up', exitCodes.usage)
     const prior = existsSync(devMetaPath) ? readJson(devMetaPath, 'development metadata') : null
     const sourceArgs = prior?.mode === 'editable-source' ? developmentSourceArgs(resolve(prior.sourcePath)) : []
-    run(engine, ['run', '--rm', '--interactive', '--tty', '--network', 'dsh-dev-internal', ...containerBaseArgs(homePath), ...sourceArgs, candidate.imageTag, 'shell'], { code: exitCodes.test })
+    run(engine, ['run', '--rm', '--interactive', '--tty', '--network', devRuntime.network, ...containerBaseArgs(homePath), ...sourceArgs, candidate.imageTag, 'shell'], { code: exitCodes.test })
     return
   }
   fail('用法: dsh dev prepare --source <worktree> --candidate <candidate.json>；dsh dev up --snapshot latest|synthetic；dsh dev shell；dsh dev down', exitCodes.usage)

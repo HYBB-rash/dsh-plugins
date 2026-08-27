@@ -60,7 +60,7 @@
 
 构建仍会在删除标签后重载 Docker archive，证明归档可以恢复同一个 image ID。若 `/dev/shm` 至少有 8 GiB 可用空间，归档会自动在那里暂存，重载成功后再复制到证据目录，避免根盘同时承受镜像层和归档的峰值占用；也可用 `DSH_RELEASE_ARCHIVE_STAGING_ROOT` 指定其他临时文件系统。暂存归档未完成摘要校验前不会生成 `candidate.json`。
 
-开发态的 Telegram/cron 容器只连接无外网的内部网络和假 Bot API；Web 由于 Harness 强制只绑定 loopback，使用宿主网络供本机浏览器访问，但只持有测试凭据，不承担 Telegram 或 cron 写入。生产容器固定使用 `1000:1000`；本机 rootless Podman 为了让快照副本保持宿主用户可读写，在容器内显示为 uid 0，但仍映射为宿主普通用户，不获得宿主 root 权限。
+开发态的 Telegram/cron 容器只连接无外网的内部网络和假 Bot API；Web 由于 Harness 强制只绑定 loopback，使用宿主网络供本机浏览器访问，但只持有测试凭据，不承担 Telegram 或 cron 写入。每个独立 worktree 都有自己的稳定运行时 ID、容器名、内部网络、数据副本和 Web 端口；一个 worktree 的 `prepare`、`shell` 或 `down` 不会占用或删除另一个 worktree 的开发运行时。生产容器固定使用 `1000:1000`；本机 rootless Podman 为了让快照副本保持宿主用户可读写，在容器内显示为 uid 0，但仍映射为宿主普通用户，不获得宿主 root 权限。
 
 `dev prepare` 是源码开发入口，不是发版入口。它在准备开始和完成后都会重新 fetch：独立任务分支必须包含最新 `origin/main`，开发基础镜像的插件 commit 也必须精确等于该 `origin/main`；期间 main 一旦更新，就停止并要求 rebase、重建基础镜像和重跑门禁。正式 `build` 和 `release` 也会拒绝任何没有基于最新 `origin/main` 的产品或发版工具 commit。它只下载已有的一致生产快照，不会为开发申请停机或在线生成快照；远端没有快照、摘要不匹配或下载失败都会停止，不会退回合成数据。Harness 始终使用 `harness.lock.json` 的只读固定 commit。六个插件、Skills、Profiles、runtime topology、materializer 和镜像运行脚本都从独立 worktree 可写挂入；镜像根文件系统仍为只读，编译产物留在 worktree 的忽略目录。生产目录和真实凭据不会被挂载。
 
