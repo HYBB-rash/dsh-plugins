@@ -24,12 +24,14 @@ x-dsh-common: &dsh-common
 services:
   prepare:
     <<: *dsh-common
+    container_name: dsh-prepare
     restart: "no"
     cap_drop: ["ALL"]
     command: ["prepare"]
 
   web:
     <<: *dsh-common
+    container_name: dsh-web
     network_mode: host
     cap_drop: ["ALL"]
     command: ["web"]
@@ -45,6 +47,7 @@ services:
 
   lan-proxy:
     <<: *dsh-common
+    container_name: dsh-lan-proxy
     network_mode: host
     cap_drop: ["ALL"]
     command: ["lan-proxy"]
@@ -56,6 +59,7 @@ services:
 
   telegram:
     <<: *dsh-common
+    container_name: dsh-telegram
     network_mode: host
     pid: host
     privileged: true

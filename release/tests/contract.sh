@@ -7,7 +7,10 @@ cleanup() { rm -rf -- "$test_root"; }
 trap cleanup EXIT
 
 archive="$test_root/image.tar"
-printf 'immutable image fixture\n' >"$archive"
+mkdir -p "$test_root/archive-root"
+printf '%s\n' '{}' >"$test_root/archive-root/fixture.json"
+printf '%s\n' '[{"Config":"fixture.json","RepoTags":["dsh-candidate:fixture"],"Layers":[]}]' >"$test_root/archive-root/manifest.json"
+tar -C "$test_root/archive-root" -cf "$archive" fixture.json manifest.json
 archive_sha="sha256:$(sha256sum "$archive" | awk '{print $1}')"
 candidate="$test_root/candidate.json"
 cat >"$candidate" <<EOF

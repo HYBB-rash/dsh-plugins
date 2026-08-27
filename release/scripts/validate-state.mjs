@@ -24,7 +24,13 @@ for (const path of databases) {
     if (integrity.length !== 1 || integrity[0] !== 'ok' || foreignKeys.length !== 0) {
       throw new Error(`SQLite validation failed: ${path}`)
     }
-    results.push({ path: path.slice(root.length + 1), integrity: 'ok', foreignKeyViolations: 0 })
+    const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()
+      .map(({ name }) => {
+        const quoted = String(name).replaceAll('"', '""')
+        const row = db.prepare(`SELECT count(*) AS count FROM "${quoted}"`).get()
+        return { name, rows: Number(row.count) }
+      })
+    results.push({ path: path.slice(root.length + 1), integrity: 'ok', foreignKeyViolations: 0, tables })
   } finally {
     db.close()
   }

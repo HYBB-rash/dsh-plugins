@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const releaseRoot = dirname(fileURLToPath(import.meta.url))
@@ -129,8 +129,19 @@ function candidateFrom(value) {
   for (const field of ['imageId', 'imageTag', 'archivePath', 'archiveSha256', 'pluginsCommit', 'harnessCommit']) {
     if (!candidate[field]) fail(`candidate 缺少 ${field}`, exitCodes.usage)
   }
+  if (candidate.status !== 'tested') fail(`candidate 尚未通过镜像测试，当前状态是 ${candidate.status ?? 'missing'}`, exitCodes.safety)
   if (!existsSync(candidate.archivePath)) fail(`candidate 镜像归档不存在: ${candidate.archivePath}`, exitCodes.safety)
   if (sha256File(candidate.archivePath) !== candidate.archiveSha256) fail('candidate 镜像归档摘要不匹配', exitCodes.safety)
+  const manifestText = run('tar', ['-xOf', candidate.archivePath, 'manifest.json'], { capture: true, announce: false, code: exitCodes.safety })
+  let archiveImageIds
+  try {
+    archiveImageIds = JSON.parse(manifestText).map(({ Config }) => basename(Config, '.json').replace(/^sha256:/u, ''))
+  } catch (error) {
+    fail(`无法读取 candidate 镜像归档身份: ${error.message}`, exitCodes.safety)
+  }
+  if (!archiveImageIds.includes(candidate.imageId.replace(/^sha256:/u, ''))) {
+    fail(`candidate 声明的 image ID 不在镜像归档中: ${candidate.imageId}`, exitCodes.safety)
+  }
   return { candidate, path }
 }
 
@@ -383,8 +394,9 @@ function commandDev(options) {
     run(engine, ['run', '--detach', '--name', 'dsh-dev-web', '--network', 'host', ...containerBaseArgs(homePath),
       '--env', 'DSH_WEB_PORT=13080', '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
     const verification = verifyDev(candidate, homePath)
-    out({ result: 'dev-started', web: 'http://127.0.0.1:13080', homePath, data: reuseData ? 'reused' : 'materialized', network: 'dsh-dev-internal', ...verification })
-    return
+    const result = { result: 'dev-started', web: 'http://127.0.0.1:13080', homePath, data: reuseData ? 'reused' : 'materialized', network: 'dsh-dev-internal', ...verification }
+    out(result)
+    return result
   }
   if (action === 'shell') {
     if (!existsSync(homePath)) fail('开发数据副本不存在；请先执行 dev up', exitCodes.usage)
@@ -441,6 +453,47 @@ function performProductionRelease(candidate, candidatePath) {
   const releaseId = `${nowId()}-${candidate.pluginsCommit.slice(0, 12)}`
   const localReleaseDir = join(stateRoot, 'releases', releaseId)
   const localSnapshotDir = join(stateRoot, 'snapshots', releaseId)
+  const releasePath = join(localReleaseDir, 'release.json')
+  ensureDir(localReleaseDir)
+  ensureDir(localSnapshotDir)
+  const evidence = {
+    schemaVersion: 1,
+    releaseId,
+    status: 'prepared',
+    currentStage: 'remote-preflight',
+    candidatePath,
+    candidate,
+    snapshot: null,
+    previous: null,
+    preflight: null,
+    production: null,
+    createdAt: new Date().toISOString(),
+    userAcceptance: null,
+  }
+  const stage = (currentStage, details = {}) => {
+    evidence.currentStage = currentStage
+    Object.assign(evidence, details)
+    writeJson(releasePath, evidence)
+  }
+  stage('remote-preflight')
+  try {
+    return performProductionReleaseUnsafe(candidate, candidatePath, releaseId, stage)
+  } catch (error) {
+    stopDev()
+    evidence.status = 'failed'
+    evidence.failedAt = new Date().toISOString()
+    evidence.failure = { stage: evidence.currentStage, message: error.message, exitCode: error.exitCode ?? 1 }
+    const snapshotMetaPath = join(localSnapshotDir, 'snapshot.json')
+    if (existsSync(snapshotMetaPath)) evidence.snapshot = readJson(snapshotMetaPath, 'snapshot')
+    writeJson(releasePath, evidence)
+    runStatus('scp', ['-p', releasePath, `${target}:/home/herman/.local/share/dsh-container/releases/${releaseId}/release.json`])
+    throw error
+  }
+}
+
+function performProductionReleaseUnsafe(candidate, candidatePath, releaseId, stage) {
+  const localReleaseDir = join(stateRoot, 'releases', releaseId)
+  const localSnapshotDir = join(stateRoot, 'snapshots', releaseId)
   ensureDir(localReleaseDir)
   ensureDir(localSnapshotDir)
 
@@ -452,8 +505,32 @@ printf 'openclaw=%s\\n' "$(systemctl --user show openclaw-gateway.service -p Mai
 `)
 
   const remoteRoot = '/home/herman/.local/share/dsh-container'
+  const previousText = ssh(`set -Eeuo pipefail
+root=${shellQuote(remoteRoot)}
+if test -f "$root/current/release.json"; then
+  cat "$root/current/release.json"
+else
+  printf '%s\\n' '{"mode":"legacy-systemd"}'
+fi
+`)
+  const previousRelease = JSON.parse(previousText)
+  const previous = previousRelease.mode === 'legacy-systemd'
+    ? { mode: 'legacy-systemd', releaseId: null }
+    : {
+        mode: 'docker',
+        releaseId: previousRelease.releaseId,
+        remoteDir: `${remoteRoot}/releases/${previousRelease.releaseId}`,
+        candidate: {
+          imageId: previousRelease.candidate?.imageId,
+          imageTag: previousRelease.candidate?.imageTag,
+        },
+      }
+  if (previous.mode === 'docker' && (!previous.releaseId || !previous.candidate.imageId || !previous.candidate.imageTag)) {
+    fail('当前 Docker release.json 缺少回退所需镜像身份', exitCodes.production)
+  }
   const remoteReleaseDir = `${remoteRoot}/releases/${releaseId}`
   const remoteSnapshot = `${remoteRoot}/snapshots/${releaseId}.tar.zst`
+  stage('stop-writers-and-snapshot', { previous, preflight: { remote: preflight } })
   const stopOutput = ssh(`set -Eeuo pipefail
 root=${shellQuote(remoteRoot)}
 release_id=${shellQuote(releaseId)}
@@ -467,6 +544,9 @@ for unit in dsh-telegram-gateway.service dsh-web.service dsh-web-lan.service dsh
   test "$state" != active && test "$state" != activating || { echo "writer still active: $unit" >&2; exit 42; }
 done
 if docker ps --format '{{.Names}}' | grep -Eq '^dsh-(web|telegram|lan-proxy)$'; then echo 'DSH container writer still active' >&2; exit 43; fi
+if pgrep -u "$(id -u)" -af 'apps/cli/(src/bin\\.ts|lib/bin\\.js).*(web|--profile telegram)' >/dev/null; then
+  echo 'DSH Harness writer process still active' >&2; exit 44
+fi
 openclaw_before="$(systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ',')"
 tar --acls --xattrs -C /home/herman -cf - .dsh | zstd -T0 -10 -o ${shellQuote(remoteSnapshot)}
 chmod 600 ${shellQuote(remoteSnapshot)}
@@ -479,6 +559,7 @@ cat "$root/releases/$release_id/stop.json"
   let stopMeta
   try { stopMeta = JSON.parse(stopOutput.split('\n').at(-1)) } catch { fail(`无法解析停机快照回执: ${stopOutput}`, exitCodes.production) }
 
+  stage('verify-snapshot')
   const localSnapshot = join(localSnapshotDir, 'home.tar.zst')
   run('scp', ['-p', `${target}:${remoteSnapshot}`, localSnapshot], { code: exitCodes.production })
   if (sha256File(localSnapshot) !== stopMeta.archiveSha256) fail('停机快照传输摘要不一致；生产保持停止，等待人工裁决', exitCodes.production)
@@ -487,6 +568,16 @@ cat "$root/releases/$release_id/stop.json"
   writeJson(snapshotMetaPath, snapshotMeta)
   copyFileSync(snapshotMetaPath, join(stateRoot, 'snapshots/latest.json'))
 
+  const remoteSnapshotMetaPath = join(localReleaseDir, 'remote-snapshot.json')
+  writeJson(remoteSnapshotMetaPath, { ...snapshotMeta, archivePath: remoteSnapshot })
+  run('scp', ['-p', remoteSnapshotMetaPath, `${target}:${remoteRoot}/snapshots/${releaseId}.json`], { code: exitCodes.production })
+  ssh(`set -Eeuo pipefail
+root=${shellQuote(remoteRoot)}
+cp "$root/snapshots/${releaseId}.json" "$root/snapshots/latest.json.next"
+mv -Tf "$root/snapshots/latest.json.next" "$root/snapshots/latest.json"
+`)
+
+  stage('snapshot-copy-tests', { snapshot: snapshotMeta })
   const testHome = join(localReleaseDir, 'preflight/home/herman')
   ensureDir(testHome)
   run('tar', ['--zstd', '-xf', localSnapshot, '-C', testHome], { code: exitCodes.test })
@@ -496,7 +587,14 @@ cat "$root/releases/$release_id/stop.json"
   writeFileSync(join(localReleaseDir, 'state-validation.json'), `${stateReceipt}\n`)
   const selfTest = run(engine, ['run', '--rm', '--read-only', '--user', '1000:1000', '--tmpfs', '/tmp:rw', '--tmpfs', '/run:rw', candidate.imageTag, 'self-test'], { capture: true, code: exitCodes.test })
   writeFileSync(join(localReleaseDir, 'preflight-tests.txt'), `${selfTest}\n`)
+  let runtimeReceipt
+  try {
+    runtimeReceipt = commandDev({ _: ['up'], snapshot: snapshotMetaPath, candidate: candidatePath, reset: true })
+  } finally {
+    stopDev()
+  }
 
+  stage('transfer-and-start')
   run('ssh', ['-o', 'BatchMode=yes', target, 'mkdir', '-p', remoteReleaseDir], { code: exitCodes.production })
   run('scp', ['-p', candidate.archivePath, `${target}:${remoteReleaseDir}/image.tar`], { code: exitCodes.production })
   run('scp', ['-p', composePath, `${target}:${remoteReleaseDir}/compose.production.yml`], { code: exitCodes.production })
@@ -533,8 +631,8 @@ printf '{"imageId":"%s","web":"%s","telegram":"%s","openclawAfter":"%s"}\\n' "$a
     candidatePath,
     candidate,
     snapshot: snapshotMeta,
-    previous: { mode: 'legacy-systemd', releaseId: null },
-    preflight: { remote: preflight, stateReceiptSha256: sha256Text(stateReceipt), selfTestSha256: sha256Text(selfTest) },
+    previous,
+    preflight: { remote: preflight, stateReceiptSha256: sha256Text(stateReceipt), selfTestSha256: sha256Text(selfTest), runtime: runtimeReceipt },
     production: productionReceipt,
     createdAt: new Date().toISOString(),
     userAcceptance: null,
@@ -557,9 +655,17 @@ function commandAccept(options) {
   if (!options.evidence) fail('accept 必须提供 --evidence，记录真实 Telegram/Web 验收结论', exitCodes.usage)
   const evidence = existsSync(options.evidence) ? readFileSync(options.evidence, 'utf8').trim() : options.evidence
   if (!evidence) fail('验收证据不能为空', exitCodes.usage)
+  const acceptanceHealth = ssh(`set -Eeuo pipefail
+test "$(docker image inspect ${shellQuote(release.candidate.imageTag)} --format '{{.Id}}')" = ${shellQuote(release.candidate.imageId)}
+test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
+test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
+curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
+printf '%s\n' 'containers-and-web-healthy'
+`)
   release.status = 'accepted'
+  release.currentStage = 'accepted'
   release.acceptedAt = new Date().toISOString()
-  release.userAcceptance = { evidence }
+  release.userAcceptance = { evidence, acceptanceHealth }
   writeJson(path, release)
   const remoteDir = `/home/herman/.local/share/dsh-container/releases/${release.releaseId}`
   run('scp', ['-p', path, `${target}:${remoteDir}/release.json`], { code: exitCodes.production })
@@ -580,12 +686,41 @@ function commandRollback(options) {
     process.exitCode = exitCodes.approval
     return
   }
-  if (release.previous?.mode !== 'legacy-systemd') fail('当前第一版只允许回退到首次切换前的 legacy systemd；Docker→Docker 回退会在第一次验收后的第二轮演练中启用', exitCodes.safety)
+  if (!['legacy-systemd', 'docker'].includes(release.previous?.mode)) fail('release 没有可识别的回退目标', exitCodes.safety)
   const remoteRoot = '/home/herman/.local/share/dsh-container'
   const remoteSnapshot = release.snapshot.remoteArchivePath
+  const restartPrevious = release.previous.mode === 'legacy-systemd'
+    ? `
+if test -L "$root/current"; then unlink "$root/current"; fi
+systemctl --user start dsh-web.service dsh-web-lan.socket dsh-telegram-gateway.service
+for attempt in $(seq 1 24); do curl --fail --silent --max-time 2 http://127.0.0.1:3080/ >/dev/null && break; sleep 5; done
+curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
+systemctl --user is-active --quiet dsh-web.service
+systemctl --user is-active --quiet dsh-telegram-gateway.service
+`
+    : `
+previous_dir=${shellQuote(release.previous.remoteDir)}
+previous_image=${shellQuote(release.previous.candidate.imageTag)}
+previous_image_id=${shellQuote(release.previous.candidate.imageId)}
+test -f "$previous_dir/compose.production.yml"
+if ! docker image inspect "$previous_image" >/dev/null 2>&1; then
+  test -f "$previous_dir/image.tar"
+  docker load --input "$previous_dir/image.tar"
+fi
+test "$(docker image inspect "$previous_image" --format '{{.Id}}')" = "$previous_image_id"
+ln -sfn "$previous_dir" "$root/current.next"
+mv -Tf "$root/current.next" "$root/current"
+cd "$previous_dir"
+DSH_IMAGE="$previous_image" DSH_IMAGE_ID="$previous_image_id" docker compose -p dsh -f compose.production.yml up -d
+for attempt in $(seq 1 24); do curl --fail --silent --max-time 2 http://127.0.0.1:3080/ >/dev/null && break; sleep 5; done
+curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
+test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
+test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
+`
   ssh(`set -Eeuo pipefail
 root=${shellQuote(remoteRoot)}
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+openclaw_before="$(systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ',')"
 if test -f "$root/current/compose.production.yml"; then
   cd "$root/current"
   DSH_IMAGE=${shellQuote(release.candidate.imageTag)} DSH_IMAGE_ID=${shellQuote(release.candidate.imageId)} docker compose -p dsh -f compose.production.yml down --timeout 30
@@ -597,16 +732,16 @@ tar --zstd -xf ${shellQuote(remoteSnapshot)} -C "$restore"
 test -d "$restore/.dsh"
 mv /home/herman/.dsh "$root/failed-dsh-$timestamp"
 mv "$restore/.dsh" /home/herman/.dsh
-systemctl --user start dsh-web.service dsh-web-lan.socket dsh-telegram-gateway.service
-for attempt in $(seq 1 24); do curl --fail --silent --max-time 2 http://127.0.0.1:3080/ >/dev/null && break; sleep 5; done
-curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
-systemctl --user is-active --quiet dsh-web.service
-systemctl --user is-active --quiet dsh-telegram-gateway.service
+${restartPrevious}
+openclaw_after="$(systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ',')"
+test "$openclaw_before" = "$openclaw_after"
 `)
   release.status = 'rolled-back'
+  release.currentStage = 'rolled-back'
   release.rolledBackAt = new Date().toISOString()
   writeJson(path, release)
-  out({ result: 'rolled-back', releaseId: release.releaseId, restored: 'legacy-systemd + downtime snapshot', note: '失败版本现场数据另存，未直接删除。' })
+  runStatus('scp', ['-p', path, `${target}:/home/herman/.local/share/dsh-container/releases/${release.releaseId}/release.json`])
+  out({ result: 'rolled-back', releaseId: release.releaseId, restored: `${release.previous.mode} + downtime snapshot`, note: '失败版本现场数据另存，未直接删除。' })
 }
 
 function commandStatus() {
