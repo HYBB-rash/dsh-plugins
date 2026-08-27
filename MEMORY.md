@@ -1,0 +1,52 @@
+# 项目记忆
+
+这里保存可复用的项目经验，不是当前运行状态的权威来源。开始任务时，按关键词检索相关段落；需要判断配置、运行状态、发布版本或外部系统时，必须做本次现场核对。当前任务、专项合同和更近目录规则优先。
+
+## 产品与职责边界
+
+- 对外 README 先用具体使用场景说明何时需要、装上后会怎样；再说明功能、边界和技术名词。展示名与搜索关键词服务于准确检索，不能替代真实体验或夸大承诺。
+- 新能力按责任和失败模式选最轻充分载体：AI/Skill 处理模糊判断与工具编排；现有工具或 Skill 内小脚本处理确定性机械步骤；只有缺少通用运行时能力、或存在模型不可绕过的安全、并发、事务、唯一投递或恢复不变量时才引入 Plugin。混合需求由 Skill 编排，Plugin 不应知道上层业务故事。
+- 私人助理先区分责任归属：用户说自己要做、正在做或需要提醒时，默认只安排、监督和跟进；只有明确要求 Agent 去做、查询、修改或落地时才执行任务内容。
+- 用户验收的是工作是否被可靠保留并完成，不是内部 Agent 数量或分工；不要为了“一个 Agent 一项责任”预先制造复杂的下放、监督或异步调度体系。
+- 长任务应按阶段主动汇报。用户未必要求严格按预计时间完成，但长时间无信息会破坏仍在负责的信任；阶段长时间无结果时也要说明进展或卡点。
+- 多项责任并存时，暂停、恢复、完成或取消必须唯一定位目标；消息、引用和上下文仍有歧义时先问，不猜“最近一项”。
+
+## DSH 助理、Cron 与持久状态
+
+- `focus` 是唯一互斥的用户时间焦点；普通委派 `delegated` 与长期监控 `monitor` 可以并行。任何多项修改若无法唯一定位，必须返回候选并保持零副作用。
+- 时间驱动周期任务由 `dsh-cron` 持有时钟和每轮唤醒；`dsh-assistant` 只保存持续责任、关联任务、结果与异常认知。桥接走正式接口，不能直接改 cron 的 `jobs.jsonl`；只管理用户时间的焦点提醒可由 assistant reminder 负责。
+- 用户的个人待办、`dsh-assistant` 当前责任账本和定时任务是三个不同事实源。`assistant_task_status` 只权威回答当前责任；用户问完整待办时，应按部署 workspace 指引读取个人任务事实，不能由空责任账本推断没有任务。
+- 每项 Agent 责任复用一个 continuable child：暂停要 interrupt，恢复要 followup 同一 child。`subagent/end` 的 `completed` 只代表一轮结束，只有满足明确的 completed/blocked 结果合同才能收口；长期监控的普通 completed 是提前停止，不是完成监控。
+- 最终结果只能有一个用户可见投递负责人。worker 的阶段 `report` 与终态 outbox 必须保持单一、可计数的完整消息链，不能重复投递。
+- 恢复责任时，必须先持久化新 residency 的 run id，之后才清掉 `resume_requested`；否则旧轮次的 aborted 可能造成 active 但无 worker 的假状态。
+- `dsh-assistant` 的提示和工具只能注入用户交互 root；`session-cron-*` 也是运行时 root。工具全局注册或无差别遍历 roots 会泄漏承诺正文和修改能力给无人值守任务。
+- Web 与 Telegram 的执行责任隔离，但状态认知可只读互查：Telegram 仅在用户问起时查询 Web 任务并转述，不能轮询、控制或接管；陈旧 running 只能诚实报告无法确认，旧 writer 的迟到事件不能覆盖新 writer。
+
+## 发布与数据边界
+
+- 本机到 `herman.hermes` 的发布唯一入口是 `./release/dsh`。Harness、插件、Profiles、Skills 和运行依赖应从明确 Git commit 构建为不可变 Docker/OCI 镜像；开发、上线前测试和生产运行使用同一候选。不要直接同步源码、修改线上 selector、远程安装依赖或恢复已退役的源码发布方式。
+- 镜像只保存不可变代码；`~/.dsh`、工作区、Session、SQLite、cron 状态、凭据、Telegram offset、附件与日志在镜像外持久化。日常开发使用停机快照的独立副本、测试凭据、假 Telegram 和无真实任务 cron 台账，不能访问真实 Telegram、领取生产任务或写生产目录。
+- 生产候选先在镜像中完成测试；获准停机后停止 DSH 写入者、确认 writer=0 并生成一致快照，再用快照副本做上线前验证。只有候选镜像与 archive 摘要一致、必要的 Web/LAN、Telegram、cron、SQLite、offset 与宿主能力门通过，才能启动生产候选。
+- 上线后保持 `awaiting-user-acceptance`，由用户完成真实 Telegram/Web 验收并执行 `./release/dsh accept` 后才固定为 `last-good`。`rollback` 默认只说明恢复方案；只有用户明确批准 `--approved` 才能恢复上一镜像及该次停机前数据。工具不得静默恢复、覆盖或删除回退边界。
+- 现场故障只有在明确属于挂载、权限、Compose、路径或启动参数，且仍处于限定现场窗口时，才可现场修复后重验；原因不明、需改 Harness/插件、改变数据语义或无法在窗口内解决时，先报告。产品代码回本地修复、提交、重建唯一候选，禁止在线改源码。
+- `herman.hermes` 替代试运行使用独立 Telegram bot 和独立 `~/.dsh` 写入状态，只按需读取 OpenClaw 的 workspace、记忆、技能和任务事实。在真实替代验收前，OpenClaw 保持其进程、cron、Session、记忆索引与 Telegram token 的唯一写入权。
+
+## Telegram gateway
+
+- Telegram 正文采用消息级投递：保留 👀、typing、引用、reaction 与最终交付，忽略 `assistant/chunk`；把完整 text + tool-call `assistant/message` 串行投递为不可编辑中途消息，再由 `summarizeTurn()` 权威收口最终文本。相同完整正文只能成功交付一次，是否自然且不重放需真实客户端验收。
+- Gateway 只保证完整事件、不可编辑、串行投递与完整可见文本精确去重；Telegram 专属 `dsh-assistant` persona 决定是否表达中途消息与如何避免语义重放。不要在 gateway 依据句号、空行、字数、前后缀 diff 或相似度切分消息。
+- 普通 Telegram reaction 不能假设支持 ✅/❌；终态 reaction 使用官方允许列表，并在真实客户端验证，不能只测请求 payload。
+- 日常正文用 Bot API `sendMessage` + MarkdownV2；仅遇到明确的、不可重试的格式拒绝时，使用相同 `reply_parameters` 回退一次纯文本。429、5xx、超时或暧昧响应不得重发，避免双消息。入站优先读取 `message.quote.text`，以同时支持 Markdown 渲染和局部引用。
+- `ignoreFeedbackFailure` 要同时捕获同步 throw：`action()` 在 `.catch()` 挂载前已经执行，测试 HTTP stub 缺方法会令同步 TypeError 穿透。
+- 测试 `session/event` 时，Harness ctx 需 mock `on` 并捕获 handler 的 `emit(session, event)`；监听器按 `session === agent.session && event.seq >= firstSeq` 过滤，TurnFeedback 再按 turn/step 边界过滤。
+- session-telegram 日志发生 seq 冲突时，先快照到 `~/.dsh/recovery/`；删冲突行后用 node:zlib `zstdCompressSync` 且 `ZSTD_c_checksumFlag=1` 逐行一帧重建。zstd CLI 单帧不满足“每个 header line 一帧”的读取约束。
+
+## 已停止或需复审的历史路线
+
+- `dsh-explore` 与 `dsh-browser-readonly` 已从源码树移除；不要把旧名称当作可编辑的现役模块。探索若再启用，应以当前 `skills/explore-opportunity` 和现场目录为准。
+- `dsh-x-feed` 已不再是本仓库插件目录；现役业务运行时为 `x-feed`，其宿主数据目录仍可使用 `DSH_HOME/storages/dsh-x-feed`。不要因旧数据目录或测试 marker 推断旧插件仍存在。
+- Harness preset、Anchored 机制和早期 token A/B 是开发者预览期证据，容易随上游提示拼装、工具 schema、事件载荷和插件挂载而折旧。除非当前方案失效、官方稳定实现或已合并社区方案出现，不主动重开自研扩展或旧 token A/B；需要使用时先核对当前来源和专项研究。
+
+## 经验记录
+
+- 2026-08-27：根 `AGENTS.md` 曾混入项目现状、历史实验和精确测试数量，导致每轮注入既长又容易过时。稳定规则留在 `AGENTS.md`；可复用经验改记此文件，并在使用前按任务关键词检索、以现场状态复核。
