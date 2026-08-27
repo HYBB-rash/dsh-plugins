@@ -3,6 +3,15 @@ set -Eeuo pipefail
 
 test "$(id -u)" = 1000
 test "$(id -g)" = 1000
+test "$(id -un)" = herman
+test "$(id -gn)" = herman
+test "$(getent passwd "$(id -u)" | cut -d: -f6)" = /home/herman
+test "$HOME" = /home/herman
+
+ssh_known_hosts="$(ssh -G git@github.com 2>/dev/null \
+  | awk 'tolower($1) == "userknownhostsfile" { print $2; exit }')"
+test "$ssh_known_hosts" = /home/herman/.ssh/known_hosts
+
 test -f /opt/dsh/harness/apps/cli/lib/bin.js
 for package in dsh-assistant dsh-cron telegram-gateway ui-context-compactor x-feed personal-feed; do
   test -d "/opt/dsh/harness/local-plugins/$package/lib"

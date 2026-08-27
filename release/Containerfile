@@ -1,6 +1,12 @@
 # syntax=docker/dockerfile:1
 FROM docker.io/library/node:24.13.0-bookworm-slim@sha256:46feb5752989c05b8606e6323fbbc3db667d14ade1c24f5d0d44d9ca9909d607
 
+# Keep the numeric identity aligned with the host mount while also making the
+# container's passwd home authoritative.  HOME alone is insufficient because
+# OpenSSH resolves its default ~/.ssh paths from the passwd database.
+RUN /usr/sbin/usermod --login herman --home /home/herman --move-home node \
+ && /usr/sbin/groupmod --new-name herman node
+
 ENV DEBIAN_FRONTEND=noninteractive \
     CI=1 \
     DSH_HOME=/home/herman/.dsh \
@@ -80,11 +86,12 @@ RUN set -eu; \
        && pnpm exec tsc -b); \
     done
 
+RUN mkdir -p /home/herman/.dsh /home/herman/.dsh/workspace \
+ && chown -R 1000:1000 /home/herman
+
 # Tests run with the same unprivileged identity as the final container.  Among
 # other things, this keeps permission-failure tests honest (root can bypass a
 # directory's write bits).
-RUN mkdir -p /home/herman/.dsh /home/herman/.dsh/workspace \
- && chown -R 1000:1000 /home/herman
 USER 1000:1000
 
 RUN set -eu; \
