@@ -20,7 +20,7 @@ Treat this Skill as the release controller. Keep every production mutation behin
 - Inspect the branch, worktree, upstream, and remote refs. Never include uncommitted files in a candidate or silently choose which changes to commit.
 - Fetch `origin` immediately before candidate construction. The release branch and intended product commit must contain the latest `origin/main`; otherwise rebase immediately, preserve unrelated work, and rerun the affected development checks before building.
 - Require full Git commits for Harness and plugins. Confirm the product commit is pushed and is the intended release target.
-- Build exactly once with `./release/dsh build --harness-ref <commit> --plugins-ref <commit>`.
+- Build exactly once with `./release/dsh build --purpose release --harness-ref <commit> --plugins-ref <commit>`.
 - Preserve the resulting `candidate.json`, Docker archive, image identity, archive checksum, and test receipt. Test, transfer, and production must use that exact candidate; never rebuild or patch its container.
 - Treat build or image-test failure as a development failure. Do not continue to production.
 
@@ -47,7 +47,7 @@ Run `./release/dsh status` for a read-only status request. Report current and la
 
 ### Accept
 
-Run `./release/dsh accept --release <release-id> --evidence <evidence>` only after the user explicitly says the real acceptance passed for that release. Confirm it becomes `current` and `last-good`, then report the final evidence.
+Run `./release/dsh accept --release <release-id> --evidence <evidence>` only after the user explicitly says the real acceptance passed for that release. Confirm it becomes `current` and `last-good`. Acceptance also invalidates and removes every local development environment and unreferenced development image while preserving source worktrees; report that cleanup receipt with the final evidence.
 
 ### Prepare and execute rollback
 

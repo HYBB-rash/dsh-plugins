@@ -32,7 +32,7 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
 2. From the clean latest-main baseline, build the development base with:
 
    ```bash
-   ./release/dsh build --harness-ref <locked-harness-commit> --plugins-ref <origin-main-commit>
+   ./release/dsh build --purpose development --harness-ref <locked-harness-commit> --plugins-ref <origin-main-commit>
    ```
 
    This local image is the dependency and Harness boundary for development. Do not publish or release it merely because preparation passed.
@@ -58,8 +58,10 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
 
 1. Fetch `origin` again when preparation finishes. The task branch must still contain the latest `origin/main`; otherwise rebase immediately and rerun the affected checks.
 2. Keep the task change on its independent branch, with focused commits. Push the exact intended product commit.
-3. Stop the local development containers with `./release/dsh dev down` when they are no longer needed; keep or remove only the isolated local data copy according to the task.
-4. For production, explicitly invoke `$dsh-release`. Recheck and rebase onto the latest `main` again before candidate construction or release. The development-base image and its receipt are not a formal release candidate and never replace release acceptance.
+3. When main changes during an unfinished task, build and prepare the new development base normally. Keep the old base until the new `dev prepare` receipt passes; the command then atomically moves that worktree's lease and removes only the old unreferenced development base.
+4. When the task no longer needs its local environment, stop it with `./release/dsh dev down`, then run `./release/dsh dev retire --source <task-worktree>` to remove that worktree's isolated data and unreferenced development base. Never use a global container-engine prune.
+5. An accepted production release invalidates every local development environment. `accept` removes the local development containers, isolated data, leases, and unreferenced development images while preserving source worktrees. Any unfinished task must rebase onto the new main and run a fresh development build and `dev prepare` before continuing.
+6. For production, explicitly invoke `$dsh-release`. Recheck and rebase onto the latest `main` again before candidate construction or release. The development-base image and its receipt are not a formal release candidate and never replace release acceptance.
 
 ## Report the result
 

@@ -20,6 +20,7 @@ cat >"$candidate" <<EOF
   "schemaVersion": 1,
   "candidateId": "fixture",
   "status": "tested",
+  "purpose": "release",
   "imageId": "sha256:fixture",
   "imageTag": "dsh-candidate:fixture",
   "archivePath": "$archive",
@@ -32,6 +33,10 @@ EOF
 
 stale_candidate="$test_root/stale-candidate.json"
 sed "s/$latest_main/1111111111111111111111111111111111111111/" "$candidate" >"$stale_candidate"
+development_candidate="$test_root/development-candidate.json"
+sed 's/"purpose": "release"/"purpose": "development"/' "$candidate" >"$development_candidate"
+stale_development_candidate="$test_root/stale-development-candidate.json"
+sed "s/$latest_main/1111111111111111111111111111111111111111/" "$development_candidate" >"$stale_development_candidate"
 
 run_expect() {
   local expected="$1"
@@ -53,6 +58,9 @@ grep -q -- '--approved-stop' "$test_root/stdout"
 
 run_expect 4 release --candidate "$stale_candidate"
 grep -q '没有基于最新 origin/main' "$test_root/stderr"
+
+run_expect 4 release --candidate "$development_candidate"
+grep -q 'development 候选不能发布' "$test_root/stderr"
 
 release_dir="$test_root/state/releases/fixture"
 mkdir -p "$release_dir"
@@ -82,13 +90,13 @@ grep -q -- '--evidence' "$test_root/stderr"
 run_expect 2 build --harness-ref main --plugins-ref main
 grep -q '40 位 Git commit' "$test_root/stderr"
 
-run_expect 2 dev prepare --candidate "$candidate"
+run_expect 2 dev prepare --candidate "$development_candidate"
 grep -q -- '--source' "$test_root/stderr"
 
 # A development base must be built from the freshly fetched origin/main.  The
 # fixture candidate is intentionally pinned elsewhere, so this stops before
 # snapshot download or any container mutation.
-run_expect 4 dev prepare --source "$repo_root" --candidate "$stale_candidate"
+run_expect 4 dev prepare --source "$repo_root" --candidate "$stale_development_candidate"
 grep -q '开发基础镜像不是最新 main' "$test_root/stderr"
 
 node --check "$repo_root/release/cli.mjs"

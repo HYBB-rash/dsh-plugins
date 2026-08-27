@@ -10,6 +10,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   renameSync,
@@ -41,6 +42,7 @@ class DshError extends Error {
 
 const fail = (message, code) => { throw new DshError(message, code) }
 const out = (value) => process.stdout.write(`${typeof value === 'string' ? value : JSON.stringify(value, null, 2)}\n`)
+const warn = (message) => process.stderr.write(`清理警告：${message}\n`)
 const ensureDir = (path) => mkdirSync(path, { recursive: true })
 const nowId = () => new Date().toISOString().replaceAll(/[-:.]/g, '').replace('T', 'T').replace('Z', 'Z')
 const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`
@@ -138,13 +140,29 @@ function requireLatestMainAncestor(commit, label) {
   return originMain
 }
 
-function candidateFrom(value) {
+function verifyDevelopmentCandidateImage(candidate) {
+  const localImageId = imageId(candidate.imageTag)
+  if (localImageId !== candidate.imageId) fail(`开发底座镜像身份改变: ${candidate.imageId} -> ${localImageId}`, exitCodes.safety)
+  const purpose = run(engine, ['image', 'inspect', candidate.imageTag, '--format', '{{index .Config.Labels "io.dsh.candidate.purpose"}}'], {
+    capture: true,
+    announce: false,
+    code: exitCodes.safety,
+  })
+  if (purpose !== 'development') fail(`开发底座镜像缺少用途身份: ${purpose || 'missing'}`, exitCodes.safety)
+}
+
+function candidateFrom(value, { verifyDevelopmentImage = true } = {}) {
   const path = value ? resolve(value) : join(stateRoot, 'candidates/latest.json')
   const candidate = readJson(path, 'candidate')
-  for (const field of ['imageId', 'imageTag', 'archivePath', 'archiveSha256', 'pluginsCommit', 'releaseToolCommit', 'harnessCommit']) {
+  for (const field of ['imageId', 'imageTag', 'archiveSha256', 'pluginsCommit', 'releaseToolCommit', 'harnessCommit']) {
     if (!candidate[field]) fail(`candidate 缺少 ${field}`, exitCodes.usage)
   }
   if (candidate.status !== 'tested') fail(`candidate 尚未通过镜像测试，当前状态是 ${candidate.status ?? 'missing'}`, exitCodes.safety)
+  if (candidatePurpose(candidate) === 'development') {
+    if (verifyDevelopmentImage) verifyDevelopmentCandidateImage(candidate)
+    return { candidate, path }
+  }
+  if (!candidate.archivePath) fail('正式 candidate 缺少 archivePath', exitCodes.usage)
   if (!existsSync(candidate.archivePath)) fail(`candidate 镜像归档不存在: ${candidate.archivePath}`, exitCodes.safety)
   if (sha256File(candidate.archivePath) !== candidate.archiveSha256) fail('candidate 镜像归档摘要不匹配', exitCodes.safety)
   const manifestText = run('tar', ['-xOf', candidate.archivePath, 'manifest.json'], { capture: true, announce: false, code: exitCodes.safety })
@@ -186,6 +204,196 @@ function archiveStagingRoot(candidateDir) {
     }
   }
   return candidateDir
+}
+
+function candidatePurpose(candidate) {
+  return candidate.purpose ?? 'release'
+}
+
+function controlledChild(root, path) {
+  const resolvedRoot = resolve(root)
+  const resolvedPath = resolve(path)
+  return resolvedPath !== resolvedRoot && resolvedPath.startsWith(`${resolvedRoot}/`)
+}
+
+function removeControlledPath(root, path) {
+  if (!controlledChild(root, path)) fail(`拒绝清理不受控路径: ${path}`, exitCodes.safety)
+  rmSync(path, { recursive: true, force: true })
+}
+
+function developmentLeasePath(sourcePath) {
+  const key = createHash('sha256').update(resolve(sourcePath)).digest('hex')
+  return join(stateRoot, 'dev/leases', `${key}.json`)
+}
+
+function readDevelopmentLeases() {
+  const leasesRoot = join(stateRoot, 'dev/leases')
+  if (!existsSync(leasesRoot)) return { complete: true, leases: [] }
+  const leases = []
+  for (const name of readdirSync(leasesRoot)) {
+    if (!name.endsWith('.json')) continue
+    try {
+      leases.push(readJson(join(leasesRoot, name), 'development lease'))
+    } catch (error) {
+      warn(error.message)
+      return { complete: false, leases }
+    }
+  }
+  return { complete: true, leases }
+}
+
+function protectedCandidateIds() {
+  const ids = new Set()
+  let complete = true
+  const latestPath = join(stateRoot, 'candidates/latest.json')
+  if (existsSync(latestPath)) {
+    try { ids.add(readJson(latestPath, 'latest candidate').candidateId) } catch (error) { warn(error.message); complete = false }
+  }
+  const leaseState = readDevelopmentLeases()
+  complete &&= leaseState.complete
+  for (const lease of leaseState.leases) ids.add(lease.candidateId)
+  const releasesRoot = join(stateRoot, 'releases')
+  if (existsSync(releasesRoot)) {
+    for (const name of readdirSync(releasesRoot)) {
+      const releasePath = join(releasesRoot, name, 'release.json')
+      if (!existsSync(releasePath)) continue
+      try {
+        const release = readJson(releasePath, 'release evidence')
+        if (release.candidate?.candidateId) ids.add(release.candidate.candidateId)
+        if (release.previous?.candidate?.candidateId) ids.add(release.previous.candidate.candidateId)
+      } catch (error) {
+        warn(error.message)
+        complete = false
+      }
+    }
+  }
+  ids.delete(undefined)
+  return { complete, ids, leases: leaseState.leases }
+}
+
+function cleanupDevelopmentLease(lease, { removeLatest = false } = {}) {
+  if (!lease?.candidateId || !lease?.devRoot) return { result: 'nothing-to-clean' }
+  const latestPath = join(stateRoot, 'candidates/latest.json')
+  if (removeLatest && existsSync(latestPath)) {
+    const latest = readJson(latestPath, 'latest candidate')
+    if (latest.candidateId === lease.candidateId && candidatePurpose(latest) === 'development') rmSync(latestPath, { force: true })
+  }
+  const protection = protectedCandidateIds()
+  const devRoot = resolve(lease.devRoot)
+  const devReferenced = protection.leases.some((item) => item.devRoot && resolve(item.devRoot) === devRoot)
+  if (!devReferenced && controlledChild(join(stateRoot, 'dev'), devRoot)) removeControlledPath(join(stateRoot, 'dev'), devRoot)
+
+  if (!protection.complete || protection.ids.has(lease.candidateId)) {
+    return { result: 'development-data-cleaned', candidateId: lease.candidateId, candidate: 'kept-referenced' }
+  }
+  const candidateDir = join(stateRoot, 'candidates', lease.candidateId)
+  const candidatePath = join(candidateDir, 'candidate.json')
+  if (!existsSync(candidatePath)) return { result: 'development-data-cleaned', candidateId: lease.candidateId, candidate: 'already-absent' }
+  const candidate = readJson(candidatePath, 'development candidate')
+  if (candidatePurpose(candidate) !== 'development') {
+    return { result: 'development-data-cleaned', candidateId: lease.candidateId, candidate: 'kept-non-development' }
+  }
+  const inspection = runStatus(engine, ['image', 'inspect', candidate.imageTag])
+  if (inspection.status === 0) {
+    const removal = runStatus(engine, ['image', 'rm', candidate.imageTag])
+    if (removal.status !== 0) {
+      warn(`镜像仍被容器使用，保留候选 ${lease.candidateId}: ${String(removal.stderr ?? '').trim()}`)
+      return { result: 'development-data-cleaned', candidateId: lease.candidateId, candidate: 'kept-image-in-use' }
+    }
+  }
+  removeControlledPath(join(stateRoot, 'candidates'), candidateDir)
+  return { result: 'development-base-cleaned', candidateId: lease.candidateId, imageTag: candidate.imageTag }
+}
+
+function replaceDevelopmentLease(source, candidate, candidatePath, devRoot) {
+  const leasePath = developmentLeasePath(source.sourcePath)
+  const previous = existsSync(leasePath) ? readJson(leasePath, 'development lease') : null
+  const lease = {
+    schemaVersion: 1,
+    sourcePath: source.sourcePath,
+    candidateId: candidate.candidateId,
+    candidatePath,
+    imageId: candidate.imageId,
+    imageTag: candidate.imageTag,
+    devRoot,
+    updatedAt: new Date().toISOString(),
+  }
+  writeJson(leasePath, lease)
+  if (previous?.candidateId && previous.candidateId !== candidate.candidateId) {
+    try { cleanupDevelopmentLease(previous) } catch (error) { warn(error.message) }
+  }
+  return { lease, leasePath }
+}
+
+function cleanupAcceptedDevelopmentState() {
+  stopDev()
+  const devRoot = join(stateRoot, 'dev')
+  const inferredDevelopmentIds = new Set()
+  if (existsSync(devRoot)) {
+    for (const name of readdirSync(devRoot)) {
+      const path = join(devRoot, name)
+      if (name === 'leases') continue
+      const metadataPath = join(path, 'dev.json')
+      if (existsSync(metadataPath)) {
+        try {
+          const metadata = readJson(metadataPath, 'development metadata')
+          if (metadata.mode === 'editable-source' && metadata.candidateId) inferredDevelopmentIds.add(metadata.candidateId)
+        } catch (error) {
+          warn(error.message)
+        }
+      }
+      if (controlledChild(devRoot, path)) removeControlledPath(devRoot, path)
+    }
+  }
+  const leasesRoot = join(devRoot, 'leases')
+  if (existsSync(leasesRoot)) {
+    for (const name of readdirSync(leasesRoot)) {
+      if (name.endsWith('.json')) rmSync(join(leasesRoot, name), { force: true })
+    }
+  }
+
+  const candidatesRoot = join(stateRoot, 'candidates')
+  const latestPath = join(candidatesRoot, 'latest.json')
+  if (existsSync(latestPath)) {
+    try {
+      const latest = readJson(latestPath, 'latest candidate')
+      if (candidatePurpose(latest) === 'development' || inferredDevelopmentIds.has(latest.candidateId)) rmSync(latestPath, { force: true })
+    } catch (error) {
+      warn(error.message)
+    }
+  }
+  const protection = protectedCandidateIds()
+  const cleaned = []
+  const kept = []
+  if (existsSync(candidatesRoot)) {
+    for (const name of readdirSync(candidatesRoot)) {
+      const candidateDir = join(candidatesRoot, name)
+      const candidatePath = join(candidateDir, 'candidate.json')
+      if (!existsSync(candidatePath)) continue
+      let candidate
+      try { candidate = readJson(candidatePath, 'development candidate') } catch (error) { warn(error.message); kept.push(name); continue }
+      const isDevelopment = candidatePurpose(candidate) === 'development' || inferredDevelopmentIds.has(candidate.candidateId)
+      if (!isDevelopment) continue
+      if (!protection.complete || protection.ids.has(candidate.candidateId)) {
+        kept.push(candidate.candidateId)
+        continue
+      }
+      const inspection = runStatus(engine, ['image', 'inspect', candidate.imageTag])
+      if (inspection.status === 0 && runStatus(engine, ['image', 'rm', candidate.imageTag]).status !== 0) {
+        warn(`验收后未能删除开发镜像 ${candidate.imageTag}`)
+        kept.push(candidate.candidateId)
+        continue
+      }
+      removeControlledPath(candidatesRoot, candidateDir)
+      cleaned.push(candidate.candidateId)
+    }
+  }
+  return {
+    result: 'accepted-release-invalidated-development',
+    cleanedCandidateIds: cleaned,
+    keptReferencedCandidateIds: kept,
+    sourceWorktrees: 'preserved',
+  }
 }
 
 function stopDev() {
@@ -371,6 +579,8 @@ function verifyDev(candidate, homePath) {
 }
 
 function commandBuild(options) {
+  const purpose = options.purpose ?? 'release'
+  if (!['development', 'release'].includes(purpose)) fail('--purpose 只能是 development 或 release', exitCodes.usage)
   const harnessCommit = requireFullCommit(harnessRepo, options['harness-ref'], '--harness-ref')
   const pluginsCommit = requireFullCommit(repoRoot, options['plugins-ref'], '--plugins-ref')
   const releaseToolCommit = requireFullCommit(repoRoot, run('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { capture: true, announce: false }), 'release tool commit')
@@ -386,117 +596,135 @@ function commandBuild(options) {
   const harnessTarget = join(context, 'harness')
   const pluginsTarget = join(context, 'plugins')
   const releaseTarget = join(context, 'release-system')
-  ensureDir(harnessTarget)
-  ensureDir(pluginsTarget)
-  ensureDir(releaseTarget)
-
-  const harnessTar = join(buildRoot, 'harness.tar')
-  const pluginsTar = join(buildRoot, 'plugins.tar')
-  const releaseTar = join(buildRoot, 'release-system.tar')
-  run('git', ['-C', harnessRepo, 'archive', '--format=tar', `--output=${harnessTar}`, harnessCommit], { code: exitCodes.safety })
-  run('git', ['-C', repoRoot, 'archive', '--format=tar', `--output=${pluginsTar}`, pluginsCommit], { code: exitCodes.safety })
-  run('git', ['-C', repoRoot, 'archive', '--format=tar', `--output=${releaseTar}`, releaseToolCommit, 'release'], { code: exitCodes.safety })
-  run('tar', ['-xf', harnessTar, '-C', harnessTarget], { code: exitCodes.safety })
-  run('tar', ['-xf', pluginsTar, '-C', pluginsTarget], { code: exitCodes.safety })
-  run('tar', ['-xf', releaseTar, '-C', releaseTarget], { code: exitCodes.safety })
-  const archivedPatch = join(releaseTarget, 'release/patches/harness-minimal-shell-path.patch')
-  if (!existsSync(join(releaseTarget, 'release/Containerfile')) || !existsSync(archivedPatch)) {
-    fail('release tool commit 不包含受 Git 管理的 Docker 发版系统', exitCodes.safety)
-  }
-  run('git', ['-C', harnessTarget, 'apply', '--verbose', archivedPatch], { code: exitCodes.safety })
-  const patchSha256 = sha256File(archivedPatch)
-  // Podman canonicalizes unqualified image names to localhost/ in a Docker
-  // archive. Record that canonical name up front so Docker loads and Compose
-  // address the exact same tag instead of relying on engine-specific aliases.
-  const imageTag = `localhost/dsh-candidate:${pluginsCommit.slice(0, 12)}-${buildId.slice(0, 15).toLowerCase()}`
-  const signaturePolicy = join(releaseTarget, 'release/containers-policy.json')
-  const engineBuildOptions = engine === 'podman'
-    ? ['--signature-policy', signaturePolicy]
-    : []
-  const engineArchiveOptions = engine === 'podman'
-    ? ['--signature-policy', signaturePolicy]
-    : []
-
-  run(engine, [
-    'build', ...engineBuildOptions, '--format', 'docker', '--pull=missing',
-    '--build-arg', `DSH_HARNESS_COMMIT=${harnessCommit}`,
-    '--build-arg', `DSH_HARNESS_PATCH_SHA256=${patchSha256}`,
-    '--build-arg', `DSH_PLUGINS_COMMIT=${pluginsCommit}`,
-    '--build-arg', `DSH_RELEASE_COMMIT=${releaseToolCommit}`,
-    '--label', `org.opencontainers.image.revision=${pluginsCommit}`,
-    '--label', `io.dsh.release.revision=${releaseToolCommit}`,
-    '--label', `io.dsh.harness.revision=${harnessCommit}`,
-    '--label', `io.dsh.harness.patch-sha256=${patchSha256}`,
-    '--tag', imageTag, '--file', join(releaseTarget, 'release/Containerfile'), context,
-  ], { code: exitCodes.test })
-
-  const builtImageId = imageId(imageTag)
-  const imageLabels = JSON.parse(run(engine, ['image', 'inspect', imageTag, '--format', '{{json .Config.Labels}}'], { capture: true, code: exitCodes.safety }))
-  if (imageLabels['org.opencontainers.image.revision'] !== pluginsCommit
-    || imageLabels['io.dsh.release.revision'] !== releaseToolCommit
-    || imageLabels['io.dsh.harness.revision'] !== harnessCommit
-    || imageLabels['io.dsh.harness.patch-sha256'] !== patchSha256) {
-    fail('镜像标签没有绑定到本次 Harness/插件源码身份', exitCodes.safety)
-  }
-  const testStartedAt = new Date().toISOString()
-  const testOutput = run(engine, [
-    'run', '--rm', '--read-only', '--user', '1000:1000',
-    '--tmpfs', '/tmp:rw,noexec,nosuid,size=512m', '--tmpfs', '/run:rw,nosuid,size=64m',
-    imageTag, 'self-test',
-  ], { capture: true, code: exitCodes.test })
-  const testReceipt = {
-    schemaVersion: 1,
-    imageId: builtImageId,
-    startedAt: testStartedAt,
-    completedAt: new Date().toISOString(),
-    output: testOutput,
-  }
-
   const candidateDir = join(stateRoot, 'candidates', buildId)
-  ensureDir(candidateDir)
-  const receiptPath = join(candidateDir, 'image-tests.json')
-  writeJson(receiptPath, testReceipt)
   const archivePath = join(candidateDir, 'image.tar')
-  const stagingRoot = archiveStagingRoot(candidateDir)
-  const stagedArchivePath = stagingRoot === candidateDir ? archivePath : join(stagingRoot, `${buildId}.image.tar`)
-  rmSync(stagedArchivePath, { force: true })
-  run(engine, ['save', ...engineArchiveOptions, '--format', 'docker-archive', '--output', stagedArchivePath, imageTag], { code: exitCodes.test })
-  const archiveSha256 = sha256File(stagedArchivePath)
+  let stagedArchivePath = null
+  let imageTag = null
+  let admitted = false
 
-  // Prove the artifact can recreate the admitted identity. This only removes
-  // the unique candidate tag created above; no user image is targeted.
-  run(engine, ['image', 'rm', imageTag], { code: exitCodes.test })
-  run(engine, ['load', ...engineArchiveOptions, '--input', stagedArchivePath], { code: exitCodes.test })
-  const loadedImageId = imageId(imageTag)
-  if (loadedImageId !== builtImageId) fail(`归档重载后的 image ID 改变: ${builtImageId} -> ${loadedImageId}`, exitCodes.test)
-  if (stagedArchivePath !== archivePath) {
-    copyFileSync(stagedArchivePath, archivePath)
-    if (sha256File(archivePath) !== archiveSha256) fail('暂存归档复制后的摘要改变', exitCodes.safety)
+  try {
+    ensureDir(harnessTarget)
+    ensureDir(pluginsTarget)
+    ensureDir(releaseTarget)
+    const harnessTar = join(buildRoot, 'harness.tar')
+    const pluginsTar = join(buildRoot, 'plugins.tar')
+    const releaseTar = join(buildRoot, 'release-system.tar')
+    run('git', ['-C', harnessRepo, 'archive', '--format=tar', `--output=${harnessTar}`, harnessCommit], { code: exitCodes.safety })
+    run('git', ['-C', repoRoot, 'archive', '--format=tar', `--output=${pluginsTar}`, pluginsCommit], { code: exitCodes.safety })
+    run('git', ['-C', repoRoot, 'archive', '--format=tar', `--output=${releaseTar}`, releaseToolCommit, 'release'], { code: exitCodes.safety })
+    run('tar', ['-xf', harnessTar, '-C', harnessTarget], { code: exitCodes.safety })
+    run('tar', ['-xf', pluginsTar, '-C', pluginsTarget], { code: exitCodes.safety })
+    run('tar', ['-xf', releaseTar, '-C', releaseTarget], { code: exitCodes.safety })
+    const archivedPatch = join(releaseTarget, 'release/patches/harness-minimal-shell-path.patch')
+    if (!existsSync(join(releaseTarget, 'release/Containerfile')) || !existsSync(archivedPatch)) {
+      fail('release tool commit 不包含受 Git 管理的 Docker 发版系统', exitCodes.safety)
+    }
+    run('git', ['-C', harnessTarget, 'apply', '--verbose', archivedPatch], { code: exitCodes.safety })
+    const patchSha256 = sha256File(archivedPatch)
+    imageTag = `localhost/dsh-candidate:${pluginsCommit.slice(0, 12)}-${buildId.slice(0, 15).toLowerCase()}`
+    const signaturePolicy = join(releaseTarget, 'release/containers-policy.json')
+    const engineBuildOptions = engine === 'podman' ? ['--signature-policy', signaturePolicy] : []
+    const engineArchiveOptions = engine === 'podman' ? ['--signature-policy', signaturePolicy] : []
+
+    run(engine, [
+      'build', ...engineBuildOptions, '--format', 'docker', '--pull=missing',
+      '--build-arg', `DSH_HARNESS_COMMIT=${harnessCommit}`,
+      '--build-arg', `DSH_HARNESS_PATCH_SHA256=${patchSha256}`,
+      '--build-arg', `DSH_PLUGINS_COMMIT=${pluginsCommit}`,
+      '--build-arg', `DSH_RELEASE_COMMIT=${releaseToolCommit}`,
+      '--label', `org.opencontainers.image.revision=${pluginsCommit}`,
+      '--label', `io.dsh.release.revision=${releaseToolCommit}`,
+      '--label', `io.dsh.harness.revision=${harnessCommit}`,
+      '--label', `io.dsh.harness.patch-sha256=${patchSha256}`,
+      '--label', `io.dsh.candidate.purpose=${purpose}`,
+      '--tag', imageTag, '--file', join(releaseTarget, 'release/Containerfile'), context,
+    ], { code: exitCodes.test })
+
+    const builtImageId = imageId(imageTag)
+    const imageLabels = JSON.parse(run(engine, ['image', 'inspect', imageTag, '--format', '{{json .Config.Labels}}'], { capture: true, code: exitCodes.safety }))
+    if (imageLabels['org.opencontainers.image.revision'] !== pluginsCommit
+      || imageLabels['io.dsh.release.revision'] !== releaseToolCommit
+      || imageLabels['io.dsh.harness.revision'] !== harnessCommit
+      || imageLabels['io.dsh.harness.patch-sha256'] !== patchSha256
+      || imageLabels['io.dsh.candidate.purpose'] !== purpose) {
+      fail('镜像标签没有绑定到本次 Harness/插件源码身份和候选用途', exitCodes.safety)
+    }
+    const testStartedAt = new Date().toISOString()
+    const testOutput = run(engine, [
+      'run', '--rm', '--read-only', '--user', '1000:1000',
+      '--tmpfs', '/tmp:rw,noexec,nosuid,size=512m', '--tmpfs', '/run:rw,nosuid,size=64m',
+      imageTag, 'self-test',
+    ], { capture: true, code: exitCodes.test })
+    const testReceipt = {
+      schemaVersion: 1,
+      imageId: builtImageId,
+      startedAt: testStartedAt,
+      completedAt: new Date().toISOString(),
+      output: testOutput,
+    }
+
+    ensureDir(candidateDir)
+    const receiptPath = join(candidateDir, 'image-tests.json')
+    writeJson(receiptPath, testReceipt)
+    const stagingRoot = archiveStagingRoot(candidateDir)
+    stagedArchivePath = stagingRoot === candidateDir ? archivePath : join(stagingRoot, `${buildId}.image.tar`)
     rmSync(stagedArchivePath, { force: true })
-  }
+    run(engine, ['save', ...engineArchiveOptions, '--format', 'docker-archive', '--output', stagedArchivePath, imageTag], { code: exitCodes.test })
+    const archiveSha256 = sha256File(stagedArchivePath)
 
-  const candidate = {
-    schemaVersion: 1,
-    candidateId: buildId,
-    status: 'tested',
-    imageId: builtImageId,
-    imageTag,
-    archivePath,
-    archiveSha256,
-    harnessCommit,
-    harnessPatchSha256: patchSha256,
-    pluginsCommit,
-    releaseToolCommit,
-    baseImage: lock.image,
-    baseImageDigest: lock.digest,
-    builtAt: new Date().toISOString(),
-    testReceiptPath: receiptPath,
-    testReceiptSha256: sha256File(receiptPath),
+    // Prove the artifact can recreate the admitted identity. This only removes
+    // the unique candidate tag created above; no user image is targeted.
+    run(engine, ['image', 'rm', imageTag], { code: exitCodes.test })
+    run(engine, ['load', ...engineArchiveOptions, '--input', stagedArchivePath], { code: exitCodes.test })
+    const loadedImageId = imageId(imageTag)
+    if (loadedImageId !== builtImageId) fail(`归档重载后的 image ID 改变: ${builtImageId} -> ${loadedImageId}`, exitCodes.test)
+    if (purpose === 'release' && stagedArchivePath !== archivePath) {
+      copyFileSync(stagedArchivePath, archivePath)
+      if (sha256File(archivePath) !== archiveSha256) fail('暂存归档复制后的摘要改变', exitCodes.safety)
+      rmSync(stagedArchivePath, { force: true })
+    } else if (purpose === 'development') {
+      rmSync(stagedArchivePath, { force: true })
+    }
+
+    const candidate = {
+      schemaVersion: 1,
+      candidateId: buildId,
+      status: 'tested',
+      purpose,
+      imageId: builtImageId,
+      imageTag,
+      archivePath: purpose === 'release' ? archivePath : null,
+      archiveSha256,
+      harnessCommit,
+      harnessPatchSha256: patchSha256,
+      pluginsCommit,
+      releaseToolCommit,
+      baseImage: lock.image,
+      baseImageDigest: lock.digest,
+      builtAt: new Date().toISOString(),
+      testReceiptPath: receiptPath,
+      testReceiptSha256: sha256File(receiptPath),
+    }
+    const candidatePath = join(candidateDir, 'candidate.json')
+    writeJson(candidatePath, candidate)
+    copyFileSync(candidatePath, join(stateRoot, 'candidates/latest.json'))
+    admitted = true
+    out({ result: 'candidate-built', candidatePath, ...candidate })
+  } finally {
+    try { removeControlledPath(join(stateRoot, 'builds'), buildRoot) } catch (error) { warn(error.message) }
+    if (stagedArchivePath && stagedArchivePath !== archivePath) {
+      try { rmSync(stagedArchivePath, { force: true }) } catch (error) { warn(error.message) }
+    }
+    if (!admitted) {
+      try { removeControlledPath(join(stateRoot, 'candidates'), candidateDir) } catch (error) { warn(error.message) }
+      if (imageTag) {
+        const removal = runStatus(engine, ['image', 'rm', imageTag])
+        if (removal.status !== 0 && runStatus(engine, ['image', 'inspect', imageTag]).status === 0) {
+          warn(`失败构建镜像未能删除 ${imageTag}: ${String(removal.stderr ?? '').trim()}`)
+        }
+      }
+    }
   }
-  const candidatePath = join(candidateDir, 'candidate.json')
-  writeJson(candidatePath, candidate)
-  copyFileSync(candidatePath, join(stateRoot, 'candidates/latest.json'))
-  out({ result: 'candidate-built', candidatePath, ...candidate })
 }
 
 function commandDev(options) {
@@ -506,7 +734,24 @@ function commandDev(options) {
     out('开发容器已停止；开发数据副本保留。')
     return
   }
-  const { candidate } = candidateFrom(options.candidate)
+  if (action === 'retire') {
+    if (!options.source) fail('dev retire 必须提供 --source <任务 worktree>', exitCodes.usage)
+    const running = ['dsh-dev-web', 'dsh-dev-telegram', 'dsh-dev-fake-telegram'].filter(devContainerRunning)
+    if (running.length > 0) fail(`开发容器仍在运行，先执行 dev down：${running.join(', ')}`, exitCodes.safety)
+    const sourcePath = resolve(options.source)
+    const leasePath = developmentLeasePath(sourcePath)
+    if (!existsSync(leasePath)) {
+      out({ result: 'development-already-retired', sourcePath })
+      return
+    }
+    const lease = readJson(leasePath, 'development lease')
+    rmSync(leasePath, { force: true })
+    const cleanup = cleanupDevelopmentLease(lease, { removeLatest: true })
+    out({ result: 'development-retired', sourcePath, cleanup })
+    return
+  }
+  if (action === 'prepare' && !options.source) fail('dev prepare 必须提供 --source <独立任务 worktree>', exitCodes.usage)
+  const { candidate, path: candidatePath } = candidateFrom(options.candidate, { verifyDevelopmentImage: action !== 'prepare' })
   const devRoot = join(stateRoot, 'dev', candidate.candidateId)
   const homePath = join(devRoot, 'home/herman')
   const devMetaPath = join(devRoot, 'dev.json')
@@ -536,6 +781,9 @@ function commandDev(options) {
     return result
   }
   if (action === 'prepare') {
+    if (candidatePurpose(candidate) !== 'development') {
+      fail('dev prepare 只接受 --purpose development 构建的开发底座，不能占用正式发版候选', exitCodes.safety)
+    }
     const source = inspectDevelopmentSource(options.source)
     const harnessLock = readJson(join(releaseRoot, 'harness.lock.json'), 'Harness lock')
     if (candidate.pluginsCommit !== source.originMain) {
@@ -544,6 +792,7 @@ function commandDev(options) {
     if (candidate.harnessCommit !== harnessLock.commit) {
       fail(`开发基础镜像没有使用固定 Harness commit：candidate=${candidate.harnessCommit}，lock=${harnessLock.commit}`, exitCodes.safety)
     }
+    verifyDevelopmentCandidateImage(candidate)
     stopDev()
     commandSnapshot({ _: ['latest'] })
     materializeSnapshot('latest', homePath)
@@ -585,6 +834,7 @@ function commandDev(options) {
       verification,
     }
     writeJson(devMetaPath, metadata)
+    const lease = replaceDevelopmentLease(completionSource, candidate, candidatePath, devRoot)
     const result = {
       result: 'dev-source-ready',
       web: 'http://127.0.0.1:13080',
@@ -592,6 +842,7 @@ function commandDev(options) {
       data: 'fresh-isolated-production-snapshot',
       network: 'dsh-dev-internal',
       ...metadata,
+      leasePath: lease.leasePath,
     }
     out(result)
     return result
@@ -603,7 +854,7 @@ function commandDev(options) {
     run(engine, ['run', '--rm', '--interactive', '--tty', '--network', 'dsh-dev-internal', ...containerBaseArgs(homePath), ...sourceArgs, candidate.imageTag, 'shell'], { code: exitCodes.test })
     return
   }
-  fail('用法: dsh dev prepare --source <worktree> --candidate <candidate.json>；dsh dev up --snapshot latest|synthetic；dsh dev shell；dsh dev down', exitCodes.usage)
+  fail('用法: dsh dev prepare --source <worktree> --candidate <candidate.json>；dsh dev up --snapshot latest|synthetic；dsh dev shell；dsh dev down；dsh dev retire --source <worktree>', exitCodes.usage)
 }
 
 function commandSnapshot(options) {
@@ -640,7 +891,11 @@ function releasePlan(candidate) {
 }
 
 function commandRelease(options) {
-  const { candidate, path: candidatePath } = candidateFrom(options.candidate)
+  const requestedCandidatePath = options.candidate ? resolve(options.candidate) : join(stateRoot, 'candidates/latest.json')
+  if (candidatePurpose(readJson(requestedCandidatePath, 'candidate')) !== 'release') {
+    fail('development 候选不能发布；请重新构建 --purpose release 的唯一正式候选', exitCodes.safety)
+  }
+  const { candidate, path: candidatePath } = candidateFrom(requestedCandidatePath)
   requireLatestMainAncestor(candidate.pluginsCommit, '候选插件 commit')
   requireLatestMainAncestor(candidate.releaseToolCommit, '候选发版工具 commit')
   if (!options['approved-stop']) {
@@ -772,23 +1027,28 @@ cat "$root/releases/$release_id/stop.json"
 root=${shellQuote(remoteRoot)}
 cp "$root/snapshots/${releaseId}.json" "$root/snapshots/latest.json.next"
 mv -Tf "$root/snapshots/latest.json.next" "$root/snapshots/latest.json"
-`)
+  `)
 
   stage('snapshot-copy-tests', { snapshot: snapshotMeta })
-  const testHome = join(localReleaseDir, 'preflight/home/herman')
-  ensureDir(testHome)
-  run('tar', ['--zstd', '-xf', localSnapshot, '-C', testHome], { code: exitCodes.test })
-  const baseArgs = containerBaseArgs(testHome)
-  run(engine, ['run', '--rm', ...baseArgs, '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'prepare'], { code: exitCodes.test })
-  const stateReceipt = run(engine, ['run', '--rm', ...baseArgs, candidate.imageTag, 'validate-state', '/home/herman/.dsh'], { capture: true, code: exitCodes.test })
-  writeFileSync(join(localReleaseDir, 'state-validation.json'), `${stateReceipt}\n`)
-  const selfTest = run(engine, ['run', '--rm', '--read-only', '--user', '1000:1000', '--tmpfs', '/tmp:rw', '--tmpfs', '/run:rw', candidate.imageTag, 'self-test'], { capture: true, code: exitCodes.test })
-  writeFileSync(join(localReleaseDir, 'preflight-tests.txt'), `${selfTest}\n`)
+  const preflightRoot = join(localReleaseDir, 'preflight')
+  const testHome = join(preflightRoot, 'home/herman')
+  let stateReceipt
+  let selfTest
   let runtimeReceipt
   try {
+    ensureDir(testHome)
+    run('tar', ['--zstd', '-xf', localSnapshot, '-C', testHome], { code: exitCodes.test })
+    const baseArgs = containerBaseArgs(testHome)
+    run(engine, ['run', '--rm', ...baseArgs, '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'prepare'], { code: exitCodes.test })
+    stateReceipt = run(engine, ['run', '--rm', ...baseArgs, candidate.imageTag, 'validate-state', '/home/herman/.dsh'], { capture: true, code: exitCodes.test })
+    writeFileSync(join(localReleaseDir, 'state-validation.json'), `${stateReceipt}\n`)
+    selfTest = run(engine, ['run', '--rm', '--read-only', '--user', '1000:1000', '--tmpfs', '/tmp:rw', '--tmpfs', '/run:rw', candidate.imageTag, 'self-test'], { capture: true, code: exitCodes.test })
+    writeFileSync(join(localReleaseDir, 'preflight-tests.txt'), `${selfTest}\n`)
     runtimeReceipt = commandDev({ _: ['up'], snapshot: snapshotMetaPath, candidate: candidatePath, reset: true })
   } finally {
     stopDev()
+    try { removeControlledPath(localReleaseDir, preflightRoot) } catch (error) { warn(error.message) }
+    try { removeControlledPath(join(stateRoot, 'dev'), join(stateRoot, 'dev', candidate.candidateId)) } catch (error) { warn(error.message) }
   }
 
   stage('transfer-and-start')
@@ -887,7 +1147,12 @@ test -f "$release_dir/release.json"
 ln -sfn "$release_dir" "$root/last-good.next"
 mv -Tf "$root/last-good.next" "$root/last-good"
 `)
-  out({ result: 'accepted', releaseId: release.releaseId, imageId: release.candidate.imageId, next: '该 release 已固定为 current 和 last-good。' })
+  const developmentCleanup = cleanupAcceptedDevelopmentState()
+  release.localDevelopmentCleanup = developmentCleanup
+  writeJson(path, release)
+  const cleanupEvidenceSync = runStatus('scp', ['-p', path, `${target}:${remoteDir}/release.json`])
+  if (cleanupEvidenceSync.status !== 0) warn('开发环境清理回执未能同步到远端 release.json；本地证据已保存')
+  out({ result: 'accepted', releaseId: release.releaseId, imageId: release.candidate.imageId, developmentCleanup, next: '该 release 已固定为 current 和 last-good；旧开发环境已失效并清理。' })
 }
 
 function commandRollback(options) {
@@ -972,7 +1237,8 @@ function usage() {
   ./release/dsh dev up --snapshot latest|synthetic [--candidate candidate.json] [--reset]
   ./release/dsh dev shell [--candidate candidate.json]
   ./release/dsh dev down
-  ./release/dsh build --harness-ref <40位commit> --plugins-ref <40位commit>
+  ./release/dsh dev retire --source <独立任务worktree>
+  ./release/dsh build --purpose development|release --harness-ref <40位commit> --plugins-ref <40位commit>
   ./release/dsh release --candidate <candidate.json> [--approved-stop]
   ./release/dsh status
   ./release/dsh accept --release <release-id|release.json> --evidence <说明|文件>
