@@ -87,7 +87,8 @@ RUN set -eu; \
          if [ ! -f "$config" ]; then config=/opt/dsh/harness/vitest.external.config.ts; fi; \
          DSH_HARNESS_ROOT=/opt/dsh/harness \
             node /opt/dsh/harness/node_modules/vitest/vitest.mjs run \
-              --config "$config" --maxWorkers=1 --no-file-parallelism); \
+              --config "$config" --configLoader runner \
+              --maxWorkers=1 --no-file-parallelism); \
       fi; \
     done; \
     (cd local-plugins/x-feed/python \
