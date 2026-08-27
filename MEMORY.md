@@ -54,3 +54,4 @@
 - 2026-08-27：根 `AGENTS.md` 曾混入项目现状、历史实验和精确测试数量，导致每轮注入既长又容易过时。稳定规则留在 `AGENTS.md`；可复用经验改记此文件，并在使用前按任务关键词检索、以现场状态复核。
 - 2026-08-27：Docker 首次切换完成真实验收后，旧 DSH systemd units、旧远端发布树、本地 `deployment/herman-hermes` 与第一次切换兼容代码均已退役；随后完成一次真实 Docker→Docker 发布与显式回退演练，证明发布、健康检查和数据恢复不再依赖旧系统。A12 完整 UI 回归所需的 `context-manager-telegram-canary` 只作为已提交构建验证 fixture 保留，不是生产发布运行时。
 - 2026-08-28：rootless Podman 的容器 UID 1000 会映射到宿主 subordinate UID；对大型镜像使用 `keep-id` 会触发昂贵的递归改属主。源码开发应以容器 root 完成宿主挂载编译，再用 `setpriv` 降权运行权限敏感测试，并把 npm/XDG 缓存放进隔离 `/tmp`，避免读取快照 Home 中不可写的用户缓存。
+- 2026-08-28：开发镜像不能按 worktree 重复构建。`release/dsh build --purpose development` 对完整 `origin/main` 只保留一份共享镜像，同一 main 直接复用且不生成归档；main 前进时新镜像自检通过后清除全部旧开发环境与旧开发镜像。每个 worktree 只拥有独立容器、网络、Web 端口和数据；共享 Podman 的 build、正式 save/load 验证及镜像清理由入口全局锁自动排队，不再人工抢窗口。

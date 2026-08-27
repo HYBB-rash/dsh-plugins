@@ -29,26 +29,26 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
 ## Prepare the environment
 
 1. Resolve the full Harness commit from `release/harness.lock.json` and the full plugin commit from the freshly fetched `origin/main`.
-2. From the clean latest-main baseline, build the development base with:
+2. Request the one shared development base for the freshly fetched `origin/main`:
 
    ```bash
    ./release/dsh build --purpose development --harness-ref <locked-harness-commit> --plugins-ref <origin-main-commit>
    ```
 
-   This local image is the dependency and Harness boundary for development. Do not publish or release it merely because preparation passed.
+   The command is safe to repeat. Under one repository-managed engine lock it reuses the already-tested image when the full main commit is unchanged; only the first request after main advances performs a real build. Development bases do not create or reload Docker archives and cannot be published as release candidates.
 3. Run:
 
    ```bash
-   ./release/dsh dev prepare --source <task-worktree> --candidate <candidate.json>
+   ./release/dsh dev prepare --source <task-worktree>
    ```
 
 4. Let the command download the latest existing consistent production snapshot. It must not stop production or create a new online snapshot. If no valid snapshot exists, report and stop; never silently substitute synthetic data.
-5. Let the deterministic command mount the six packages, product Skills, Profiles, runtime topology, materializer, and image runtime scripts as editable worktree inputs, plus an isolated snapshot copy. The image root stays read-only. The command must replace credentials, empty cron work, remove production Telegram offsets and locks, block real Telegram egress, and leave production directories unmounted.
+5. Let the deterministic command create worktree-specific data, container names, an internal network, and a Web port from the shared main image. It mounts the six packages, product Skills, Profiles, runtime topology, materializer, and image runtime scripts as editable worktree inputs, plus an isolated snapshot copy. The image root stays read-only. The command must replace credentials, empty cron work, remove production Telegram offsets and locks, block real Telegram egress, and leave production directories unmounted. Other worktrees may prepare and run at the same time.
 6. Do not claim readiness until the command reports `dev-source-ready`. That receipt means the mounted source completed the full six-package build, all runtime-image TypeScript and Python tests, Web health, fake Telegram polling and delivery, empty cron verification, real Telegram blocking, and common image identity checks.
 
 ## Develop inside the boundary
 
-- Use `./release/dsh dev shell --candidate <candidate.json>` for commands that must run with the fixed Harness and image dependencies.
+- Use `./release/dsh dev shell` for commands that must run with the fixed Harness and image dependencies. It resolves the shared main image and this worktree's isolated runtime from repository-managed state.
 - Keep editable source in the task worktree. Generated `lib`, caches, and test output remain ignored and outside the image identity.
 - Use focused tests during the inner loop when the affected boundary is known. Before declaring development complete, rerun the affected integration tests and any wider tests required by the change.
 - Never mount production persistence, use real credentials, contact real Telegram, claim real cron work, install dependencies on production, or patch a running production container.
@@ -58,11 +58,11 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
 
 1. Fetch `origin` again when preparation finishes. The task branch must still contain the latest `origin/main`; otherwise rebase immediately and rerun the affected checks.
 2. Keep the task change on its independent branch, with focused commits. Push the exact intended product commit.
-3. When main changes during an unfinished task, build and prepare the new development base normally. Keep the old base until the new `dev prepare` receipt passes; the command then atomically moves that worktree's lease and removes only the old unreferenced development base.
-4. When the task no longer needs its local environment, stop it with `./release/dsh dev down`, then run `./release/dsh dev retire --source <task-worktree>` to remove that worktree's isolated data and unreferenced development base. Never use a global container-engine prune.
-5. An accepted production release invalidates every local development environment. `accept` removes the local development containers, isolated data, leases, and unreferenced development images while preserving source worktrees. Any unfinished task must rebase onto the new main and run a fresh development build and `dev prepare` before continuing.
+3. When main changes, the first build request constructs and self-tests the new shared base, then invalidates every environment tied to the previous main and removes all older development images. An unfinished task keeps its source worktree, rebases onto the new main, and runs `dev prepare` again. Do not retain an older development image or try to keep an old container alive.
+4. When the task no longer needs its local environment, stop it with `./release/dsh dev down`, then run `./release/dsh dev retire --source <task-worktree>` to remove only that worktree's containers, network, port reservation, lease, and isolated data. The current shared main image remains available for other tasks. Never use a global container-engine prune.
+5. An accepted production release invalidates every local development environment. `accept` removes all development containers, isolated data, leases, runtime reservations, and the shared development image while preserving source worktrees. Any unfinished task must rebase onto the new main, request the new single main image, and run `dev prepare` before continuing.
 6. For production, explicitly invoke `$dsh-release`. Recheck and rebase onto the latest `main` again before candidate construction or release. The development-base image and its receipt are not a formal release candidate and never replace release acceptance.
 
 ## Report the result
 
-Use concise Chinese. Report the task branch/worktree, latest-main commit, locked Harness commit, development image identity, snapshot identity, full baseline result, isolated runtime result, and whether the environment is ready. If blocked, report the single failed gate and the evidence needed to proceed.
+Use concise Chinese. Report the task branch/worktree, latest-main commit, locked Harness commit, whether the shared development image was built or reused, its identity, the worktree-specific runtime identity, snapshot identity, full baseline result, isolated runtime result, and whether the environment is ready. If blocked, report the single failed gate and the evidence needed to proceed.

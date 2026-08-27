@@ -2,4 +2,19 @@
 set -Eeuo pipefail
 
 release_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec node "$release_dir/cli.mjs" "$@"
+state_root="${DSH_RELEASE_STATE_ROOT:-$HOME/.local/share/dsh-container}"
+
+# The local container engine has one shared image/layer store.  Commands that
+# build, archive, load, or remove images must queue behind one process lock.
+# Runtime-only development commands deliberately stay outside this lock so
+# independent worktrees can run in parallel.
+case "${1:-}" in
+  build|accept)
+    mkdir -p -- "$state_root/locks"
+    exec flock --exclusive "$state_root/locks/container-engine.lock" \
+      node "$release_dir/cli.mjs" "$@"
+    ;;
+  *)
+    exec node "$release_dir/cli.mjs" "$@"
+    ;;
+esac

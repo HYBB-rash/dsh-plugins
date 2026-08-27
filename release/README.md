@@ -12,22 +12,22 @@
 ## 常用流程
 
 ```bash
-# 开发任务先从最新 main 构建开发基础镜像；这不是正式发版候选
+# 请求最新 main 的唯一开发基础镜像。同一 main 重复调用会直接复用，
+# 只有 main 前进后第一次调用才真正构建；这不是正式发版候选。
 ./release/dsh build \
   --purpose development \
   --harness-ref b150a551b8d465e31e418e1b2eaf5e79bbb7d28e \
   --plugins-ref "$(git rev-parse origin/main)"
 
-# 自动下载已有的最新生产快照，挂入当前独立 worktree 的可编辑源码，
-# 完成六个插件的全量构建、全量测试和隔离 Web/假 Telegram/空 cron 验收
+# 每个 worktree 从上述共享镜像创建自己的容器、网络、端口和数据副本；
+# 不再为每个任务重新生成镜像。
 ./release/dsh dev prepare \
-  --source "$(git rev-parse --show-toplevel)" \
-  --candidate ~/.local/share/dsh-container/candidates/latest.json
+  --source "$(git rev-parse --show-toplevel)"
 
 # 进入同一镜像、同一隔离数据和同一源码挂载的开发 shell
-./release/dsh dev shell --candidate ~/.local/share/dsh-container/candidates/latest.json
+./release/dsh dev shell
 
-# 任务结束、不再需要这份隔离开发数据时，释放该 worktree 的开发底座
+# 任务结束时只删除该 worktree 的容器和隔离数据；共享 main 镜像保留
 ./release/dsh dev down
 ./release/dsh dev retire --source "$(git rev-parse --show-toplevel)"
 
@@ -64,13 +64,15 @@
 
 本机 Podman 构建显式使用目录内的 `containers-policy.json`，不修改用户全局容器配置。该策略不额外要求镜像签名；基础镜像身份由 `image.lock.json` 中不可变的完整 digest 锁定。
 
-构建仍会在删除标签后重载 Docker archive，证明归档可以恢复同一个 image ID。若 `/dev/shm` 至少有 8 GiB 可用空间，归档会自动在那里暂存，重载成功后再复制到证据目录，避免根盘同时承受镜像层和归档的峰值占用；也可用 `DSH_RELEASE_ARCHIVE_STAGING_ROOT` 指定其他临时文件系统。暂存归档未完成摘要校验前不会生成 `candidate.json`。
+正式发版候选仍会在删除其唯一标签后重载 Docker archive，证明归档可以恢复同一个 image ID。这个共享存储敏感段和所有镜像构建、验收清理都由 `release/dsh` 的全局锁自动排队，不需要 Agent 人工协调窗口。若 `/dev/shm` 至少有 8 GiB 可用空间，正式归档会自动在那里暂存，重载成功后再复制到证据目录；也可用 `DSH_RELEASE_ARCHIVE_STAGING_ROOT` 指定其他临时文件系统。暂存归档未完成摘要校验前不会生成正式 `candidate.json`。
 
-构建工作目录、未完成的候选目录、失败构建的候选镜像标签和归档暂存文件，无论成功还是失败都会由本次命令清理。`--purpose development` 和 `--purpose release` 会把开发底座与正式候选明确分开；开发底座不能发布。开发底座在内存盘完成归档保存、重载和身份证明后立即删除临时归档，不会在根盘永久再存一份约 4.4 GiB 的发版包；只有正式候选保留可传输归档。每个独立 worktree 都有自己的开发租约：main 更新后，只有新底座完成全部 `dev prepare` 验证并接管租约，旧底座才会被清理；其他未完成任务、最新候选和任何 release 证据引用的镜像不会被误删。任务结束后用 `dev retire` 释放最后一份开发数据和开发底座。
+构建工作目录、未完成候选、失败构建标签和归档暂存文件都会由本次命令清理。开发底座与正式候选用途严格分开，开发底座不能发布。development 不生成、保存或重载 Docker archive；它按完整 `origin/main` commit 使用稳定身份，本机始终只保留最新 main 的一份开发镜像。同一 main 的重复 build 在锁内确认镜像和测试回执后直接复用。main 前进时先完成新镜像构建和自检，再停止并删除所有旧开发容器、隔离数据、租约、旧候选和旧开发镜像；源码 worktree 始终保留。
+
+每个 worktree 的开发环境使用路径摘要派生的独立容器名和内部网络，并在一个短状态锁内分配独立 Web 端口。因此多个任务可以从同一只读 main 镜像并行运行；`dev down` 和 `dev retire` 只作用于指定 worktree。不得恢复固定的全局 `dsh-dev-web`、`dsh-dev-telegram`、`dsh-dev-fake-telegram` 或 `dsh-dev-internal` 名称。
 
 正式发版的生产快照测试副本和临时开发副本在测试结束或失败后都会清理，只保留快照、测试回执、候选归档和发布证据这些回退与审计所需内容。流程不会执行无边界的 `podman system prune` 或 `docker system prune`。
 
-正式 release 完成 `accept` 后，本地所有旧开发环境都立即失效：开发容器、隔离数据、worktree 租约和未被 release 引用的开发镜像会自动清理；任务源码 worktree 原样保留。未完成任务下次继续时，必须先同步新 main，再用新的开发底座重新执行 `dev prepare`。
+正式 release 完成 `accept` 后，本地开发环境和共享开发镜像立即失效并清理；任务源码 worktree 原样保留。未完成任务下次继续时，必须先同步新 main，请求最新 main 的唯一开发镜像，再执行自己的 `dev prepare`。
 
 开发态的 Telegram/cron 容器只连接无外网的内部网络和假 Bot API；Web 由于 Harness 强制只绑定 loopback，使用宿主网络供本机浏览器访问，但只持有测试凭据，不承担 Telegram 或 cron 写入。生产容器固定使用 `1000:1000`；本机 rootless Podman 为了让快照副本保持宿主用户可读写，在容器内显示为 uid 0，但仍映射为宿主普通用户，不获得宿主 root 权限。
 

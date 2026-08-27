@@ -154,7 +154,7 @@ function verifyDevelopmentCandidateImage(candidate) {
 function candidateFrom(value, { verifyDevelopmentImage = true } = {}) {
   const path = value ? resolve(value) : join(stateRoot, 'candidates/latest.json')
   const candidate = readJson(path, 'candidate')
-  for (const field of ['imageId', 'imageTag', 'archiveSha256', 'pluginsCommit', 'releaseToolCommit', 'harnessCommit']) {
+  for (const field of ['imageId', 'imageTag', 'pluginsCommit', 'releaseToolCommit', 'harnessCommit']) {
     if (!candidate[field]) fail(`candidate 缺少 ${field}`, exitCodes.usage)
   }
   if (candidate.status !== 'tested') fail(`candidate 尚未通过镜像测试，当前状态是 ${candidate.status ?? 'missing'}`, exitCodes.safety)
@@ -162,6 +162,7 @@ function candidateFrom(value, { verifyDevelopmentImage = true } = {}) {
     if (verifyDevelopmentImage) verifyDevelopmentCandidateImage(candidate)
     return { candidate, path }
   }
+  if (!candidate.archiveSha256) fail('正式 candidate 缺少 archiveSha256', exitCodes.usage)
   if (!candidate.archivePath) fail('正式 candidate 缺少 archivePath', exitCodes.usage)
   if (!existsSync(candidate.archivePath)) fail(`candidate 镜像归档不存在: ${candidate.archivePath}`, exitCodes.safety)
   if (sha256File(candidate.archivePath) !== candidate.archiveSha256) fail('candidate 镜像归档摘要不匹配', exitCodes.safety)
@@ -210,6 +211,120 @@ function candidatePurpose(candidate) {
   return candidate.purpose ?? 'release'
 }
 
+function developmentCandidatePointerPath() {
+  return join(stateRoot, 'dev/main-candidate.json')
+}
+
+function developmentKey(sourcePath) {
+  return createHash('sha256').update(resolve(sourcePath)).digest('hex')
+}
+
+function developmentRuntimePath(sourcePath) {
+  return join(stateRoot, 'dev/runtimes', `${developmentKey(sourcePath)}.json`)
+}
+
+function legacyDevelopmentRuntime() {
+  return {
+    schemaVersion: 1,
+    legacy: true,
+    network: 'dsh-dev-internal',
+    fakeTelegram: 'dsh-dev-fake-telegram',
+    telegram: 'dsh-dev-telegram',
+    web: 'dsh-dev-web',
+    webPort: 13080,
+  }
+}
+
+function allocatedDevelopmentPorts() {
+  const ports = new Set()
+  const runtimesRoot = join(stateRoot, 'dev/runtimes')
+  if (!existsSync(runtimesRoot)) return ports
+  for (const name of readdirSync(runtimesRoot)) {
+    if (!name.endsWith('.json')) continue
+    try {
+      const runtime = readJson(join(runtimesRoot, name), 'development runtime')
+      if (Number.isInteger(runtime.webPort)) ports.add(runtime.webPort)
+    } catch (error) {
+      warn(error.message)
+    }
+  }
+  return ports
+}
+
+function listeningTcpPorts() {
+  const result = runStatus('ss', ['-H', '-ltn'])
+  if (result.status !== 0) return new Set()
+  const ports = new Set()
+  for (const line of String(result.stdout).split('\n')) {
+    const match = /:(\d+)\s/u.exec(line)
+    if (match !== null) ports.add(Number(match[1]))
+  }
+  return ports
+}
+
+function withShortStateLock(name, operation) {
+  const locksRoot = join(stateRoot, 'locks')
+  const lockPath = join(locksRoot, `${name}.lock`)
+  ensureDir(locksRoot)
+  const started = Date.now()
+  while (true) {
+    try {
+      mkdirSync(lockPath)
+      writeJson(join(lockPath, 'owner.json'), { pid: process.pid, createdAt: new Date().toISOString() })
+      break
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error
+      try {
+        const owner = readJson(join(lockPath, 'owner.json'), `${name} lock owner`)
+        try { process.kill(owner.pid, 0) } catch (processError) {
+          if (processError.code === 'ESRCH') rmSync(lockPath, { recursive: true, force: true })
+        }
+      } catch {}
+      if (Date.now() - started > 30_000) fail(`等待 ${name} 状态锁超时`, exitCodes.safety)
+      sleepSync(100)
+    }
+  }
+  try {
+    return operation()
+  } finally {
+    rmSync(lockPath, { recursive: true, force: true })
+  }
+}
+
+function developmentRuntime(sourcePath, { create = false } = {}) {
+  const resolvedSource = resolve(sourcePath)
+  const key = developmentKey(resolvedSource)
+  const path = developmentRuntimePath(resolvedSource)
+  if (existsSync(path)) return readJson(path, 'development runtime')
+  if (!create) return null
+  return withShortStateLock('development-runtime', () => {
+    if (existsSync(path)) return readJson(path, 'development runtime')
+    const used = allocatedDevelopmentPorts()
+    for (const port of listeningTcpPorts()) used.add(port)
+    const firstPort = 13080 + (Number.parseInt(key.slice(0, 8), 16) % 10_000)
+    let webPort = null
+    for (let offset = 0; offset < 10_000; offset += 1) {
+      const candidate = 13080 + ((firstPort - 13080 + offset) % 10_000)
+      if (!used.has(candidate)) { webPort = candidate; break }
+    }
+    if (webPort === null) fail('没有可用的本地开发 Web 端口', exitCodes.safety)
+    const suffix = key.slice(0, 12)
+    const runtime = {
+      schemaVersion: 2,
+      sourcePath: resolvedSource,
+      key,
+      network: `dsh-dev-${suffix}-internal`,
+      fakeTelegram: `dsh-dev-${suffix}-fake-telegram`,
+      telegram: `dsh-dev-${suffix}-telegram`,
+      web: `dsh-dev-${suffix}-web`,
+      webPort,
+      createdAt: new Date().toISOString(),
+    }
+    writeJson(path, runtime)
+    return runtime
+  })
+}
+
 function controlledChild(root, path) {
   const resolvedRoot = resolve(root)
   const resolvedPath = resolve(path)
@@ -222,8 +337,7 @@ function removeControlledPath(root, path) {
 }
 
 function developmentLeasePath(sourcePath) {
-  const key = createHash('sha256').update(resolve(sourcePath)).digest('hex')
-  return join(stateRoot, 'dev/leases', `${key}.json`)
+  return join(stateRoot, 'dev/leases', `${developmentKey(sourcePath)}.json`)
 }
 
 function readDevelopmentLeases() {
@@ -271,68 +385,141 @@ function protectedCandidateIds() {
   return { complete, ids, leases: leaseState.leases }
 }
 
-function cleanupDevelopmentLease(lease, { removeLatest = false } = {}) {
-  if (!lease?.candidateId || !lease?.devRoot) return { result: 'nothing-to-clean' }
-  const latestPath = join(stateRoot, 'candidates/latest.json')
-  if (removeLatest && existsSync(latestPath)) {
-    const latest = readJson(latestPath, 'latest candidate')
-    if (latest.candidateId === lease.candidateId && candidatePurpose(latest) === 'development') rmSync(latestPath, { force: true })
-  }
-  const protection = protectedCandidateIds()
-  const devRoot = resolve(lease.devRoot)
-  const devReferenced = protection.leases.some((item) => item.devRoot && resolve(item.devRoot) === devRoot)
-  if (!devReferenced && controlledChild(join(stateRoot, 'dev'), devRoot)) removeControlledPath(join(stateRoot, 'dev'), devRoot)
+function runtimeForLease(lease) {
+  return lease?.runtime ?? developmentRuntime(lease?.sourcePath ?? '') ?? legacyDevelopmentRuntime()
+}
 
-  if (!protection.complete || protection.ids.has(lease.candidateId)) {
-    return { result: 'development-data-cleaned', candidateId: lease.candidateId, candidate: 'kept-referenced' }
+function stopDev(runtime) {
+  if (!runtime) return
+  for (const name of [runtime.telegram, runtime.fakeTelegram, runtime.web]) {
+    if (name) runStatus(engine, ['rm', '--force', name])
   }
-  const candidateDir = join(stateRoot, 'candidates', lease.candidateId)
-  const candidatePath = join(candidateDir, 'candidate.json')
-  if (!existsSync(candidatePath)) return { result: 'development-data-cleaned', candidateId: lease.candidateId, candidate: 'already-absent' }
-  const candidate = readJson(candidatePath, 'development candidate')
-  if (candidatePurpose(candidate) !== 'development') {
-    return { result: 'development-data-cleaned', candidateId: lease.candidateId, candidate: 'kept-non-development' }
-  }
-  const inspection = runStatus(engine, ['image', 'inspect', candidate.imageTag])
-  if (inspection.status === 0) {
-    const removal = runStatus(engine, ['image', 'rm', candidate.imageTag])
-    if (removal.status !== 0) {
-      warn(`镜像仍被容器使用，保留候选 ${lease.candidateId}: ${String(removal.stderr ?? '').trim()}`)
-      return { result: 'development-data-cleaned', candidateId: lease.candidateId, candidate: 'kept-image-in-use' }
-    }
-  }
-  removeControlledPath(join(stateRoot, 'candidates'), candidateDir)
-  return { result: 'development-base-cleaned', candidateId: lease.candidateId, imageTag: candidate.imageTag }
+  if (runtime.network) runStatus(engine, ['network', 'rm', runtime.network])
+}
+
+function removeDevelopmentRuntime(sourcePath) {
+  if (!sourcePath) return
+  rmSync(developmentRuntimePath(sourcePath), { force: true })
+}
+
+function cleanupDevelopmentLease(lease) {
+  if (!lease?.candidateId || !lease?.devRoot) return { result: 'nothing-to-clean' }
+  const devRoot = resolve(lease.devRoot)
+  if (controlledChild(join(stateRoot, 'dev'), devRoot)) removeControlledPath(join(stateRoot, 'dev'), devRoot)
+  removeDevelopmentRuntime(lease.sourcePath)
+  return { result: 'development-environment-cleaned', candidateId: lease.candidateId, sharedMainImage: 'kept' }
 }
 
 function replaceDevelopmentLease(source, candidate, candidatePath, devRoot) {
   const leasePath = developmentLeasePath(source.sourcePath)
-  const previous = existsSync(leasePath) ? readJson(leasePath, 'development lease') : null
   const lease = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sourcePath: source.sourcePath,
     candidateId: candidate.candidateId,
     candidatePath,
     imageId: candidate.imageId,
     imageTag: candidate.imageTag,
     devRoot,
+    runtime: source.runtime,
     updatedAt: new Date().toISOString(),
   }
   writeJson(leasePath, lease)
-  if (previous?.candidateId && previous.candidateId !== candidate.candidateId) {
-    try { cleanupDevelopmentLease(previous) } catch (error) { warn(error.message) }
-  }
   return { lease, leasePath }
 }
 
+function invalidateDevelopmentEnvironments({ exceptCandidateId = null } = {}) {
+  const leaseState = readDevelopmentLeases()
+  if (!leaseState.complete) fail('开发租约不完整，拒绝自动清理旧环境', exitCodes.safety)
+  const invalidated = []
+  for (const lease of leaseState.leases) {
+    if (exceptCandidateId && lease.candidateId === exceptCandidateId) continue
+    stopDev(runtimeForLease(lease))
+    rmSync(developmentLeasePath(lease.sourcePath), { force: true })
+    cleanupDevelopmentLease(lease)
+    invalidated.push(lease.sourcePath)
+  }
+  return invalidated
+}
+
+function developmentCandidates() {
+  const candidatesRoot = join(stateRoot, 'candidates')
+  if (!existsSync(candidatesRoot)) return []
+  const candidates = []
+  for (const name of readdirSync(candidatesRoot)) {
+    const path = join(candidatesRoot, name, 'candidate.json')
+    if (!existsSync(path)) continue
+    try {
+      const candidate = readJson(path, 'development candidate')
+      if (candidatePurpose(candidate) === 'development') candidates.push({ candidate, path })
+    } catch (error) {
+      warn(error.message)
+    }
+  }
+  return candidates
+}
+
+function developmentTestReceiptValid(candidate) {
+  if (!candidate.testReceiptPath || !candidate.testReceiptSha256 || !existsSync(candidate.testReceiptPath)) return false
+  try {
+    return sha256File(candidate.testReceiptPath) === candidate.testReceiptSha256
+  } catch {
+    return false
+  }
+}
+
+function reusableDevelopmentCandidate({ pluginsCommit, harnessCommit, releaseToolCommit, baseImageDigest }) {
+  return developmentCandidates()
+    .filter(({ candidate }) => candidate.status === 'tested'
+      && candidate.pluginsCommit === pluginsCommit
+      && candidate.harnessCommit === harnessCommit
+      && candidate.releaseToolCommit === releaseToolCommit
+      && candidate.baseImageDigest === baseImageDigest
+      && developmentTestReceiptValid(candidate))
+    .sort((left, right) => String(right.candidate.builtAt).localeCompare(String(left.candidate.builtAt)))
+    .find(({ candidate }) => runStatus(engine, ['image', 'inspect', candidate.imageTag]).status === 0) ?? null
+}
+
+function removeObsoleteDevelopmentCandidates(currentCandidateId) {
+  const cleaned = []
+  for (const { candidate, path } of developmentCandidates()) {
+    if (candidate.candidateId === currentCandidateId) continue
+    const inspection = runStatus(engine, ['image', 'inspect', candidate.imageTag])
+    if (inspection.status === 0) {
+      const removal = runStatus(engine, ['image', 'rm', candidate.imageTag])
+      if (removal.status !== 0) {
+        fail(`旧开发镜像仍被未知容器使用，无法保持单一 main 镜像: ${candidate.imageTag}\n${String(removal.stderr ?? '').trim()}`, exitCodes.safety)
+      }
+    }
+    removeControlledPath(join(stateRoot, 'candidates'), dirname(path))
+    cleaned.push(candidate.candidateId)
+  }
+  return cleaned
+}
+
+function admitDevelopmentCandidate(candidate, candidatePath) {
+  const invalidatedSourcePaths = invalidateDevelopmentEnvironments({ exceptCandidateId: candidate.candidateId })
+  const cleanedCandidateIds = removeObsoleteDevelopmentCandidates(candidate.candidateId)
+  writeJson(developmentCandidatePointerPath(), candidate)
+  const legacyLatest = join(stateRoot, 'candidates/latest.json')
+  if (existsSync(legacyLatest)) {
+    try {
+      if (candidatePurpose(readJson(legacyLatest, 'latest candidate')) === 'development') rmSync(legacyLatest, { force: true })
+    } catch (error) {
+      warn(error.message)
+    }
+  }
+  return { candidatePath, invalidatedSourcePaths, cleanedCandidateIds }
+}
+
 function cleanupAcceptedDevelopmentState() {
-  stopDev()
+  const invalidatedSourcePaths = invalidateDevelopmentEnvironments()
+  stopDev(legacyDevelopmentRuntime())
   const devRoot = join(stateRoot, 'dev')
   const inferredDevelopmentIds = new Set()
   if (existsSync(devRoot)) {
     for (const name of readdirSync(devRoot)) {
       const path = join(devRoot, name)
-      if (name === 'leases') continue
+      if (['leases', 'runtimes'].includes(name)) continue
       const metadataPath = join(path, 'dev.json')
       if (existsSync(metadataPath)) {
         try {
@@ -351,6 +538,8 @@ function cleanupAcceptedDevelopmentState() {
       if (name.endsWith('.json')) rmSync(join(leasesRoot, name), { force: true })
     }
   }
+  rmSync(join(devRoot, 'runtimes'), { recursive: true, force: true })
+  rmSync(developmentCandidatePointerPath(), { force: true })
 
   const candidatesRoot = join(stateRoot, 'candidates')
   const latestPath = join(candidatesRoot, 'latest.json')
@@ -392,15 +581,9 @@ function cleanupAcceptedDevelopmentState() {
     result: 'accepted-release-invalidated-development',
     cleanedCandidateIds: cleaned,
     keptReferencedCandidateIds: kept,
+    invalidatedSourcePaths,
     sourceWorktrees: 'preserved',
   }
-}
-
-function stopDev() {
-  for (const name of ['dsh-dev-telegram', 'dsh-dev-fake-telegram', 'dsh-dev-web']) {
-    runStatus(engine, ['rm', '--force', name])
-  }
-  runStatus(engine, ['network', 'rm', 'dsh-dev-internal'])
 }
 
 function writeTestCredentials(path) {
@@ -545,33 +728,33 @@ function devLogs(name) {
   return `${String(result.stdout ?? '')}${String(result.stderr ?? '')}`.trim()
 }
 
-function verifyDev(candidate, homePath) {
+function verifyDev(candidate, homePath, runtime) {
   let ready = false
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    const web = runStatus('curl', ['--fail', '--silent', '--max-time', '2', 'http://127.0.0.1:13080/'])
-    if (web.status === 0 && devContainerRunning('dsh-dev-web') && devContainerRunning('dsh-dev-telegram')
-      && devContainerRunning('dsh-dev-fake-telegram')) {
+    const web = runStatus('curl', ['--fail', '--silent', '--max-time', '2', `http://127.0.0.1:${runtime.webPort}/`])
+    if (web.status === 0 && devContainerRunning(runtime.web) && devContainerRunning(runtime.telegram)
+      && devContainerRunning(runtime.fakeTelegram)) {
       ready = true
       break
     }
-    if (!devContainerRunning('dsh-dev-web') || !devContainerRunning('dsh-dev-telegram')) break
+    if (!devContainerRunning(runtime.web) || !devContainerRunning(runtime.telegram)) break
     sleepSync(1000)
   }
   if (!ready) {
-    fail(`开发环境启动失败\n--- web ---\n${devLogs('dsh-dev-web')}\n--- telegram ---\n${devLogs('dsh-dev-telegram')}`, exitCodes.test)
+    fail(`开发环境启动失败\n--- web ---\n${devLogs(runtime.web)}\n--- telegram ---\n${devLogs(runtime.telegram)}`, exitCodes.test)
   }
 
-  for (const name of ['dsh-dev-web', 'dsh-dev-telegram']) {
+  for (const name of [runtime.web, runtime.telegram]) {
     const identity = run(engine, ['inspect', name, '--format', '{{.Image}}|{{.HostConfig.ReadonlyRootfs}}'], { capture: true, announce: false, code: exitCodes.test })
     if (identity !== `${candidate.imageId}|true`) fail(`${name} 没有运行同一个只读候选镜像: ${identity}`, exitCodes.test)
   }
-  run(engine, ['exec', 'dsh-dev-fake-telegram', 'curl', '--fail', '--silent', 'http://127.0.0.1:8080/bottest-token/getMe'], { capture: true, announce: false, code: exitCodes.test })
-  run(engine, ['exec', 'dsh-dev-fake-telegram', 'curl', '--fail', '--silent', '--request', 'POST', 'http://127.0.0.1:8080/bottest-token/sendMessage'], { capture: true, announce: false, code: exitCodes.test })
-  const requests = run(engine, ['exec', 'dsh-dev-fake-telegram', 'curl', '--fail', '--silent', 'http://127.0.0.1:8080/bottest-token/getRequests'], { capture: true, announce: false, code: exitCodes.test })
+  run(engine, ['exec', runtime.fakeTelegram, 'curl', '--fail', '--silent', 'http://127.0.0.1:8080/bottest-token/getMe'], { capture: true, announce: false, code: exitCodes.test })
+  run(engine, ['exec', runtime.fakeTelegram, 'curl', '--fail', '--silent', '--request', 'POST', 'http://127.0.0.1:8080/bottest-token/sendMessage'], { capture: true, announce: false, code: exitCodes.test })
+  const requests = run(engine, ['exec', runtime.fakeTelegram, 'curl', '--fail', '--silent', 'http://127.0.0.1:8080/bottest-token/getRequests'], { capture: true, announce: false, code: exitCodes.test })
   for (const method of ['getMe', 'getUpdates', 'sendMessage']) {
     if (!requests.includes(`/${method}`)) fail(`假 Telegram 没有观察到 ${method}`, exitCodes.test)
   }
-  const realTelegram = runStatus(engine, ['exec', 'dsh-dev-telegram', 'curl', '--silent', '--show-error', '--max-time', '2', 'https://api.telegram.org'])
+  const realTelegram = runStatus(engine, ['exec', runtime.telegram, 'curl', '--silent', '--show-error', '--max-time', '2', 'https://api.telegram.org'])
   if (realTelegram.status === 0) fail('开发 Telegram 容器可以访问真实 Telegram；内部网络隔离失效', exitCodes.test)
   const cronLedger = join(homePath, '.dsh/storages/dsh-cron/jobs.jsonl')
   if (existsSync(cronLedger) && readFileSync(cronLedger, 'utf8').trim() !== '') fail('开发 cron 台账不是空的，拒绝启动真实任务', exitCodes.test)
@@ -583,14 +766,40 @@ function commandBuild(options) {
   if (!['development', 'release'].includes(purpose)) fail('--purpose 只能是 development 或 release', exitCodes.usage)
   const harnessCommit = requireFullCommit(harnessRepo, options['harness-ref'], '--harness-ref')
   const pluginsCommit = requireFullCommit(repoRoot, options['plugins-ref'], '--plugins-ref')
-  const releaseToolCommit = requireFullCommit(repoRoot, run('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { capture: true, announce: false }), 'release tool commit')
   const originMain = requireLatestMainAncestor(pluginsCommit, '插件 commit')
+  if (purpose === 'development' && pluginsCommit !== originMain) {
+    fail(`开发底座只能使用最新 origin/main：requested=${pluginsCommit}，origin/main=${originMain}`, exitCodes.safety)
+  }
+  const releaseToolRef = purpose === 'development'
+    ? originMain
+    : run('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { capture: true, announce: false })
+  const releaseToolCommit = requireFullCommit(repoRoot, releaseToolRef, 'release tool commit')
   const releaseToolBasedOnMain = runStatus('git', ['-C', repoRoot, 'merge-base', '--is-ancestor', originMain, releaseToolCommit])
   if (releaseToolBasedOnMain.status !== 0) {
     fail(`发版工具 commit ${releaseToolCommit} 没有基于最新 origin/main ${originMain}；请先 rebase 后再继续`, exitCodes.safety)
   }
   const lock = readJson(join(releaseRoot, 'image.lock.json'), 'image lock')
-  const buildId = `${nowId()}-${pluginsCommit.slice(0, 12)}`
+  if (purpose === 'development') {
+    const harnessLock = readJson(join(releaseRoot, 'harness.lock.json'), 'Harness lock')
+    if (harnessCommit !== harnessLock.commit) {
+      fail(`开发底座必须使用固定 Harness commit：requested=${harnessCommit}，lock=${harnessLock.commit}`, exitCodes.safety)
+    }
+    const reusable = reusableDevelopmentCandidate({
+      pluginsCommit,
+      harnessCommit,
+      releaseToolCommit,
+      baseImageDigest: lock.digest,
+    })
+    if (reusable) {
+      verifyDevelopmentCandidateImage(reusable.candidate)
+      const cleanup = admitDevelopmentCandidate(reusable.candidate, reusable.path)
+      out({ result: 'development-base-reused', ...cleanup, ...reusable.candidate })
+      return
+    }
+  }
+  const buildId = purpose === 'development'
+    ? `development-${pluginsCommit}`
+    : `${nowId()}-${pluginsCommit.slice(0, 12)}`
   const buildRoot = join(stateRoot, 'builds', buildId)
   const context = join(buildRoot, 'context')
   const harnessTarget = join(context, 'harness')
@@ -603,6 +812,9 @@ function commandBuild(options) {
   let admitted = false
 
   try {
+    if (purpose === 'development' && existsSync(candidateDir)) {
+      removeControlledPath(join(stateRoot, 'candidates'), candidateDir)
+    }
     ensureDir(harnessTarget)
     ensureDir(pluginsTarget)
     ensureDir(releaseTarget)
@@ -621,7 +833,9 @@ function commandBuild(options) {
     }
     run('git', ['-C', harnessTarget, 'apply', '--verbose', archivedPatch], { code: exitCodes.safety })
     const patchSha256 = sha256File(archivedPatch)
-    imageTag = `localhost/dsh-candidate:${pluginsCommit.slice(0, 12)}-${buildId.slice(0, 15).toLowerCase()}`
+    imageTag = purpose === 'development'
+      ? `localhost/dsh-development-main:${pluginsCommit}`
+      : `localhost/dsh-candidate:${pluginsCommit.slice(0, 12)}-${buildId.slice(0, 15).toLowerCase()}`
     const signaturePolicy = join(releaseTarget, 'release/containers-policy.json')
     const engineBuildOptions = engine === 'podman' ? ['--signature-policy', signaturePolicy] : []
     const engineArchiveOptions = engine === 'podman' ? ['--signature-policy', signaturePolicy] : []
@@ -666,28 +880,30 @@ function commandBuild(options) {
     ensureDir(candidateDir)
     const receiptPath = join(candidateDir, 'image-tests.json')
     writeJson(receiptPath, testReceipt)
-    const stagingRoot = archiveStagingRoot(candidateDir)
-    stagedArchivePath = stagingRoot === candidateDir ? archivePath : join(stagingRoot, `${buildId}.image.tar`)
-    rmSync(stagedArchivePath, { force: true })
-    run(engine, ['save', ...engineArchiveOptions, '--format', 'docker-archive', '--output', stagedArchivePath, imageTag], { code: exitCodes.test })
-    const archiveSha256 = sha256File(stagedArchivePath)
+    let archiveSha256 = null
+    if (purpose === 'release') {
+      const stagingRoot = archiveStagingRoot(candidateDir)
+      stagedArchivePath = stagingRoot === candidateDir ? archivePath : join(stagingRoot, `${buildId}.image.tar`)
+      rmSync(stagedArchivePath, { force: true })
+      run(engine, ['save', ...engineArchiveOptions, '--format', 'docker-archive', '--output', stagedArchivePath, imageTag], { code: exitCodes.test })
+      archiveSha256 = sha256File(stagedArchivePath)
 
-    // Prove the artifact can recreate the admitted identity. This only removes
-    // the unique candidate tag created above; no user image is targeted.
-    run(engine, ['image', 'rm', imageTag], { code: exitCodes.test })
-    run(engine, ['load', ...engineArchiveOptions, '--input', stagedArchivePath], { code: exitCodes.test })
-    const loadedImageId = imageId(imageTag)
-    if (loadedImageId !== builtImageId) fail(`归档重载后的 image ID 改变: ${builtImageId} -> ${loadedImageId}`, exitCodes.test)
-    if (purpose === 'release' && stagedArchivePath !== archivePath) {
-      copyFileSync(stagedArchivePath, archivePath)
-      if (sha256File(archivePath) !== archiveSha256) fail('暂存归档复制后的摘要改变', exitCodes.safety)
-      rmSync(stagedArchivePath, { force: true })
-    } else if (purpose === 'development') {
-      rmSync(stagedArchivePath, { force: true })
+      // Formal releases prove that the transferred archive restores the exact
+      // admitted image identity.  The wrapper serializes this shared-store
+      // mutation; development bases never perform this destructive round-trip.
+      run(engine, ['image', 'rm', imageTag], { code: exitCodes.test })
+      run(engine, ['load', ...engineArchiveOptions, '--input', stagedArchivePath], { code: exitCodes.test })
+      const loadedImageId = imageId(imageTag)
+      if (loadedImageId !== builtImageId) fail(`归档重载后的 image ID 改变: ${builtImageId} -> ${loadedImageId}`, exitCodes.test)
+      if (stagedArchivePath !== archivePath) {
+        copyFileSync(stagedArchivePath, archivePath)
+        if (sha256File(archivePath) !== archiveSha256) fail('暂存归档复制后的摘要改变', exitCodes.safety)
+        rmSync(stagedArchivePath, { force: true })
+      }
     }
 
     const candidate = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       candidateId: buildId,
       status: 'tested',
       purpose,
@@ -707,9 +923,19 @@ function commandBuild(options) {
     }
     const candidatePath = join(candidateDir, 'candidate.json')
     writeJson(candidatePath, candidate)
-    copyFileSync(candidatePath, join(stateRoot, 'candidates/latest.json'))
+    let developmentCleanup = null
+    if (purpose === 'development') {
+      run('git', ['-C', repoRoot, 'fetch', 'origin'], { code: exitCodes.safety })
+      const completedMain = run('git', ['-C', repoRoot, 'rev-parse', 'origin/main'], { capture: true, announce: false, code: exitCodes.safety })
+      if (completedMain !== pluginsCommit) {
+        fail(`开发镜像构建期间 main 已更新：image=${pluginsCommit}，origin/main=${completedMain}；拒绝登记旧镜像`, exitCodes.safety)
+      }
+      developmentCleanup = admitDevelopmentCandidate(candidate, candidatePath)
+    } else {
+      copyFileSync(candidatePath, join(stateRoot, 'candidates/latest.json'))
+    }
     admitted = true
-    out({ result: 'candidate-built', candidatePath, ...candidate })
+    out({ result: 'candidate-built', candidatePath, developmentCleanup, ...candidate })
   } finally {
     try { removeControlledPath(join(stateRoot, 'builds'), buildRoot) } catch (error) { warn(error.message) }
     if (stagedArchivePath && stagedArchivePath !== archivePath) {
@@ -730,33 +956,44 @@ function commandBuild(options) {
 function commandDev(options) {
   const action = options._[0]
   if (action === 'down') {
-    stopDev()
-    out('开发容器已停止；开发数据副本保留。')
+    const sourcePath = resolve(options.source ?? repoRoot)
+    const leasePath = developmentLeasePath(sourcePath)
+    const lease = existsSync(leasePath) ? readJson(leasePath, 'development lease') : null
+    const runtime = lease ? runtimeForLease(lease) : developmentRuntime(sourcePath)
+    if (runtime) stopDev(runtime)
+    out({ result: 'development-stopped', sourcePath, runtime: runtime ?? 'already-absent', data: 'preserved' })
     return
   }
   if (action === 'retire') {
     if (!options.source) fail('dev retire 必须提供 --source <任务 worktree>', exitCodes.usage)
-    const running = ['dsh-dev-web', 'dsh-dev-telegram', 'dsh-dev-fake-telegram'].filter(devContainerRunning)
-    if (running.length > 0) fail(`开发容器仍在运行，先执行 dev down：${running.join(', ')}`, exitCodes.safety)
     const sourcePath = resolve(options.source)
     const leasePath = developmentLeasePath(sourcePath)
     if (!existsSync(leasePath)) {
+      removeDevelopmentRuntime(sourcePath)
       out({ result: 'development-already-retired', sourcePath })
       return
     }
     const lease = readJson(leasePath, 'development lease')
+    const runtime = runtimeForLease(lease)
+    const running = [runtime.web, runtime.telegram, runtime.fakeTelegram].filter(devContainerRunning)
+    if (running.length > 0) fail(`开发容器仍在运行，先执行 dev down：${running.join(', ')}`, exitCodes.safety)
     rmSync(leasePath, { force: true })
-    const cleanup = cleanupDevelopmentLease(lease, { removeLatest: true })
+    const cleanup = cleanupDevelopmentLease(lease)
     out({ result: 'development-retired', sourcePath, cleanup })
     return
   }
   if (action === 'prepare' && !options.source) fail('dev prepare 必须提供 --source <独立任务 worktree>', exitCodes.usage)
-  const { candidate, path: candidatePath } = candidateFrom(options.candidate, { verifyDevelopmentImage: action !== 'prepare' })
-  const devRoot = join(stateRoot, 'dev', candidate.candidateId)
+  const sourcePath = resolve(options.source ?? repoRoot)
+  const defaultDevelopmentCandidate = developmentCandidatePointerPath()
+  const candidateValue = options.candidate
+    ?? (['prepare', 'shell'].includes(action) && existsSync(defaultDevelopmentCandidate) ? defaultDevelopmentCandidate : undefined)
+  const { candidate, path: candidatePath } = candidateFrom(candidateValue, { verifyDevelopmentImage: action !== 'prepare' })
+  const runtime = developmentRuntime(sourcePath, { create: ['prepare', 'up'].includes(action) })
+  const devRoot = join(stateRoot, 'dev/environments', developmentKey(sourcePath))
   const homePath = join(devRoot, 'home/herman')
   const devMetaPath = join(devRoot, 'dev.json')
   if (action === 'up') {
-    stopDev()
+    stopDev(runtime)
     const snapshot = options.snapshot ?? 'latest'
     const prior = existsSync(devMetaPath) ? readJson(devMetaPath, 'development metadata') : null
     const reuseData = !options.reset && prior?.snapshot === snapshot && existsSync(join(homePath, '.dsh'))
@@ -765,18 +1002,31 @@ function commandDev(options) {
       writeJson(devMetaPath, { schemaVersion: 1, candidateId: candidate.candidateId, snapshot, createdAt: new Date().toISOString() })
     }
     run(engine, ['run', '--rm', ...containerBaseArgs(homePath), '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'prepare'], { code: exitCodes.test })
-    run(engine, ['network', 'create', '--internal', 'dsh-dev-internal'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-fake-telegram', '--network', 'dsh-dev-internal', '--network-alias', 'fake-telegram', '--read-only', '--tmpfs', '/tmp:rw', candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-telegram', '--network', 'dsh-dev-internal', ...containerBaseArgs(homePath),
+    run(engine, ['network', 'create', '--internal', runtime.network], { code: exitCodes.test })
+    run(engine, ['run', '--detach', '--name', runtime.fakeTelegram, '--network', runtime.network, '--network-alias', 'fake-telegram', '--read-only', '--tmpfs', '/tmp:rw', candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
+    run(engine, ['run', '--detach', '--name', runtime.telegram, '--network', runtime.network, ...containerBaseArgs(homePath),
       '--env', 'TELEGRAM_BOT_TOKEN=test-token', '--env', 'TELEGRAM_ALLOWED_CHAT_ID=1', '--env', 'DEEPSEEK_API_KEY=test-key',
       candidate.imageTag, 'telegram-test'], { code: exitCodes.test })
     // Harness intentionally binds Web only to loopback.  Keep it on the host
     // network for local browser access; the Telegram/cron writer remains on
     // the egress-free internal network with only the fake Bot API.
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-web', '--network', 'host', ...containerBaseArgs(homePath),
-      '--env', 'DSH_WEB_PORT=13080', '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
-    const verification = verifyDev(candidate, homePath)
-    const result = { result: 'dev-started', web: 'http://127.0.0.1:13080', homePath, data: reuseData ? 'reused' : 'materialized', network: 'dsh-dev-internal', ...verification }
+    run(engine, ['run', '--detach', '--name', runtime.web, '--network', 'host', ...containerBaseArgs(homePath),
+      '--env', `DSH_WEB_PORT=${runtime.webPort}`, '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
+    const verification = verifyDev(candidate, homePath, runtime)
+    const metadata = {
+      schemaVersion: 2,
+      mode: 'immutable-candidate',
+      candidateId: candidate.candidateId,
+      imageId: candidate.imageId,
+      snapshot,
+      sourcePath,
+      runtime,
+      createdAt: new Date().toISOString(),
+      verification,
+    }
+    writeJson(devMetaPath, metadata)
+    const lease = replaceDevelopmentLease({ sourcePath, runtime }, candidate, candidatePath, devRoot)
+    const result = { result: 'dev-started', web: `http://127.0.0.1:${runtime.webPort}`, homePath, data: reuseData ? 'reused' : 'materialized', network: runtime.network, runtime, leasePath: lease.leasePath, ...verification }
     out(result)
     return result
   }
@@ -793,7 +1043,7 @@ function commandDev(options) {
       fail(`开发基础镜像没有使用固定 Harness commit：candidate=${candidate.harnessCommit}，lock=${harnessLock.commit}`, exitCodes.safety)
     }
     verifyDevelopmentCandidateImage(candidate)
-    stopDev()
+    stopDev(runtime)
     commandSnapshot({ _: ['latest'] })
     materializeSnapshot('latest', homePath)
     const sourceArgs = developmentSourceArgs(source.sourcePath)
@@ -801,15 +1051,15 @@ function commandDev(options) {
       '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'dev-source-check'], { code: exitCodes.test })
     run(engine, ['run', '--rm', ...containerBaseArgs(homePath), ...sourceArgs,
       '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'prepare'], { code: exitCodes.test })
-    run(engine, ['network', 'create', '--internal', 'dsh-dev-internal'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-fake-telegram', '--network', 'dsh-dev-internal', '--network-alias', 'fake-telegram',
+    run(engine, ['network', 'create', '--internal', runtime.network], { code: exitCodes.test })
+    run(engine, ['run', '--detach', '--name', runtime.fakeTelegram, '--network', runtime.network, '--network-alias', 'fake-telegram',
       '--read-only', '--tmpfs', '/tmp:rw', ...sourceArgs, candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-telegram', '--network', 'dsh-dev-internal', ...containerBaseArgs(homePath), ...sourceArgs,
+    run(engine, ['run', '--detach', '--name', runtime.telegram, '--network', runtime.network, ...containerBaseArgs(homePath), ...sourceArgs,
       '--env', 'TELEGRAM_BOT_TOKEN=test-token', '--env', 'TELEGRAM_ALLOWED_CHAT_ID=1', '--env', 'DEEPSEEK_API_KEY=test-key',
       candidate.imageTag, 'telegram-test'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', 'dsh-dev-web', '--network', 'host', ...containerBaseArgs(homePath), ...sourceArgs,
-      '--env', 'DSH_WEB_PORT=13080', '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
-    const verification = verifyDev(candidate, homePath)
+    run(engine, ['run', '--detach', '--name', runtime.web, '--network', 'host', ...containerBaseArgs(homePath), ...sourceArgs,
+      '--env', `DSH_WEB_PORT=${runtime.webPort}`, '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
+    const verification = verifyDev(candidate, homePath, runtime)
     let completionSource
     try {
       completionSource = inspectDevelopmentSource(source.sourcePath)
@@ -817,7 +1067,7 @@ function commandDev(options) {
         fail(`开发准备期间 main 已更新：candidate=${candidate.pluginsCommit}，origin/main=${completionSource.originMain}；请先 rebase 并重建开发基础镜像`, exitCodes.safety)
       }
     } catch (error) {
-      stopDev()
+      stopDev(runtime)
       throw error
     }
     const metadata = {
@@ -830,17 +1080,18 @@ function commandDev(options) {
       branch: completionSource.branch,
       sourceHead: completionSource.head,
       originMain: completionSource.originMain,
+      runtime,
       createdAt: new Date().toISOString(),
       verification,
     }
     writeJson(devMetaPath, metadata)
-    const lease = replaceDevelopmentLease(completionSource, candidate, candidatePath, devRoot)
+    const lease = replaceDevelopmentLease({ ...completionSource, runtime }, candidate, candidatePath, devRoot)
     const result = {
       result: 'dev-source-ready',
-      web: 'http://127.0.0.1:13080',
+      web: `http://127.0.0.1:${runtime.webPort}`,
       homePath,
       data: 'fresh-isolated-production-snapshot',
-      network: 'dsh-dev-internal',
+      network: runtime.network,
       ...metadata,
       leasePath: lease.leasePath,
     }
@@ -851,10 +1102,12 @@ function commandDev(options) {
     if (!existsSync(homePath)) fail('开发数据副本不存在；请先执行 dev up', exitCodes.usage)
     const prior = existsSync(devMetaPath) ? readJson(devMetaPath, 'development metadata') : null
     const sourceArgs = prior?.mode === 'editable-source' ? developmentSourceArgs(resolve(prior.sourcePath)) : []
-    run(engine, ['run', '--rm', '--interactive', '--tty', '--network', 'dsh-dev-internal', ...containerBaseArgs(homePath), ...sourceArgs, candidate.imageTag, 'shell'], { code: exitCodes.test })
+    const shellRuntime = prior?.runtime ?? runtime
+    if (!shellRuntime) fail('开发 runtime 不存在；请先执行 dev prepare', exitCodes.usage)
+    run(engine, ['run', '--rm', '--interactive', '--tty', '--network', shellRuntime.network, ...containerBaseArgs(homePath), ...sourceArgs, candidate.imageTag, 'shell'], { code: exitCodes.test })
     return
   }
-  fail('用法: dsh dev prepare --source <worktree> --candidate <candidate.json>；dsh dev up --snapshot latest|synthetic；dsh dev shell；dsh dev down；dsh dev retire --source <worktree>', exitCodes.usage)
+  fail('用法: dsh dev prepare --source <worktree> [--candidate <candidate.json>]；dsh dev up --snapshot latest|synthetic；dsh dev shell；dsh dev down [--source <worktree>]；dsh dev retire --source <worktree>', exitCodes.usage)
 }
 
 function commandSnapshot(options) {
@@ -936,7 +1189,6 @@ function performProductionRelease(candidate, candidatePath) {
   try {
     return performProductionReleaseUnsafe(candidate, candidatePath, releaseId, stage)
   } catch (error) {
-    stopDev()
     evidence.status = 'failed'
     evidence.failedAt = new Date().toISOString()
     evidence.failure = { stage: evidence.currentStage, message: error.message, exitCode: error.exitCode ?? 1 }
@@ -1035,6 +1287,7 @@ mv -Tf "$root/snapshots/latest.json.next" "$root/snapshots/latest.json"
   let stateReceipt
   let selfTest
   let runtimeReceipt
+  const preflightSourcePath = join(localReleaseDir, 'preflight-runtime')
   try {
     ensureDir(testHome)
     run('tar', ['--zstd', '-xf', localSnapshot, '-C', testHome], { code: exitCodes.test })
@@ -1044,11 +1297,19 @@ mv -Tf "$root/snapshots/latest.json.next" "$root/snapshots/latest.json"
     writeFileSync(join(localReleaseDir, 'state-validation.json'), `${stateReceipt}\n`)
     selfTest = run(engine, ['run', '--rm', '--read-only', '--user', '1000:1000', '--tmpfs', '/tmp:rw', '--tmpfs', '/run:rw', candidate.imageTag, 'self-test'], { capture: true, code: exitCodes.test })
     writeFileSync(join(localReleaseDir, 'preflight-tests.txt'), `${selfTest}\n`)
-    runtimeReceipt = commandDev({ _: ['up'], snapshot: snapshotMetaPath, candidate: candidatePath, reset: true })
+    runtimeReceipt = commandDev({ _: ['up'], source: preflightSourcePath, snapshot: snapshotMetaPath, candidate: candidatePath, reset: true })
   } finally {
-    stopDev()
+    const preflightLeasePath = developmentLeasePath(preflightSourcePath)
+    if (existsSync(preflightLeasePath)) {
+      const preflightLease = readJson(preflightLeasePath, 'preflight development lease')
+      stopDev(runtimeForLease(preflightLease))
+      rmSync(preflightLeasePath, { force: true })
+      cleanupDevelopmentLease(preflightLease)
+    } else {
+      stopDev(runtimeReceipt?.runtime ?? developmentRuntime(preflightSourcePath))
+      removeDevelopmentRuntime(preflightSourcePath)
+    }
     try { removeControlledPath(localReleaseDir, preflightRoot) } catch (error) { warn(error.message) }
-    try { removeControlledPath(join(stateRoot, 'dev'), join(stateRoot, 'dev', candidate.candidateId)) } catch (error) { warn(error.message) }
   }
 
   stage('transfer-and-start')
@@ -1216,6 +1477,7 @@ test "$openclaw_before" = "$openclaw_after"
 
 function commandStatus() {
   const localCandidate = existsSync(join(stateRoot, 'candidates/latest.json')) ? readJson(join(stateRoot, 'candidates/latest.json')) : null
+  const developmentCandidate = existsSync(developmentCandidatePointerPath()) ? readJson(developmentCandidatePointerPath()) : null
   const remoteResult = runStatus('ssh', ['-o', 'BatchMode=yes', target, 'bash', '-s'], { input: `set -u
 printf 'openclaw='; systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ','; printf '\\n'
 if command -v docker >/dev/null 2>&1; then
@@ -1226,17 +1488,17 @@ fi
 printf 'current='; readlink -f /home/herman/.local/share/dsh-container/current 2>/dev/null || true
 printf 'last-good='; readlink -f /home/herman/.local/share/dsh-container/last-good 2>/dev/null || true
 ` })
-  out({ local: { stateRoot, latestCandidate: localCandidate }, remote: { target, reachable: remoteResult.status === 0, output: String(remoteResult.stdout ?? '').trim(), error: String(remoteResult.stderr ?? '').trim() } })
+  out({ local: { stateRoot, latestCandidate: localCandidate, developmentMain: developmentCandidate }, remote: { target, reachable: remoteResult.status === 0, output: String(remoteResult.stdout ?? '').trim(), error: String(remoteResult.stderr ?? '').trim() } })
 }
 
 function usage() {
   out(`DSH Docker 发版唯一入口
 
   ./release/dsh snapshot latest
-  ./release/dsh dev prepare --source <独立任务worktree> --candidate <latest-main-candidate.json>
+  ./release/dsh dev prepare --source <独立任务worktree> [--candidate <latest-main-candidate.json>]
   ./release/dsh dev up --snapshot latest|synthetic [--candidate candidate.json] [--reset]
   ./release/dsh dev shell [--candidate candidate.json]
-  ./release/dsh dev down
+  ./release/dsh dev down [--source <独立任务worktree>]
   ./release/dsh dev retire --source <独立任务worktree>
   ./release/dsh build --purpose development|release --harness-ref <40位commit> --plugins-ref <40位commit>
   ./release/dsh release --candidate <candidate.json> [--approved-stop]
