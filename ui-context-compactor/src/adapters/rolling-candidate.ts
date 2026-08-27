@@ -9,6 +9,7 @@ import {
 import type { CandidateEnvelope, CandidateRef, C28Result } from '../candidate-qualification.ts'
 import type { EvidenceConclusionSet } from '../fact-resolution.ts'
 import type { ChatRef } from '../focus.ts'
+import type { ExactBackgroundUpdateOrigin, RollingCandidateRuntimeEvidence } from '../candidate.ts'
 import type { OwnerQualifiedCandidateObserver } from '../background-state.ts'
 import type { QualifiedBackgroundCurrentPort } from './qualified-background.ts'
 import { parseCanonicalBackgroundStateRecord } from '../state-transaction.ts'
@@ -31,6 +32,14 @@ interface CurrentRollingAssociation {
   evidenceRef?: string
 }
 
+export interface RollingCandidatePending {
+  readonly chat: ChatRef
+  readonly generation: number
+  readonly actionRef: string
+  readonly evidenceRef: string
+  readonly producer: ExactBackgroundUpdateOrigin
+}
+
 export type RollingQualification<Ref extends CandidateRef = CandidateRef> =
   | { readonly kind: 'changed'; readonly decision: QualifiedDecision<Ref>; readonly c28: C28Result<Ref> }
   | { readonly kind: 'identical'; readonly ref: IdenticalQualifiedCandidateRef; readonly decision: QualifiedDecision<Ref>; readonly c28: C28Result<Ref> }
@@ -40,6 +49,8 @@ export interface RollingCandidateAdapter extends OwnerQualifiedCandidateObserver
   acceptActionFactBoundary(boundary: ActionFactBoundary): void
   acceptEvidenceConclusions(conclusions: EvidenceConclusionSet): void
   requestRollingCandidate(request: RollingCandidateRequest): boolean
+  stagePending(chat: ChatRef, producer: ExactBackgroundUpdateOrigin): boolean
+  takePending(chat: ChatRef, consumer: ExactBackgroundUpdateOrigin): RollingCandidatePending | undefined
   takeQualification(chat: ChatRef): RollingQualification | undefined
 }
 
@@ -80,6 +91,7 @@ export function createRollingCandidateAdapter(
 ): RollingCandidateAdapter {
   const current = new Map<ChatRef, CurrentRollingAssociation>()
   const outcomes = new Map<ChatRef, RollingQualification>()
+  const pending = new Map<ChatRef, RollingCandidatePending>()
   return Object.freeze({
     acceptCurrent(chat: ChatRef, record: unknown): boolean {
       const association = currentAssociation(record, chat)
@@ -93,6 +105,7 @@ export function createRollingCandidateAdapter(
         || c41.value.value.target !== chat) return false
       current.set(chat, association)
       outcomes.delete(chat)
+      pending.delete(chat)
       return true
     },
     acceptActionFactBoundary(boundary: ActionFactBoundary): void {
@@ -110,6 +123,25 @@ export function createRollingCandidateAdapter(
         || association.actionRef === undefined
         || association.evidenceRef === undefined) return false
       return dependencies.formation.requestRollingCandidate(request)
+    },
+    stagePending(chat: ChatRef, producer: ExactBackgroundUpdateOrigin): boolean {
+      const association = current.get(chat)
+      if (association === undefined || association.actionRef === undefined
+        || association.evidenceRef === undefined || pending.has(chat)
+        || producer.messageId.trim().length === 0 || producer.hash.trim().length === 0) return false
+      pending.set(chat, Object.freeze({ chat, generation: association.generation,
+        actionRef: association.actionRef, evidenceRef: association.evidenceRef, producer }))
+      return true
+    },
+    takePending(chat: ChatRef, consumer: ExactBackgroundUpdateOrigin): RollingCandidatePending | undefined {
+      const value = pending.get(chat)
+      if (value === undefined || value.producer.messageId === consumer.messageId
+        || value.producer.hash === consumer.hash) return undefined
+      pending.delete(chat)
+      const association = current.get(chat)
+      return association?.generation === value.generation
+        && association.actionRef === value.actionRef && association.evidenceRef === value.evidenceRef
+        ? value : undefined
     },
     acceptOwnerQualifiedCandidate<Ref extends CandidateRef>(
       decision: QualifiedDecision<Ref>,

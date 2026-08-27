@@ -2402,81 +2402,14 @@ function installFocusCanary(
         if (projection === undefined) throw new Error('evidence actionable presentation was not exact')
         if (signal.aborted) return await failClosed()
         if (currentBackground !== undefined) {
-          const runtimeEvidence = await buildCandidateRuntimeEvidence(
-            agent, message, [message, projection], signal,
-          )
-          if (runtimeEvidence === undefined || rollingCandidate === undefined
-            || !rollingCandidate.requestRollingCandidate({
-              chat: sessionId as ChatRef,
-              generation: currentBackground.generation,
-              runtimeEvidence,
-            })) {
-            throw new Error('rolling candidate formation did not receive exact C41/C14/C15 evidence')
-          }
-          const terminal = candidateTerminals.get(sessionId)
-          candidateTerminals.delete(sessionId)
-          if (terminal?.kind === 'failed') {
-            throw new Error('rolling candidate qualification did not close exactly')
-          }
-          if (terminal?.kind === 'issue') {
-            await preserveClaimedInput(ctx, agent, message)
-            await publishCandidateResult(agent, terminal.text)
-            return { kind: 'enter', messages: [] }
-          }
-          const rolling = rollingCandidate.takeQualification(sessionId as ChatRef)
-          if (rolling === undefined) throw new Error('rolling candidate has no owner-qualified C28 outcome')
-          if (rolling.kind === 'identical') {
-            if (!background.state.discardObservedQualification(sessionId, rolling.decision, rolling.c28)) {
-              throw new Error('identical qualified candidate is not the retained owner C28')
-            }
-          } else {
-            const sessions = sessionsFlushPort(ctx)
-            const persistence = sessionPersistencePort(ctx)
-            if (sessions === undefined || persistence === undefined || signal.aborted) {
-              throw new Error('rolling candidate has no exact live transaction inputs')
-            }
-            const currentHeader = agent.session.requestHeader()
-            if (currentHeader === undefined
-              || tokenMeter.measure(agent.session, currentHeader).logRevision
-                !== runtimeEvidence.budget.firstAssembly.revision) {
-              throw new Error('rolling background writer revision changed after formation')
-            }
-            const committed = await qualifiedBackground.apply.apply({
-              sessionId,
-              session: agent.session,
-              record: currentBackground === undefined ? { family: 'background' } : stored as BackgroundStateRecord,
-              focus: established,
-              boundary: candidateActionBasis.get(sessionId) ?? completion.boundary,
-              origin: runtimeEvidence.origin,
-              save: async value => {
-                const exact = backgroundStateRecordSchema.safeParse(value)
-                if (!exact.success) throw new Error('rolling background live sidecar record failed exact schema validation')
-                await table.put(sessionId, exact.data)
-              },
-              flush: async () => await sessions.flush(agent.session),
-              readFrom: async fromSeq => await persistence.readFrom(sessionId, fromSeq),
-            })
-            const visible = agent.session.deriveMessages()
-            const canonical = visible[0]
-            if (committed.record.phase !== 'finalized'
-              || committed.record.generation !== currentBackground.generation + 1
-              || visible.length !== 1 || canonical === undefined
-              || canonical.source.kind !== 'context-manager-canonical'
-              || canonical.source.machine.kind !== 'background') {
-              throw new Error('rolling background finalized publication is not uniquely visible')
-            }
-          }
+          if (rollingCandidate === undefined || !rollingCandidate.stagePending(
+            sessionId as ChatRef, origin,
+          )) throw new Error('rolling producer did not establish one C41/C14/C15 pending record')
           const directIds = postCanonicalBasisDirects.get(sessionId) ?? new Set<string>()
           directIds.add(origin.messageId)
           postCanonicalBasisDirects.set(sessionId, directIds)
         }
-        // A rolling C28 either installed the new canonical state or proved its
-        // exact identity.  In both cases this admitted direct is the sole
-        // post-canonical request input; its evidence projection is already in
-        // the qualified background and must not be duplicated in the request.
-        return currentBackground === undefined
-          ? { kind: 'enter', messages: [message, projection] }
-          : { kind: 'enter', messages: [message] }
+        return { kind: 'enter', messages: [message, projection] }
       }
 
       const sessions = sessionsFlushPort(ctx)
@@ -3336,7 +3269,11 @@ function installFocusCanary(
         const prior = preNextRecord !== undefined && isBackgroundStateRecord(preNextRecord)
           ? parseCanonicalBackgroundStateRecord(preNextRecord)?.transaction
           : undefined
-        if (preNextRecord !== undefined && isBackgroundStateRecord(preNextRecord)) {
+        const rollingPending = rollingCandidate?.takePending(sessionId as ChatRef, {
+          messageId,
+          hash: directExpressionHash(messageId, '请更新当前背景'),
+        })
+        if (rollingPending === undefined && preNextRecord !== undefined && isBackgroundStateRecord(preNextRecord)) {
           const c41 = qualifiedBackground.current.acceptCurrent(sessionId as ChatRef, preNextRecord)
           if (prior?.phase !== 'finalized'
             || c41?.kind !== 'business_result'
@@ -3370,11 +3307,18 @@ function installFocusCanary(
         }
         candidateTerminals.delete(sessionId)
         candidateRuntimeEvidence.set(sessionId, runtimeEvidence as ExplicitBackgroundUpdateRuntimeEvidence)
-        const c38 = candidateAdvice.requestExplicitBackgroundUpdate({ chat: sessionId as ChatRef })
+        const c38 = rollingPending === undefined
+          ? candidateAdvice.requestExplicitBackgroundUpdate({ chat: sessionId as ChatRef })
+          : formation.requestRollingCandidate({
+              chat: sessionId as ChatRef,
+              generation: rollingPending.generation,
+              runtimeEvidence,
+            })
         candidateRuntimeEvidence.delete(sessionId)
         const terminal = candidateTerminals.get(sessionId)
         candidateTerminals.delete(sessionId)
-        if (c38.kind !== 'business_result' || terminal?.kind === 'failed') {
+        if ((typeof c38 === 'object' && c38 !== null && 'kind' in c38 && c38.kind !== 'business_result')
+          || terminal?.kind === 'failed') {
           throw new Error('candidate qualification did not close exactly')
         }
         if (terminal?.kind === 'issue') {
