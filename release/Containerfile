@@ -62,12 +62,23 @@ RUN set -eu; \
     done; \
     cp -a /opt/dsh/plugins-src/release/profiles/. /opt/dsh/harness/local-profiles/; \
     cp /opt/dsh/plugins-src/release/vitest.external.config.ts /opt/dsh/harness/vitest.external.config.ts; \
+    cp /opt/dsh/plugins-src/runtime-package-topology.json /opt/dsh/harness/local-plugins/runtime-package-topology.json; \
+    mkdir -p /opt/dsh/harness/local-plugins/scripts; \
+    cp /opt/dsh/plugins-src/scripts/materialize-runtime-topology.mjs \
+      /opt/dsh/harness/local-plugins/scripts/materialize-runtime-topology.mjs; \
     for package in telegram-gateway dsh-cron dsh-assistant personal-feed x-feed ui-context-compactor; do \
       (cd "local-plugins/$package" \
        && pnpm exec tsc -b \
        && pnpm exec tsdown \
        && pnpm exec tsc -b); \
     done
+
+# Tests run with the same unprivileged identity as the final container.  Among
+# other things, this keeps permission-failure tests honest (root can bypass a
+# directory's write bits).
+RUN mkdir -p /home/herman/.dsh /home/herman/.dsh/workspace \
+ && chown -R 1000:1000 /home/herman
+USER 1000:1000
 
 RUN set -eu; \
     for package in telegram-gateway dsh-cron dsh-assistant personal-feed x-feed ui-context-compactor; do \
@@ -88,10 +99,6 @@ LABEL org.opencontainers.image.title="DSH private-assistant runtime" \
       io.dsh.harness.revision="${DSH_HARNESS_COMMIT}" \
       io.dsh.harness.patch-sha256="${DSH_HARNESS_PATCH_SHA256}"
 
-RUN mkdir -p /home/herman/.dsh /home/herman/.dsh/workspace \
- && chown -R 1000:1000 /home/herman
-
 WORKDIR /home/herman/.dsh/workspace
-USER 1000:1000
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/dsh/plugins-src/release/scripts/entrypoint.sh"]
 CMD ["help"]
