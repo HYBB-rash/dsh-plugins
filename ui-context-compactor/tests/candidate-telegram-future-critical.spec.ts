@@ -143,6 +143,7 @@ class FutureCriticalAdapter extends LlmAdapter {
   evidenceCalls = 0
   futureCalls = 0
   rootCalls = 0
+  futureRequest: GenerateOptions | undefined
   futureMode: FutureMode = 'valid'
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -190,6 +191,7 @@ class FutureCriticalAdapter extends LlmAdapter {
     }
     if (hasSchema(options, 'ui-context-compactor:future-critical-schema')) {
       this.futureCalls += 1
+      this.futureRequest = options
       if (this.futureMode === 'timeout') {
         await new Promise(resolve => setTimeout(resolve, 30))
       }
@@ -613,6 +615,7 @@ describe('F01-T1F future-critical candidate through the real root and production
     const output = runPipeline(basis('p3'), projection, 'p3')
     expect(projection).toMatchObject({ kind: 'projected', auxiliaryCalls: 1 })
     expect(harness.adapter.futureCalls).toBe(1)
+    expect(harness.adapter.futureRequest?.reasoningEffort).toBeUndefined()
     expect(output.c26).toHaveLength(1)
     expect(output.c27).toHaveLength(1)
     expect(output.c28).toHaveLength(1)

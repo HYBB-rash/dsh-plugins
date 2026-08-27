@@ -794,6 +794,9 @@ describe('F08-T1 local restriction through the natural Agent lifecycle', () => {
     const message = await send(h.agent, tracer); const row = readLocalSidecar(h.root), t = transaction(row)
     const observed = await recordReceiverObservations(ledger, 'P1-live', spies)
     expect(h.adapter.focusCalls).toBe(1); expect(h.adapter.actionCalls).toBe(1); expect(h.adapter.rootCalls).toBe(2)
+    const actionRequest = h.adapter.requests.find(request =>
+      schema(request, 'ui-context-compactor:action-fact-need-schema'))
+    expect(actionRequest?.reasoningEffort).toBeUndefined()
     expect(t.phase).toBe('finalized'); expect(t.generation).toBe(1)
     const expectedPreservedFocus = {
       kind: 'focus_established', ref: verifiedFocusDecision.ref,

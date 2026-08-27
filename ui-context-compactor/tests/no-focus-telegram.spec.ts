@@ -12,8 +12,10 @@ import AgentDefaultModel from '@deepseek-ai/dsh-agent-default-model'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import {
+  CallId,
   createUserMessage,
   LlmAdapter,
+  ReasoningEffortId,
   type GenerateOptions,
   type LlmResolvedModelInfo,
   type StreamChunk,
@@ -32,6 +34,11 @@ import { runGateway, type TelegramHttp } from '../../telegram-gateway/src/index.
 import * as ContextManager from '../src/index.ts'
 import { ManagedAwareBasicCompactionEngine } from '../src/managed-compaction.ts'
 import { FocusAuthority } from '../src/focus.ts'
+import {
+  BoundedAuxiliarySemanticCall,
+  directExpressionHash,
+  type BoundedAuxiliarySemanticCallConfig,
+} from '../src/managed-runtime.ts'
 
 const roots: string[] = []
 const contexts: Context[] = []
@@ -56,9 +63,16 @@ class Adapter extends LlmAdapter {
   rootCalls = 0
   auxiliaryCalls = 0
   auxiliaryFailure: unknown
+  auxiliaryResponse: readonly StreamChunk[] = chunks('{"kind":"close","relation":"current"}')
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    return Promise.resolve({ provider, id: model, name: model, context: { contextWindow: 8_192 } })
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      context: { contextWindow: 8_192 },
+      reasoning: { efforts: [{ id: ReasoningEffortId('off'), name: 'Off' }] },
+    })
   }
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -67,7 +81,7 @@ class Adapter extends LlmAdapter {
       && message.source.plugin === 'ui-context-compactor:focus-canary-schema')) {
       this.auxiliaryCalls += 1
       if (this.auxiliaryFailure !== undefined) throw this.auxiliaryFailure
-      yield* chunks('{"kind":"close","relation":"current"}')
+      yield* this.auxiliaryResponse
       return
     }
     this.rootCalls += 1
@@ -372,6 +386,74 @@ function expectProofOnlyWarningsWhitelisted(warnings: readonly string[], secret:
 }
 
 describe('F07-T1 exact Telegram no-focus admission', () => {
+  it('keeps bounded auxiliary JSON calls tool-free, non-reasoning, and text-only', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await mountAgentLoopTestDependencies(ctx)
+    await ctx.plugin(TokenMeter)
+    const adapter = new Adapter()
+    ctx.llm.registerAdapter(['telegram-no-focus-test'], adapter)
+    const config: BoundedAuxiliarySemanticCallConfig = {
+      provider: 'telegram-no-focus-test',
+      model: 'telegram-no-focus-test',
+      maxOutputTokens: 64,
+      timeoutMs: 500,
+      maxExpressionChars: 240,
+      maxProjectionTokens: 1_024,
+      safetyMarginTokens: 128,
+    }
+    const call = new BoundedAuxiliarySemanticCall(ctx.llm, ctx.tokenMeter, config)
+    const propose = (messageId: string, coldRecovery = false) => {
+      const origin = { messageId, hash: directExpressionHash(messageId, closeText) }
+      const signal = new AbortController().signal
+      return coldRecovery
+        ? call.proposeProofOnlyColdRecovery(closeText, origin, signal)
+        : call.propose(closeText, origin, signal)
+    }
+    const secret = 'bounded-output-must-not-leak'
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    expect(await propose('text-output')).toMatchObject({
+      kind: 'proposal',
+      value: { kind: 'close', relation: 'current' },
+    })
+    expect(await propose('cold-text-output', true)).toMatchObject({
+      kind: 'proposal',
+      value: { kind: 'close', relation: 'current' },
+    })
+
+    adapter.auxiliaryResponse = [
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'block-end', index: 0, block: { type: 'reasoning', text: secret } },
+      { type: 'block-start', index: 1, blockType: 'text' },
+      { type: 'block-end', index: 1, block: { type: 'text', text: '{"kind":"close","relation":"current"}' } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]
+    expect(await propose('reasoning-output', true)).toMatchObject({ kind: 'known_failure', code: 'focus-canary' })
+
+    adapter.auxiliaryResponse = [
+      { type: 'block-start', index: 0, blockType: 'tool-call' },
+      { type: 'block-end', index: 0, block: {
+        type: 'tool-call', id: CallId('bounded-tool-call'), name: secret, arguments: '{}',
+      } },
+      { type: 'block-start', index: 1, blockType: 'text' },
+      { type: 'block-end', index: 1, block: { type: 'text', text: '{"kind":"close","relation":"current"}' } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]
+    expect(await propose('tool-output', true)).toMatchObject({ kind: 'known_failure', code: 'focus-canary' })
+
+    const auxiliaryRequests = adapter.requests.filter(request => request.messages.some(message =>
+      message.source.kind === 'plugin'
+      && message.source.plugin === 'ui-context-compactor:focus-canary-schema'))
+    expect(auxiliaryRequests).toHaveLength(4)
+    expect(auxiliaryRequests[0]?.reasoningEffort).toBeUndefined()
+    expect(auxiliaryRequests.slice(1).every(request => request.reasoningEffort === 'off')).toBe(true)
+    expect(auxiliaryRequests.every(request => request.tools === undefined)).toBe(true)
+    expect(stderr).not.toHaveBeenCalled()
+    expect(JSON.stringify(stderr.mock.calls)).not.toContain(secret)
+    stderr.mockRestore()
+  })
+
   it('keeps closure-only stage diagnostics fixed-code and the managed failure unchanged', async () => {
     const secret = `${closeText}:must-not-leak`
     const cases = [
@@ -750,6 +832,11 @@ describe('F07-T1 exact Telegram no-focus admission', () => {
       auxiliaryCalls: 1, rootCalls: 0, canonical: 2, directClose: 1,
       phase: 'finalized', familyKeys: Object.freeze(['closure', 'transaction']),
     }))
+    const recoveryRequest = recovered.adapter.requests.find(request => request.messages.some(message =>
+      message.source.kind === 'plugin'
+      && message.source.plugin === 'ui-context-compactor:focus-canary-schema'))
+    expect(recoveryRequest?.reasoningEffort).toBe('off')
+    expect(recoveryRequest?.tools).toBeUndefined()
     expect(recovered.agent.session.events.filter(event => event.type === 'user/message'
       && event.data.source.kind === 'user' && text(event.data) === '继续').map(event => String(event.data.id)))
       .toEqual(continueIds)

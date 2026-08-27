@@ -786,6 +786,9 @@ describe('F03-T1 one external fact through the public Telegram Agent lifecycle',
     expect(harness.adapter.actionCalls).toBe(1)
     expect(harness.adapter.evidenceCalls).toBe(1)
     expect(harness.adapter.rootCalls).toBe(2)
+    const evidenceRequest = harness.adapter.requests.find(request =>
+      hasSchema(request, 'ui-context-compactor:evidence-schema'))
+    expect(evidenceRequest?.reasoningEffort).toBeUndefined()
     expect(ledger.events.filter(event => event.kind === 'search')).toEqual([expect.objectContaining({
       kind: 'search', request: { query: privateQuery, maxResults: 1 }, result: exactWebResult(),
     })])

@@ -12,7 +12,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { CallId, createToolResultMessage, createUserMessage, freezeMessage, LlmAdapter, MessageId, type GenerateOptions, type LlmResolvedModelInfo, type StreamChunk, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { CallId, createToolResultMessage, createUserMessage, freezeMessage, LlmAdapter, MessageId, ReasoningEffortId, type GenerateOptions, type LlmResolvedModelInfo, type StreamChunk, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent, type SessionEventMap, type SessionEventType, type SurfaceEventType, type SurfaceIntent } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import Storage from '@deepseek-ai/dsh-storage'
@@ -63,7 +63,7 @@ class Adapter extends LlmAdapter {
   auxiliaryOutput = '{"kind":"focus","subject":"untrusted","relation":"new"}'
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    return Promise.resolve({ provider, id: model, name: model, context: { contextWindow: 8_192 } })
+    return Promise.resolve({ provider, id: model, name: model, context: { contextWindow: 8_192 }, reasoning: { efforts: [{ id: ReasoningEffortId('off'), name: 'Off' }] } })
   }
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -523,7 +523,7 @@ const ContextManager = await import(contextManagerUrl)
 const chunks = text => [{ type:'block-start', index:0, blockType:'text' }, { type:'block-end', index:0, block:{ type:'text', text } }, { type:'finish', reason:{ kind:'stop' } }]
 class Adapter extends LlmAdapter {
   calls = 0
-  async resolveModel(provider, model) { return { provider, id:model, name:model, context:{ contextWindow:8192 } } }
+  async resolveModel(provider, model) { return { provider, id:model, name:model, context:{ contextWindow:8192 }, reasoning:{ efforts:[{ id:'off', name:'Off' }] } } }
   async *stream(options) { if (options.messages.some(message => message.source.kind === 'plugin' && message.source.plugin === 'ui-context-compactor:focus-canary-schema')) { this.calls += 1; yield* chunks(this.calls === 1 ? '{"kind":"focus","subject":"child A","relation":"new"}' : '{"kind":"close","relation":"current"}'); return } yield* chunks('child root receipt') }
 }
 const ctx = new Context()

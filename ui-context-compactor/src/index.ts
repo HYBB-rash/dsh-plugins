@@ -2706,7 +2706,7 @@ function installFocusCanary(
             const closeText = textOf(liveTranscript.close)
             if (closeText !== '这件事结束了') return
             const origin = proofOnly.data.closure.original
-            const proposal = await auxiliary.propose(closeText, origin, signal)
+            const proposal = await auxiliary.proposeProofOnlyColdRecovery(closeText, origin, signal)
             if (proposal.kind !== 'proposal' || proposal.value.kind !== 'close') return
             const result = focusAuthority.fromBoundProposal(proposal)
               .decideFocus(createExplicitUserExpression(closeText, sessionId as ChatRef, origin))

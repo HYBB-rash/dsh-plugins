@@ -3,6 +3,7 @@ import {
   BlockAssembler,
   createUserMessage,
   deepFreeze,
+  ReasoningEffortId,
   type GenerateOptions,
   type LlmRuntime,
 } from '@deepseek-ai/dsh-llm'
@@ -555,6 +556,24 @@ export class BoundedAuxiliarySemanticCall {
     origin: DirectExpressionOrigin,
     signal: AbortSignal,
   ): Promise<FocusProposalOutcome> {
+    return this.proposeFocus(expression, origin, signal)
+  }
+
+  /** Strict-JSON reclassification used only by proof-only cold recovery. */
+  async proposeProofOnlyColdRecovery(
+    expression: string,
+    origin: DirectExpressionOrigin,
+    signal: AbortSignal,
+  ): Promise<FocusProposalOutcome> {
+    return this.proposeFocus(expression, origin, signal, ReasoningEffortId('off'))
+  }
+
+  private async proposeFocus(
+    expression: string,
+    origin: DirectExpressionOrigin,
+    signal: AbortSignal,
+    reasoningEffort?: ReasoningEffortId,
+  ): Promise<FocusProposalOutcome> {
     if (!validConfig(this.config)
       || expression.length === 0
       || expression.length > this.config.maxExpressionChars
@@ -568,6 +587,7 @@ export class BoundedAuxiliarySemanticCall {
       'ui-context-compactor:focus-canary-schema',
       expression,
       signal,
+      reasoningEffort,
     )
     if (result.kind !== 'output') return { kind: result.kind, code: 'focus-canary', origin }
     const proposal = proposalFromOutput(result.value, origin)
@@ -775,6 +795,7 @@ export class BoundedAuxiliarySemanticCall {
     sourcePlugin: string,
     expression: string,
     signal: AbortSignal,
+    reasoningEffort?: ReasoningEffortId,
   ): Promise<{ readonly kind: 'output'; readonly value: string } | { readonly kind: 'known_failure' | 'unknown' }> {
 
     const controller = new AbortController()
@@ -798,6 +819,7 @@ export class BoundedAuxiliarySemanticCall {
       const options: GenerateOptions = deepFreeze({
         provider: this.config.provider,
         model: this.config.model,
+        ...reasoningEffort === undefined ? {} : { reasoningEffort },
         messages: [instruction, input],
         maxTokens: this.config.maxOutputTokens,
         signal: controller.signal,
