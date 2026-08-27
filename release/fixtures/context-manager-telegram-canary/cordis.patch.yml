@@ -1,0 +1,66 @@
+# Isolated local Telegram canary profile. prepare-profile.sh copies this below
+# a fresh DSH_HOME; it never overlays the real production profile.
+- id: hmr
+  disabled: true
+
+- id: session-persistence-jsonl
+  disabled: false
+  config:
+    root: !!js dshHomePath('sessions')
+
+- insert:
+    - id: storage
+      name: '@deepseek-ai/dsh-storage'
+    - id: storage-sqlite
+      name: '@deepseek-ai/dsh-storage-sqlite'
+      config:
+        path: !!js dshHomePath('storages/context-manager-focus-canary.sqlite')
+    - id: storage-domain
+      name: '@deepseek-ai/dsh-storage-domain'
+      config:
+        backend: sqlite
+
+- id: compaction-basic
+  disabled: true
+- insert:
+    - id: context-manager-managed-compaction
+      name: '@deepseek-ai/dsh-client-ui-context-compactor/managed-compaction'
+      config:
+        auto: true
+        thresholdRatio: 0.278
+        retainRatio: 0.12
+        managedRuntime:
+          mode: enforce
+          safeUpdateMarginTokens: 64
+          allowlist:
+            - session-context-manager-focus-canary-a
+            - session-context-manager-focus-canary-b
+- id: command-compact
+  disabled: false
+
+- insert:
+    - id: ui-context-compactor
+      name: '@deepseek-ai/dsh-client-ui-context-compactor'
+      inject: [storageDomain, tokenMeter]
+      config:
+        focusCanary:
+          mode: enforce
+          safeUpdateMarginTokens: 64
+          allowlist:
+            - session-context-manager-focus-canary-a
+            - session-context-manager-focus-canary-b
+          auxiliary:
+            provider: deepseek-official
+            model: deepseek-v4-flash
+            maxOutputTokens: 64
+            timeoutMs: 300000
+            maxExpressionChars: 240
+            maxProjectionTokens: 1024
+            safetyMarginTokens: 128
+        nativeWriterArbitration:
+          mode: enforce
+    - id: telegram-gateway
+      name: '@deepseek-ai/dsh-telegram-gateway'
+      config:
+        sessionId: session-context-manager-focus-canary-a
+        cwd: !!js process.env.DSH_CWD ?? process.cwd()
