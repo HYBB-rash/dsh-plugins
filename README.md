@@ -8,6 +8,16 @@
 
 > 这里的“展示名”仅用于本 README 的识别和检索；紧邻的目录名以及组件类型才是代码中的真实标识。它们没有修改 API、包名或 Skill 名。
 
+## 发版入口
+
+这个仓库部署到 `herman.hermes` 时，唯一入口是：
+
+```bash
+./release/dsh
+```
+
+开发、上线前测试和生产运行使用同一个不可变 Docker/OCI 镜像；镜像只能从明确的 Harness commit 和插件 commit 构建。禁止直接同步源码、修改线上 selector、在线安装依赖，也禁止恢复或扩展旧 `deploy.sh` 流程。停机、快照、上线、真实验收、正式接受和回退的完整边界见 [`release/README.md`](release/README.md)。
+
 ## 仓库总览
 
 | 展示名 | 实际目录 / 类型 | 什么时候会需要 | 装上后会怎样 | 主要边界 |

@@ -41,7 +41,6 @@ __pycache__/
 AGENTS.md
 **/AGENTS.md
 archive/
-deployment/
 
 # Docker release artifacts are content-addressed local state, never source.
 release/.artifacts/

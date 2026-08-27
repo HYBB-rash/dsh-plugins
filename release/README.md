@@ -1,15 +1,12 @@
 # DSH Docker 发版系统
 
-这个目录是 DSH 唯一的新发版入口。它把 Harness、六个插件、Profiles、Skills 和运行依赖构建成一个不可变镜像；`~/.dsh`、工作区和业务数据只从镜像外挂载。
-
-当前阶段仍保留旧 systemd 发版系统，只用于第一次 Docker 切换失败后的回退。第一个 Docker release 完成真实 Telegram/Web 验收并执行 `accept` 前，禁止删除旧系统。
+这个目录是 DSH 唯一发版入口。它把 Harness、六个插件、Profiles、Skills 和运行依赖构建成一个不可变镜像；`~/.dsh`、工作区和业务数据只从镜像外挂载。线上不再安装依赖、构建源码或切换源码 selector。
 
 ## 不会偷偷发生的事
 
 - `build` 只接受 Harness 和产品插件两个完整 Git commit，并分别用 `git archive` 取源码。Dockerfile、Profiles 和验收脚本单独取当前分支 HEAD 的精确发版工具 commit。候选清单同时记录三者，未提交文件、旧 `node_modules` 和原工作树里的旧部署目录不会进入镜像。
 - `release` 默认只打印停机影响和回退边界，退出码为 `3`。只有明确添加 `--approved-stop` 才会停止生产写入者。
 - `rollback` 默认只报告方案。只有明确添加 `--approved` 才会恢复数据和旧运行版本。
-- `retire-legacy` 同时要求 release 已经是 `accepted`，并再次添加 `--approved`。它不能在第一次真实验收前运行。
 - 发版脚本不停止、不重启、不配置 OpenClaw；生产切换前后会比较 OpenClaw PID 和重启计数。
 
 ## 常用流程
@@ -35,6 +32,10 @@
 # 真实 Telegram 和 Web 验收通过后
 ./release/dsh accept --release <release-id> --evidence '真实 Telegram 单条回复且 Web 正常'
 
+# 回退命令第一次只报告方案；用户明确批准后才能真正恢复
+./release/dsh rollback --release <release-id>
+./release/dsh rollback --release <release-id> --approved
+
 # 两类事故注入：挂载问题可现场恢复；业务源码错误必须阻止候选生成
 ./release/tests/fault-injection.sh /path/to/candidate.json
 ```
@@ -55,6 +56,12 @@
 | `5` | 构建或测试失败 |
 | `6` | 生产启动或验收失败 |
 
-## 第一次切换后的收尾
+## 固定边界
 
-第一次 release 被 `accept` 后，还不能立即宣布改造完成。需要先确认其他任务不再使用旧流程，再执行 `retire-legacy`；随后从源码删除一次性的 systemd 回退兼容代码和旧文档引用，并完成一次纯 Docker→Docker 发布/回退演练。
+- 产品代码和发版工具都来自清单记录的精确 Git commit；工作树中的未提交文件不会进入镜像。
+- `release` 在获得停机许可前不停止任何写入者；许可只覆盖该次候选和该次停机窗口。
+- 停机后先做一致快照，再用快照副本执行上线前测试；测试失败时生产保持停止并报告，不在线改产品代码。
+- 明确属于挂载、权限、Compose、路径或启动参数的发版小问题，可在限定现场窗口内修正后重新验收；需要改 Harness、插件、数据语义或原因不清时，先向用户报告。只有用户批准后才能回退。
+- 上线后状态先是 `awaiting-user-acceptance`。真实 Telegram 与 Web 验收通过并执行 `accept` 后，该镜像才成为 `last-good`。
+- 回退默认只打印恢复对象、快照和影响；只有显式 `--approved` 才能恢复上一 Docker 镜像及对应停机前数据。
+- OpenClaw 始终在流程外：不得停止、重启、改配置或接管其写入权。

@@ -804,19 +804,33 @@ for unit in dsh-web.service dsh-telegram-gateway.service; do printf '%s=' "$unit
 }
 
 function commandRetireLegacy(options) {
-  const { release } = findRelease(options.release)
+  const { path, release } = findRelease(options.release)
   if (release.status !== 'accepted') fail('只有 accepted release 才能清理旧系统', exitCodes.safety)
   if (!options.approved) {
     out({ status: 'waiting-for-destructive-cleanup-authorization', releaseId: release.releaseId, next: '确认隔壁任务不再依赖旧流程后加 --approved' })
     process.exitCode = exitCodes.approval
     return
   }
-  const healthy = ssh(`set -Eeuo pipefail
+  const retiredAt = new Date().toISOString()
+  const retirement = ssh(`set -Eeuo pipefail
+root=/home/herman/.local/share/dsh-container
+release_dir="$root/releases/${release.releaseId}"
+test "$(readlink -f "$root/current")" = "$release_dir"
+test "$(readlink -f "$root/last-good")" = "$release_dir"
 test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
+test "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker image inspect ${shellQuote(release.candidate.imageTag)} --format '{{.Id}}')" = ${shellQuote(release.production.engineImageId)}
+test "$(docker inspect dsh-web --format '{{.Image}}')" = ${shellQuote(release.production.engineImageId)}
+test "$(docker inspect dsh-telegram --format '{{.Image}}')" = ${shellQuote(release.production.engineImageId)}
+test "$(docker inspect dsh-lan-proxy --format '{{.Image}}')" = ${shellQuote(release.production.engineImageId)}
+curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
+curl --fail --silent --max-time 3 http://192.168.6.240:3080/ >/dev/null
+docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs >/dev/null
+openclaw_before="$(systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ',')"
+test -n "$openclaw_before"
+printf '%s' "$openclaw_before"
 `)
-  void healthy
   ssh(`set -Eeuo pipefail
 systemctl --user disable --now dsh-web.service dsh-telegram-gateway.service dsh-web-lan.service dsh-web-lan.socket 2>/dev/null || true
 for unit in dsh-web.service dsh-telegram-gateway.service dsh-web-lan.service dsh-web-lan.socket dsh-canary.slice; do
@@ -824,11 +838,19 @@ for unit in dsh-web.service dsh-telegram-gateway.service dsh-web-lan.service dsh
 done
 systemctl --user daemon-reload
 rm -rf -- /home/herman/.local/share/dsh-deploy
+find /home/herman/.dsh/profiles -type l -lname '/home/herman/.local/share/dsh-deploy/*' -delete
+find /home/herman/Projects /home/herman/.local/bin -xdev -type l -lname '/home/herman/.local/share/dsh-deploy/*' -delete 2>/dev/null || true
+openclaw_after="$(systemctl --user show openclaw-gateway.service -p MainPID -p NRestarts --value 2>/dev/null | tr '\\n' ',')"
+test "$openclaw_after" = ${shellQuote(retirement)}
 `)
   const legacyLocal = realpathSync(process.env.DSH_LEGACY_LOCAL_ROOT ?? '/home/herman/Projects/dsh-plugins/deployment/herman-hermes')
   if (legacyLocal !== '/home/herman/Projects/dsh-plugins/deployment/herman-hermes') fail(`拒绝删除非预期目录: ${legacyLocal}`, exitCodes.safety)
   rmSync(legacyLocal, { recursive: true, force: true })
-  out({ result: 'legacy-runtime-retired', releaseId: release.releaseId, note: '受 Git 管理的旧引用和一次性兼容代码还需在本分支提交删除，并完成 Docker→Docker 演练。' })
+  release.legacyRetirement = { retiredAt, openclaw: retirement, remotePathRemoved: '/home/herman/.local/share/dsh-deploy', localPathRemoved: legacyLocal }
+  writeJson(path, release)
+  const remoteDir = `/home/herman/.local/share/dsh-container/releases/${release.releaseId}`
+  run('scp', ['-p', path, `${target}:${remoteDir}/release.json`], { code: exitCodes.production })
+  out({ result: 'legacy-runtime-retired', releaseId: release.releaseId, retiredAt, openclaw: retirement, note: '旧运行时已删除；下一步从源码删除一次性兼容代码并完成 Docker→Docker 演练。' })
 }
 
 function usage() {
