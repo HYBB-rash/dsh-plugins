@@ -35,7 +35,7 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
    ./release/dsh build --purpose development --harness-ref <locked-harness-commit> --plugins-ref <origin-main-commit>
    ```
 
-   The command is safe to repeat. Under one repository-managed engine lock it reuses the already-tested image when the full main commit is unchanged; only the first request after main advances performs a real build. Development bases do not create or reload Docker archives and cannot be published as release candidates.
+   The command is safe to repeat. Under one repository-managed engine lock it reuses the already-tested image when the full main commit is unchanged; only the first request after main advances performs a real build and the full six-package TypeScript/Python test gate. Development bases do not create or reload Docker archives and cannot be published as release candidates.
 3. Run:
 
    ```bash
@@ -44,7 +44,7 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
 
 4. Let the command download the latest existing consistent production snapshot. It must not stop production or create a new online snapshot. If no valid snapshot exists, report and stop; never silently substitute synthetic data.
 5. Let the deterministic command create worktree-specific data, container names, an internal network, and a Web port from the shared main image. It mounts the six packages, product Skills, Profiles, runtime topology, materializer, and image runtime scripts as editable worktree inputs, plus an isolated snapshot copy. The image root stays read-only. The command must replace credentials, empty cron work, remove production Telegram offsets and locks, block real Telegram egress, and leave production directories unmounted. Other worktrees may prepare and run at the same time.
-6. Do not claim readiness until the command reports `dev-source-ready`. That receipt means the mounted source completed the full six-package build, all runtime-image TypeScript and Python tests, Web health, fake Telegram polling and delivery, empty cron verification, real Telegram blocking, and common image identity checks.
+6. Do not claim readiness until the command reports `dev-source-ready`. Editable mounts hide the image's prebuilt `lib`, so preparation recompiles the six mounted packages, but it does not repeat their test suites. The receipt means that compilation, Web health, fake Telegram polling and delivery, empty cron verification, real Telegram blocking, and common image identity checks passed. The full TypeScript/Python baseline belongs to the shared main image's build receipt.
 
 ## Develop inside the boundary
 
@@ -52,7 +52,7 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
 - Keep editable source in the task worktree. Generated `lib`, caches, and test output remain ignored and outside the image identity.
 - Use focused tests during the inner loop when the affected boundary is known. Before declaring development complete, rerun the affected integration tests and any wider tests required by the change.
 - Never mount production persistence, use real credentials, contact real Telegram, claim real cron work, install dependencies on production, or patch a running production container.
-- A preparation failure is a development failure. Preserve the evidence and fix it locally; do not route around a failed gate.
+- A preparation failure means the isolated environment is not ready. Preserve the evidence and fix it locally; do not route around the failed environment gate.
 
 ## Recheck before handoff
 
@@ -65,4 +65,4 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
 
 ## Report the result
 
-Use concise Chinese. Report the task branch/worktree, latest-main commit, locked Harness commit, whether the shared development image was built or reused, its identity, the worktree-specific runtime identity, snapshot identity, full baseline result, isolated runtime result, and whether the environment is ready. If blocked, report the single failed gate and the evidence needed to proceed.
+Use concise Chinese. Report the task branch/worktree, latest-main commit, locked Harness commit, whether the shared development image was built or reused, its identity and test receipt, the worktree-specific runtime identity, snapshot identity, editable-source compilation result, isolated runtime result, and whether the environment is ready. If blocked, report the single failed gate and the evidence needed to proceed.
