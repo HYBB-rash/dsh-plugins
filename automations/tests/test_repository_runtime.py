@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -95,6 +96,14 @@ class RepositoryIndependenceTests(unittest.TestCase):
             [str(path.relative_to(ROOT)) for path in entrypoints if not os.access(path, os.X_OK)],
             [],
         )
+
+    def test_image_self_test_requires_only_present_automation_directories(self):
+        self_test = (ROOT / "release" / "scripts" / "self-test.sh").read_text(encoding="utf-8")
+        match = re.search(r"for automation_dir in ([^;]+); do", self_test)
+        self.assertIsNotNone(match)
+        required = set(match.group(1).split())
+        present = {path.name for path in AUTOMATIONS.iterdir() if path.is_dir()}
+        self.assertEqual(required - present, set())
 
     def test_production_manifests_use_direct_image_commands_and_one_bzp_operation_lock(self):
         manifests = [

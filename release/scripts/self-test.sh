@@ -16,7 +16,7 @@ test -f /opt/dsh/harness/apps/cli/lib/bin.js
 for package in dsh-assistant dsh-cron telegram-gateway ui-context-compactor x-feed personal-feed; do
   test -d "/opt/dsh/harness/local-plugins/$package/lib"
 done
-for automation_dir in bzp cron deepseek github mywechat notion relay-sites scripts search telegram wechat zerochan; do
+for automation_dir in bzp cron deepseek github mywechat notion relay-sites scripts search telegram zerochan; do
   test -d "/opt/dsh/automations/$automation_dir"
 done
 for automation_entrypoint in \
