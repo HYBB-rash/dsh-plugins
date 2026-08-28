@@ -57,6 +57,11 @@ export type { MaintenanceControlConfig } from './control.ts'
 /** Public Unix-socket client for the manager control contract. */
 export { createControlRpcClient }
 export type { ControlRpcClientConfig } from './control-rpc.ts'
+/** Stopped-writer release preflight uses the same v1 control service and RPC. */
+export { createControlService, inspectActiveJobs } from './control.ts'
+export { createControlRpcServer } from './control-rpc.ts'
+export type { ControlServiceConfig } from './control.ts'
+export type { ControlRpcServerConfig } from './control-rpc.ts'
 /** Public generic per-run environment port and fail-closed registry. */
 export * from './run-environment.ts'
 /** Generic prepare -> deliver -> settle environment. */

@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createControlService } from '../src/control.ts'
+import { createControlService, inspectActiveJobs } from '../src/control.ts'
 import { JsonlStore, RunLedger } from '../src/store.ts'
 import type {
   BoundCronCommandSnapshot,
@@ -550,5 +550,35 @@ describe('Lane A1 control service binding lifecycle', () => {
     ].sort())
     expect(JSON.stringify(latestRun)).not.toContain('failure-alert')
     expect(JSON.stringify(latestRun)).not.toContain('claimedAt')
+  })
+
+  it('projects every active Agent and command job for whole-ledger release guards', async () => {
+    const dir = tempDir()
+    const service = createControlService({ storeDir: dir })
+    const agent = activeJob(await service.ensureBound(GATED_SPEC))
+    const command = activeCommandJob(await service.ensureBoundCommand(ALERT_COMMAND_SPEC))
+    new JsonlStore(join(dir, 'jobs.jsonl')).append({
+      op: 'create',
+      id: 'unbound-agent',
+      sessionMode: 'persistent',
+      schedule: { kind: 'interval', minutes: 30 },
+      prompt: 'unbound prompt',
+      deliver: 'telegram',
+      createdAt: '2026-08-28T00:00:00.000Z',
+    })
+
+    expect(inspectActiveJobs({ storeDir: dir })).toEqual(expect.arrayContaining([
+      { kind: 'agent', ...agent },
+      { kind: 'command', ...command },
+      {
+        kind: 'agent',
+        id: 'unbound-agent',
+        sessionMode: 'persistent',
+        schedule: { kind: 'interval', minutes: 30 },
+        prompt: 'unbound prompt',
+        deliver: 'telegram',
+        createdAt: '2026-08-28T00:00:00.000Z',
+      },
+    ]))
   })
 })

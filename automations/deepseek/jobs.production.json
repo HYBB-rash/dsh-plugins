@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "business": "deepseek",
+  "jobs": [
+    {
+      "kind": "command",
+      "spec": {
+        "externalRef": "openclaw-cron:ca622ad6-51f2-4d64-8bc0-4fde431c73f7",
+        "schedule": {
+          "kind": "cron",
+          "expr": "2 9 * * *"
+        },
+        "command": {
+          "argv": [
+            "/usr/bin/bash",
+            "/opt/dsh/automations/deepseek/deepseek_daily.sh"
+          ],
+          "timeoutSeconds": 300,
+          "outputMaxBytes": 65536
+        },
+        "deliver": "telegram",
+        "failureAlert": {
+          "after": 2,
+          "cooldownMinutes": 30
+        }
+      },
+      "predecessorSpecSha256": [
+        "sha256:23cb9155e057ad2b132a58e005da4bc4d4ee31ef5dac9082cce84231af8c1239"
+      ],
+      "allowCreate": false
+    }
+  ]
+}

@@ -27,6 +27,7 @@ import type {
   DshCronControlClient,
   FailureAlertControlSuccessResponse,
   AgentBinding,
+  ActiveCronJobInspection,
   AgentBindingInspection,
   DshCronMaintenanceControl,
   MaintenanceControlError,
@@ -61,6 +62,43 @@ export interface ControlServiceConfig {
 
 export interface MaintenanceControlConfig {
   readonly storeDir: string
+}
+
+/**
+ * Inspect every active definition through the dsh-cron store abstraction.
+ * This is intentionally read-only; production mutations still cross the
+ * manager-owned Unix-socket control service.
+ */
+export function inspectActiveJobs(config: ControlServiceConfig): readonly ActiveCronJobInspection[] {
+  return new JobStore(config.storeDir).fold().active.map((job): ActiveCronJobInspection => {
+    if (job.kind === 'command') {
+      return {
+        kind: 'command',
+        id: job.id,
+        createdAt: job.createdAt,
+        ...(job.externalRef === undefined ? {} : { externalRef: job.externalRef }),
+        schedule: job.schedule,
+        command: job.command,
+        deliver: job.deliver,
+        ...(job.cwd === undefined ? {} : { cwd: job.cwd }),
+        ...(job.failureAlert === undefined ? {} : { failureAlert: job.failureAlert }),
+      }
+    }
+    return {
+      kind: 'agent',
+      id: job.id,
+      createdAt: job.createdAt,
+      ...(job.externalRef === undefined ? {} : { externalRef: job.externalRef }),
+      schedule: job.schedule,
+      prompt: job.prompt,
+      deliver: job.deliver,
+      ...(job.cwd === undefined ? {} : { cwd: job.cwd }),
+      sessionMode: job.sessionMode,
+      ...(job.agentEnvironment === undefined ? {} : { agentEnvironment: job.agentEnvironment }),
+      ...(job.gate === undefined ? {} : { gate: job.gate }),
+      ...(job.failureAlert === undefined ? {} : { failureAlert: job.failureAlert }),
+    }
+  })
 }
 
 function canonicalize(value: unknown): string {
