@@ -48,7 +48,9 @@ case "$command" in
     name="$1"
     shift
     test -f "$MOCK_ENGINE_STATE/running/$name"
-    if [[ "$*" == *'.State.Running'* ]]; then
+    if (($# == 0)); then
+      printf '[{"Id":"%s","Name":"/%s","Config":{"Cmd":["runtime"],"Labels":{}},"Mounts":[],"NetworkSettings":{"Networks":{}}}]\n' "$name" "$name"
+    elif [[ "$*" == *'.State.Running'* ]]; then
       printf '%s\n' true
     else
       printf '%s|true\n' "$image_id"
@@ -66,6 +68,13 @@ case "$command" in
   rm)
     if [[ "${1:-}" == --force ]]; then shift; fi
     find "$MOCK_ENGINE_STATE/running/${1:-missing}" -delete
+    ;;
+  stop)
+    if [[ "${1:-}" == --time ]]; then shift 2; fi
+    find "$MOCK_ENGINE_STATE/running/${1:-missing}" -delete
+    ;;
+  ps)
+    find "$MOCK_ENGINE_STATE/running" -mindepth 1 -maxdepth 1 -printf '%f\n'
     ;;
   network) exit 0 ;;
   *) exit 64 ;;

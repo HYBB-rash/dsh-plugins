@@ -94,6 +94,7 @@ case "$command" in
     : >"$MOCK_ENGINE_STATE/images/$key.present"
     ;;
   inspect) exit 1 ;;
+  ps) exit 0 ;;
   rm|network) exit 0 ;;
   *) exit 64 ;;
 esac

@@ -48,7 +48,7 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
 
 ## Develop inside the boundary
 
-- Use `./release/dsh dev shell` for commands that must run with the fixed Harness and image dependencies. It resolves the shared main image and this worktree's isolated runtime from repository-managed state.
+- Use `./release/dsh dev shell` for commands that must run with the fixed Harness and image dependencies. It resolves the shared main image and this worktree's isolated runtime from repository-managed state. Each shell is independently named, labelled, and registered; do not replace it with a direct container-engine command.
 - Keep editable source in the task worktree. Generated `lib`, caches, and test output remain ignored and outside the image identity.
 - Use focused tests during the inner loop when the affected boundary is known. Before declaring development complete, rerun the affected integration tests and any wider tests required by the change.
 - Never mount production persistence, use real credentials, contact real Telegram, claim real cron work, install dependencies on production, or patch a running production container.
@@ -59,7 +59,7 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
 1. Fetch `origin` again when preparation finishes. The task branch must still contain the latest `origin/main`; otherwise rebase immediately and rerun the affected checks.
 2. Keep the task change on its independent branch, with focused commits. Push the exact intended product commit.
 3. When main changes, the first build request constructs and self-tests the new shared base, then invalidates every environment tied to the previous main and removes all older development images. An unfinished task keeps its source worktree, rebases onto the new main, and runs `dev prepare` again. Do not retain an older development image or try to keep an old container alive.
-4. When the task no longer needs its local environment, stop it with `./release/dsh dev down`, then run `./release/dsh dev retire --source <task-worktree>` to remove only that worktree's containers, network, port reservation, lease, and isolated data. The current shared main image remains available for other tasks. Never use a global container-engine prune.
+4. When the task no longer needs its local environment, stop it with `./release/dsh dev down`, then run `./release/dsh dev retire --source <task-worktree>` to remove only that worktree's runtime containers, registered or orphaned shells, network, port reservation, lease, and isolated data. Cleanup identifies historical unlabelled shells only from the exact source-derived home mount and network; it never guesses from a fuzzy name. The current shared main image remains available for other tasks. Never use direct Podman cleanup, an artificial quiet window, or a global container-engine prune.
 5. An accepted production release invalidates every local development environment. `accept` removes all development containers, isolated data, leases, runtime reservations, and the shared development image while preserving source worktrees. Any unfinished task must rebase onto the new main, request the new single main image, and run `dev prepare` before continuing.
 6. For production, explicitly invoke `$dsh-release`. Recheck and rebase onto the latest `main` again before candidate construction or release. The development-base image and its receipt are not a formal release candidate and never replace release acceptance.
 

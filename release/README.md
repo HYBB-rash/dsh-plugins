@@ -70,6 +70,8 @@
 
 每个 worktree 的开发环境使用路径摘要派生的独立容器名和内部网络，并在一个短状态锁内分配独立 Web 端口。因此多个任务可以从同一只读 main 镜像并行运行；`dev down` 和 `dev retire` 只作用于指定 worktree。不得恢复固定的全局 `dsh-dev-web`、`dsh-dev-telegram`、`dsh-dev-fake-telegram` 或 `dsh-dev-internal` 名称。
 
+`dev shell` 同样按 worktree 生成带归属标签的独立容器，并在本地状态中登记。正常退出会删除登记；即使交互终端意外断开，`dev down`、`dev retire`、main 镜像更新和正式发布验收也会先按精确 worktree 身份优雅停止遗留 shell，确认归零后才删除租约、隔离数据或旧镜像。不得直接 `kill`、调用 Podman 清理或为此申请人工安静窗口。
+
 正式发版的生产快照测试副本和临时开发副本在测试结束或失败后都会清理，只保留快照、测试回执、候选归档和发布证据这些回退与审计所需内容。流程不会执行无边界的 `podman system prune` 或 `docker system prune`。
 
 正式 release 完成 `accept` 后，本地开发环境和共享开发镜像立即失效并清理；任务源码 worktree 原样保留。未完成任务下次继续时，必须先同步新 main，请求最新 main 的唯一开发镜像，再执行自己的 `dev prepare`。
