@@ -49,6 +49,7 @@
 
 ## 经验记录
 
+- 2026-08-29：任何用户功能实现前，必须用用户可见入口、亲自动作和预期结果定义验收；内部 ID、配置、fixture、日志和测试不能替代用户路径。经过同等生命周期边界后用户仍不可达时，返回需求层；形成入口所需的责任属于该纵向切面。
 - 2026-08-28：仓库自管自动化按明确业务拆出 `automations/<business>/` 后，`automations/scripts/` 只保留跨业务支持代码；镜像的 Python 编译、shell 语法、OpenClaw 缺席和退役文件门禁必须递归覆盖整个 `automations/`，不能继续只检查旧的平铺 `scripts/`。直接执行的业务脚本若复用共享模块，也要验证从新目录独立加载时的导入路径。
 - 2026-08-28：开发容器的最小生命周期单位应是 worktree 环境，不是每次交互 shell。`dev prepare` 为每个 worktree 创建一个带明确归属的固定 toolbox，`dev shell` 只 exec 进入它；多个终端共用该 toolbox，不创建或登记额外容器。`dev down`、`dev retire`、main 镜像换代和发版验收都按 worktree 整体停止并清理，避免 shell 状态、孤儿识别和人工资源窗口。
 - 2026-08-28：不可变镜像中的源码可能由 root 拥有且对运行 UID 只读；`compileall` 这类只做语法验证的构建检查仍会默认回写 `__pycache__`。应把 `PYTHONPYCACHEPREFIX` 指向构建期临时目录，而不是放宽源码权限或让检查污染镜像输入。
