@@ -45,6 +45,7 @@ import {
 } from './managed-runtime.ts'
 import { ManagedAwareBasicCompactionEngine } from './managed-compaction.ts'
 import { ManagedFailurePresenter, isManagedFailure } from './managed-failure.ts'
+import { InputRequeueCoordinator } from './input-requeue.ts'
 import { NoFocusHarness } from './no-focus-harness.ts'
 import { NoFocusRecovery } from './no-focus-recovery.ts'
 import { classifyTelegramStateRecovery } from './state-recovery.ts'
@@ -1920,6 +1921,7 @@ function installFocusCanary(
 ): ManagedCompactRequest {
   const auxiliary = new BoundedAuxiliarySemanticCall(ctx.llm, tokenMeter, config.auxiliary)
   const managedFailure = new ManagedFailurePresenter()
+  const inputRequeue = new InputRequeueCoordinator()
   const candidateAdvice = new UserInteractionAdvice()
   type EstablishedFocus = Extract<FocusDecision, { readonly kind: 'focus_established' }>
   type CandidateTerminal =
@@ -3170,7 +3172,83 @@ function installFocusCanary(
   }
   ctx.on('agent/disposed', ({ agent }) => { recoveryLifecycles.delete(agent) })
 
+  const installInputRequeueRecovery = (agent: Agent): void => {
+    if (!managed(agent, classifier)) return
+    // A wake interrupted between its durable insertion and the synchronous
+    // inserted-hook filter is never model input after restart.
+    inputRequeue.discardStaleWakes(agent)
+    let transactionOriginId: string | undefined
+    let closureOriginId: string | undefined
+    try {
+      const stored = domain.table('focus_precanonical').get(String(agent.session.id))
+      const background = stored !== undefined && isBackgroundStateRecord(stored)
+        ? parseCanonicalBackgroundStateRecord(stored)
+        : undefined
+      transactionOriginId = background?.transaction?.machine.originMessageId
+      closureOriginId = stored !== undefined && isAnyNoFocusRecord(stored)
+        ? stored.closure.original.messageId
+        : undefined
+    } catch {
+      // A failed state read grants no requeue authority. Existing recovery and
+      // no-safe containment retain ownership of that startup failure.
+      return
+    }
+    const recoverable = inputRequeue.plan(agent).filter(input => {
+      const inputId = String(input.message.id)
+      return inputId !== transactionOriginId && inputId !== closureOriginId
+    })
+    if (recoverable.length === 0) return
+    try {
+      void agent.runMaintenance(async (signal) => {
+        const sessions = sessionsFlushPort(ctx)
+        const persistence = sessionPersistencePort(ctx)
+        if (signal.aborted) return
+        let complete = true
+        for (const input of recoverable) {
+          if (signal.aborted) return
+          const outcome = await inputRequeue.recover(agent, input, {
+            flush: async () => sessions !== undefined && await sessions.flush(agent.session),
+            readFrom: async fromSeq => {
+              if (persistence === undefined) return { events: [] }
+              return await persistence.readFrom(String(agent.session.id), fromSeq)
+            },
+          }, 'none', recoverable)
+          if (outcome.kind === 'persistence-failed') {
+            complete = false
+            continue
+          }
+          // Cold Inbox replay reconstructs pending values but deliberately
+          // does not emit a new live inserted notification. After detached
+          // exact proof, restore that same identity into the existing
+          // admission ledgers before the mechanical wake; otherwise an
+          // already-pending recovery is claimed and rejected as unadmitted.
+          const sessionId = String(agent.session.id)
+          const messageId = String(input.message.id)
+          const ids = inserted.get(sessionId) ?? new Set<string>()
+          ids.add(messageId)
+          inserted.set(sessionId, ids)
+          const exact = insertedMessages.get(agent) ?? new Map<string, UserMessage>()
+          exact.set(messageId, input.message)
+          insertedMessages.set(agent, exact)
+        }
+        if (complete && !signal.aborted) inputRequeue.wakeAfterIdle(agent, recoverable)
+      })
+    } catch {
+      // Another owner may have synchronously occupied maintenance. No input is
+      // changed in that case; the next lifecycle can classify the same log.
+    }
+  }
+
+  // Register after the existing recovery hook. Both are prepend listeners, so
+  // this narrower claim repair reserves maintenance before state restoration.
+  ctx.on('agent/created', ({ agent }) => { installInputRequeueRecovery(agent) }, { prepend: true })
+  for (const id of config.allowlist) {
+    const agent = ctx.agents.get(SessionId(id))
+    if (agent !== undefined) installInputRequeueRecovery(agent)
+  }
+
   ctx.on('agent/inbox/inserted', ({ agent, message }) => {
+    if (managed(agent, classifier) && inputRequeue.discardInsertedWake(agent, message)) return
     if (!managed(agent, classifier) || !isDirectUserSource(message.source)) return
     const sessionId = String(agent.session.id)
     const messageId = String(message.id)
@@ -3972,6 +4050,25 @@ function installFocusCanary(
         || error instanceof Error && error.message === FOCUS_CANARY_UNAVAILABLE_TEXT) throw error
       return await canaryFailure(ctx, agent, message)
     }
+  }, { prepend: true })
+
+  // A failed physical reinsert has no authority to speak during cold start.
+  // The process-local incident is consumed at most once, only when later
+  // legitimate traffic causes that exact input to be claimed and independently
+  // proves it through the established F07 presenter gate.
+  ctx.on('agent/pre-step', async ({ agent, messages }, next): Promise<PreStepDecision> => {
+    if (!managed(agent, classifier) || messages.length !== 1) return await next()
+    const message = messages[0]
+    if (message === undefined
+      || !isDirectUserSource(message.source)
+      || !inputRequeue.hasDeferredFailure(agent, String(message.id))) return await next()
+    try {
+      await preserveClaimedInput(ctx, agent, message)
+    } catch {
+      throw new Error('focus-canary')
+    }
+    inputRequeue.consumeDeferredFailure(agent, String(message.id))
+    return managedFailure.afterPhysicallyProvedInput({ physicallyProved: true })
   }, { prepend: true })
 
   return Object.freeze({

@@ -443,6 +443,104 @@ async function send(agent: Agent, text: string): Promise<UserMessage> {
   return message
 }
 
+async function exerciseInputRequeueProductionIntegration(): Promise<void> {
+  const root = await mkdtemp(join(tmpdir(), 'context-manager-r1a-integration-'))
+  roots.push(root)
+  const sessionsRoot = join(root, 'sessions')
+  await mkdir(sessionsRoot, { recursive: true })
+  const target = ContextRoutePlugin.FOCUS_CANARY_IDS[0]
+  const original = createUserMessage({
+    content: [{ type: 'text', text: focusDirect }],
+    source: { kind: 'user' },
+  })
+
+  const seed = new Context()
+  contexts.push(seed)
+  await mountAgentLoopTestDependencies(seed)
+  const seedAdapter = new NaturalEvidenceAdapter()
+  seed.llm.registerAdapter(['natural-evidence-test'], seedAdapter)
+  await seed.plugin(JsonlSessionPersistence, { root: sessionsRoot, compression: 'none' })
+  await seed.plugin(AgentLoop, { agents: [] })
+  const seeded = seed.agentLoop.create(SessionId(target), {
+    provider: 'natural-evidence-test', model: 'natural-evidence-test', maxTokens: 256,
+  })
+  seeded.inbox.append('next-turn', original)
+  expect(seeded.inbox.claim('next-turn', 1)).toStrictEqual([original])
+  expect(await seed.sessions.flush(seeded.session)).toBe(true)
+  await seed.fiber.dispose()
+  contexts.splice(contexts.indexOf(seed), 1)
+
+  const live = new Context()
+  contexts.push(live)
+  await mountAgentLoopTestDependencies(live)
+  const sqlitePath = join(root, 'context-manager.sqlite')
+  await live.plugin(Storage)
+  await live.plugin(StorageSqlite, { path: sqlitePath })
+  await live.plugin(StorageDomain, { backend: 'sqlite' })
+  await live.plugin(TokenMeter)
+  await live.plugin(JsonlSessionPersistence, { root: sessionsRoot, compression: 'none' })
+  const detachedFrom: number[] = []
+  const readFrom = live.sessionPersistence.readFrom.bind(live.sessionPersistence)
+  live.sessionPersistence.readFrom = async (id, fromSeq, signal) => {
+    const detached = await readFrom(id, fromSeq, signal)
+    detachedFrom.push(fromSeq)
+    return detached
+  }
+  await live.plugin(CommandRuntime)
+  const managedRuntime = {
+    mode: 'enforce' as const,
+    safeUpdateMarginTokens: 64,
+    allowlist: [...ContextRoutePlugin.FOCUS_CANARY_IDS],
+  }
+  await live.plugin(ManagedAwareBasicCompactionEngine, {
+    auto: true, thresholdRatio: .99, retainRatio: .1, managedRuntime,
+  })
+  await live.plugin(commandCompact)
+  const adapter = new NaturalEvidenceAdapter()
+  live.llm.registerAdapter(['natural-evidence-test'], adapter)
+  await live.plugin(ContextRoutePlugin, {
+    focusCanary: {
+      ...managedRuntime,
+      auxiliary: {
+        provider: 'natural-evidence-test', model: 'natural-evidence-test',
+        maxOutputTokens: 256, timeoutMs: 500, maxExpressionChars: 240,
+        maxProjectionTokens: 2_048, safetyMarginTokens: 128,
+      },
+    },
+    nativeWriterArbitration: { mode: 'enforce' },
+  })
+  await live.plugin(AgentLoop, { agents: [] })
+  const recovered = (await live.agents.resume({
+    resumeSessionId: SessionId(target),
+    agentOptions: { provider: 'natural-evidence-test', model: 'natural-evidence-test', maxTokens: 256 },
+  })).agent
+  for (let pass = 0; pass < 4; pass += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+    await recovered.whenIdle()
+  }
+  const requests = adapter.rootRequests.filter(request => request.messages.some(message =>
+    message.source.kind === 'user' && String(message.id) === String(original.id)))
+  expect(requests).toHaveLength(1)
+  expect(recovered.session.events.filter(event => event.type === 'user/message'
+    && String(event.data.id) === String(original.id))).toHaveLength(1)
+  expect(recovered.session.events.filter(event => event.type === 'assistant/message')).toHaveLength(1)
+  const reinsert = recovered.session.events.findLast(event => event.type === 'agent/inbox/spliced'
+    && event.data.inserted.length === 1
+    && String(event.data.inserted[0]?.id) === String(original.id))
+  expect(reinsert?.type).toBe('agent/inbox/spliced')
+  expect(reinsert?.type === 'agent/inbox/spliced' ? reinsert.data.start : undefined).toBe(0)
+  expect(detachedFrom).toContain(reinsert?.seq)
+  const turn = recovered.session.events.find(event => event.type === 'turn/start')
+  expect(turn?.seq).toBeGreaterThan(reinsert?.seq ?? Number.MAX_SAFE_INTEGER)
+  expect(recovered.session.events.filter(event => event.type === 'user/message'
+    && event.data.source.kind === 'context-manager-input-requeue-wake')).toHaveLength(0)
+  expect(recovered.session.events.filter(event => event.type.startsWith('tool/')
+    || event.type.startsWith('compaction/'))).toHaveLength(0)
+  expect(recovered.inbox.nextStep).toStrictEqual([])
+  expect(recovered.inbox.nextTurn).toStrictEqual([])
+  expect(await readFile(sqlitePath)).not.toHaveLength(0)
+}
+
 describe('single-session context route through the real loop', () => {
   it('uses the public web service and keeps the evidence canary subordinate to focus enforce', async () => {
     const ctx = new Context()
@@ -794,6 +892,7 @@ describe('single-session context route through the real loop', () => {
       && event.data.source.kind === 'user'
       && String(event.data.id) === String(rollingProducerDirect.id))).toHaveLength(1)
     expect(qualifiedAgent.session.events.filter(event => event.type.startsWith('compaction/'))).toHaveLength(0)
+    await exerciseInputRequeueProductionIntegration()
   })
 
   it('updates on progress and correction, survives two real compactions, and retrieves shadowed detail by seq', async () => {

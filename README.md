@@ -158,6 +158,7 @@ flowchart LR
 - 只服务单个 session；摘要仍可能错，不能替代原始会话记录或跨会话知识库。
 - 对受管 Telegram canary，已有唯一背景后的同 chat、同 generation C14/C15 事实更新会重新走同一份确定性候选、双 reviewer 与 C28；只有候选正文和机器投影逐字节相同，才保留 identical-qualified 证明而不换入背景。assistant 文本、普通 direct 和任意触发都不能取得这条资格链。
 - Telegram 冷启动只按结构化来源区分真正新聊天、已保全的 pre-canonical 焦点、待迁移旧 route 与缺失应有 state；已完整保全的 canonical state 继续由既有 owner 恢复，不进入这四分；旧 route 正文不成为候选或规范状态，日志已有 context-manager state 而 owner material 缺失时走既有受管错误面，不冒充新聊天。
+- 受管输入若已经从 inbox 被 claim、但 append-only 日志能证明同 id 尚未进入 `user/message` 或任何 request/provider 开始点，会按原 id、target、顺序和正文重插；只有 flush 后的 detached readback 精确核对成功才允许后续一次执行。持久证明失败时只保留 live inbox，不启动模型或伪造回复；冷启动不会凭空主动发 Telegram，只有同一进程的下一次合法受管 turn 再次 claim 并独立保全该输入后，才最多一次复用既有失败呈现。已有 `user/message` 或请求开始证据属于执行结果不确定事故，本恢复不会自动重放。
 
 ## 构建、测试与本地开发
 
