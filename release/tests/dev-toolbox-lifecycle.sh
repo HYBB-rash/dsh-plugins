@@ -32,6 +32,9 @@ case "$command" in
     if [[ "$*" == *'.State.Running'* ]]; then printf '%s\n' true; else printf '%s|true\n' "$image_id"; fi
     ;;
   exec)
+    if [[ "$*" == *'/opt/dsh/release-system/scripts/dev-source-verify.sh'* ]] && [[ "${MOCK_VERIFY_EXIT:-0}" != 0 ]]; then
+      exit "$MOCK_VERIFY_EXIT"
+    fi
     exit 0
     ;;
   rm)
@@ -45,7 +48,8 @@ EOF
 chmod +x "$mock_engine"
 
 candidate="$test_root/candidate.json"
-cat >"$candidate" <<'EOF'
+latest_main="$(git -C "$repo_root" rev-parse origin/main)"
+cat >"$candidate" <<EOF
 {
   "schemaVersion": 2,
   "candidateId": "development-main-fixture",
@@ -54,8 +58,10 @@ cat >"$candidate" <<'EOF'
   "imageId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "imageTag": "localhost/dsh-development-main:fixture",
   "harnessCommit": "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e",
-  "pluginsCommit": "1111111111111111111111111111111111111111",
-  "releaseToolCommit": "1111111111111111111111111111111111111111"
+  "pluginsCommit": "$latest_main",
+  "releaseToolCommit": "$latest_main",
+  "testReceiptPath": "$test_root/image-tests.json",
+  "testReceiptSha256": "sha256:baseline-fixture"
 }
 EOF
 
@@ -87,7 +93,7 @@ fs.writeFileSync(leasePath, JSON.stringify({ schemaVersion: 2, sourcePath, candi
 NODE
 }
 
-source_a="$test_root/worktree-a"
+source_a="$repo_root"
 source_b="$test_root/worktree-b"
 prepare_fixture "$source_a"
 prepare_fixture "$source_b"
@@ -101,7 +107,35 @@ toolbox_a="dsh-dev-${key_a:0:12}-toolbox"
 toolbox_b="dsh-dev-${key_b:0:12}-toolbox"
 
 test "$(grep -Fc "exec --interactive --tty --workdir /workspace/dsh-plugins $toolbox_a bash" "$test_root/engine.log")" = 2
+run_dev dev verify --source "$source_a" --candidate "$candidate" >"$test_root/verify-all.json"
+run_dev dev verify --source "$source_a" --candidate "$candidate" --package x-feed >"$test_root/verify-x-feed.json"
+node - <<'NODE' "$test_root/verify-all.json" "$test_root/verify-x-feed.json" "$latest_main"
+const fs = require('node:fs')
+const [allPath, focusedPath, latestMain] = process.argv.slice(2)
+const all = JSON.parse(fs.readFileSync(allPath, 'utf8'))
+const focused = JSON.parse(fs.readFileSync(focusedPath, 'utf8'))
+if (all.result !== 'dev-source-verified') throw new Error('missing editable verification receipt')
+if (all.receipt.baseline.pluginsCommit !== latestMain) throw new Error('missing shared-main baseline receipt')
+if (all.receipt.editableSource.scope !== 'all') throw new Error('wrong full verification scope')
+if (focused.receipt.editableSource.scope !== 'x-feed') throw new Error('wrong focused verification scope')
+if (focused.tests.python !== 'x-feed unittest discover') throw new Error('focused x-feed must include Python tests')
+NODE
+grep -Fq "exec --workdir /workspace/dsh-plugins $toolbox_a bash /opt/dsh/release-system/scripts/dev-source-verify.sh all" "$test_root/engine.log"
+grep -Fq "exec --workdir /workspace/dsh-plugins $toolbox_a bash /opt/dsh/release-system/scripts/dev-source-verify.sh x-feed" "$test_root/engine.log"
+set +e
+MOCK_VERIFY_EXIT=23 \
+  DSH_RELEASE_STATE_ROOT="$state_root" \
+  DSH_CONTAINER_ENGINE="$mock_engine" \
+  MOCK_ENGINE_STATE="$mock_state" \
+  MOCK_ENGINE_LOG="$test_root/engine.log" \
+    "$repo_root/release/dsh" dev verify --source "$source_a" --candidate "$candidate" >"$test_root/verify-fail.stdout" 2>"$test_root/verify-fail.stderr"
+verify_exit="$?"
+set -e
+test "$verify_exit" = 5
+test -f "$mock_state/running/$toolbox_a"
+test -f "$state_root/dev/leases/$key_a.json"
 ! grep -Eq '^(create|start) ' "$test_root/engine.log"
+! grep -Eq '^run ' "$test_root/engine.log"
 test ! -e "$state_root/dev/shells"
 
 node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(r.schemaVersion!==3 || r.toolbox!==process.argv[2]) process.exit(1)' \
@@ -119,4 +153,4 @@ test ! -e "$state_root/dev/runtimes/$key_a.json"
 run_dev dev retire --source "$source_b" >"$test_root/retire-b.json"
 test ! -e "$mock_state/running/$toolbox_b"
 
-printf 'fixed per-worktree development toolbox lifecycle contract passed\n'
+printf 'fixed per-worktree development toolbox lifecycle and editable verification contract passed\n'

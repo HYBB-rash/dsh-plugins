@@ -61,4 +61,5 @@
 - 2026-08-28：rootless Podman 的容器 UID 1000 会映射到宿主 subordinate UID；对大型镜像使用 `keep-id` 会触发昂贵的递归改属主。源码开发应以容器 root 完成宿主挂载编译，再用 `setpriv` 降权运行权限敏感测试，并把 npm/XDG 缓存放进隔离 `/tmp`，避免读取快照 Home 中不可写的用户缓存。
 - 2026-08-28：开发镜像不能按 worktree 重复构建。`release/dsh build --purpose development` 对完整 `origin/main` 只保留一份共享镜像，同一 main 直接复用且不生成归档；main 前进时新镜像自检通过后清除全部旧开发环境与旧开发镜像。每个 worktree 只拥有独立容器、网络、Web 端口和数据；共享 Podman 的 build、正式 save/load 验证及镜像清理由入口全局锁自动排队，不再人工抢窗口。
 - 2026-08-28：全量产品测试属于共享 main 开发镜像的构建回执，不属于每个 worktree 的容器准备。`dev prepare` 只重新编译被可编辑挂载遮住的六包产物，并验证快照隔离、Web、假 Telegram、空 cron、真实 Telegram 阻断和镜像身份；不要让环境创建重复执行 Vitest/Python unittest，也不要把长命令回执提前结束误判为准备失败。
+- 2026-08-28：可编辑源码的正式 verify 应分开身份：rootless toolbox 的 uid 0 只写入挂载源码的 type/build/bundle；Vitest/Python 要以 Containerfile 的 `1000:1000` 运行，并在每次创建、该 uid 可写、结束清理的临时 HOME/npm/XDG/data 中执行且清空 `NODE_PATH`。否则会污染宿主输出所有权、让 chmod 权限测试失真，或让镜像预装依赖越过 runtime-package-topology 的模块边界。
 - 2026-08-28：盘点 OpenClaw 依赖时不能只查任务声明或同名脚本；应同时核对实际状态库、启用任务的调用链、systemd、插件和跨主机入口。历史 `jobs.json` 路径可能已不存在，而现役状态已迁到 SQLite；文件存在或名称相同也不能证明仍在运行或内容一致。

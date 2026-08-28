@@ -670,6 +670,37 @@ const developmentPackages = Object.freeze([
   'ui-context-compactor',
 ])
 
+function editableSourceReceipt(source, candidate, scope) {
+  const status = run('git', ['-C', source.sourcePath, 'status', '--porcelain=v1', '--untracked-files=all'], {
+    capture: true,
+    announce: false,
+    code: exitCodes.safety,
+  })
+  return {
+    baseline: {
+      candidateId: candidate.candidateId,
+      imageId: candidate.imageId,
+      pluginsCommit: candidate.pluginsCommit,
+      imageTestReceiptPath: candidate.testReceiptPath ?? null,
+      imageTestReceiptSha256: candidate.testReceiptSha256 ?? null,
+    },
+    editableSource: {
+      sourcePath: source.sourcePath,
+      branch: source.branch,
+      head: source.head,
+      originMain: source.originMain,
+      workingTree: status ? 'dirty' : 'clean',
+      workingTreeStatusSha256: sha256Text(status),
+      scope,
+      identities: {
+        typeBuildBundle: 'rootless-toolbox-uid-0',
+        test: '1000:1000',
+      },
+      cache: 'toolbox-tmpfs',
+    },
+  }
+}
+
 function developmentSourceArgs(sourcePath) {
   const args = ['--volume', `${sourcePath}:/workspace/dsh-plugins:ro`]
   const imageNodeModules = '/opt/dsh/harness/node_modules/.pnpm/node_modules'
@@ -1023,11 +1054,11 @@ function commandDev(options) {
     out({ result: 'development-retired', sourcePath, cleanup })
     return
   }
-  if (action === 'prepare' && !options.source) fail('dev prepare 必须提供 --source <独立任务 worktree>', exitCodes.usage)
+  if (['prepare', 'verify'].includes(action) && !options.source) fail(`dev ${action} 必须提供 --source <独立任务 worktree>`, exitCodes.usage)
   const sourcePath = resolve(options.source ?? repoRoot)
   const defaultDevelopmentCandidate = developmentCandidatePointerPath()
   const candidateValue = options.candidate
-    ?? (['prepare', 'shell'].includes(action) && existsSync(defaultDevelopmentCandidate) ? defaultDevelopmentCandidate : undefined)
+    ?? (['prepare', 'verify', 'shell'].includes(action) && existsSync(defaultDevelopmentCandidate) ? defaultDevelopmentCandidate : undefined)
   const { candidate, path: candidatePath } = candidateFrom(candidateValue, { verifyDevelopmentImage: action !== 'prepare' })
   const runtime = developmentRuntime(sourcePath, { create: ['prepare', 'up'].includes(action) })
   const devRoot = join(stateRoot, 'dev/environments', developmentKey(sourcePath))
@@ -1151,6 +1182,54 @@ function commandDev(options) {
     out(result)
     return result
   }
+  if (action === 'verify') {
+    if (candidatePurpose(candidate) !== 'development') {
+      fail('dev verify 只接受 --purpose development 构建的开发底座，不能占用正式发版候选', exitCodes.safety)
+    }
+    const scope = options.package ?? 'all'
+    if (scope !== 'all' && !developmentPackages.includes(scope)) {
+      fail(`dev verify --package 必须是 all 或一个已挂载包: ${scope}`, exitCodes.usage)
+    }
+    const source = inspectDevelopmentSource(options.source)
+    const harnessLock = readJson(join(releaseRoot, 'harness.lock.json'), 'Harness lock')
+    if (candidate.pluginsCommit !== source.originMain) {
+      fail(`开发基础镜像不是最新 main：candidate=${candidate.pluginsCommit}，origin/main=${source.originMain}`, exitCodes.safety)
+    }
+    if (candidate.harnessCommit !== harnessLock.commit) {
+      fail(`开发基础镜像没有使用固定 Harness commit：candidate=${candidate.harnessCommit}，lock=${harnessLock.commit}`, exitCodes.safety)
+    }
+    const prior = existsSync(devMetaPath) ? readJson(devMetaPath, 'development metadata') : null
+    if (prior?.mode !== 'editable-source') fail('dev verify 只验证已准备好的 editable-source 环境；请先执行 dev prepare', exitCodes.usage)
+    const verifyRuntime = normalizeDevelopmentRuntime(prior.runtime) ?? runtime
+    const leasePath = developmentLeasePath(source.sourcePath)
+    if (!existsSync(leasePath)) fail('开发环境租约不存在；请重新执行 dev prepare', exitCodes.safety)
+    const lease = readJson(leasePath, 'development lease')
+    if (lease.candidateId !== candidate.candidateId || lease.imageId !== candidate.imageId) {
+      fail('开发环境与当前共享 main 镜像不一致；请重新执行 dev prepare', exitCodes.safety)
+    }
+    if (!devContainerRunning(verifyRuntime.toolbox)) fail('开发 toolbox 没有运行；请重新执行 dev prepare', exitCodes.safety)
+    const receipt = editableSourceReceipt(source, candidate, scope)
+    run(engine, [
+      'exec', '--workdir', '/workspace/dsh-plugins', verifyRuntime.toolbox,
+      'bash', '/opt/dsh/release-system/scripts/dev-source-verify.sh', scope,
+    ], { code: exitCodes.test })
+    const completedSource = inspectDevelopmentSource(source.sourcePath)
+    if (candidate.pluginsCommit !== completedSource.originMain) {
+      fail(`验证期间 main 已更新：candidate=${candidate.pluginsCommit}，origin/main=${completedSource.originMain}；请先 rebase 并重建开发基础镜像`, exitCodes.safety)
+    }
+    const result = {
+      result: 'dev-source-verified',
+      receipt,
+      tests: {
+        typeBuildBundle: scope === 'all' ? [...developmentPackages] : [scope],
+        typeScript: scope === 'all' ? 'all-mounted-package-suites' : scope,
+        python: scope === 'all' || scope === 'x-feed' ? 'x-feed unittest discover' : 'not-applicable',
+      },
+      runtime: verifyRuntime,
+    }
+    out(result)
+    return result
+  }
   if (action === 'shell') {
     if (!existsSync(homePath)) fail('开发数据副本不存在；请先执行 dev up', exitCodes.usage)
     const prior = existsSync(devMetaPath) ? readJson(devMetaPath, 'development metadata') : null
@@ -1167,7 +1246,7 @@ function commandDev(options) {
     run(engine, ['exec', '--interactive', '--tty', '--workdir', workdir, shellRuntime.toolbox, 'bash'], { code: exitCodes.test })
     return
   }
-  fail('用法: dsh dev prepare --source <worktree> [--candidate <candidate.json>]；dsh dev up --snapshot latest|synthetic；dsh dev shell；dsh dev down [--source <worktree>]；dsh dev retire --source <worktree>', exitCodes.usage)
+  fail('用法: dsh dev prepare --source <worktree> [--candidate <candidate.json>]；dsh dev verify --source <worktree> [--package <包名>]；dsh dev up --snapshot latest|synthetic；dsh dev shell；dsh dev down [--source <worktree>]；dsh dev retire --source <worktree>', exitCodes.usage)
 }
 
 function commandSnapshot(options) {
@@ -1547,6 +1626,7 @@ function usage() {
 
   ./release/dsh snapshot latest
   ./release/dsh dev prepare --source <独立任务worktree> [--candidate <latest-main-candidate.json>]
+  ./release/dsh dev verify --source <独立任务worktree> [--package <已挂载包>]
   ./release/dsh dev up --snapshot latest|synthetic [--candidate candidate.json] [--reset]
   ./release/dsh dev shell [--candidate candidate.json]
   ./release/dsh dev down [--source <独立任务worktree>]
