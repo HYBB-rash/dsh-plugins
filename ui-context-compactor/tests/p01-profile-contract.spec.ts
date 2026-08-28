@@ -1,13 +1,30 @@
 import { describe, expect, it } from 'vitest'
-import { readFile } from 'node:fs/promises'
+import { access, readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
 const P01_SESSION_ID = 'session-2ad8a3dd-1e0b-4126-aca8-4f129ad02b54'
+const EDITABLE_PROFILES_ROOT = '/workspace/dsh-plugins/release/profiles'
 
-function sourceRoot(): string {
-  return process.env['DSH_HARNESS_ROOT'] === undefined
-    ? resolve(process.cwd(), '..')
-    : '/workspace/dsh-plugins'
+async function profilesRoot(): Promise<string> {
+  try {
+    await access(EDITABLE_PROFILES_ROOT)
+    return EDITABLE_PROFILES_ROOT
+  } catch {
+    // A formal release build supplies the Harness root and archives release
+    // tooling into its one canonical sibling; do not search arbitrary paths.
+  }
+
+  const harnessRoot = process.env['DSH_HARNESS_ROOT']
+  if (harnessRoot === undefined || harnessRoot.trim().length === 0) {
+    throw new Error('missing editable profiles and DSH_HARNESS_ROOT for archived profiles')
+  }
+  const archivedProfilesRoot = resolve(harnessRoot, '..', 'release-system', 'profiles')
+  try {
+    await access(archivedProfilesRoot)
+    return archivedProfilesRoot
+  } catch (error: unknown) {
+    throw new Error(`missing official archived profiles at ${archivedProfilesRoot}`, { cause: error })
+  }
 }
 
 function pluginBlock(profile: string, id: string): string {
@@ -34,10 +51,10 @@ function p01ConfigBlock(plugin: string): string {
 
 describe('P01 production profile contract', () => {
   it('keeps one identical exact allowlist in the Web runtime and invariant, and none in Telegram', async () => {
-    const root = sourceRoot()
+    const root = await profilesRoot()
     const [web, telegram] = await Promise.all([
-      readFile(resolve(root, 'release/profiles/web/cordis.patch.yml'), 'utf8'),
-      readFile(resolve(root, 'release/profiles/telegram/cordis.patch.yml'), 'utf8'),
+      readFile(resolve(root, 'web/cordis.patch.yml'), 'utf8'),
+      readFile(resolve(root, 'telegram/cordis.patch.yml'), 'utf8'),
     ])
     const runtime = p01ConfigBlock(pluginBlock(web, 'ui-context-compactor'))
     const invariant = p01ConfigBlock(pluginBlock(web, 'ui-context-compactor-invariant'))
