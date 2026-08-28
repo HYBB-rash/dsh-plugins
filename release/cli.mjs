@@ -223,30 +223,12 @@ function developmentRuntimePath(sourcePath) {
   return join(stateRoot, 'dev/runtimes', `${developmentKey(sourcePath)}.json`)
 }
 
-function developmentShellStateRoot(sourcePath) {
-  return join(stateRoot, 'dev/shells', developmentKey(sourcePath))
-}
-
-function developmentShellBlockPath(sourcePath) {
-  return join(developmentShellStateRoot(sourcePath), 'blocked.json')
-}
-
-function developmentShellRecordPath(sourcePath, shellName) {
-  return join(developmentShellStateRoot(sourcePath), `${shellName}.json`)
-}
-
-function developmentShellLockName(sourcePath) {
-  return `development-shell-${developmentKey(sourcePath)}`
-}
-
-function expectedDevelopmentRuntime(sourcePath) {
-  const resolvedSource = resolve(sourcePath)
-  const key = developmentKey(resolvedSource)
-  const suffix = key.slice(0, 12)
+function normalizeDevelopmentRuntime(runtime) {
+  if (!runtime?.key || !runtime?.sourcePath) return runtime
   return {
-    sourcePath: resolvedSource,
-    key,
-    network: `dsh-dev-${suffix}-internal`,
+    ...runtime,
+    schemaVersion: 3,
+    toolbox: runtime.toolbox ?? `dsh-dev-${runtime.key.slice(0, 12)}-toolbox`,
   }
 }
 
@@ -322,10 +304,18 @@ function developmentRuntime(sourcePath, { create = false } = {}) {
   const resolvedSource = resolve(sourcePath)
   const key = developmentKey(resolvedSource)
   const path = developmentRuntimePath(resolvedSource)
-  if (existsSync(path)) return readJson(path, 'development runtime')
+  if (existsSync(path)) {
+    const runtime = normalizeDevelopmentRuntime(readJson(path, 'development runtime'))
+    writeJson(path, runtime)
+    return runtime
+  }
   if (!create) return null
   return withShortStateLock('development-runtime', () => {
-    if (existsSync(path)) return readJson(path, 'development runtime')
+    if (existsSync(path)) {
+      const runtime = normalizeDevelopmentRuntime(readJson(path, 'development runtime'))
+      writeJson(path, runtime)
+      return runtime
+    }
     const used = allocatedDevelopmentPorts()
     for (const port of listeningTcpPorts()) used.add(port)
     const firstPort = 13080 + (Number.parseInt(key.slice(0, 8), 16) % 10_000)
@@ -337,10 +327,11 @@ function developmentRuntime(sourcePath, { create = false } = {}) {
     if (webPort === null) fail('没有可用的本地开发 Web 端口', exitCodes.safety)
     const suffix = key.slice(0, 12)
     const runtime = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       sourcePath: resolvedSource,
       key,
       network: `dsh-dev-${suffix}-internal`,
+      toolbox: `dsh-dev-${suffix}-toolbox`,
       fakeTelegram: `dsh-dev-${suffix}-fake-telegram`,
       telegram: `dsh-dev-${suffix}-telegram`,
       web: `dsh-dev-${suffix}-web`,
@@ -413,211 +404,12 @@ function protectedCandidateIds() {
 }
 
 function runtimeForLease(lease) {
-  return lease?.runtime ?? developmentRuntime(lease?.sourcePath ?? '') ?? legacyDevelopmentRuntime()
-}
-
-function repositoryWorktreePaths() {
-  const output = run('git', ['-C', repoRoot, 'worktree', 'list', '--porcelain'], {
-    capture: true,
-    announce: false,
-    code: exitCodes.safety,
-  })
-  return output.split('\n')
-    .filter((line) => line.startsWith('worktree '))
-    .map((line) => resolve(line.slice('worktree '.length)))
-}
-
-function engineContainerInspections() {
-  const listed = runStatus(engine, ['ps', '--all', '--format', '{{.ID}}'])
-  if (listed.status !== 0) {
-    fail(`无法列出开发容器，拒绝猜测清理范围\n${String(listed.stderr ?? '').trim()}`, exitCodes.safety)
-  }
-  const inspections = []
-  for (const id of String(listed.stdout ?? '').split('\n').map((value) => value.trim()).filter(Boolean)) {
-    const inspected = runStatus(engine, ['inspect', id])
-    if (inspected.status !== 0) continue
-    try {
-      const parsed = JSON.parse(String(inspected.stdout ?? ''))
-      const value = Array.isArray(parsed) ? parsed[0] : parsed
-      if (value) inspections.push(value)
-    } catch (error) {
-      warn(`无法解析容器 ${id} 的身份，保留不动: ${error.message}`)
-    }
-  }
-  return inspections
-}
-
-function normalizedImageId(value) {
-  return String(value ?? '').replace(/^sha256:/u, '')
-}
-
-function inspectionUsesCandidate(inspection, candidate) {
-  const expectedId = normalizedImageId(candidate.imageId)
-  const actualIds = [inspection.Image, inspection.ImageID, inspection.ImageId]
-    .map(normalizedImageId)
-    .filter(Boolean)
-  const actualTags = [inspection.ImageName, inspection.Config?.Image].filter(Boolean)
-  return actualIds.includes(expectedId) || actualTags.includes(candidate.imageTag)
-}
-
-function developmentShellOwnedBySource(inspection, sourcePath) {
-  const command = inspection.Config?.Cmd
-  if (!Array.isArray(command) || command.length !== 1 || command[0] !== 'shell') return false
-
-  const resolvedSource = resolve(sourcePath)
-  const expected = expectedDevelopmentRuntime(resolvedSource)
-  const expectedHome = resolve(join(stateRoot, 'dev/environments', expected.key, 'home/herman'))
-  const mounts = Array.isArray(inspection.Mounts) ? inspection.Mounts : []
-  const hasHome = mounts.some((mount) => mount.Destination === '/home/herman'
-    && resolve(String(mount.Source ?? '')) === expectedHome)
-  if (!hasHome) return false
-
-  const labels = inspection.Config?.Labels ?? {}
-  const labelled = labels['io.dsh.dev.role'] === 'shell'
-    && labels['io.dsh.dev.source-key'] === expected.key
-    && resolve(String(labels['io.dsh.dev.source-path'] ?? '')) === resolvedSource
-  if (labels['io.dsh.dev.role'] !== undefined && !labelled) return false
-
-  const networks = Object.keys(inspection.NetworkSettings?.Networks ?? {})
-  const hasExpectedNetwork = networks.includes(expected.network)
-  const hasWorkspace = mounts.some((mount) => mount.Destination === '/workspace/dsh-plugins'
-    && resolve(String(mount.Source ?? '')) === resolvedSource)
-
-  // New shells prove ownership with labels. Historical shells predate labels,
-  // so require both the source-derived home mount and its exact source-derived
-  // network; a matching workspace mount is additional evidence when present.
-  return labelled || (hasExpectedNetwork && (hasWorkspace || hasHome))
-}
-
-function developmentShellIdentity(inspection) {
-  return {
-    id: String(inspection.Id ?? inspection.ID ?? ''),
-    name: String(inspection.Name ?? inspection.Names?.[0] ?? '').replace(/^\//u, ''),
-  }
-}
-
-function ownedDevelopmentShells(sourcePath, inspections = engineContainerInspections()) {
-  return inspections
-    .filter((inspection) => developmentShellOwnedBySource(inspection, sourcePath))
-    .map((inspection) => ({ ...developmentShellIdentity(inspection), inspection }))
-    .filter(({ id }) => id)
-}
-
-function stopOwnedDevelopmentShells(sourcePath, shells = ownedDevelopmentShells(sourcePath)) {
-  if (shells.length === 0) return []
-  const stopped = []
-  const stop = runStatus(engine, ['stop', '--time', '30', ...shells.map(({ id }) => id)])
-  for (const shell of shells) {
-    if (runStatus(engine, ['inspect', shell.id]).status === 0) {
-      const removal = runStatus(engine, ['rm', shell.id])
-      if (removal.status !== 0 && runStatus(engine, ['inspect', shell.id]).status === 0) {
-        const detail = stop.status === 0 ? '' : `\n${String(stop.stderr ?? '').trim()}`
-        fail(`无法优雅停止或移除 ${sourcePath} 的开发 shell ${shell.name || shell.id}${detail}`, exitCodes.safety)
-      }
-    }
-    stopped.push(shell.name || shell.id)
-  }
-  const remaining = ownedDevelopmentShells(sourcePath)
-  if (remaining.length > 0) {
-    fail(`开发 shell 未全部退出，保留状态不继续清理: ${remaining.map(({ name, id }) => name || id).join(', ')}`, exitCodes.safety)
-  }
-  return stopped
-}
-
-function blockAndStopDevelopmentShells(sourcePath, reason) {
-  const resolvedSource = resolve(sourcePath)
-  withShortStateLock(developmentShellLockName(resolvedSource), () => {
-    writeJson(developmentShellBlockPath(resolvedSource), {
-      schemaVersion: 1,
-      sourcePath: resolvedSource,
-      reason,
-      blockedAt: new Date().toISOString(),
-    })
-  })
-  return stopOwnedDevelopmentShells(resolvedSource)
-}
-
-function unblockDevelopmentShells(sourcePath) {
-  const resolvedSource = resolve(sourcePath)
-  withShortStateLock(developmentShellLockName(resolvedSource), () => {
-    rmSync(developmentShellBlockPath(resolvedSource), { force: true })
-  })
-}
-
-function removeDevelopmentShellState(sourcePath) {
-  if (!sourcePath) return
-  rmSync(developmentShellStateRoot(sourcePath), { recursive: true, force: true })
-}
-
-function registerDevelopmentShell(sourcePath, candidate, runtime, homePath, sourceArgs) {
-  const resolvedSource = resolve(sourcePath)
-  return withShortStateLock(developmentShellLockName(resolvedSource), () => {
-    if (existsSync(developmentShellBlockPath(resolvedSource))) {
-      fail('开发环境正在停止或已经停止；请重新执行 dev prepare 后再进入 shell', exitCodes.safety)
-    }
-    const leasePath = developmentLeasePath(resolvedSource)
-    if (!existsSync(leasePath)) fail('开发租约不存在；拒绝启动无法归属和回收的 shell', exitCodes.safety)
-    const lease = readJson(leasePath, 'development lease')
-    if (lease.candidateId !== candidate.candidateId || lease.imageId !== candidate.imageId) {
-      fail('开发租约与当前共享 main 镜像不一致；请重新执行 dev prepare', exitCodes.safety)
-    }
-    const shellName = `dsh-dev-${developmentKey(resolvedSource).slice(0, 12)}-shell-${nowId().toLowerCase()}-${process.pid}`
-    const recordPath = developmentShellRecordPath(resolvedSource, shellName)
-    run(engine, [
-      'create', '--rm', '--interactive', '--tty', '--name', shellName,
-      '--label', 'io.dsh.dev.role=shell',
-      '--label', `io.dsh.dev.source-key=${developmentKey(resolvedSource)}`,
-      '--label', `io.dsh.dev.source-path=${resolvedSource}`,
-      '--label', `io.dsh.dev.runtime-key=${runtime.key ?? developmentKey(resolvedSource)}`,
-      '--network', runtime.network, ...containerBaseArgs(homePath), ...sourceArgs, candidate.imageTag, 'shell',
-    ], { code: exitCodes.test })
-    writeJson(recordPath, {
-      schemaVersion: 1,
-      role: 'shell',
-      name: shellName,
-      sourcePath: resolvedSource,
-      sourceKey: developmentKey(resolvedSource),
-      runtimeKey: runtime.key ?? developmentKey(resolvedSource),
-      imageId: candidate.imageId,
-      imageTag: candidate.imageTag,
-      cliPid: process.pid,
-      createdAt: new Date().toISOString(),
-    })
-    return { shellName, recordPath }
-  })
-}
-
-function stopCandidateDevelopmentShells(candidate) {
-  const inspections = engineContainerInspections().filter((inspection) => inspectionUsesCandidate(inspection, candidate))
-  const stopped = []
-  const seen = new Set()
-  const sourcePaths = new Set(repositoryWorktreePaths())
-  for (const inspection of inspections) {
-    const labels = inspection.Config?.Labels ?? {}
-    if (labels['io.dsh.dev.role'] !== 'shell' || !labels['io.dsh.dev.source-path']) continue
-    const sourcePath = resolve(labels['io.dsh.dev.source-path'])
-    if (developmentKey(sourcePath) === labels['io.dsh.dev.source-key']) sourcePaths.add(sourcePath)
-  }
-  for (const sourcePath of sourcePaths) {
-    const shells = ownedDevelopmentShells(sourcePath, inspections).filter(({ id }) => !seen.has(id))
-    if (shells.length === 0) continue
-    for (const shell of shells) seen.add(shell.id)
-    withShortStateLock(developmentShellLockName(sourcePath), () => {
-      writeJson(developmentShellBlockPath(sourcePath), {
-        schemaVersion: 1,
-        sourcePath,
-        reason: `obsolete-development-image:${candidate.candidateId}`,
-        blockedAt: new Date().toISOString(),
-      })
-    })
-    stopped.push(...stopOwnedDevelopmentShells(sourcePath, shells).map((name) => ({ sourcePath, name })))
-  }
-  return stopped
+  return normalizeDevelopmentRuntime(lease?.runtime) ?? developmentRuntime(lease?.sourcePath ?? '') ?? legacyDevelopmentRuntime()
 }
 
 function stopDev(runtime) {
   if (!runtime) return
-  for (const name of [runtime.telegram, runtime.fakeTelegram, runtime.web]) {
+  for (const name of [runtime.toolbox, runtime.telegram, runtime.fakeTelegram, runtime.web]) {
     if (name) runStatus(engine, ['rm', '--force', name])
   }
   if (runtime.network) runStatus(engine, ['network', 'rm', runtime.network])
@@ -633,7 +425,6 @@ function cleanupDevelopmentLease(lease) {
   const devRoot = resolve(lease.devRoot)
   if (controlledChild(join(stateRoot, 'dev'), devRoot)) removeControlledPath(join(stateRoot, 'dev'), devRoot)
   removeDevelopmentRuntime(lease.sourcePath)
-  removeDevelopmentShellState(lease.sourcePath)
   return { result: 'development-environment-cleaned', candidateId: lease.candidateId, sharedMainImage: 'kept' }
 }
 
@@ -660,7 +451,6 @@ function invalidateDevelopmentEnvironments({ exceptCandidateId = null } = {}) {
   const invalidated = []
   for (const lease of leaseState.leases) {
     if (exceptCandidateId && lease.candidateId === exceptCandidateId) continue
-    blockAndStopDevelopmentShells(lease.sourcePath, `invalidated-development-image:${lease.candidateId}`)
     stopDev(runtimeForLease(lease))
     rmSync(developmentLeasePath(lease.sourcePath), { force: true })
     cleanupDevelopmentLease(lease)
@@ -711,7 +501,6 @@ function removeObsoleteDevelopmentCandidates(currentCandidateId) {
   const cleaned = []
   for (const { candidate, path } of developmentCandidates()) {
     if (candidate.candidateId === currentCandidateId) continue
-    stopCandidateDevelopmentShells(candidate)
     const inspection = runStatus(engine, ['image', 'inspect', candidate.imageTag])
     if (inspection.status === 0) {
       const removal = runStatus(engine, ['image', 'rm', candidate.imageTag])
@@ -796,7 +585,6 @@ function cleanupAcceptedDevelopmentState() {
         kept.push(candidate.candidateId)
         continue
       }
-      stopCandidateDevelopmentShells(candidate)
       const inspection = runStatus(engine, ['image', 'inspect', candidate.imageTag])
       if (inspection.status === 0 && runStatus(engine, ['image', 'rm', candidate.imageTag]).status !== 0) {
         warn(`验收后未能删除开发镜像 ${candidate.imageTag}`)
@@ -913,6 +701,23 @@ function developmentSourceArgs(sourcePath) {
   return args
 }
 
+function developmentContainerLabels(runtime, role) {
+  return [
+    '--label', `io.dsh.dev.source-key=${runtime.key}`,
+    '--label', `io.dsh.dev.source-path=${runtime.sourcePath}`,
+    '--label', `io.dsh.dev.role=${role}`,
+  ]
+}
+
+function startDevelopmentToolbox(candidate, runtime, homePath, sourceArgs) {
+  run(engine, [
+    'run', '--detach', '--name', runtime.toolbox, '--network', runtime.network,
+    ...developmentContainerLabels(runtime, 'toolbox'),
+    ...containerBaseArgs(homePath), ...sourceArgs,
+    candidate.imageTag, 'toolbox',
+  ], { code: exitCodes.test })
+}
+
 function inspectDevelopmentSource(value) {
   if (!value) fail('dev prepare 必须提供 --source <独立任务 worktree>', exitCodes.usage)
   const sourcePath = resolve(value)
@@ -962,19 +767,19 @@ function verifyDev(candidate, homePath, runtime) {
   let ready = false
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const web = runStatus('curl', ['--fail', '--silent', '--max-time', '2', `http://127.0.0.1:${runtime.webPort}/`])
-    if (web.status === 0 && devContainerRunning(runtime.web) && devContainerRunning(runtime.telegram)
+    if (web.status === 0 && devContainerRunning(runtime.toolbox) && devContainerRunning(runtime.web) && devContainerRunning(runtime.telegram)
       && devContainerRunning(runtime.fakeTelegram)) {
       ready = true
       break
     }
-    if (!devContainerRunning(runtime.web) || !devContainerRunning(runtime.telegram)) break
+    if (!devContainerRunning(runtime.toolbox) || !devContainerRunning(runtime.web) || !devContainerRunning(runtime.telegram)) break
     sleepSync(1000)
   }
   if (!ready) {
     fail(`开发环境启动失败\n--- web ---\n${devLogs(runtime.web)}\n--- telegram ---\n${devLogs(runtime.telegram)}`, exitCodes.test)
   }
 
-  for (const name of [runtime.web, runtime.telegram]) {
+  for (const name of [runtime.toolbox, runtime.web, runtime.telegram]) {
     const identity = run(engine, ['inspect', name, '--format', '{{.Image}}|{{.HostConfig.ReadonlyRootfs}}'], { capture: true, announce: false, code: exitCodes.test })
     if (identity !== `${candidate.imageId}|true`) fail(`${name} 没有运行同一个只读候选镜像: ${identity}`, exitCodes.test)
   }
@@ -1190,34 +995,31 @@ function commandDev(options) {
     const leasePath = developmentLeasePath(sourcePath)
     const lease = existsSync(leasePath) ? readJson(leasePath, 'development lease') : null
     const runtime = lease ? runtimeForLease(lease) : developmentRuntime(sourcePath)
-    const shellsStopped = blockAndStopDevelopmentShells(sourcePath, 'dev-down')
     if (runtime) stopDev(runtime)
-    out({ result: 'development-stopped', sourcePath, runtime: runtime ?? 'already-absent', shellsStopped, data: 'preserved' })
+    out({ result: 'development-stopped', sourcePath, runtime: runtime ?? 'already-absent', data: 'preserved' })
     return
   }
   if (action === 'retire') {
     if (!options.source) fail('dev retire 必须提供 --source <任务 worktree>', exitCodes.usage)
     const sourcePath = resolve(options.source)
     const leasePath = developmentLeasePath(sourcePath)
-    const shellsStopped = blockAndStopDevelopmentShells(sourcePath, 'dev-retire')
     if (!existsSync(leasePath)) {
       const runtime = developmentRuntime(sourcePath)
       if (runtime) stopDev(runtime)
       const devRoot = join(stateRoot, 'dev/environments', developmentKey(sourcePath))
       if (controlledChild(join(stateRoot, 'dev'), devRoot)) removeControlledPath(join(stateRoot, 'dev'), devRoot)
       removeDevelopmentRuntime(sourcePath)
-      removeDevelopmentShellState(sourcePath)
-      out({ result: 'development-already-retired', sourcePath, shellsStopped })
+      out({ result: 'development-already-retired', sourcePath })
       return
     }
     const lease = readJson(leasePath, 'development lease')
     const runtime = runtimeForLease(lease)
     stopDev(runtime)
-    const running = [runtime.web, runtime.telegram, runtime.fakeTelegram].filter(devContainerRunning)
+    const running = [runtime.toolbox, runtime.web, runtime.telegram, runtime.fakeTelegram].filter(devContainerRunning)
     if (running.length > 0) fail(`开发容器未全部退出，拒绝删除租约：${running.join(', ')}`, exitCodes.safety)
     rmSync(leasePath, { force: true })
     const cleanup = cleanupDevelopmentLease(lease)
-    out({ result: 'development-retired', sourcePath, shellsStopped, cleanup })
+    out({ result: 'development-retired', sourcePath, cleanup })
     return
   }
   if (action === 'prepare' && !options.source) fail('dev prepare 必须提供 --source <独立任务 worktree>', exitCodes.usage)
@@ -1231,7 +1033,6 @@ function commandDev(options) {
   const homePath = join(devRoot, 'home/herman')
   const devMetaPath = join(devRoot, 'dev.json')
   if (action === 'up') {
-    blockAndStopDevelopmentShells(sourcePath, 'dev-up-replace')
     stopDev(runtime)
     const snapshot = options.snapshot ?? 'latest'
     const prior = existsSync(devMetaPath) ? readJson(devMetaPath, 'development metadata') : null
@@ -1242,14 +1043,18 @@ function commandDev(options) {
     }
     run(engine, ['run', '--rm', ...containerBaseArgs(homePath), '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'prepare'], { code: exitCodes.test })
     run(engine, ['network', 'create', '--internal', runtime.network], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', runtime.fakeTelegram, '--network', runtime.network, '--network-alias', 'fake-telegram', '--read-only', '--tmpfs', '/tmp:rw', candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', runtime.telegram, '--network', runtime.network, ...containerBaseArgs(homePath),
+    startDevelopmentToolbox(candidate, runtime, homePath, [])
+    run(engine, ['run', '--detach', '--name', runtime.fakeTelegram, '--network', runtime.network, '--network-alias', 'fake-telegram',
+      ...developmentContainerLabels(runtime, 'fake-telegram'), '--read-only', '--tmpfs', '/tmp:rw', candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
+    run(engine, ['run', '--detach', '--name', runtime.telegram, '--network', runtime.network,
+      ...developmentContainerLabels(runtime, 'telegram'), ...containerBaseArgs(homePath),
       '--env', 'TELEGRAM_BOT_TOKEN=test-token', '--env', 'TELEGRAM_ALLOWED_CHAT_ID=1', '--env', 'DEEPSEEK_API_KEY=test-key',
       candidate.imageTag, 'telegram-test'], { code: exitCodes.test })
     // Harness intentionally binds Web only to loopback.  Keep it on the host
     // network for local browser access; the Telegram/cron writer remains on
     // the egress-free internal network with only the fake Bot API.
-    run(engine, ['run', '--detach', '--name', runtime.web, '--network', 'host', ...containerBaseArgs(homePath),
+    run(engine, ['run', '--detach', '--name', runtime.web, '--network', 'host',
+      ...developmentContainerLabels(runtime, 'web'), ...containerBaseArgs(homePath),
       '--env', `DSH_WEB_PORT=${runtime.webPort}`, '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
     const verification = verifyDev(candidate, homePath, runtime)
     const metadata = {
@@ -1265,7 +1070,6 @@ function commandDev(options) {
     }
     writeJson(devMetaPath, metadata)
     const lease = replaceDevelopmentLease({ sourcePath, runtime }, candidate, candidatePath, devRoot)
-    unblockDevelopmentShells(sourcePath)
     const result = { result: 'dev-started', web: `http://127.0.0.1:${runtime.webPort}`, homePath, data: reuseData ? 'reused' : 'materialized', network: runtime.network, runtime, leasePath: lease.leasePath, ...verification }
     out(result)
     return result
@@ -1283,7 +1087,6 @@ function commandDev(options) {
       fail(`开发基础镜像没有使用固定 Harness commit：candidate=${candidate.harnessCommit}，lock=${harnessLock.commit}`, exitCodes.safety)
     }
     verifyDevelopmentCandidateImage(candidate)
-    blockAndStopDevelopmentShells(sourcePath, 'dev-prepare-replace')
     stopDev(runtime)
     commandSnapshot({ _: ['latest'] })
     materializeSnapshot('latest', homePath)
@@ -1293,12 +1096,15 @@ function commandDev(options) {
     run(engine, ['run', '--rm', ...containerBaseArgs(homePath), ...sourceArgs,
       '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'prepare'], { code: exitCodes.test })
     run(engine, ['network', 'create', '--internal', runtime.network], { code: exitCodes.test })
+    startDevelopmentToolbox(candidate, runtime, homePath, sourceArgs)
     run(engine, ['run', '--detach', '--name', runtime.fakeTelegram, '--network', runtime.network, '--network-alias', 'fake-telegram',
-      '--read-only', '--tmpfs', '/tmp:rw', ...sourceArgs, candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', runtime.telegram, '--network', runtime.network, ...containerBaseArgs(homePath), ...sourceArgs,
+      ...developmentContainerLabels(runtime, 'fake-telegram'), '--read-only', '--tmpfs', '/tmp:rw', ...sourceArgs, candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
+    run(engine, ['run', '--detach', '--name', runtime.telegram, '--network', runtime.network,
+      ...developmentContainerLabels(runtime, 'telegram'), ...containerBaseArgs(homePath), ...sourceArgs,
       '--env', 'TELEGRAM_BOT_TOKEN=test-token', '--env', 'TELEGRAM_ALLOWED_CHAT_ID=1', '--env', 'DEEPSEEK_API_KEY=test-key',
       candidate.imageTag, 'telegram-test'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', runtime.web, '--network', 'host', ...containerBaseArgs(homePath), ...sourceArgs,
+    run(engine, ['run', '--detach', '--name', runtime.web, '--network', 'host',
+      ...developmentContainerLabels(runtime, 'web'), ...containerBaseArgs(homePath), ...sourceArgs,
       '--env', `DSH_WEB_PORT=${runtime.webPort}`, '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
     const verification = verifyDev(candidate, homePath, runtime)
     let completionSource
@@ -1332,7 +1138,6 @@ function commandDev(options) {
     }
     writeJson(devMetaPath, metadata)
     const lease = replaceDevelopmentLease({ ...completionSource, runtime }, candidate, candidatePath, devRoot)
-    unblockDevelopmentShells(sourcePath)
     const result = {
       result: 'dev-source-ready',
       web: `http://127.0.0.1:${runtime.webPort}`,
@@ -1348,15 +1153,17 @@ function commandDev(options) {
   if (action === 'shell') {
     if (!existsSync(homePath)) fail('开发数据副本不存在；请先执行 dev up', exitCodes.usage)
     const prior = existsSync(devMetaPath) ? readJson(devMetaPath, 'development metadata') : null
-    const sourceArgs = prior?.mode === 'editable-source' ? developmentSourceArgs(resolve(prior.sourcePath)) : []
-    const shellRuntime = prior?.runtime ?? runtime
+    const shellRuntime = normalizeDevelopmentRuntime(prior?.runtime) ?? runtime
     if (!shellRuntime) fail('开发 runtime 不存在；请先执行 dev prepare', exitCodes.usage)
-    const { shellName, recordPath } = registerDevelopmentShell(sourcePath, candidate, shellRuntime, homePath, sourceArgs)
-    try {
-      run(engine, ['start', '--attach', '--interactive', shellName], { code: exitCodes.test })
-    } finally {
-      if (runStatus(engine, ['inspect', shellName]).status !== 0) rmSync(recordPath, { force: true })
+    const leasePath = developmentLeasePath(sourcePath)
+    if (!existsSync(leasePath)) fail('开发环境租约不存在；请重新执行 dev prepare', exitCodes.safety)
+    const lease = readJson(leasePath, 'development lease')
+    if (lease.candidateId !== candidate.candidateId || lease.imageId !== candidate.imageId) {
+      fail('开发环境与当前共享 main 镜像不一致；请重新执行 dev prepare', exitCodes.safety)
     }
+    if (!devContainerRunning(shellRuntime.toolbox)) fail('开发 toolbox 没有运行；请重新执行 dev prepare', exitCodes.safety)
+    const workdir = prior?.mode === 'editable-source' ? '/workspace/dsh-plugins' : '/home/herman/.dsh/workspace'
+    run(engine, ['exec', '--interactive', '--tty', '--workdir', workdir, shellRuntime.toolbox, 'bash'], { code: exitCodes.test })
     return
   }
   fail('用法: dsh dev prepare --source <worktree> [--candidate <candidate.json>]；dsh dev up --snapshot latest|synthetic；dsh dev shell；dsh dev down [--source <worktree>]；dsh dev retire --source <worktree>', exitCodes.usage)

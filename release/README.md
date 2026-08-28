@@ -24,7 +24,7 @@
 ./release/dsh dev prepare \
   --source "$(git rev-parse --show-toplevel)"
 
-# 进入同一镜像、同一隔离数据和同一源码挂载的开发 shell
+# 进入该 worktree 已有的固定 toolbox 容器；不会再创建 shell 容器
 ./release/dsh dev shell
 
 # 任务结束时只删除该 worktree 的容器和隔离数据；共享 main 镜像保留
@@ -68,9 +68,9 @@
 
 构建工作目录、未完成候选、失败构建标签和归档暂存文件都会由本次命令清理。开发底座与正式候选用途严格分开，开发底座不能发布。development 在镜像构建阶段完成六个包的构建、TypeScript/Python 全量测试和镜像自检，但不生成、保存或重载 Docker archive；它按完整 `origin/main` commit 使用稳定身份，本机始终只保留最新 main 的一份开发镜像。同一 main 的重复 build 在锁内确认镜像和测试回执后直接复用。main 前进时先完成新镜像构建和自检，再停止并删除所有旧开发容器、隔离数据、租约、旧候选和旧开发镜像；源码 worktree 始终保留。
 
-每个 worktree 的开发环境使用路径摘要派生的独立容器名和内部网络，并在一个短状态锁内分配独立 Web 端口。因此多个任务可以从同一只读 main 镜像并行运行；`dev down` 和 `dev retire` 只作用于指定 worktree。不得恢复固定的全局 `dsh-dev-web`、`dsh-dev-telegram`、`dsh-dev-fake-telegram` 或 `dsh-dev-internal` 名称。
+每个 worktree 的开发环境使用路径摘要派生的独立 toolbox、Web、Telegram、假 Telegram 容器和内部网络，并在一个短状态锁内分配独立 Web 端口。所有容器都带有同一个 worktree 身份；一套环境是最小生命周期单位。因此多个任务可以从同一只读 main 镜像并行运行，`dev down`、`dev retire`、main 镜像更新和正式发布验收都只按 worktree 整体停止和清理。不得恢复固定的全局容器名，也不得直接调用 Podman 或执行全局 prune。
 
-`dev shell` 同样按 worktree 生成带归属标签的独立容器，并在本地状态中登记。正常退出会删除登记；即使交互终端意外断开，`dev down`、`dev retire`、main 镜像更新和正式发布验收也会先按精确 worktree 身份优雅停止遗留 shell，确认归零后才删除租约、隔离数据或旧镜像。不得直接 `kill`、调用 Podman 清理或为此申请人工安静窗口。
+`dev prepare` 创建并持续运行该 worktree 的固定 toolbox；`dev shell` 只用容器引擎的 exec 进入它，不创建新容器、不登记 shell 状态。交互终端断开只会结束本次 bash，不会产生需要另行识别的容器。一个 worktree 可以同时打开多个终端，它们都进入同一个 toolbox；清理时只需要销毁整套 worktree 环境。
 
 正式发版的生产快照测试副本和临时开发副本在测试结束或失败后都会清理，只保留快照、测试回执、候选归档和发布证据这些回退与审计所需内容。流程不会执行无边界的 `podman system prune` 或 `docker system prune`。
 

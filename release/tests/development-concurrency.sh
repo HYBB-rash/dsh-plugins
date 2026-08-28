@@ -122,7 +122,7 @@ node - <<'NODE' "$test_root/a.json" "$test_root/b.json"
 const fs = require('node:fs')
 const a = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 const b = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'))
-for (const key of ['network', 'fakeTelegram', 'telegram', 'web', 'webPort']) {
+for (const key of ['network', 'toolbox', 'fakeTelegram', 'telegram', 'web', 'webPort']) {
   if (a.runtime[key] === b.runtime[key]) throw new Error(`runtime field collided: ${key}`)
 }
 if (a.homePath === b.homePath || a.leasePath === b.leasePath) throw new Error('development data or lease collided')
@@ -130,12 +130,20 @@ NODE
 
 runtime_a_web="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).runtime.web)' "$test_root/a.json")"
 runtime_b_web="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).runtime.web)' "$test_root/b.json")"
+runtime_a_toolbox="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).runtime.toolbox)' "$test_root/a.json")"
+runtime_b_toolbox="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).runtime.toolbox)' "$test_root/b.json")"
 test -f "$mock_state/running/$runtime_a_web"
 test -f "$mock_state/running/$runtime_b_web"
+test -f "$mock_state/running/$runtime_a_toolbox"
+test -f "$mock_state/running/$runtime_b_toolbox"
+grep -Fq "io.dsh.dev.source-path=$source_a" "$test_root/engine.log"
+grep -Fq 'io.dsh.dev.role=toolbox' "$test_root/engine.log"
 
 run_dev dev down --source "$source_a" >"$test_root/down-a.json"
 test ! -e "$mock_state/running/$runtime_a_web"
+test ! -e "$mock_state/running/$runtime_a_toolbox"
 test -e "$mock_state/running/$runtime_b_web"
+test -e "$mock_state/running/$runtime_b_toolbox"
 
 run_dev dev down --source "$source_b" >"$test_root/down-b.json"
 run_dev dev retire --source "$source_a" >"$test_root/retire-a.json"

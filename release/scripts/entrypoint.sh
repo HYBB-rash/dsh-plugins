@@ -39,14 +39,13 @@ case "${1:-help}" in
   lan-proxy)
     exec socat TCP-LISTEN:3080,bind="${DSH_LAN_ADDRESS:-192.168.6.240}",reuseaddr,fork TCP:127.0.0.1:3080
     ;;
-  shell)
-    shift
-    exec bash "$@"
+  toolbox)
+    exec sleep infinity
     ;;
   help|--help|-h)
     cat <<'EOF'
 Container commands: prepare, self-test, dev-source-build, validate-state, fake-telegram,
-web, telegram, telegram-test, lan-proxy, shell
+web, telegram, telegram-test, lan-proxy, toolbox
 EOF
     ;;
   *)

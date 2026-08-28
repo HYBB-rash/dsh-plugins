@@ -49,7 +49,7 @@
 
 ## 经验记录
 
-- 2026-08-28：交互式 `dev shell` 不能只依赖 `podman run --rm`；Codex 的终端句柄消失时，容器可能继续运行，而任务租约先被删除会丢失归属。每个 shell 必须使用独立名称、精确 worktree 标签和状态登记；`dev down`、`dev retire`、main 镜像换代及发版验收都应先按 worktree 身份优雅停止 shell、确认归零，再删除租约、数据或旧镜像。历史匿名 shell 只能用 source 派生的 home 挂载与内部网络共同证明归属，不能按模糊名称、人工窗口或全局 prune 清理。
+- 2026-08-28：开发容器的最小生命周期单位应是 worktree 环境，不是每次交互 shell。`dev prepare` 为每个 worktree 创建一个带明确归属的固定 toolbox，`dev shell` 只 exec 进入它；多个终端共用该 toolbox，不创建或登记额外容器。`dev down`、`dev retire`、main 镜像换代和发版验收都按 worktree 整体停止并清理，避免 shell 状态、孤儿识别和人工资源窗口。
 - 2026-08-28：Docker 发版清理不能依赖无边界的 engine prune。构建命令只清理自己创建的临时目录、失败候选、暂存归档和唯一标签；开发底座与正式候选必须有不同用途身份，每个任务 worktree 持有独立开发租约。main 更新时先让新底座通过完整准备再换租约、删旧底座，release、latest 或其他任务仍引用的镜像必须保留；正式 release 一旦 accepted，则全部旧开发环境失效，清理其隔离数据、租约和无 release 引用的开发镜像，但保留源码 worktree 供 rebase 后重建。
 - 2026-08-28：容器与宿主只有数值 UID/GID 相同仍不够；OpenSSH 等工具会从容器的 passwd 记录解析默认用户目录，而不只看 `HOME`。挂载 `/home/herman` 的运行镜像必须让 UID 1000 在 passwd 中对应 `herman:/home/herman`，并在镜像自测中同时验证 `id`、`getent passwd`、`HOME` 和 `ssh -G` 的默认 `known_hosts` 路径。
 - 2026-08-27：根 `AGENTS.md` 曾混入项目现状、历史实验和精确测试数量，导致每轮注入既长又容易过时。稳定规则留在 `AGENTS.md`；可复用经验改记此文件，并在使用前按任务关键词检索、以现场状态复核。
