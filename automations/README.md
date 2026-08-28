@@ -5,6 +5,13 @@ the OpenClaw workspace. OpenClaw is not a runtime prerequisite: active code
 must work when its CLI, service, plugins, state database and home directory are
 all absent.
 
+Harness receives the same ownership rule from the repository-managed runtime
+instructions in `release/harness-automation-instructions.md`. A task helper
+script is developed in an independent repository worktree under
+`automations/<business>/`; only scripts without a clear business owner stay in
+`automations/scripts/`. The published `/opt/dsh/automations` tree is read-only
+runtime input, never an online editing location.
+
 ## Source map
 
 - `bzp/`: Baozupo meter queries, BLE reads, monitoring and WeChat dispatch.

@@ -843,6 +843,7 @@ function developmentSourceArgs(sourcePath) {
   }
   args.push(
     '--volume', `${join(sourcePath, 'release/scripts')}:/opt/dsh/release-system/scripts:rw`,
+    '--volume', `${join(sourcePath, 'release/harness-automation-instructions.md')}:/opt/dsh/release-system/harness-automation-instructions.md:ro`,
     '--volume', `${join(sourcePath, 'release/fixtures/context-manager-telegram-canary')}:/opt/dsh/harness/local-plugins/deployment/herman-hermes/context-manager-telegram-canary:ro`,
     '--volume', `${join(sourcePath, 'release/vitest.external.config.ts')}:/opt/dsh/harness/vitest.external.config.ts:ro`,
     '--volume', `${join(sourcePath, 'runtime-package-topology.json')}:/opt/dsh/harness/local-plugins/runtime-package-topology.json:rw`,
@@ -893,6 +894,7 @@ function inspectDevelopmentSource(value) {
   }
   for (const required of [
     'release/scripts',
+    'release/harness-automation-instructions.md',
     'skills',
     'release/profiles/web/cordis.patch.yml',
     'release/profiles/telegram/cordis.patch.yml',
