@@ -1457,7 +1457,7 @@ test -f "$bzp_auth"
 test "$(stat -c '%a' "$bzp_auth")" = 600
 test -S /run/dbus/system_bus_socket
 test -d /sys/class/bluetooth/hci0
-rita_ssh=(ssh -i "$publish_key" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10 -- "$rita_host")
+rita_ssh=(ssh -n -i "$publish_key" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10 -- "$rita_host")
 "${'${rita_ssh[@]}'}" test -f "$rita_refresh_private"
 test "$("${'${rita_ssh[@]}'}" stat -c '%a' "$rita_refresh_private")" = 600
 rita_exists=false
@@ -1631,7 +1631,7 @@ test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"
 publish_key=${shellQuote(ritaPublishKeyPath)}
 rita_host=${shellQuote(ritaHost)}
 rita_refresh_private=${shellQuote(ritaRefreshPrivateKeyPath)}
-rita_ssh=(ssh -i "$publish_key" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10 -- "$rita_host")
+rita_ssh=(ssh -n -i "$publish_key" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10 -- "$rita_host")
 rita_ack="$("${'${rita_ssh[@]}'}" ssh -i "$rita_refresh_private" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10 -- herman@192.168.6.240 refresh all)"
 test "$rita_ack" = '收到'
 sudo -n systemctl disable --now ${shellQuote(oomUnit)}
@@ -1736,7 +1736,7 @@ docker exec dsh-web /opt/dsh/automations/bzp/bzp_forced_key.py install >/dev/nul
 publish_key=${shellQuote(ritaPublishKeyPath)}
 rita_host=${shellQuote(ritaHost)}
 rita_latest=${shellQuote(ritaLatestPath)}
-rita_ssh=(ssh -i "$publish_key" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10 -- "$rita_host")
+rita_ssh=(ssh -n -i "$publish_key" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10 -- "$rita_host")
 test "$("${'${rita_ssh[@]}'}" stat -c '%a' "$rita_latest")" = 600
 test "$("${'${rita_ssh[@]}'}" stat -c '%a' ${shellQuote(dirname(ritaLatestPath))})" = 700
 "${'${rita_ssh[@]}'}" ${shellQuote(`/usr/bin/python3 -c ${shellQuote(`import json,math,sys
@@ -1883,9 +1883,9 @@ except BaseException:
  try: os.unlink(temporary)
  except FileNotFoundError: pass
  raise`)} ${shellQuote(ritaLatestPath)} ${shellQuote(ritaBefore.ritaLatestMode)}`)} <"$rita_backup"
-  test "$("${'${rita_ssh[@]}'}" sha256sum "$rita_latest" | awk '{print "sha256:"$1}')" = ${shellQuote(ritaBefore.ritaLatestSha256)}
+  test "$("${'${rita_ssh[@]}'}" sha256sum "$rita_latest" </dev/null | awk '{print "sha256:"$1}')" = ${shellQuote(ritaBefore.ritaLatestSha256)}
 else
-  "${'${rita_ssh[@]}'}" rm -f "$rita_latest"
+  "${'${rita_ssh[@]}'}" rm -f "$rita_latest" </dev/null
 fi
 if test -f "$root/current/compose.production.yml"; then
   cd "$root/current"
