@@ -13,9 +13,6 @@ bzp_ble_monitor.py — 包租婆 BLE 电表低成本监控 (每 5 分钟 cron �
   * 剩余电量 <= 10 度: 每 5 分钟输出明确充电提醒 (基于最近一次有效实时读数)。
   * 小时汇报读取失败: 保留该小时待汇报 (pending), 后续成功时补报。
   * 读数 > 10 度且非小时汇报时 stdout 为空 → no-agent cron 静默。
-  * 为 rita.hermes 微信投递预留兼容入口: --channel weixin|rita.hermes 时
-    每条消息输出 JSON 信封 {"channel":"weixin","target":...,"text":...}。
-
 运行方式 (由 cron 每 5 分钟调用; 本脚本不做任何对外发送):
     python3 bzp_ble_monitor.py [--state-file ...] [--reader-script ...]
 
@@ -155,13 +152,21 @@ def load_state(path: str) -> dict:
 def save_state(path: str, state: dict):
     """原子写入: tmp + fsync + os.replace。"""
     d = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(d, exist_ok=True)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    os.chmod(d, 0o700)
     tmp = "%s.tmp.%d.%s" % (path, os.getpid(), uuid.uuid4().hex[:8])
-    with open(tmp, "w", encoding="utf-8") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+    os.chmod(path, 0o600)
+    directory_fd = os.open(d, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +321,8 @@ def backfill_text(last: dict, pending_hours: list, opts) -> str:
 
 
 def apply_outcome(state: dict, now: datetime, opts, read_ok: bool,
-                  reading: dict | None) -> tuple:
+                  reading: dict | None, attempted: bool = True,
+                  failure_reason: str = "read_failed") -> tuple:
     """把一次运行结果合并进状态并决定输出。返回 (new_state, messages)。"""
     state = copy.deepcopy(state)
     hour = hour_key(now)
@@ -329,8 +335,8 @@ def apply_outcome(state: dict, now: datetime, opts, read_ok: bool,
                         and surplus_before <= opts.low_power_threshold)
     report_due = (state.get("last_report_hour") != hour) or bool(state.get("pending_hours"))
 
-    attempt = {"at": fmt_ts(now), "ok": bool(read_ok)}
-    if read_ok:
+    attempt = {"at": fmt_ts(now), "ok": bool(read_ok)} if attempted else None
+    if attempted and read_ok:
         state["last_success"] = {
             "at": fmt_ts(now),
             "epoch": now_epoch,
@@ -342,8 +348,8 @@ def apply_outcome(state: dict, now: datetime, opts, read_ok: bool,
         }
         state["last_success_hour"] = hour
         attempt["reason"] = "ok"
-    else:
-        attempt["reason"] = "read_failed"
+    elif attempted:
+        attempt["reason"] = failure_reason
         # 小时汇报失败: 保留该小时待汇报 (低电量模式以提醒为主, 不累计 pending;
         # 尚无任何成功读数时也无从补报, 不记 pending)
         if (report_due and not low_power_before
@@ -352,7 +358,8 @@ def apply_outcome(state: dict, now: datetime, opts, read_ok: bool,
             if hour not in pending:
                 pending.append(hour)
             state["pending_hours"] = pending[-opts.max_pending_hours:]
-    state["last_read_attempt"] = attempt
+    if attempt is not None:
+        state["last_read_attempt"] = attempt
 
     # --- 输出决策 ---
     last = state.get("last_success")
@@ -402,7 +409,7 @@ class FlockLock:
     def acquire(self, timeout: float = 5.0) -> bool:
         d = os.path.dirname(os.path.abspath(self.path)) or "."
         os.makedirs(d, exist_ok=True)
-        fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
         deadline = time.time() + max(0.0, timeout)
         while True:
             try:
@@ -426,16 +433,11 @@ class FlockLock:
 
 
 # ---------------------------------------------------------------------------
-# 输出通道: telegram 平文本 / rita.hermes 微信 JSON 信封 (兼容入口)
+# 输出通道: Telegram 平文本
 # ---------------------------------------------------------------------------
 def render_messages(messages: list, opts):
-    if opts.channel in ("weixin", "rita.hermes"):
-        for msg in messages:
-            print(json.dumps({"channel": "weixin", "target": opts.weixin_target,
-                              "text": msg}, ensure_ascii=False))
-    else:
-        for msg in messages:
-            print(msg)
+    for msg in messages:
+        print(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -461,8 +463,8 @@ def default_opts(**kw) -> Opts:
     o.meter_kind = "electric"
     o.lock_timeout = 5.0
     o.max_pending_hours = 12
-    o.channel = "telegram"
-    o.weixin_target = "rita.hermes"
+    o.force_read = False
+    o.fail_on_read_error = False
     o.log_file = os.path.join(os.path.dirname(o.state_file), "bzp_ble_monitor.log")
     o.skip_dep_check = False
     o.verbose = False
@@ -505,11 +507,10 @@ def parse_args(argv=None) -> Opts:
                    help="等待 flock 的秒数, 超时静默跳过")
     p.add_argument("--max-pending-hours", type=int, default=12,
                    help="pending 小时数上限")
-    p.add_argument("--channel", choices=["telegram", "weixin", "rita.hermes"],
-                   default="telegram",
-                   help="投递通道: telegram 平文本; weixin/rita.hermes 输出 JSON 信封")
-    p.add_argument("--weixin-target", default="rita.hermes",
-                   help="微信投递目标 (预留)")
+    p.add_argument("--force-read", action="store_true",
+                   help="忽略自然调度节流并执行一次实时读表")
+    p.add_argument("--fail-on-read-error", action="store_true",
+                   help="执行过实时读表且失败时以非零退出 (供刷新 worker 使用)")
     p.add_argument("--log-file", default=None, help="监控日志文件")
     p.add_argument("--skip-dep-check", action="store_true",
                    help="透传给读表器, 跳过依赖检查 (仅测试)")
@@ -555,19 +556,23 @@ def main(argv=None) -> int:
         return 0
     try:
         state = load_state(opts.state_file)
-        read_needed, reason = plan_run(state, now, opts)
+        read_needed, reason = (True, "forced_read") if opts.force_read else plan_run(state, now, opts)
         log.info("run hour=%s read_needed=%s reason=%s",
                  hour_key(now), read_needed, reason)
         read_ok, reading = False, None
         if read_needed:
             read_ok, reading, why = run_bounded_read(opts, opts.log_file)
             log.info("read ok=%s reason=%s", read_ok, why)
-        state, messages = apply_outcome(state, now, opts, read_ok, reading)
+        state, messages = apply_outcome(
+            state, now, opts, read_ok, reading,
+            attempted=read_needed,
+            failure_reason=why if read_needed else "not_attempted",
+        )
         save_state(opts.state_file, state)
         render_messages(messages, opts)
         for msg in messages:
             log.info("OUT %s", msg)
-        return 0
+        return 1 if read_needed and not read_ok and opts.fail_on_read_error else 0
     finally:
         lock.release()
 

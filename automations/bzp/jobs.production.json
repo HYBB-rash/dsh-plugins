@@ -1,0 +1,176 @@
+{
+  "schemaVersion": 1,
+  "business": "bzp",
+  "jobs": [
+    {
+      "kind": "command",
+      "spec": {
+        "externalRef": "openclaw-cron:6bafae80-d8eb-4497-bb91-fc3ed7ff59b6",
+        "schedule": {
+          "kind": "cron",
+          "expr": "1-56/5 * * * *"
+        },
+        "command": {
+          "argv": [
+            "/usr/bin/python3",
+            "/opt/dsh/automations/bzp/bzp_dual_dispatch.py",
+            "--meter",
+            "electric",
+            "--operation-lock",
+            "/home/herman/.dsh/storages/automations/bzp/operation.lock",
+            "--monitor-timeout",
+            "400",
+            "--electric-state",
+            "/home/herman/.dsh/storages/automations/bzp/electric/state.json",
+            "--water-state",
+            "/home/herman/.dsh/storages/automations/bzp/water/state.json",
+            "--ssh-key",
+            "/home/herman/.ssh/dsh-bzp-publish-to-rita",
+            "--ssh-host",
+            "rita@192.168.6.239",
+            "--remote-path",
+            "/home/rita/.local/state/dsh-automations/bzp/latest.json",
+            "--",
+            "--meter-kind",
+            "electric",
+            "--state-file",
+            "/home/herman/.dsh/storages/automations/bzp/electric/state.json",
+            "--log-file",
+            "/home/herman/.dsh/storages/automations/bzp/electric/monitor.log",
+            "--lock-file",
+            "/home/herman/.dsh/storages/automations/bzp/hci0.lock",
+            "--reader-script",
+            "/opt/dsh/automations/bzp/bzp_ble_read_until_success.py",
+            "--auth-file",
+            "/home/herman/.local/share/bzp-ble/auth.json",
+            "--read-budget",
+            "300",
+            "--max-rounds",
+            "10",
+            "--refresh-interval",
+            "1800",
+            "--reminder-interval",
+            "300",
+            "--low-power-threshold",
+            "10",
+            "--sn",
+            "YM00236K2A68",
+            "--mac",
+            "23:06:20:00:2A:68"
+          ],
+          "timeoutSeconds": 430,
+          "outputMaxBytes": 8192
+        },
+        "deliver": "telegram",
+        "failureAlert": {
+          "after": 2,
+          "cooldownMinutes": 30
+        },
+        "cwd": "/home/herman/.dsh/workspace"
+      },
+      "predecessorSpecSha256": [
+        "sha256:067fc3f25afc9495fa52762a2d01cf91ff7d00912261e175c6f8e38ca027006d"
+      ],
+      "allowCreate": true
+    },
+    {
+      "kind": "command",
+      "spec": {
+        "externalRef": "manual:bzp-water-monitor:20260822",
+        "schedule": {
+          "kind": "cron",
+          "expr": "3-58/5 * * * *"
+        },
+        "command": {
+          "argv": [
+            "/usr/bin/python3",
+            "/opt/dsh/automations/bzp/bzp_dual_dispatch.py",
+            "--meter",
+            "water",
+            "--operation-lock",
+            "/home/herman/.dsh/storages/automations/bzp/operation.lock",
+            "--monitor-timeout",
+            "400",
+            "--electric-state",
+            "/home/herman/.dsh/storages/automations/bzp/electric/state.json",
+            "--water-state",
+            "/home/herman/.dsh/storages/automations/bzp/water/state.json",
+            "--ssh-key",
+            "/home/herman/.ssh/dsh-bzp-publish-to-rita",
+            "--ssh-host",
+            "rita@192.168.6.239",
+            "--remote-path",
+            "/home/rita/.local/state/dsh-automations/bzp/latest.json",
+            "--",
+            "--meter-kind",
+            "water",
+            "--state-file",
+            "/home/herman/.dsh/storages/automations/bzp/water/state.json",
+            "--log-file",
+            "/home/herman/.dsh/storages/automations/bzp/water/monitor.log",
+            "--lock-file",
+            "/home/herman/.dsh/storages/automations/bzp/hci0.lock",
+            "--reader-script",
+            "/opt/dsh/automations/bzp/bzp_ble_read_until_success.py",
+            "--auth-file",
+            "/home/herman/.local/share/bzp-ble/auth.json",
+            "--read-budget",
+            "300",
+            "--max-rounds",
+            "10",
+            "--refresh-interval",
+            "1800",
+            "--reminder-interval",
+            "300",
+            "--low-power-threshold",
+            "5",
+            "--sn",
+            "YM00234J0667",
+            "--mac",
+            "23:04:19:00:06:67"
+          ],
+          "timeoutSeconds": 430,
+          "outputMaxBytes": 8192
+        },
+        "deliver": "telegram",
+        "failureAlert": {
+          "after": 2,
+          "cooldownMinutes": 30
+        },
+        "cwd": "/home/herman/.dsh/workspace"
+      },
+      "predecessorSpecSha256": [
+        "sha256:82daa033751669c36cd909588821720e135516ec4c5b04bce7c2af9d4d464ef3"
+      ],
+      "allowCreate": true
+    },
+    {
+      "kind": "command",
+      "spec": {
+        "externalRef": "dsh:bzp-refresh-worker:v1",
+        "schedule": {
+          "kind": "cron",
+          "expr": "* * * * *"
+        },
+        "command": {
+          "argv": [
+            "/usr/bin/python3",
+            "/opt/dsh/automations/bzp/bzp_refresh_worker.py",
+            "--ssh-key",
+            "/home/herman/.ssh/dsh-bzp-publish-to-rita"
+          ],
+          "timeoutSeconds": 800,
+          "outputMaxBytes": 8192
+        },
+        "deliver": "telegram",
+        "failureAlert": {
+          "after": 2,
+          "cooldownMinutes": 30
+        },
+        "cwd": "/home/herman/.dsh/workspace"
+      },
+      "predecessorSpecSha256": [],
+      "allowCreate": true
+    }
+  ]
+}
