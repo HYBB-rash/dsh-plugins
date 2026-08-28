@@ -101,6 +101,12 @@ EOF
 run_expect 3 rollback --release fixture
 grep -q 'waiting-for-rollback-authorization' "$test_root/stdout"
 
+accepted_release="$test_root/accepted-release.json"
+sed 's/"status": "awaiting-user-acceptance"/"status": "accepted"/' \
+  "$release_dir/release.json" >"$accepted_release"
+run_expect 4 rollback --release "$accepted_release"
+grep -q '只有未 accept 的候选' "$test_root/stderr"
+
 run_expect 2 accept --release fixture
 grep -q -- '--evidence' "$test_root/stderr"
 
@@ -147,6 +153,17 @@ grep -q "release/harness-automation-instructions.md" "$repo_root/release/cli.mjs
 grep -q 'harness-automation-instructions.md' "$repo_root/release/scripts/prepare-runtime.sh"
 grep -q '"\$dsh_home/AGENTS.md"' "$repo_root/release/scripts/prepare-runtime.sh"
 grep -q 'harness-automation-instructions.md' "$repo_root/release/scripts/self-test.sh"
+grep -q "deleted.has(relativePath)" "$repo_root/release/cli.mjs"
+grep -q "reconcile-cron-preflight" "$repo_root/release/cli.mjs"
+grep -q "reconcile_production_jobs.mjs migrate" "$repo_root/release/cli.mjs"
+grep -q "reconcile_production_jobs.mjs check" "$repo_root/release/cli.mjs"
+grep -q "bzp_forced_key.py install" "$repo_root/release/cli.mjs"
+grep -q "bzp_forced_key.py remove" "$repo_root/release/cli.mjs"
+grep -q "const oomUnit = 'wechat-oom-protect.service'" "$repo_root/release/cli.mjs"
+grep -q "systemctl disable --now" "$repo_root/release/cli.mjs"
+grep -q "rm -f /etc/systemd/system/" "$repo_root/release/cli.mjs"
+test ! -e "$repo_root/automations/wechat/wechat_oom_protect.py"
+test ! -e "$repo_root/automations/bzp/bzp_weixin_relay.py"
 test -x "$repo_root/release/tests/dev-toolbox-lifecycle.sh"
 test ! -e "$repo_root/release/tests/dev-shell-lifecycle.sh"
 ! grep -Eq 'developmentShell|dev/shells|engineContainerInspections|stopCandidateDevelopmentShells' "$repo_root/release/cli.mjs"

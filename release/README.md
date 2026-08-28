@@ -81,6 +81,10 @@
 
 正式发版的生产快照测试副本和临时开发副本在测试结束或失败后都会清理，只保留快照、测试回执、候选归档和发布证据这些回退与审计所需内容。流程不会执行无边界的 `podman system prune` 或 `docker system prune`。
 
+仓库管理的生产任务定义位于各业务目录的 `jobs.production.json`。停机快照副本先通过同一版 dsh-cron v1 控制接口执行迁移；候选生产启动后再通过在线控制 socket 执行，并立即做一次只读对账。只有 manifest 明确列出的 predecessor 摘要可以被替换；未知漂移、重复 externalRef、任务类型变化、持久化不确定、任一活跃任务的旧 home 路径，以及通过 `sh -lc` 间接执行 `/opt/dsh/automations` 都会失败关闭。迁移回执保存旧新 job ID 和前后 spec 摘要。
+
+BZP 发布另有基础设施硬门：停机前必须证明 Herman 可通过专用 key 到达 Rita、Rita 的反向刷新 key 已就位、BLE/DBus 与 mode-0600 auth 文件可用，并备份 Rita 原 `latest.json` 的存在状态、摘要和权限。候选启动后安装 marker-scoped forced key，要求 Rita 的真实 `refresh all` 立即只返回 `收到`，并由每分钟 worker 异步刷新合并 JSON。任一 SSH、远端原子落盘或摘要校验失败都会使任务失败。微信 OOM unit 只在候选期 stop/disable；回退会按发布前状态恢复，只有 `accept` 才删除 unit 文件和 inactive/disabled 的旧 BZP 用户 unit。
+
 正式 release 完成 `accept` 后，本地开发环境和共享开发镜像立即失效并清理；任务源码 worktree 原样保留。未完成任务下次继续时，必须先同步新 main，请求最新 main 的唯一开发镜像，再执行自己的 `dev prepare`。
 
 开发态的 Telegram/cron 容器只连接无外网的内部网络和假 Bot API；Web 由于 Harness 强制只绑定 loopback，使用宿主网络供本机浏览器访问，但只持有测试凭据，不承担 Telegram 或 cron 写入。生产容器固定使用 `1000:1000`；本机 rootless Podman 为了让快照副本保持宿主用户可读写，在容器内显示为 uid 0，但仍映射为宿主普通用户，不获得宿主 root 权限。
@@ -103,7 +107,7 @@
 - `release` 在获得停机许可前不停止任何写入者；许可只覆盖该次候选和该次停机窗口。
 - 停机后先做一致快照，再用快照副本执行上线前测试；测试失败时生产保持停止并报告，不在线改产品代码。
 - 明确属于挂载、权限、Compose、路径或启动参数的发版小问题，可在限定现场窗口内修正后重新验收；需要改 Harness、插件、数据语义或原因不清时，先向用户报告。只有用户批准后才能回退。
-- 上线后状态先是 `awaiting-user-acceptance`。真实 Telegram 与 Web 验收通过并执行 `accept` 后，该镜像才成为 `last-good`。
+- 上线后状态先是 `awaiting-user-acceptance`。真实 Telegram、Web、五个既有任务、两块 BLE 表、Rita 合并文件和反向 `refresh all` 全部验收通过并执行 `accept` 后，该镜像才成为 `last-good`。
 - 回退默认只打印恢复对象、快照和影响；只有显式 `--approved` 才能恢复上一 Docker 镜像及对应停机前数据。
 - OpenClaw 始终在流程外且可完全不存在：不得停止、重启、改配置或接管其写入权，DSH 也不得读取它的目录、凭据、CLI、插件或状态。
 

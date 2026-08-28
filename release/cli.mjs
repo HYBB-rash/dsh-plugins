@@ -31,6 +31,14 @@ const target = process.env.DSH_DEPLOY_TARGET ?? 'herman.hermes'
 const engine = process.env.DSH_CONTAINER_ENGINE ?? 'podman'
 const composePath = join(releaseRoot, 'compose.production.yml')
 const patchPath = join(releaseRoot, 'patches/harness-minimal-shell-path.patch')
+const ritaHost = 'rita@192.168.6.239'
+const ritaLatestPath = '/home/rita/.local/state/dsh-automations/bzp/latest.json'
+const ritaPublishKeyPath = '/home/herman/.ssh/dsh-bzp-publish-to-rita'
+const ritaRefreshPrivateKeyPath = '/home/rita/.ssh/dsh-bzp-refresh-to-herman'
+const ritaRefreshPublicKeyPath = '/home/herman/.local/share/dsh-container/secrets/rita-bzp-refresh.pub'
+const bzpAuthPath = '/home/herman/.local/share/bzp-ble/auth.json'
+const oomUnit = 'wechat-oom-protect.service'
+const oldBzpUserUnit = 'bzp-ble-read-until-success.service'
 const exitCodes = Object.freeze({ usage: 2, approval: 3, safety: 4, test: 5, production: 6 })
 
 class DshError extends Error {
@@ -697,6 +705,11 @@ function editableSourceFingerprint(sourcePath) {
     announce: false,
     code: exitCodes.safety,
   })
+  const deleted = new Set(run('git', ['-C', sourcePath, 'ls-files', '-z', '--deleted'], {
+    capture: true,
+    announce: false,
+    code: exitCodes.safety,
+  }).split('\0').filter(Boolean))
   const paths = [...new Set(listed.split('\0').filter(Boolean))].sort()
   const digest = createHash('sha256')
   for (const relativePath of paths) {
@@ -705,6 +718,10 @@ function editableSourceFingerprint(sourcePath) {
     try {
       entry = lstatSync(path)
     } catch (error) {
+      if (deleted.has(relativePath)) {
+        digest.update(`${relativePath}\0deleted\0`)
+        continue
+      }
       fail(`验证源码在计算指纹时变化: ${relativePath}`, exitCodes.safety)
     }
     digest.update(`${relativePath}\0`)
@@ -1391,6 +1408,20 @@ function performProductionRelease(candidate, candidatePath) {
     evidence.failure = { stage: evidence.currentStage, message: error.message, exitCode: error.exitCode ?? 1 }
     const snapshotMetaPath = join(localSnapshotDir, 'snapshot.json')
     if (existsSync(snapshotMetaPath)) evidence.snapshot = readJson(snapshotMetaPath, 'snapshot')
+    const remoteReleaseDir = `/home/herman/.local/share/dsh-container/releases/${releaseId}`
+    const partialProduction = {}
+    for (const [name, field] of [
+      ['rita-forced-key.json', 'forcedKey'],
+      ['cron-reconciliation.json', 'cronReconciliation'],
+      ['cron-reconciliation-check.json', 'cronReconciliationCheck'],
+    ]) {
+      const localPath = join(localReleaseDir, name)
+      const transfer = runStatus('scp', ['-p', `${target}:${remoteReleaseDir}/${name}`, localPath])
+      if (transfer.status === 0) {
+        try { partialProduction[field] = readJson(localPath, name) } catch { /* keep the primary release failure */ }
+      }
+    }
+    if (Object.keys(partialProduction).length > 0) evidence.production = partialProduction
     writeJson(releasePath, evidence)
     runStatus('scp', ['-p', releasePath, `${target}:/home/herman/.local/share/dsh-container/releases/${releaseId}/release.json`])
     throw error
@@ -1403,13 +1434,55 @@ function performProductionReleaseUnsafe(candidate, candidatePath, releaseId, sta
   ensureDir(localReleaseDir)
   ensureDir(localSnapshotDir)
 
+  const remoteRoot = '/home/herman/.local/share/dsh-container'
+  const remoteReleaseDir = `${remoteRoot}/releases/${releaseId}`
   const preflight = ssh(`set -Eeuo pipefail
 command -v docker >/dev/null || { echo 'Docker 未安装；请先在 herman.hermes 安装 docker.io 和 docker-compose-v2' >&2; exit 41; }
 docker compose version >/dev/null
 docker info >/dev/null
+command -v sudo >/dev/null
+sudo -n true
+release_dir=${shellQuote(remoteReleaseDir)}
+publish_key=${shellQuote(ritaPublishKeyPath)}
+refresh_public_key=${shellQuote(ritaRefreshPublicKeyPath)}
+bzp_auth=${shellQuote(bzpAuthPath)}
+rita_host=${shellQuote(ritaHost)}
+rita_latest=${shellQuote(ritaLatestPath)}
+rita_refresh_private=${shellQuote(ritaRefreshPrivateKeyPath)}
+mkdir -p "$release_dir"
+test -f "$publish_key"
+test "$(stat -c '%a' "$publish_key")" = 600
+test -f "$refresh_public_key"
+test -f "$bzp_auth"
+test "$(stat -c '%a' "$bzp_auth")" = 600
+test -S /run/dbus/system_bus_socket
+test -d /sys/class/bluetooth/hci0
+rita_ssh=(ssh -i "$publish_key" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10 -- "$rita_host")
+"${'${rita_ssh[@]}'}" test -f "$rita_refresh_private"
+test "$("${'${rita_ssh[@]}'}" stat -c '%a' "$rita_refresh_private")" = 600
+rita_exists=false
+rita_sha=null
+rita_mode=null
+if "${'${rita_ssh[@]}'}" test -e "$rita_latest"; then
+  "${'${rita_ssh[@]}'}" test -f "$rita_latest"
+  "${'${rita_ssh[@]}'}" cat "$rita_latest" >"$release_dir/rita-latest.before"
+  chmod 600 "$release_dir/rita-latest.before"
+  rita_sha="sha256:$(sha256sum "$release_dir/rita-latest.before" | awk '{print $1}')"
+  test "$("${'${rita_ssh[@]}'}" sha256sum "$rita_latest" | awk '{print "sha256:"$1}')" = "$rita_sha"
+  rita_mode="$("${'${rita_ssh[@]}'}" stat -c '%a' "$rita_latest")"
+  rita_exists=true
+else
+  rm -f "$release_dir/rita-latest.before"
+fi
+oom_enabled="$(systemctl is-enabled ${shellQuote(oomUnit)} 2>/dev/null || true)"
+oom_active="$(systemctl is-active ${shellQuote(oomUnit)} 2>/dev/null || true)"
+printf '{"ritaHostReachable":true,"ritaLatestExists":%s,"ritaLatestSha256":"%s","ritaLatestMode":"%s","ritaRefreshKeyPresent":true,"bleAdapter":"hci0","bzpAuthMode":"600","oomEnabled":"%s","oomActive":"%s"}\n' \
+  "$rita_exists" "$rita_sha" "$rita_mode" "$oom_enabled" "$oom_active" >"$release_dir/infrastructure-before.json"
+cat "$release_dir/infrastructure-before.json"
 `)
+  let infrastructureBefore
+  try { infrastructureBefore = JSON.parse(preflight.split('\n').at(-1)) } catch { fail(`无法解析发布基础设施预检回执: ${preflight}`, exitCodes.production) }
 
-  const remoteRoot = '/home/herman/.local/share/dsh-container'
   const previousText = ssh(`set -Eeuo pipefail
 root=${shellQuote(remoteRoot)}
 test -f "$root/current/release.json" || { echo '当前生产不是可识别的 Docker release' >&2; exit 42; }
@@ -1430,9 +1503,8 @@ cat "$root/current/release.json"
   if (!previous.releaseId || !previous.candidate.imageId || !previous.candidate.imageTag || !previous.engineImageId) {
     fail('当前 Docker release.json 缺少回退所需镜像身份', exitCodes.production)
   }
-  const remoteReleaseDir = `${remoteRoot}/releases/${releaseId}`
   const remoteSnapshot = `${remoteRoot}/snapshots/${releaseId}.tar.zst`
-  stage('stop-writers-and-snapshot', { previous, preflight: { remote: preflight } })
+  stage('stop-writers-and-snapshot', { previous, preflight: { infrastructureBefore } })
   const stopOutput = ssh(`set -Eeuo pipefail
 root=${shellQuote(remoteRoot)}
 release_id=${shellQuote(releaseId)}
@@ -1482,12 +1554,19 @@ mv -Tf "$root/snapshots/latest.json.next" "$root/snapshots/latest.json"
   let stateReceipt
   let selfTest
   let runtimeReceipt
+  let preflightReconciliation
   const preflightSourcePath = join(localReleaseDir, 'preflight-runtime')
   try {
     ensureDir(testHome)
     run('tar', ['--zstd', '-xf', localSnapshot, '-C', testHome], { code: exitCodes.test })
     const baseArgs = containerBaseArgs(testHome)
     run(engine, ['run', '--rm', ...baseArgs, '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'prepare'], { code: exitCodes.test })
+    const preflightReceiptContainer = `/home/herman/.dsh/storages/automations/release-receipts/${releaseId}-preflight.json`
+    const preflightReceiptHost = join(testHome, '.dsh/storages/automations/release-receipts', `${releaseId}-preflight.json`)
+    run(engine, ['run', '--rm', ...baseArgs, candidate.imageTag, 'reconcile-cron-preflight', '--receipt', preflightReceiptContainer], { capture: true, code: exitCodes.test })
+    preflightReconciliation = readJson(preflightReceiptHost, 'snapshot-copy cron reconciliation receipt')
+    if (preflightReconciliation.status !== 'migrated') fail('快照副本任务迁移没有形成 migrated 回执', exitCodes.test)
+    copyFileSync(preflightReceiptHost, join(localReleaseDir, 'preflight-cron-reconciliation.json'))
     stateReceipt = run(engine, ['run', '--rm', ...baseArgs, candidate.imageTag, 'validate-state', '/home/herman/.dsh'], { capture: true, code: exitCodes.test })
     writeFileSync(join(localReleaseDir, 'state-validation.json'), `${stateReceipt}\n`)
     selfTest = run(engine, ['run', '--rm', '--read-only', '--user', '1000:1000', '--tmpfs', '/tmp:rw', '--tmpfs', '/run:rw', candidate.imageTag, 'self-test'], { capture: true, code: exitCodes.test })
@@ -1535,13 +1614,62 @@ curl --fail --silent --max-time 3 http://192.168.6.240:3080/ >/dev/null
 test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
+test "$(docker inspect dsh-prepare --format '{{.State.Status}}/{{.State.ExitCode}}')" = 'exited/0'
 docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs >/dev/null
+docker exec dsh-telegram test -S /run/dbus/system_bus_socket
+docker exec dsh-telegram test -d /sys/class/bluetooth/hci0
+docker exec dsh-telegram test -f ${shellQuote(bzpAuthPath)}
+test "$(docker exec dsh-telegram stat -c '%a' ${shellQuote(bzpAuthPath)})" = 600
+forced_key_receipt="$release_dir/rita-forced-key.json"
+docker exec dsh-web /opt/dsh/automations/bzp/bzp_forced_key.py install >"$forced_key_receipt"
+cron_receipt="$release_dir/cron-reconciliation.json"
+docker exec dsh-web node /opt/dsh/automations/scripts/reconcile_production_jobs.mjs migrate --receipt "$cron_receipt" >/dev/null
+cron_check_receipt="$release_dir/cron-reconciliation-check.json"
+docker exec dsh-web node /opt/dsh/automations/scripts/reconcile_production_jobs.mjs check --receipt "$cron_check_receipt" >/dev/null
+test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$cron_receipt")" = migrated
+test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$cron_check_receipt")" = checked
+publish_key=${shellQuote(ritaPublishKeyPath)}
+rita_host=${shellQuote(ritaHost)}
+rita_refresh_private=${shellQuote(ritaRefreshPrivateKeyPath)}
+rita_ssh=(ssh -i "$publish_key" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10 -- "$rita_host")
+rita_ack="$("${'${rita_ssh[@]}'}" ssh -i "$rita_refresh_private" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10 -- herman@192.168.6.240 refresh all)"
+test "$rita_ack" = '收到'
+sudo -n systemctl disable --now ${shellQuote(oomUnit)}
+test "$(systemctl is-active ${shellQuote(oomUnit)} 2>/dev/null || true)" = inactive
+test "$(systemctl is-enabled ${shellQuote(oomUnit)} 2>/dev/null || true)" = disabled
 ln -sfn "$release_dir" ${shellQuote(remoteRoot)}/current.next
 mv -Tf ${shellQuote(remoteRoot)}/current.next ${shellQuote(remoteRoot)}/current
-printf '{"imageId":"%s","engineImageId":"%s","web":"%s","telegram":"%s","lan":"%s","cronControl":"ready"}\\n' "$expected_image" "$engine_image" "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')"
+printf '{"imageId":"%s","engineImageId":"%s","prepare":"exited/0","web":"%s","telegram":"%s","lan":"%s","cronControl":"ready","cronReconciliationSha256":"sha256:%s","cronCheckSha256":"sha256:%s","forcedKeySha256":"sha256:%s","ritaRefreshAck":"收到","oom":"inactive/disabled"}\\n' \
+  "$expected_image" "$engine_image" \
+  "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" \
+  "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" \
+  "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" \
+  "$(sha256sum "$cron_receipt" | awk '{print $1}')" \
+  "$(sha256sum "$cron_check_receipt" | awk '{print $1}')" \
+  "$(sha256sum "$forced_key_receipt" | awk '{print $1}')"
 `)
   let productionReceipt
   try { productionReceipt = JSON.parse(startOutput.split('\n').at(-1)) } catch { fail(`无法解析生产启动回执: ${startOutput}`, exitCodes.production) }
+  const productionEvidenceFiles = [
+    'cron-reconciliation.json',
+    'cron-reconciliation-check.json',
+    'rita-forced-key.json',
+    'infrastructure-before.json',
+  ]
+  for (const name of productionEvidenceFiles) {
+    run('scp', ['-p', `${target}:${remoteReleaseDir}/${name}`, join(localReleaseDir, name)], { code: exitCodes.production })
+  }
+  const productionReconciliation = readJson(join(localReleaseDir, 'cron-reconciliation.json'), 'production cron reconciliation receipt')
+  const productionReconciliationCheck = readJson(join(localReleaseDir, 'cron-reconciliation-check.json'), 'production cron reconciliation check')
+  const forcedKey = readJson(join(localReleaseDir, 'rita-forced-key.json'), 'Rita forced key receipt')
+  if (productionReconciliation.status !== 'migrated' || productionReconciliationCheck.status !== 'checked') {
+    fail('生产任务 reconciliation 回执状态不完整', exitCodes.production)
+  }
+  if (sha256File(join(localReleaseDir, 'cron-reconciliation.json')) !== productionReceipt.cronReconciliationSha256
+    || sha256File(join(localReleaseDir, 'cron-reconciliation-check.json')) !== productionReceipt.cronCheckSha256
+    || sha256File(join(localReleaseDir, 'rita-forced-key.json')) !== productionReceipt.forcedKeySha256) {
+    fail('生产自动化切换回执摘要不一致', exitCodes.production)
+  }
   const release = {
     schemaVersion: 1,
     releaseId,
@@ -1550,15 +1678,31 @@ printf '{"imageId":"%s","engineImageId":"%s","web":"%s","telegram":"%s","lan":"%
     candidate,
     snapshot: snapshotMeta,
     previous,
-    preflight: { remote: preflight, stateReceiptSha256: sha256Text(stateReceipt), selfTestSha256: sha256Text(selfTest), runtime: runtimeReceipt },
-    production: productionReceipt,
+    preflight: {
+      infrastructureBefore,
+      stateReceiptSha256: sha256Text(stateReceipt),
+      selfTestSha256: sha256Text(selfTest),
+      cronReconciliation: preflightReconciliation,
+      runtime: runtimeReceipt,
+    },
+    production: {
+      ...productionReceipt,
+      cronReconciliation: productionReconciliation,
+      cronReconciliationCheck: productionReconciliationCheck,
+      forcedKey,
+    },
     createdAt: new Date().toISOString(),
     userAcceptance: null,
   }
   const releasePath = join(localReleaseDir, 'release.json')
   writeJson(releasePath, release)
   run('scp', ['-p', releasePath, `${target}:${remoteReleaseDir}/release.json`], { code: exitCodes.production })
-  out({ result: 'production-running-awaiting-user-acceptance', releasePath, releaseId, required: '请从真实 Telegram 发一条验收消息，并检查 Web；通过后执行 dsh accept。' })
+  out({
+    result: 'production-running-awaiting-user-acceptance',
+    releasePath,
+    releaseId,
+    required: '请验收 Web、Telegram、原 5 个任务、电表水表 ble_live 读数、Rita 合并 JSON 与 refresh all；全部通过后执行 dsh accept。',
+  })
 }
 
 function findRelease(value) {
@@ -1578,12 +1722,61 @@ test "sha256:$(sha256sum ${shellQuote(`/home/herman/.local/share/dsh-container/r
 test "$(docker image inspect ${shellQuote(release.candidate.imageTag)} --format '{{.Id}}')" = ${shellQuote(release.production.engineImageId)}
 test "$(docker inspect dsh-web --format '{{.Image}}')" = ${shellQuote(release.production.engineImageId)}
 test "$(docker inspect dsh-telegram --format '{{.Image}}')" = ${shellQuote(release.production.engineImageId)}
+test "$(docker inspect dsh-lan-proxy --format '{{.Image}}')" = ${shellQuote(release.production.engineImageId)}
+test "$(docker inspect dsh-prepare --format '{{.Image}}')" = ${shellQuote(release.production.engineImageId)}
 test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
+test "$(docker inspect dsh-prepare --format '{{.State.Status}}/{{.State.ExitCode}}')" = 'exited/0'
 curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
 curl --fail --silent --max-time 3 http://192.168.6.240:3080/ >/dev/null
 docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs >/dev/null
+docker exec dsh-web node /opt/dsh/automations/scripts/reconcile_production_jobs.mjs check >/dev/null
+docker exec dsh-web /opt/dsh/automations/bzp/bzp_forced_key.py install >/dev/null
+publish_key=${shellQuote(ritaPublishKeyPath)}
+rita_host=${shellQuote(ritaHost)}
+rita_latest=${shellQuote(ritaLatestPath)}
+rita_ssh=(ssh -i "$publish_key" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10 -- "$rita_host")
+test "$("${'${rita_ssh[@]}'}" stat -c '%a' "$rita_latest")" = 600
+test "$("${'${rita_ssh[@]}'}" stat -c '%a' ${shellQuote(dirname(ritaLatestPath))})" = 700
+"${'${rita_ssh[@]}'}" ${shellQuote(`/usr/bin/python3 -c ${shellQuote(`import json,math,sys
+value=json.load(open(sys.argv[1], encoding="utf-8"))
+assert value.get("schemaVersion")==1
+assert value.get("producerImageId")==sys.argv[2]
+assert value.get("publicationReason") in ("scheduled","requested")
+assert set(value.get("meters",{}))=={"electric","water"}
+for name,unit in (("electric","kWh"),("water","m3")):
+ projection=value["meters"][name]
+ assert projection.get("unit")==unit
+ success=projection.get("lastSuccess")
+ assert isinstance(success,dict) and success.get("source")=="ble_live"
+ assert success.get("switchState") in (0,1)
+ assert all(not isinstance(success.get(key),bool) and math.isfinite(float(success.get(key))) for key in ("total","surplus"))
+ attempt=projection.get("lastAttempt")
+ assert isinstance(attempt,dict) and isinstance(attempt.get("ok"),bool)`)} ${shellQuote(ritaLatestPath)} ${shellQuote(release.candidate.imageId)}`)}
+test "$(systemctl is-active ${shellQuote(oomUnit)} 2>/dev/null || true)" = inactive
+test "$(systemctl is-enabled ${shellQuote(oomUnit)} 2>/dev/null || true)" = disabled
+for container in dsh-web dsh-telegram dsh-lan-proxy; do
+  if docker top "$container" -eo args | grep -Fq ${shellQuote('.open' + 'claw')}; then
+    echo "forbidden legacy path in $container process" >&2
+    exit 61
+  fi
+done
+if crontab -l 2>/dev/null | grep -Eq ${shellQuote('([.]open' + 'claw|bzp_weixin_relay[.]py|wechat_oom_protect[.]py)')}; then
+  echo 'legacy automation path remains in user crontab' >&2
+  exit 62
+fi
+old_bzp_unit="$HOME/.config/systemd/user/${oldBzpUserUnit}"
+if test -e "$old_bzp_unit"; then
+  test "$(systemctl --user is-active ${shellQuote(oldBzpUserUnit)} 2>/dev/null || true)" = inactive
+  old_bzp_enabled="$(systemctl --user is-enabled ${shellQuote(oldBzpUserUnit)} 2>/dev/null || true)"
+  test "$old_bzp_enabled" = disabled -o "$old_bzp_enabled" = not-found
+  rm -f "$old_bzp_unit"
+  systemctl --user daemon-reload
+fi
+sudo -n rm -f /etc/systemd/system/${oomUnit}
+sudo -n systemctl daemon-reload
+test ! -e /etc/systemd/system/${oomUnit}
 printf '%s\n' 'containers-and-web-healthy'
 `)
   release.status = 'accepted'
@@ -1610,14 +1803,21 @@ mv -Tf "$root/last-good.next" "$root/last-good"
 
 function commandRollback(options) {
   const { path, release } = findRelease(options.release)
+  if (!['awaiting-user-acceptance', 'failed'].includes(release.status)) {
+    fail(`只有未 accept 的候选可以按本快照回退，当前是 ${release.status}`, exitCodes.safety)
+  }
   if (!options.approved) {
     out({ status: 'waiting-for-rollback-authorization', releaseId: release.releaseId, restore: release.previous, snapshot: release.snapshot, next: '用户批准后加 --approved' })
     process.exitCode = exitCodes.approval
     return
   }
   if (release.previous?.mode !== 'docker') fail('release 没有可识别的上一 Docker release', exitCodes.safety)
+  if (!release.snapshot?.remoteArchivePath) fail('release 尚未形成可回退的停机快照', exitCodes.safety)
   const remoteRoot = '/home/herman/.local/share/dsh-container'
   const remoteSnapshot = release.snapshot.remoteArchivePath
+  const removeForcedKey = release.production?.forcedKey?.changed === true
+  const ritaBefore = release.preflight?.infrastructureBefore
+  if (typeof ritaBefore?.ritaLatestExists !== 'boolean') fail('release 缺少 Rita 回退边界', exitCodes.safety)
   const restartPrevious = `
 previous_dir=${shellQuote(release.previous.remoteDir)}
 previous_image=${shellQuote(release.previous.candidate.imageTag)}
@@ -1638,11 +1838,55 @@ curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
 test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
+test "$(docker inspect dsh-prepare --format '{{.State.Status}}/{{.State.ExitCode}}')" = 'exited/0'
 docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs >/dev/null
+oom_enabled_before=${shellQuote(ritaBefore.oomEnabled ?? '')}
+oom_active_before=${shellQuote(ritaBefore.oomActive ?? '')}
+sudo -n systemctl daemon-reload
+if test "$oom_enabled_before" = enabled -o "$oom_enabled_before" = enabled-runtime; then
+  sudo -n systemctl enable ${shellQuote(oomUnit)}
+fi
+if test "$oom_active_before" = active; then
+  sudo -n systemctl start ${shellQuote(oomUnit)}
+fi
 `
   ssh(`set -Eeuo pipefail
 root=${shellQuote(remoteRoot)}
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+if ${removeForcedKey ? 'true' : 'false'} && docker inspect dsh-web >/dev/null 2>&1; then
+  docker exec dsh-web /opt/dsh/automations/bzp/bzp_forced_key.py remove >/dev/null
+fi
+publish_key=${shellQuote(ritaPublishKeyPath)}
+rita_host=${shellQuote(ritaHost)}
+rita_latest=${shellQuote(ritaLatestPath)}
+rita_ssh=(ssh -i "$publish_key" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10 -- "$rita_host")
+if ${ritaBefore.ritaLatestExists ? 'true' : 'false'}; then
+  rita_backup=${shellQuote(`/home/herman/.local/share/dsh-container/releases/${release.releaseId}/rita-latest.before`)}
+  test -f "$rita_backup"
+  test "sha256:$(sha256sum "$rita_backup" | awk '{print $1}')" = ${shellQuote(ritaBefore.ritaLatestSha256)}
+  "${'${rita_ssh[@]}'}" ${shellQuote(`/usr/bin/python3 -c ${shellQuote(`import os,sys,uuid
+target=sys.argv[1]
+mode=int(sys.argv[2],8)
+payload=sys.stdin.buffer.read()
+parent=os.path.dirname(target)
+os.makedirs(parent,mode=0o700,exist_ok=True)
+temporary=os.path.join(parent,".latest.json.rollback."+uuid.uuid4().hex)
+try:
+ fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+ with os.fdopen(fd,"wb") as handle:
+  handle.write(payload); handle.flush(); os.fsync(handle.fileno())
+ os.replace(temporary,target); os.chmod(target,mode)
+ directory=os.open(parent,os.O_RDONLY)
+ try: os.fsync(directory)
+ finally: os.close(directory)
+except BaseException:
+ try: os.unlink(temporary)
+ except FileNotFoundError: pass
+ raise`)} ${shellQuote(ritaLatestPath)} ${shellQuote(ritaBefore.ritaLatestMode)}`)} <"$rita_backup"
+  test "$("${'${rita_ssh[@]}'}" sha256sum "$rita_latest" | awk '{print "sha256:"$1}')" = ${shellQuote(ritaBefore.ritaLatestSha256)}
+else
+  "${'${rita_ssh[@]}'}" rm -f "$rita_latest"
+fi
 if test -f "$root/current/compose.production.yml"; then
   cd "$root/current"
   DSH_IMAGE=${shellQuote(release.candidate.imageTag)} DSH_IMAGE_ID=${shellQuote(release.candidate.imageId)} docker compose -p dsh -f compose.production.yml down --timeout 30

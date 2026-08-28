@@ -14,7 +14,8 @@ runtime input, never an online editing location.
 
 ## Source map
 
-- `bzp/`: Baozupo meter queries, BLE reads, monitoring and WeChat dispatch.
+- `bzp/`: Baozupo electric/water BLE monitoring, Rita JSON publication and
+  bounded on-demand refresh requests.
 - `mywechat/`: my-wechat context generation, repository update and watchdog
   entrypoints.
 - `relay-sites/`: relay-site inspection and daily discovery.
@@ -49,11 +50,11 @@ superseded wrappers were removed after caller verification.
 | --- | --- | --- |
 | DSH command/Agent jobs | `automations/<business>/`, `automations/scripts/`, `x-feed/python/` | Job definitions must invoke immutable image paths, never a home-directory source checkout |
 | X feed | `x-feed/python/` and `x-feed/src/` | Chrome/CDP and persistent `DSH_X_FEED_DATA_DIR` |
-| BLE | `automations/bzp/` | BLE device, mode-0600 auth file and locked Python dependencies |
+| BLE | `automations/bzp/` | Both BLE devices, BlueZ/DBus, shared hci0 lock, mode-0600 auth file and locked Python dependencies |
 | my-wechat | `automations/mywechat/` | Independent `$HOME/my-wechat` checkout, database, virtualenv and health files |
 | Browser/search | `automations/search/` | Operator browser profile, Firefox/geckodriver/xvfb where applicable; profiles and cookies are never committed |
-| Host OOM guard | `automations/wechat/wechat_oom_protect.py` | A separately managed host systemd unit and the required `/proc` permission |
-| Rita WeChat relay | `automations/bzp/bzp_weixin_relay.py` | An explicit non-OpenClaw sender executable accepting `--target` and message bytes on stdin |
+| Rita meter snapshot | `automations/bzp/bzp_snapshot.py` | Restricted Herman-to-Rita SSH key and `/home/rita/.local/state/dsh-automations/bzp/latest.json` |
+| Rita refresh request | `automations/bzp/bzp_refresh_enqueue.py` | Marker-scoped forced-command key; only `refresh electric|water|all` may enter the bounded queue |
 
 The release image masks `/home/herman/.openclaw` with an empty tmpfs. This
 makes accidental dependency visible even during the transition period when a
@@ -75,6 +76,7 @@ host copy may still exist.
 
 ```bash
 python3 -m unittest discover -s automations/tests -p 'test_*.py'
+node --test automations/tests/*.test.mjs
 python3 -m unittest automations/bzp/test_bzp_ble_read_until_success.py
 (cd x-feed/python && python3 -m unittest discover -p 'test_x_*.py')
 find automations -type f -name '*.sh' -exec bash -n {} \;
