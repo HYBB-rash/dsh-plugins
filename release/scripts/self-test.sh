@@ -16,7 +16,23 @@ test -f /opt/dsh/harness/apps/cli/lib/bin.js
 for package in dsh-assistant dsh-cron telegram-gateway ui-context-compactor x-feed personal-feed; do
   test -d "/opt/dsh/harness/local-plugins/$package/lib"
 done
-test -d /opt/dsh/automations/scripts
+for automation_dir in bzp cron deepseek github mywechat notion relay-sites scripts search telegram wechat zerochan; do
+  test -d "/opt/dsh/automations/$automation_dir"
+done
+for automation_entrypoint in \
+  bzp/bzp_ble_monitor.py \
+  bzp/bzp_ble_read_until_success.py \
+  bzp/bzp_dual_dispatch.py \
+  bzp/bzp_weixin_relay.py \
+  cron/cron_conflict_check.py \
+  deepseek/deepseek_daily.sh \
+  mywechat/mywechat_ai_context_daily.sh \
+  mywechat/mywechat_ai_context_hourly.sh \
+  mywechat/mywechat_pull.sh \
+  mywechat/mywechat_watchdog.sh \
+  telegram/send_tg_ops.sh; do
+  test -x "/opt/dsh/automations/$automation_entrypoint"
+done
 test -f /opt/dsh/automations/requirements.lock
 
 for executable in bash bluetoothctl curl git node openssl python3 rg socat ssh; do

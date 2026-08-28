@@ -13,8 +13,12 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS = ROOT / "automations" / "scripts"
-sys.path.insert(0, str(SCRIPTS))
+AUTOMATIONS = ROOT / "automations"
+SCRIPTS = AUTOMATIONS / "scripts"
+BZP = AUTOMATIONS / "bzp"
+CRON = AUTOMATIONS / "cron"
+for source_dir in (SCRIPTS, BZP, CRON):
+    sys.path.insert(0, str(source_dir))
 
 import automation_paths
 import bzp_dual_dispatch
@@ -33,7 +37,9 @@ class RepositoryIndependenceTests(unittest.TestCase):
             "cron_changed",
         )
         offenders = []
-        for path in SCRIPTS.rglob("*"):
+        for path in AUTOMATIONS.rglob("*"):
+            if AUTOMATIONS / "tests" in path.parents:
+                continue
             if not path.is_file() or path.suffix not in {".py", ".sh", ".js", ".cjs"}:
                 continue
             text = path.read_text(encoding="utf-8")
@@ -43,25 +49,50 @@ class RepositoryIndependenceTests(unittest.TestCase):
         self.assertEqual(offenders, [])
 
     def test_retired_openclaw_sources_are_not_shipped(self):
-        retired = (
-            ROOT / "automations" / "legacy-openclaw" / "templates" / "sentinel-reminder.sh",
-            ROOT / "automations" / "legacy-openclaw" / "triggers" / "codex-linux-monitor.js",
-            ROOT / "automations" / "legacy-openclaw" / "triggers" / "information-feed.js",
-            ROOT / "automations" / "legacy-openclaw" / "triggers" / "openclaw-daily-brief.js",
-            ROOT / "automations" / "legacy-openclaw" / "triggers" / "openclaw-daily-trigger.js",
-            ROOT / "automations" / "legacy-openclaw" / "triggers" / "openclaw-weekly-brief.js",
-            ROOT / "automations" / "legacy-openclaw" / "triggers" / "x-insight-random.js",
-            ROOT / "automations" / "legacy-openclaw" / "x-delivery-receipt" / "index.cjs",
-            SCRIPTS / "baozupo_ble_reminder.sh",
-            SCRIPTS / "relay_shutdown_reminder.sh",
-            SCRIPTS / "trade_system_reminder.sh",
-            SCRIPTS / "rest_break_alarm.sh",
-            SCRIPTS / "openclaw_daily_brief.sh",
-            SCRIPTS / "openclaw_weekly_brief.sh",
-            SCRIPTS / "info_monitor.py",
-            SCRIPTS / "mywechat_sync_daemon.sh",
+        self.assertFalse((AUTOMATIONS / "legacy-openclaw").exists())
+        retired_names = {
+            "baozupo_ble_reminder.sh",
+            "relay_shutdown_reminder.sh",
+            "trade_system_reminder.sh",
+            "rest_break_alarm.sh",
+            "openclaw_daily_brief.sh",
+            "openclaw_weekly_brief.sh",
+            "info_monitor.py",
+            "mywechat_sync_daemon.sh",
+        }
+        found = [
+            str(path.relative_to(ROOT))
+            for path in AUTOMATIONS.rglob("*")
+            if path.is_file() and path.name in retired_names
+        ]
+        self.assertEqual(found, [])
+
+    def test_only_shared_automation_support_stays_in_scripts(self):
+        source_files = {
+            path.name
+            for path in SCRIPTS.iterdir()
+            if path.is_file() and path.suffix in {".py", ".sh", ".js", ".cjs"}
+        }
+        self.assertEqual(source_files, {"automation_paths.py"})
+
+    def test_direct_task_entrypoints_keep_executable_mode(self):
+        entrypoints = (
+            BZP / "bzp_ble_monitor.py",
+            BZP / "bzp_ble_read_until_success.py",
+            BZP / "bzp_dual_dispatch.py",
+            BZP / "bzp_weixin_relay.py",
+            CRON / "cron_conflict_check.py",
+            AUTOMATIONS / "deepseek" / "deepseek_daily.sh",
+            AUTOMATIONS / "mywechat" / "mywechat_ai_context_daily.sh",
+            AUTOMATIONS / "mywechat" / "mywechat_ai_context_hourly.sh",
+            AUTOMATIONS / "mywechat" / "mywechat_pull.sh",
+            AUTOMATIONS / "mywechat" / "mywechat_watchdog.sh",
+            AUTOMATIONS / "telegram" / "send_tg_ops.sh",
         )
-        self.assertEqual([str(path.relative_to(ROOT)) for path in retired if path.exists()], [])
+        self.assertEqual(
+            [str(path.relative_to(ROOT)) for path in entrypoints if not os.access(path, os.X_OK)],
+            [],
+        )
 
 
 class PathTests(unittest.TestCase):
@@ -104,7 +135,7 @@ class RelayTests(unittest.TestCase):
         opts = SimpleNamespace(
             ssh_bin="/usr/bin/ssh",
             ssh_host="rita.hermes",
-            remote_helper="/opt/dsh/automations/scripts/bzp_weixin_relay.py",
+            remote_helper="/opt/dsh/automations/bzp/bzp_weixin_relay.py",
             weixin_sender_bin="/opt/weixin/send",
             weixin_target="wife",
         )

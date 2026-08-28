@@ -18,6 +18,7 @@ import html as htmllib
 import subprocess
 import urllib.parse
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 from automation_paths import state_dir
 
 HOME = os.path.expanduser("~")

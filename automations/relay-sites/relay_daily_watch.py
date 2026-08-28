@@ -18,6 +18,7 @@ import json
 import subprocess
 import concurrent.futures
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 from automation_paths import state_file
 
 HOME = os.path.expanduser("~")

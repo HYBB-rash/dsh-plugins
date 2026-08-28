@@ -49,6 +49,7 @@
 
 ## 经验记录
 
+- 2026-08-28：仓库自管自动化按明确业务拆出 `automations/<business>/` 后，`automations/scripts/` 只保留跨业务支持代码；镜像的 Python 编译、shell 语法、OpenClaw 缺席和退役文件门禁必须递归覆盖整个 `automations/`，不能继续只检查旧的平铺 `scripts/`。直接执行的业务脚本若复用共享模块，也要验证从新目录独立加载时的导入路径。
 - 2026-08-28：开发容器的最小生命周期单位应是 worktree 环境，不是每次交互 shell。`dev prepare` 为每个 worktree 创建一个带明确归属的固定 toolbox，`dev shell` 只 exec 进入它；多个终端共用该 toolbox，不创建或登记额外容器。`dev down`、`dev retire`、main 镜像换代和发版验收都按 worktree 整体停止并清理，避免 shell 状态、孤儿识别和人工资源窗口。
 - 2026-08-28：不可变镜像中的源码可能由 root 拥有且对运行 UID 只读；`compileall` 这类只做语法验证的构建检查仍会默认回写 `__pycache__`。应把 `PYTHONPYCACHEPREFIX` 指向构建期临时目录，而不是放宽源码权限或让检查污染镜像输入。
 - 2026-08-28：Git 的 `100644` 只约束可执行位，不会自动修复工作树实际为 `0600` 的读权限；rootless 容器挂载源码时，这种权限漂移会让宿主可读文件在容器测试中报 `EACCES`。`dev prepare` 前应核对版本化运行输入对容器映射用户可读。旧 OpenClaw 代码可以先按原字节导入用于审计，但调用者确认已 disabled、被替代或只能在 OpenClaw 内执行后，原始提交已足够保留证据，不应继续用 `legacy` 目录把它们伪装成当前可交付资产。

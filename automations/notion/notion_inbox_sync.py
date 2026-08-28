@@ -21,6 +21,7 @@ import hashlib
 import urllib.request
 import urllib.error
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 from automation_paths import state_dir
 
 INBOX = os.path.expanduser(os.environ.get(

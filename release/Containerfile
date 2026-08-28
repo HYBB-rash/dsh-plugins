@@ -134,11 +134,11 @@ RUN set -eu; \
         python3 -m unittest test_insight_engine.py); \
     (cd /opt/dsh/automations \
      && python3 -m unittest discover -s tests -p 'test_*.py'); \
-    (cd /opt/dsh/automations/scripts \
+    (cd /opt/dsh/automations/bzp \
      && python3 -m unittest test_bzp_ble_read_until_success.py); \
     PYTHONPYCACHEPREFIX="$python_data/pycache" \
-      python3 -m compileall -q /opt/dsh/automations/scripts; \
-    for script in /opt/dsh/automations/scripts/*.sh; do bash -n "$script"; done
+      python3 -m compileall -q /opt/dsh/automations; \
+    find /opt/dsh/automations -type f -name '*.sh' -exec bash -n {} \;
 
 # A historical product commit may name the verification fixture by its path at
 # that revision.  The temporary alias is strictly a build-test input and must

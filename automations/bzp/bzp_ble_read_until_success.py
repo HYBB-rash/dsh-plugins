@@ -67,6 +67,7 @@ from typing import Optional
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlparse
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 from automation_paths import state_dir
 
 # ---------------------------------------------------------------------------

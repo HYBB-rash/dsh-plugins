@@ -4,7 +4,9 @@
 输出: 有新增->文本; 无新增->NO_REPLY
 """
 import json, os, subprocess, time
+import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 from automation_paths import state_file
 
 REPO = "HYBB-rash/chatgpt-linux-nix"

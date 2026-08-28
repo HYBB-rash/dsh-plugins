@@ -23,8 +23,8 @@ fi
 
 HEALTH_FILE="${MYWECHAT_HEALTH_FILE:-$(ls "$MYWECHAT_DIR"/sync_health_*.json 2>/dev/null | grep -v 'qq' | head -1)}"
 QQ_HEALTH_FILE="${MYWECHAT_QQ_HEALTH_FILE:-$(ls "$MYWECHAT_DIR"/sync_health_qq_*.json 2>/dev/null | head -1)}"
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-SEND_TG="${SEND_TG:-$SCRIPT_DIR/send_tg_ops.sh}"
+AUTOMATIONS_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+SEND_TG="${SEND_TG:-$AUTOMATIONS_DIR/telegram/send_tg_ops.sh}"
 
 WX_PATTERN="WeChatAppEx|wechat"
 SYNC_PATTERN="sync.py --interval"
