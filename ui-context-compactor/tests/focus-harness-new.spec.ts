@@ -583,7 +583,7 @@ describe('F02-H1/H2 real Harness focus canary', () => {
     })
   })
 
-  it('keeps B unrelated, rejects a natural thanks without closing, and leaves A independently continuable', async () => {
+  it('keeps B unrelated, answers a natural thanks without closing, and leaves A independently continuable', async () => {
     const root = await mkdtemp(join(tmpdir(), 'focus-canary-isolation-'))
     temporaryRoots.push(root)
     const a = await mount(root, ContextManager.FOCUS_CANARY_IDS[0])
@@ -602,9 +602,12 @@ describe('F02-H1/H2 real Harness focus canary', () => {
     const bErrors = canaryErrors(b.ctx, b.agent)
     await send(b.agent, '好，谢谢')
     expect(b.adapter.auxiliaryCalls).toBe(1)
-    expect(b.adapter.rootCalls).toBe(1)
-    expect(bErrors.map(error => error instanceof Error ? error.message : String(error))).toEqual(['focus-canary'])
-    expect(visibleAssistantTexts(b.agent)).toEqual(['继续处理：帮我规划周末徒步'])
+    expect(b.adapter.rootCalls).toBe(2)
+    expect(bErrors).toEqual([])
+    expect(visibleAssistantTexts(b.agent)).toEqual([
+      '继续处理：帮我规划周末徒步',
+      '继续处理：帮我规划周末徒步',
+    ])
     expect(readStoredFocus(root, ContextManager.FOCUS_CANARY_IDS[1])).toEqual(beforeThanks)
     await b.ctx.sessions.flush(b.agent.session)
     await b.ctx.fiber.dispose()

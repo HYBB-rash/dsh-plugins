@@ -43,6 +43,12 @@ import {
   type BoundedAuxiliarySemanticCallConfig,
   type ManagedRuntimeConfig,
 } from './managed-runtime.ts'
+import {
+  createExistingFocusRelationRequest,
+  isExplicitCurrentMatterClosure,
+  isPoliteAcknowledgementExpression,
+} from './focus-existing.ts'
+import { handleExistingFocusInteraction } from './adapters/user-interaction.ts'
 import { ManagedAwareBasicCompactionEngine } from './managed-compaction.ts'
 import { ManagedFailurePresenter, isManagedFailure } from './managed-failure.ts'
 import { InputRequeueCoordinator } from './input-requeue.ts'
@@ -2879,7 +2885,15 @@ function installFocusCanary(
                 return await persistence.readFrom(sessionId, fromSeq)
               },
             })
-            if (restored === undefined || signal.aborted) return
+            const transaction = restored?.record.transaction
+            const recoveredFocus = restored === undefined
+              ? undefined
+              : focusAuthority.registerAuthenticatedRecoveredFocus(restored.evidence.c35)
+            if (restored === undefined
+              || transaction?.phase !== 'finalized'
+              || recoveredFocus === undefined
+              || transaction.material.canonicalState.focus.ref !== recoveredFocus.ref
+              || signal.aborted) return
             if (recoveryGates.get(agent) === gate) gate.kind = 'ready'
           } finally {
             if (recoveryGates.get(agent) === gate && gate.kind !== 'ready') gate.kind = 'closed'
@@ -3558,7 +3572,7 @@ function installFocusCanary(
     // no-focus, so it alone must close before downstream/auxiliary/C01 when
     // that proof port is unavailable; ordinary H1 focus input stays available
     // to the F01-T3 composition.
-    if (textOf(message) === '这件事结束了'
+    if (isExplicitCurrentMatterClosure(textOf(message) ?? '')
       && (sessionPersistencePort(ctx) === undefined || sessionsFlushPort(ctx) === undefined)) {
       claims.delete(String(message.id))
       if (claims.size === 0) inserted.delete(sessionId)
@@ -3751,8 +3765,121 @@ function installFocusCanary(
       }
     }
     if (preNextRecord !== undefined && isBackgroundStateRecord(preNextRecord)) {
+      const text = textOf(message)
+      const exact = parseCanonicalBackgroundStateRecord(preNextRecord)
+      const transaction = exact?.transaction
+      const current = transaction?.phase === 'finalized'
+        && (recoveryGate === undefined || recoveryGate.kind === 'ready')
+        ? focusAuthority.resolveExistingFocus(
+            transaction.material.canonicalState.focus.ref,
+            sessionId as ChatRef,
+          )
+        : undefined
+      if (text === undefined || current === undefined) {
+        finishClaimTracking(agent, messageId)
+        return await closedRecoveryInput(ctx, agent, message, managedFailure)
+      }
+      const origin = { messageId, hash: directExpressionHash(messageId, text) }
+      // F06 already owns the exact continuation admission for recovered
+      // canonical background; T1E must not reinterpret or block that seam.
+      if (text === '继续') {
+        finishClaimTracking(agent, messageId)
+        return base
+      }
+      if (isPoliteAcknowledgementExpression(text)) {
+        finishClaimTracking(agent, messageId)
+        return base
+      }
+      if (isExplicitCurrentMatterClosure(text)) {
+        try {
+          const proposal = await auxiliary.propose(text, origin, signal)
+          const result = focusAuthority.fromBoundProposal(proposal)
+            .decideFocus(createExplicitUserExpression(text, sessionId as ChatRef, origin))
+          const noFocusDecision = result.kind === 'business_result' ? result.value : undefined
+          if (result.kind !== 'business_result'
+            || noFocusDecision?.kind !== 'no_focus'
+            || proposal.kind !== 'proposal'
+            || proposal.value.kind !== 'close'
+            || candidateAdvice.acceptMatterRelation(noFocusDecision).kind !== 'business_result') {
+            throw new Error('canonical explicit close did not establish the existing C01/C07 handoff')
+          }
+          const pending: ClosureOnlyNoFocusRecord = {
+            closure: {
+              phase: 'pending',
+              original: origin,
+              proposal: { kind: proposal.value.kind, relation: proposal.value.relation },
+              decision: {
+                kind: noFocusDecision.kind,
+                ref: noFocusDecision.ref,
+                chat: noFocusDecision.chat,
+                latestCorrections: noFocusDecision.latestCorrections,
+              },
+            },
+          }
+          await domain.table('focus_precanonical').put(sessionId, pending)
+          const physicallyProved: ClosureOnlyNoFocusRecord = {
+            closure: { ...pending.closure, phase: 'physically_proved' },
+          }
+          finishClaimTracking(agent, messageId)
+          return await knownUnavailable(ctx, agent, message, async () => {
+            await domain.table('focus_precanonical').put(sessionId, physicallyProved)
+          }, async () => {
+            const freshCarrier: Omit<ClosureOnlyNoFocusRecord, 'transaction'> & {
+              readonly transaction?: never
+            } = { closure: physicallyProved.closure }
+            const entered = await noFocusHarness.enter({
+              sessionId,
+              session: agent.session,
+              record: freshCarrier,
+              close: physicallyProved.closure.original,
+              decision: noFocusDecision,
+              save: async value => {
+                const parsed = closureOnlyNoFocusRecordSchema.safeParse(value)
+                if (!parsed.success) throw new Error('canonical close transaction row failed exact schema validation')
+                await domain.table('focus_precanonical').put(sessionId, parsed.data)
+              },
+              flush: async () => {
+                const sessions = sessionsFlushPort(ctx)
+                if (sessions === undefined) throw new Error('canonical close has no persistence listener')
+                return await sessions.flush(agent.session)
+              },
+              readFrom: async fromSeq => {
+                const persistence = sessionPersistencePort(ctx)
+                if (persistence === undefined) throw new Error('canonical close persistence is unavailable')
+                return await persistence.readFrom(sessionId, fromSeq)
+              },
+            })
+            return { kind: 'enter', messages: [entered.notice] }
+          })
+        } catch {
+          finishClaimTracking(agent, messageId)
+          return await canaryFailure(ctx, agent, message)
+        }
+      }
+      const expression = createExplicitUserExpression(text, sessionId as ChatRef, origin)
+      const request = createExistingFocusRelationRequest(expression, origin, current)
+      if (request === undefined) {
+        finishClaimTracking(agent, messageId)
+        return await canaryFailure(ctx, agent, message)
+      }
+      const outcome = await auxiliary.proposeExistingFocusRelation(request, signal)
+      const interaction = handleExistingFocusInteraction(
+        focusAuthority, candidateAdvice, request, outcome,
+      )
       finishClaimTracking(agent, messageId)
-      return base
+      if (interaction.kind !== 'accepted') return await canaryFailure(ctx, agent, message)
+      return {
+        kind: 'enter',
+        messages: [...base.messages, createUserMessage({
+          content: [{ type: 'text', text: interaction.presentation }],
+          source: {
+            kind: 'plugin',
+            plugin: 'ui-context-compactor:existing-focus-advice',
+            form: 'notice',
+            summary: 'existing focus relation advice',
+          },
+        })],
+      }
     }
     const noFocusInserted = insertedMessages.get(agent)?.get(messageId)
     const noFocusClaimed = claimedNoFocusMessages.get(agent)?.get(messageId)
@@ -3924,8 +4051,7 @@ function installFocusCanary(
           return await knownUnavailable(ctx, agent, message, async () => {})
         }
         if (isAnyNoFocusRecord(existing)) return await canaryFailure(ctx, agent, message)
-        if (text !== '这件事结束了' && text !== '继续') return await canaryFailure(ctx, agent, message)
-        if (text === '这件事结束了') {
+        if (isExplicitCurrentMatterClosure(text)) {
           const proposal = await auxiliary.propose(text, origin, signal)
           const result = focusAuthority.fromBoundProposal(proposal)
             .decideFocus(createExplicitUserExpression(text, sessionId as ChatRef, origin))
@@ -4000,8 +4126,9 @@ function installFocusCanary(
             }
           })
         }
-        if (text !== '继续') return await canaryFailure(ctx, agent, message)
-        if (hasLaterDirectUserEvidence(agent, existing)) return await canaryFailure(ctx, agent, message)
+        if (text === '继续' && hasLaterDirectUserEvidence(agent, existing)) {
+          return await canaryFailure(ctx, agent, message)
+        }
         const original = originalFromSession(agent, existing)
         const originalText = original === undefined ? undefined : textOf(original)
         if (originalText === undefined
@@ -4020,6 +4147,31 @@ function installFocusCanary(
           return await canaryFailure(ctx, agent, message)
         }
         decision = result.value
+        if (text !== '继续') {
+          if (isPoliteAcknowledgementExpression(text)) {
+            return base
+          }
+          const expression = createExplicitUserExpression(text, sessionId as ChatRef, origin)
+          const request = createExistingFocusRelationRequest(expression, origin, decision)
+          if (request === undefined) return await canaryFailure(ctx, agent, message)
+          const outcome = await auxiliary.proposeExistingFocusRelation(request, signal)
+          const interaction = handleExistingFocusInteraction(
+            focusAuthority, candidateAdvice, request, outcome,
+          )
+          if (interaction.kind !== 'accepted') return await canaryFailure(ctx, agent, message)
+          return {
+            kind: 'enter',
+            messages: [...base.messages, createUserMessage({
+              content: [{ type: 'text', text: interaction.presentation }],
+              source: {
+                kind: 'plugin',
+                plugin: 'ui-context-compactor:existing-focus-advice',
+                form: 'notice',
+                summary: 'existing focus relation advice',
+              },
+            })],
+          }
+        }
         // This durable no-shape-change write is the restart transaction's
         // commit point: the same pre-canonical projection may be retained only
         // after C01 has independently re-established every decision field.

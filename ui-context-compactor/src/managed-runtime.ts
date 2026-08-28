@@ -35,6 +35,12 @@ import {
   type EvidencePromiseDescription,
 } from './fact-resolution.ts'
 import type { CanonicalStateRef } from './state-transaction.ts'
+import type {
+  ExistingFocusRelation,
+  ExistingFocusRelationProposal,
+  ExistingFocusRelationProposalOutcome,
+  ExistingFocusRelationRequest,
+} from './focus-existing.ts'
 
 /** The only sidecar domain owned by the context manager. */
 export const CONTEXT_MANAGER_STORAGE_DOMAIN = 'context_manager'
@@ -110,6 +116,17 @@ const ACTION_FACT_NEED_INSTRUCTION = [
   'Every neededFor item must name an item in actions. Each required fact must occur exactly once in either usableInputs or unresolvedInputs.',
   'usableInputs may contain direct_fact or inherited_fact objects; unresolvedInputs degree is insufficient, conflicting, or unknown.',
   'Do not decide focus, do not close the matter, do not invoke tools, and do not use any prior conversation beyond the supplied focus projection.',
+].join('\n')
+
+const EXISTING_FOCUS_RELATION_INSTRUCTION = [
+  'Classify only this one explicit direct user expression against the supplied already-established current focus A.',
+  'Return exactly one JSON object with no markdown and these exact keys:',
+  '{"kind":"existing_focus_relation","focus":"echo the exact supplied focus ref","relation":"related"}',
+  'relation must be exactly one of: related, one_off_unrelated, acknowledgement, new_matter, unknown, multiple.',
+  'Use one_off_unrelated only for a bounded one-time aside that does not begin continuing work B.',
+  'Use acknowledgement for courtesy or thanks that does not explicitly accept, end, or cancel A.',
+  'Use new_matter for persistent unrelated work or a genuine start of B; never disguise it as one_off_unrelated.',
+  'Use unknown or multiple when the relation is not uniquely established. Do not choose a focus, close A, invoke tools, or use conversation outside this projection.',
 ].join('\n')
 
 const EVIDENCE_INSTRUCTION = [
@@ -319,6 +336,35 @@ function proposalFromOutput(output: string, origin: DirectExpressionOrigin): Foc
   const subject = record.subject.trim()
   if (subject.length === 0 || subject.length > 240) return undefined
   return { kind: 'focus', relation: 'new', subject, origin }
+}
+
+function existingFocusRelationFromOutput(
+  output: string,
+  request: ExistingFocusRelationRequest,
+): ExistingFocusRelationProposal | undefined {
+  if (output.length === 0 || output.length > 512) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(output)
+  } catch {
+    return undefined
+  }
+  const record = object(parsed)
+  const relations: readonly ExistingFocusRelation[] = [
+    'related', 'one_off_unrelated', 'acknowledgement', 'new_matter', 'unknown', 'multiple',
+  ]
+  if (record === undefined
+    || !onlyKeys(record, ['kind', 'focus', 'relation'])
+    || record.kind !== 'existing_focus_relation'
+    || record.focus !== request.focus.ref
+    || typeof record.relation !== 'string'
+    || !relations.includes(record.relation as ExistingFocusRelation)) return undefined
+  return Object.freeze({
+    kind: 'existing_focus_relation',
+    focus: request.focus.ref,
+    relation: record.relation as ExistingFocusRelation,
+    origin: request.origin,
+  })
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -541,7 +587,7 @@ function structuredEvidenceFinding(
  * uncertainty. `estimateMessage` prices the exact two messages dispatched.
  */
 export class BoundedAuxiliarySemanticCall {
-  private readonly claimedOrigins = new Map<string, 'focus' | 'action-fact-need'>()
+  private readonly claimedOrigins = new Map<string, 'focus' | 'existing-focus-relation' | 'action-fact-need'>()
   private readonly claimedEvidenceRequests = new WeakSet<BoundedEvidenceProposalRequest>()
   private readonly claimedFutureCriticalRequests = new WeakSet<BoundedFutureCriticalProposalRequest>()
 
@@ -594,6 +640,58 @@ export class BoundedAuxiliarySemanticCall {
     return proposal === undefined
       ? { kind: 'known_failure', code: 'focus-canary', origin }
       : { kind: 'proposal', value: proposal, origin }
+  }
+
+  async proposeExistingFocusRelation(
+    request: ExistingFocusRelationRequest,
+    signal: AbortSignal,
+  ): Promise<ExistingFocusRelationProposalOutcome> {
+    const { expression, origin, focus } = request
+    const failure = (
+      kind: 'known_failure' | 'unknown' = 'known_failure',
+    ): ExistingFocusRelationProposalOutcome => ({
+      kind, code: 'focus-canary', origin, focus: focus.ref,
+    })
+    const rawRequest = object(request)
+    const rawExpression = object(expression)
+    const rawOrigin = object(origin)
+    const rawFocus = object(focus)
+    if (!validConfig(this.config)
+      || rawRequest === undefined || !onlyKeys(rawRequest, ['expression', 'origin', 'focus'])
+      || rawExpression === undefined || !onlyKeys(rawExpression, ['expression', 'chat'])
+      || rawOrigin === undefined || !onlyKeys(rawOrigin, ['messageId', 'hash'])
+      || rawFocus === undefined
+      || !onlyKeys(rawFocus, ['kind', 'ref', 'chat', 'currentMatter', 'latestCorrections'])
+      || focus.kind !== 'focus_established'
+      || focus.chat !== expression.chat
+      || !nonblank(focus.ref)
+      || !nonblank(focus.currentMatter)
+      || !nonblank(origin.messageId)
+      || directExpressionHash(origin.messageId, expression.expression) !== origin.hash
+      || expression.expression.length === 0
+      || expression.expression.length > this.config.maxExpressionChars
+      || signal.aborted) return failure(signal.aborted ? 'unknown' : 'known_failure')
+    if (!this.claimOrigin(origin.messageId, origin.hash, 'existing-focus-relation')) return failure()
+    const projection = JSON.stringify({
+      focus: {
+        kind: focus.kind,
+        ref: focus.ref,
+        currentMatter: focus.currentMatter,
+        latestCorrections: focus.latestCorrections,
+      },
+      expression: expression.expression,
+    })
+    const result = await this.perform(
+      EXISTING_FOCUS_RELATION_INSTRUCTION,
+      'ui-context-compactor:existing-focus-relation-schema',
+      projection,
+      signal,
+    )
+    if (result.kind !== 'output') return failure(result.kind)
+    const proposal = existingFocusRelationFromOutput(result.value, request)
+    return proposal === undefined
+      ? failure()
+      : { kind: 'proposal', origin, focus: focus.ref, value: proposal }
   }
 
   async proposeActionFacts(
@@ -783,7 +881,11 @@ export class BoundedAuxiliarySemanticCall {
       : { kind: 'proposal', request, value: proposal }
   }
 
-  private claimOrigin(messageId: string, hash: string, schema: 'focus' | 'action-fact-need'): boolean {
+  private claimOrigin(
+    messageId: string,
+    hash: string,
+    schema: 'focus' | 'existing-focus-relation' | 'action-fact-need',
+  ): boolean {
     const key = `${messageId}\0${hash}`
     if (this.claimedOrigins.has(key)) return false
     this.claimedOrigins.set(key, schema)

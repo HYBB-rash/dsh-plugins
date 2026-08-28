@@ -25,6 +25,11 @@ import type {
   ContentFailureReason,
   SafeNonFormationReason,
 } from './candidate-qualification.ts'
+import type {
+  EstablishedFocusDecision,
+  ExistingFocusRelationProposalOutcome,
+} from './focus-existing.ts'
+import { isExplicitCurrentMatterClosure } from './focus-existing.ts'
 
 export const FOCUS_CANARY_ERROR = 'focus-canary'
 
@@ -233,6 +238,9 @@ const boundFocusPorts = new WeakMap<FocusAuthority, (expression: ExplicitUserExp
 const restoredFacts = new WeakMap<FocusAuthority, WeakSet<RestoredFocusFact>>()
 const acceptedRestoredReports = new WeakMap<FocusAuthority, WeakSet<C35Result>>()
 const claimedRestoredReports = new WeakMap<FocusAuthority, WeakSet<C35Result>>()
+const registeredRestoredReports = new WeakMap<FocusAuthority, WeakSet<C35Result>>()
+const issuedEstablishedFocus = new WeakMap<FocusAuthority, WeakSet<EstablishedFocusDecision>>()
+const issuedEstablishedFocusByRef = new WeakMap<FocusAuthority, Map<FocusDecisionRef, EstablishedFocusDecision>>()
 
 export interface EstablishedFocusCandidateReceivers {
   readonly formation: {
@@ -376,11 +384,52 @@ export class FocusAuthority {
     restoredFacts.set(this, new WeakSet())
     acceptedRestoredReports.set(this, new WeakSet())
     claimedRestoredReports.set(this, new WeakSet())
+    registeredRestoredReports.set(this, new WeakSet())
+    issuedEstablishedFocus.set(this, new WeakSet())
+    issuedEstablishedFocusByRef.set(this, new Map())
   }
 
   /** One formal owner per installed plugin/context; index owns its lifecycle. */
   static createOwner(): FocusAuthority {
     return new FocusAuthority()
+  }
+
+  /** @internal Resolve only a focus already registered by this exact owner. */
+  resolveExistingFocus(ref: FocusDecisionRef, chat: ChatRef): EstablishedFocusDecision | undefined {
+    const focus = issuedEstablishedFocusByRef.get(this)?.get(ref)
+    return focus?.chat === chat && issuedEstablishedFocus.get(this)?.has(focus) === true
+      ? focus
+      : undefined
+  }
+
+  /**
+   * @internal Register the exact C35 focus after the state transaction has
+   * claimed it. A raw sidecar projection or structurally similar report has
+   * no path into this owner registry.
+   */
+  registerAuthenticatedRecoveredFocus(report: C35Result): EstablishedFocusDecision | undefined {
+    const accepted = acceptedRestoredReports.get(this)
+    const claimed = claimedRestoredReports.get(this)
+    const registered = registeredRestoredReports.get(this)
+    if (accepted?.has(report) !== true
+      || claimed?.has(report) !== true
+      || registered?.has(report) === true
+      || report.kind !== 'business_result'
+      || report.value.kind !== 'accepted_for_contract') return undefined
+    const fact = report.value.value
+    if (fact.focus.kind !== 'focus_established') return undefined
+    const focus = Object.freeze({ ...fact.focus, chat: fact.target })
+    const byRef = issuedEstablishedFocusByRef.get(this)
+    const existing = byRef?.get(focus.ref)
+    if (byRef === undefined || (existing !== undefined
+      && (existing.chat !== focus.chat
+        || existing.currentMatter !== focus.currentMatter
+        || existing.latestCorrections !== focus.latestCorrections))) return undefined
+    const exact = existing ?? focus
+    issuedEstablishedFocus.get(this)?.add(exact)
+    byRef.set(exact.ref, exact)
+    registered?.add(report)
+    return exact
   }
 
   /**
@@ -393,6 +442,74 @@ export class FocusAuthority {
 
   fromBoundProposal(proposal: FocusProposalOutcome): BoundFocusProposal {
     return new BoundFocusProposal(this, proposal)
+  }
+
+  /** @internal C01 on one direct expression while the exact established A remains current. */
+  decideExistingFocus(
+    expression: ExplicitUserExpression,
+    current: EstablishedFocusDecision,
+    proposalOutcome: ExistingFocusRelationProposalOutcome,
+  ): C01Result {
+    const identity = call('C01', expression)
+    const origin = originOf(expression)
+    const expectedHash = origin === undefined ? undefined : createHash('sha256')
+      .update(origin.messageId)
+      .update('\0')
+      .update(expression.expression)
+      .digest('hex')
+    if (origin === undefined
+      || origin.messageId.trim().length === 0
+      || origin.hash !== expectedHash
+      || expression.expression.trim().length === 0
+      || expression.expression.length > 240
+      || expression.chat !== current.chat
+      || issuedEstablishedFocus.get(this)?.has(current) !== true
+      || proposalOutcome.focus !== current.ref
+      || proposalOutcome.origin.messageId !== origin.messageId
+      || proposalOutcome.origin.hash !== origin.hash) {
+      return {
+        kind: 'rejected', identity,
+        reason: { kind: 'known_business_precondition_not_met', detail: scope('C01', 'rejection') },
+      }
+    }
+    if (proposalOutcome.kind === 'known_failure') {
+      return {
+        kind: 'known_failure', identity,
+        problem: { detail: scope('C01', 'failure'), affected: scope('C01', 'failure_scope') },
+      }
+    }
+    if (proposalOutcome.kind === 'unknown') {
+      return {
+        kind: 'unknown', identity,
+        problem: { detail: scope('C01', 'unknown'), affected: scope('C01', 'unknown_scope') },
+      }
+    }
+    if (proposalOutcome.kind !== 'proposal') {
+      return {
+        kind: 'unknown', identity,
+        problem: { detail: scope('C01', 'unknown'), affected: scope('C01', 'unknown_scope') },
+      }
+    }
+    const proposal = proposalOutcome.value
+    if (proposal.kind !== 'existing_focus_relation'
+      || proposal.focus !== current.ref
+      || proposal.origin.messageId !== origin.messageId
+      || proposal.origin.hash !== origin.hash) {
+      return {
+        kind: 'rejected', identity,
+        reason: { kind: 'known_business_precondition_not_met', detail: scope('C01', 'rejection') },
+      }
+    }
+    if (proposal.relation === 'acknowledgement'
+      || proposal.relation === 'new_matter'
+      || proposal.relation === 'unknown'
+      || proposal.relation === 'multiple') {
+      return {
+        kind: 'unknown', identity,
+        problem: { detail: scope('C01', 'unknown'), affected: scope('C01', 'unknown_scope') },
+      }
+    }
+    return { kind: 'business_result', identity, value: current }
   }
 
   /** C35 receiver: only a successful C34 report may be decoded into this fact. */
@@ -478,7 +595,7 @@ export class FocusAuthority {
       // The auxiliary output is untrusted. H2 recognizes exactly this narrow
       // direct-user close expression so "好，谢谢" can never become no-focus
       // merely because a provider classified it that way.
-      if (proposal.relation !== 'current' || matter !== '这件事结束了') {
+      if (proposal.relation !== 'current' || !isExplicitCurrentMatterClosure(matter)) {
         return {
           kind: 'rejected',
           identity,
@@ -531,6 +648,8 @@ export class FocusAuthority {
         problem: { detail: scope('C01', 'failure'), affected: scope('C01', 'failure_scope') },
       }
     }
+    issuedEstablishedFocus.get(this)?.add(decision)
+    issuedEstablishedFocusByRef.get(this)?.set(decision.ref, decision)
     return {
       kind: 'business_result',
       identity,

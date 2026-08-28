@@ -57,6 +57,7 @@ const contexts: Context[] = []
 const roots: string[] = []
 
 const focusDirect = '准备升级 DeepSeek Harness'
+const relatedFocusDirect = '继续整理 DeepSeek Harness 升级风险。'
 const singleFactDirect = '查一下 DeepSeek Harness 当前最新版本；确认后再决定是否升级。'
 const multiFactDirect = '查一下 DeepSeek Harness 当前最新版本和该版本要求的 Node.js 版本；分别确认后再决定是否升级。'
 const multiSourceDirect = '查一下 DeepSeek Harness 当前最新版本的两个来源；如果结论冲突，说明冲突并只限制依赖版本结论的行动。'
@@ -162,6 +163,7 @@ function storedFocusRecord(path: string, key: string): Record<string, unknown> |
 class NaturalEvidenceAdapter extends LlmAdapter {
   readonly rootRequests: GenerateOptions[] = []
   focusCalls = 0
+  relationCalls = 0
   actionCalls = 0
   evidenceCalls = 0
   singleVersion = '1.4.2'
@@ -175,6 +177,15 @@ class NaturalEvidenceAdapter extends LlmAdapter {
     if (hasSchema(options, 'ui-context-compactor:focus-canary-schema')) {
       this.focusCalls += 1
       yield* textChunks(JSON.stringify({ kind: 'focus', subject: focusDirect, relation: 'new' }))
+      return
+    }
+    if (hasSchema(options, 'ui-context-compactor:existing-focus-relation-schema')) {
+      this.relationCalls += 1
+      const projection = object(JSON.parse(messageText(options.messages.slice(1))))
+      const focus = object(projection?.focus)
+      yield* textChunks(JSON.stringify({
+        kind: 'existing_focus_relation', focus: focus?.ref, relation: 'related',
+      }))
       return
     }
     if (hasSchema(options, 'ui-context-compactor:action-fact-need-schema')) {
@@ -689,7 +700,13 @@ describe('single-session context route through the real loop', () => {
     )
 
     await send(agent, focusDirect)
+    const focusStateBeforeRelated = storedFocusRecord(sqlitePath, String(agent.session.id))
+    await send(agent, relatedFocusDirect)
+    const relatedPresentation = modelInput(naturalAdapter.rootRequests.at(-1)!)
     const afterFocusRoot = naturalAdapter.rootRequests.length
+    expect(storedFocusRecord(sqlitePath, String(agent.session.id))).toStrictEqual(focusStateBeforeRelated)
+    expect(relatedPresentation).toContain(`继续当前焦点：${focusDirect}`)
+    expect(naturalAdapter.relationCalls).toBe(1)
     await send(agent, singleFactDirect)
     const afterSingle = {
       action: naturalAdapter.actionCalls,
@@ -782,10 +799,10 @@ describe('single-session context route through the real loop', () => {
     const qualifiedDetachedCanonical = canonicalMessages(qualifiedDetached.events)
 
     expect(naturalAdapter.focusCalls).toBe(2)
-    expect(afterFocusRoot).toBe(1)
-    expect(afterSingle).toStrictEqual({ action: 1, evidence: 1, search: 1, root: 2 })
-    expect(afterMulti).toStrictEqual({ action: 2, evidence: 3, search: 3, root: 3 })
-    expect(afterMultiSource).toStrictEqual({ action: 3, evidence: 5, search: 4, root: 4 })
+    expect(afterFocusRoot).toBe(2)
+    expect(afterSingle).toStrictEqual({ action: 1, evidence: 1, search: 1, root: 3 })
+    expect(afterMulti).toStrictEqual({ action: 2, evidence: 3, search: 3, root: 4 })
+    expect(afterMultiSource).toStrictEqual({ action: 3, evidence: 5, search: 4, root: 5 })
     expect(naturalSearches.map(request => request.query)).toStrictEqual([
       releaseQuery, releaseQuery, nodeQuery, releaseQuery, releaseQuery,
     ])
@@ -830,7 +847,7 @@ describe('single-session context route through the real loop', () => {
       && String(event.data.id) === String(qualifiedDirect.id))).toHaveLength(1)
     expect(persisted.events.flatMap(event => event.type === 'user/message'
       && event.data.source.kind === 'user' ? [messageText([event.data])] : [])).toEqual([
-      focusDirect, singleFactDirect, updateBackgroundDirect, multiFactDirect, multiSourceDirect,
+      focusDirect, relatedFocusDirect, singleFactDirect, updateBackgroundDirect, multiFactDirect, multiSourceDirect,
       '只记录一句普通备注，不查询版本。',
     ])
     expect(qualifiedDetached.events.flatMap(event => event.type === 'user/message'
@@ -892,6 +909,12 @@ describe('single-session context route through the real loop', () => {
       && event.data.source.kind === 'user'
       && String(event.data.id) === String(rollingProducerDirect.id))).toHaveLength(1)
     expect(qualifiedAgent.session.events.filter(event => event.type.startsWith('compaction/'))).toHaveLength(0)
+    const canonicalBeforeRelated = storedFocusRecord(sqlitePath, qualifiedBackgroundSessionId)
+    const relationCallsBeforeCanonical = naturalAdapter.relationCalls
+    await send(qualifiedAgent, relatedFocusDirect)
+    expect(storedFocusRecord(sqlitePath, qualifiedBackgroundSessionId)).toStrictEqual(canonicalBeforeRelated)
+    expect(naturalAdapter.relationCalls).toBe(relationCallsBeforeCanonical + 1)
+    expect(modelInput(naturalAdapter.rootRequests.at(-1)!)).toContain(`继续当前焦点：${focusDirect}`)
     await exerciseInputRequeueProductionIntegration()
   })
 
