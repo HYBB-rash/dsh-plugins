@@ -159,6 +159,11 @@ grep -q "reconcile_production_jobs.mjs migrate" "$repo_root/release/cli.mjs"
 grep -q "reconcile_production_jobs.mjs check" "$repo_root/release/cli.mjs"
 grep -q "bzp_forced_key.py install" "$repo_root/release/cli.mjs"
 grep -q "bzp_forced_key.py remove" "$repo_root/release/cli.mjs"
+# The release scripts themselves arrive over stdin.  Nested SSH calls that do
+# not intentionally carry a Rita file payload must never consume that stream.
+test "$(grep -c 'rita_ssh=(ssh -n -i' "$repo_root/release/cli.mjs")" = 3
+grep -Fq 'sha256sum "$rita_latest" </dev/null' "$repo_root/release/cli.mjs"
+grep -Fq 'rm -f "$rita_latest" </dev/null' "$repo_root/release/cli.mjs"
 grep -q "const oomUnit = 'wechat-oom-protect.service'" "$repo_root/release/cli.mjs"
 grep -q "systemctl disable --now" "$repo_root/release/cli.mjs"
 grep -q "rm -f /etc/systemd/system/" "$repo_root/release/cli.mjs"
