@@ -23,17 +23,22 @@ for automation_entrypoint in \
   bzp/bzp_ble_monitor.py \
   bzp/bzp_ble_read_until_success.py \
   bzp/bzp_dual_dispatch.py \
-  bzp/bzp_weixin_relay.py \
+  bzp/bzp_snapshot.py \
+  bzp/bzp_refresh_enqueue.py \
+  bzp/bzp_refresh_worker.py \
+  bzp/bzp_forced_key.py \
   cron/cron_conflict_check.py \
   deepseek/deepseek_daily.sh \
   mywechat/mywechat_ai_context_daily.sh \
   mywechat/mywechat_ai_context_hourly.sh \
   mywechat/mywechat_pull.sh \
   mywechat/mywechat_watchdog.sh \
+  scripts/reconcile_production_jobs.mjs \
   telegram/send_tg_ops.sh; do
   test -x "/opt/dsh/automations/$automation_entrypoint"
 done
 test -f /opt/dsh/automations/requirements.lock
+node --input-type=module -e "const m=await import('file:///opt/dsh/automations/scripts/reconcile_production_jobs.mjs'); const jobs=m.loadManifests('/opt/dsh/automations'); m.validateImageTargets(jobs);"
 
 for executable in bash bluetoothctl curl git node openssl python3 rg socat ssh; do
   command -v "$executable" >/dev/null

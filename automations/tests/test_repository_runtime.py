@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import importlib
-import io
 import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 
@@ -21,8 +19,6 @@ for source_dir in (SCRIPTS, BZP, CRON):
     sys.path.insert(0, str(source_dir))
 
 import automation_paths
-import bzp_dual_dispatch
-import bzp_weixin_relay
 import cron_conflict_check
 
 
@@ -40,7 +36,7 @@ class RepositoryIndependenceTests(unittest.TestCase):
         for path in AUTOMATIONS.rglob("*"):
             if AUTOMATIONS / "tests" in path.parents:
                 continue
-            if not path.is_file() or path.suffix not in {".py", ".sh", ".js", ".cjs"}:
+            if not path.is_file() or path.suffix not in {".py", ".sh", ".js", ".cjs", ".mjs"}:
                 continue
             text = path.read_text(encoding="utf-8")
             for marker in forbidden:
@@ -59,6 +55,8 @@ class RepositoryIndependenceTests(unittest.TestCase):
             "openclaw_weekly_brief.sh",
             "info_monitor.py",
             "mywechat_sync_daemon.sh",
+            "bzp_weixin_relay.py",
+            "wechat_oom_protect.py",
         }
         found = [
             str(path.relative_to(ROOT))
@@ -71,16 +69,19 @@ class RepositoryIndependenceTests(unittest.TestCase):
         source_files = {
             path.name
             for path in SCRIPTS.iterdir()
-            if path.is_file() and path.suffix in {".py", ".sh", ".js", ".cjs"}
+            if path.is_file() and path.suffix in {".py", ".sh", ".js", ".cjs", ".mjs"}
         }
-        self.assertEqual(source_files, {"automation_paths.py"})
+        self.assertEqual(source_files, {"automation_paths.py", "reconcile_production_jobs.mjs"})
 
     def test_direct_task_entrypoints_keep_executable_mode(self):
         entrypoints = (
             BZP / "bzp_ble_monitor.py",
             BZP / "bzp_ble_read_until_success.py",
             BZP / "bzp_dual_dispatch.py",
-            BZP / "bzp_weixin_relay.py",
+            BZP / "bzp_snapshot.py",
+            BZP / "bzp_refresh_enqueue.py",
+            BZP / "bzp_refresh_worker.py",
+            BZP / "bzp_forced_key.py",
             CRON / "cron_conflict_check.py",
             AUTOMATIONS / "deepseek" / "deepseek_daily.sh",
             AUTOMATIONS / "mywechat" / "mywechat_ai_context_daily.sh",
@@ -88,10 +89,34 @@ class RepositoryIndependenceTests(unittest.TestCase):
             AUTOMATIONS / "mywechat" / "mywechat_pull.sh",
             AUTOMATIONS / "mywechat" / "mywechat_watchdog.sh",
             AUTOMATIONS / "telegram" / "send_tg_ops.sh",
+            SCRIPTS / "reconcile_production_jobs.mjs",
         )
         self.assertEqual(
             [str(path.relative_to(ROOT)) for path in entrypoints if not os.access(path, os.X_OK)],
             [],
+        )
+
+    def test_production_manifests_use_direct_image_commands_and_one_bzp_operation_lock(self):
+        manifests = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in AUTOMATIONS.rglob("jobs.production.json")
+        ]
+        self.assertGreaterEqual(len(manifests), 3)
+        bzp_locks = []
+        forbidden = ".open" + "claw"
+        for manifest in manifests:
+            for job in manifest["jobs"]:
+                spec = job["spec"]
+                self.assertNotIn(forbidden, json.dumps(spec, ensure_ascii=False))
+                if job["kind"] == "command":
+                    argv = spec["command"]["argv"]
+                    self.assertNotEqual(argv[:2], ["sh", "-lc"])
+                    self.assertNotEqual(argv[:2], ["bash", "-lc"])
+                    if manifest["business"] == "bzp" and "--operation-lock" in argv:
+                        bzp_locks.append(argv[argv.index("--operation-lock") + 1])
+        self.assertEqual(
+            bzp_locks,
+            ["/home/herman/.dsh/storages/automations/bzp/operation.lock"] * 2,
         )
 
 
@@ -114,35 +139,6 @@ class PathTests(unittest.TestCase):
                     automation_paths.state_file("monitor.json"),
                     str(Path(tmp) / "state" / "monitor.json"),
                 )
-
-
-class RelayTests(unittest.TestCase):
-    def test_relay_passes_message_on_stdin_without_openclaw_arguments(self):
-        opts = SimpleNamespace(
-            sender_bin="/opt/weixin/send",
-            target="wife",
-            max_bytes=1024,
-            send_timeout=3.0,
-        )
-        completed = SimpleNamespace(returncode=0)
-        with mock.patch.object(bzp_weixin_relay.subprocess, "run", return_value=completed) as run:
-            code = bzp_weixin_relay.relay_once(opts, io.BytesIO("电量正常".encode()), None)
-        self.assertEqual(code, 0)
-        self.assertEqual(run.call_args.args[0], ["/opt/weixin/send", "--target", "wife"])
-        self.assertEqual(run.call_args.kwargs["input"], "电量正常".encode())
-
-    def test_dispatch_passes_explicit_remote_sender(self):
-        opts = SimpleNamespace(
-            ssh_bin="/usr/bin/ssh",
-            ssh_host="rita.hermes",
-            remote_helper="/opt/dsh/automations/bzp/bzp_weixin_relay.py",
-            weixin_sender_bin="/opt/weixin/send",
-            weixin_target="wife",
-        )
-        command = bzp_dual_dispatch._ssh_command(opts)
-        self.assertIn("--sender-bin", command)
-        self.assertIn("/opt/weixin/send", command)
-        self.assertNotIn("--channel", command)
 
 
 class CronLedgerTests(unittest.TestCase):

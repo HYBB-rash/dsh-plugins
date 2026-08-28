@@ -18,6 +18,11 @@ case "${1:-help}" in
     shift
     exec node "$release_root/scripts/validate-state.mjs" "$@"
     ;;
+  reconcile-cron-preflight)
+    shift
+    exec node /opt/dsh/automations/scripts/reconcile_production_jobs.mjs migrate \
+      --offline-store "${DSH_HOME:-/home/herman/.dsh}/storages/dsh-cron" "$@"
+    ;;
   fake-telegram)
     exec node "$release_root/scripts/fake-telegram.mjs"
     ;;
@@ -44,8 +49,9 @@ case "${1:-help}" in
     ;;
   help|--help|-h)
     cat <<'EOF'
-Container commands: prepare, self-test, dev-source-build, validate-state, fake-telegram,
-web, telegram, telegram-test, lan-proxy, toolbox
+Container commands: prepare, self-test, dev-source-build, validate-state,
+reconcile-cron-preflight, fake-telegram, web, telegram, telegram-test,
+lan-proxy, toolbox
 EOF
     ;;
   *)

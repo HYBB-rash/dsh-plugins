@@ -133,7 +133,8 @@ RUN set -eu; \
      && DSH_X_FEED_DATA_DIR="$python_data" PYTHONWARNINGS=ignore \
         python3 -m unittest test_insight_engine.py); \
     (cd /opt/dsh/automations \
-     && python3 -m unittest discover -s tests -p 'test_*.py'); \
+     && python3 -m unittest discover -s tests -p 'test_*.py' \
+     && node --test tests/*.test.mjs); \
     (cd /opt/dsh/automations/bzp \
      && python3 -m unittest test_bzp_ble_read_until_success.py); \
     PYTHONPYCACHEPREFIX="$python_data/pycache" \
