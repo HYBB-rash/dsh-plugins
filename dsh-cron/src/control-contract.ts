@@ -10,6 +10,7 @@ import type {
   AgentEnvironmentMarker,
   CommandGate,
   CommandPayload,
+  DeliverChannel,
   FailureAlertPolicy,
   ScheduleSpec,
 } from './types.ts'
@@ -172,6 +173,38 @@ export interface BoundCronCommandJobView extends BoundCronCommandSpec {
   readonly id: string
   readonly createdAt: string
 }
+
+/**
+ * Read-only projection used by repository release guards. Unlike a bound
+ * snapshot, it also includes jobs without an externalRef so a whole-ledger
+ * dependency scan cannot accidentally omit unmanaged active work.
+ */
+export type ActiveCronJobInspection =
+  | {
+      readonly kind: 'agent'
+      readonly id: string
+      readonly createdAt: string
+      readonly externalRef?: string
+      readonly schedule: ScheduleSpec
+      readonly prompt: string
+      readonly deliver: DeliverChannel
+      readonly cwd?: string
+      readonly sessionMode: CronSessionMode
+      readonly agentEnvironment?: AgentEnvironmentMarker
+      readonly gate?: CommandGate
+      readonly failureAlert?: FailureAlertPolicy
+    }
+  | {
+      readonly kind: 'command'
+      readonly id: string
+      readonly createdAt: string
+      readonly externalRef?: string
+      readonly schedule: ScheduleSpec
+      readonly command: CommandPayload
+      readonly deliver: 'telegram' | 'silent'
+      readonly cwd?: string
+      readonly failureAlert?: FailureAlertPolicy
+    }
 
 /** Public observation of one external command binding. */
 export interface BoundCronCommandSnapshot {
