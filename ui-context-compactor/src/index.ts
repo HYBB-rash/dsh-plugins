@@ -135,6 +135,16 @@ import {
   type RouteReducerConfig,
   type RouteUpdateFailureCode,
 } from './reducer.ts'
+import {
+  P01_USER_WORDS_CONTEXT_NAME,
+  P01_USER_WORDS_VARIABLE_NAME,
+  assertP01UserWordsCompactionSafe,
+  buildP01UserWordsView,
+  isP01UserWordsRootSession,
+  resolveP01UserWordsViewConfig,
+  type P01UserWordsViewConfig,
+  type ResolvedP01UserWordsViewConfig,
+} from './p01-user-words.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'ui-context-compactor'
@@ -163,6 +173,8 @@ export interface Config {
   }
   /** Force one safe standalone compaction after this many completed root turns. Disabled when omitted. */
   readonly compactEveryTurns?: number
+  /** P01-only exact single-root user-words reconstruction trial. */
+  readonly p01UserWordsView?: P01UserWordsViewConfig
   /** H1-only local Harness canary. It accepts only the two exact test chat ids. */
   readonly focusCanary?:
     | {
@@ -200,6 +212,10 @@ export const Config: z<Config> = z.object({
     minChars: z.number().step(1).min(1_024).default(2_500),
   }),
   compactEveryTurns: z.number().step(1).min(1),
+  p01UserWordsView: z.object({
+    mode: z.const('enforce').required(),
+    allowlist: z.array(z.string()).required(),
+  }).default(undefined as never),
   focusCanary: z.union([
     z.object({
       mode: z.const('observe').required(),
@@ -4271,6 +4287,17 @@ function isRootSession(delegationDepth: number | undefined): boolean {
   return (delegationDepth ?? 0) === 0
 }
 
+function isP01Agent(
+  agent: Agent,
+  config: ResolvedP01UserWordsViewConfig | undefined,
+): boolean {
+  return isP01UserWordsRootSession(
+    String(agent.session.id),
+    agent.session.header.delegationDepth,
+    config,
+  )
+}
+
 function warnRouteFailure(ctx: Context, code: RouteUpdateFailureCode): void {
   const message = `ui-context-compactor: route update failed (${code}); raw Session history is retained and compaction stays blocked until a later successful update`
   ctx.logger.warn(message)
@@ -4309,6 +4336,7 @@ function warnPeriodicCompactionFailure(ctx: Context, code: 'stale-route' | 'back
 export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const resolved = resolveConfig(config)
   const compactEveryTurns = resolveCompactEveryTurns(config.compactEveryTurns)
+  const p01UserWordsView = resolveP01UserWordsViewConfig(config.p01UserWordsView)
   // Observe is intentionally a compatibility/no-op mode: it must not change
   // admission, storage, request contents, provider dispatch, or user output.
   // The H1 Harness chain is explicitly enforce-only.
@@ -4368,12 +4396,34 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     ? undefined
     : managedCompaction?.classifier ?? new ManagedInteractiveRootClassifier(enforcedRuntime)
 
+  // The variable indirection is intentional: system-prompt interpolation is
+  // single-pass, so arbitrary verbatim `{{...}}` in user words remains data.
+  ctx.systemPrompt.variable(P01_USER_WORDS_VARIABLE_NAME, ({ agent }) => {
+    if (agent === undefined || !isP01Agent(agent, p01UserWordsView)) return ''
+    try {
+      return buildP01UserWordsView({
+        events: agent.session.events,
+        surfaceNodes: agent.session.surface.nodes,
+      })
+    } catch {
+      // Runtime ambiguity or a read failure contributes no snapshot; the
+      // ordinary current turn remains owned by AgentLoop.
+      return ''
+    }
+  })
+  ctx.systemPrompt.context({
+    name: P01_USER_WORDS_CONTEXT_NAME,
+    order: -79,
+    text: `{{${P01_USER_WORDS_VARIABLE_NAME}}}`,
+  })
+
   ctx.systemPrompt.context({
     name: 'context-route:policy',
     order: -80,
     text: ({ agent }) => {
       if (agent === undefined
         || managed(agent, classifier)
+        || isP01Agent(agent, p01UserWordsView)
         || !isRootSession(agent.session.header.delegationDepth)) return ''
       return renderRouteBootstrapContext(String(agent.session.id))
     },
@@ -4392,6 +4442,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     const decision = await next()
     if (decision.kind === 'reject'
       || managed(agent, classifier)
+      || isP01Agent(agent, p01UserWordsView)
       || !isRootSession(agent.session.header.delegationDepth)
       || signal.aborted) return decision
     const projection = foldRoute(agent.session.events)
@@ -4422,7 +4473,9 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   })
 
   ctx.on('agent/turn-stopping', async ({ agent, signal }) => {
-    if (managed(agent, classifier) || !isRootSession(agent.session.header.delegationDepth)) return
+    if (managed(agent, classifier)
+      || isP01Agent(agent, p01UserWordsView)
+      || !isRootSession(agent.session.header.delegationDepth)) return
     try {
       await updateRoute(ctx, agent, resolved, signal)
     } catch (error: unknown) {
@@ -4444,7 +4497,14 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           || !isRootSession(agent.session.header.delegationDepth)
           || completedTurnsSinceLastSuccessfulCompaction(agent.session.events) < compactEveryTurns) return
         try {
-          assertRouteFreshForCompaction(agent.session.events, agent.session.surface.nodes)
+          if (isP01Agent(agent, p01UserWordsView)) {
+            assertP01UserWordsCompactionSafe({
+              events: agent.session.events,
+              surfaceNodes: agent.session.surface.nodes,
+            })
+          } else {
+            assertRouteFreshForCompaction(agent.session.events, agent.session.surface.nodes)
+          }
         } catch {
           warnPeriodicCompactionFailure(compactionCtx, 'stale-route')
           return
@@ -4471,6 +4531,23 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   }
 }
 
+export {
+  P01_USER_WORDS_CONTEXT_NAME,
+  P01_USER_WORDS_VARIABLE_NAME,
+  P01_USER_WORDS_VIEW_HEADER,
+  P01_USER_WORDS_VIEW_MAX_CHARS,
+  assertP01UserWordsCompactionSafe,
+  buildP01UserWordsView,
+  evaluateP01UserWordsView,
+  hasP01ContextRoute,
+  isP01UserWordsRootSession,
+  resolveP01UserWordsViewConfig,
+  type BuildP01UserWordsViewRequest,
+  type P01UserWordsUnavailableReason,
+  type P01UserWordsViewConfig,
+  type P01UserWordsViewEvaluation,
+  type ResolvedP01UserWordsViewConfig,
+} from './p01-user-words.ts'
 export {
   assertRouteFreshForCompaction,
   buildRouteMaterial,

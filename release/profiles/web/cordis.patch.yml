@@ -43,10 +43,19 @@
         largeToolResultPreprocessing:
           enabled: true
           minChars: 2500
+        p01UserWordsView:
+          mode: enforce
+          allowlist:
+            - 'session-2ad8a3dd-1e0b-4126-aca8-4f129ad02b54'
     - id: ui-context-compactor-invariant-registry
       name: '@deepseek-ai/dsh-invariants'
     - id: ui-context-compactor-invariant
       name: '@deepseek-ai/dsh-client-ui-context-compactor/invariant'
+      config:
+        p01UserWordsView:
+          mode: enforce
+          allowlist:
+            - 'session-2ad8a3dd-1e0b-4126-aca8-4f129ad02b54'
     - id: tool-session-query
       name: '@deepseek-ai/dsh-tool-session-query'
     - id: dsh-cron

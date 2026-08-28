@@ -46,7 +46,10 @@ import * as RouteInvariant from '../src/invariant.ts'
 import {
   assertRouteFreshForCompaction,
   completedTurnsSinceLastSuccessfulCompaction,
+  createRouteRevisionMessage,
   foldRoute,
+  P01_USER_WORDS_CONTEXT_NAME,
+  parseRouteBody,
   ROUTE_CONTEXT_SOURCE,
   type Config as ContextRouteConfig,
   type RouteBody,
@@ -75,6 +78,14 @@ const rawMultiSourceEnvelope = 'PRIVATE-RAW-MULTI-SOURCE-ENVELOPE'
 const updateBackgroundDirect = '请更新当前背景'
 const qualifiedBackgroundSessionId = ContextRoutePlugin.FOCUS_CANARY_IDS[1]!
 const unprovableCandidatePresentation = '尚未形成候选目前无法证明合格：完整候选超出已知安全余量。影响范围：候选资格整体。'
+const p01SessionId = 'session-2ad8a3dd-1e0b-4126-aca8-4f129ad02b54'
+const p01OldWords = 'P01-旧原话-蓝瓷杯：我把庭院钥匙放在蓝色瓷杯后面。'
+const p01Config = Object.freeze({
+  p01UserWordsView: Object.freeze({
+    mode: 'enforce' as const,
+    allowlist: Object.freeze([p01SessionId]),
+  }),
+})
 
 afterEach(async () => {
   vi.restoreAllMocks()
@@ -118,6 +129,21 @@ function messageText(messages: readonly Message[]): string {
 
 function modelInput(options: GenerateOptions): string {
   return messageText(options.messages)
+}
+
+function occurrenceCount(value: string, needle: string): number {
+  return value.split(needle).length - 1
+}
+
+function p01ViewCarriers(options: GenerateOptions): string[] {
+  return options.messages.flatMap((message) => {
+    const source = message.source
+    if (source.kind !== 'plugin'
+      || source.plugin !== '@deepseek-ai/dsh-system-prompt'
+      || source.form !== 'snapshot'
+      || !source.sections.some(section => section.name === P01_USER_WORDS_CONTEXT_NAME)) return []
+    return [messageText([message])]
+  })
 }
 
 function hasSchema(options: GenerateOptions, plugin: string): boolean {
@@ -387,6 +413,12 @@ class RouteAwareAdapter extends LlmAdapter {
       )
       return
     }
+    if (modelInput(options).includes('庭院钥匙在哪里？')) {
+      yield* textChunks(modelInput(options).includes(p01OldWords)
+        ? '庭院钥匙在蓝色瓷杯后面。'
+        : '当前请求没有提供庭院钥匙位置。')
+      return
+    }
     yield* textChunks(`conversation answer ${this.conversationRequests.length}`)
   }
 }
@@ -430,7 +462,9 @@ async function harness(config: ContextRouteConfig = {}): Promise<Harness> {
   await ctx.plugin(AgentLoopInvariant)
   await ctx.plugin(CompactionInvariant)
   await ctx.plugin(CompactionBasicInvariant)
-  await ctx.plugin(RouteInvariant)
+  await ctx.plugin(RouteInvariant, config.p01UserWordsView === undefined
+    ? {}
+    : { p01UserWordsView: config.p01UserWordsView })
   await ctx.plugin(SqliteSessionQueryEngine, { path: ':memory:', openAt: 'first-search' })
   await ctx.plugin(ToolSessionQuery)
   await ctx.plugin(TokenMeter)
@@ -442,6 +476,63 @@ async function harness(config: ContextRouteConfig = {}): Promise<Harness> {
   ctx.llm.registerAdapter(['mock'], adapter)
   const agent = ctx.agentLoop.create(SessionId('route-integration'), { provider: 'mock', model: 'mock' })
   return { ctx, agent, adapter, compaction }
+}
+
+interface PersistentP01Harness extends Harness {
+  readonly root: string
+  readonly sessionsRoot: string
+  readonly sqlitePath: string
+}
+
+async function mountPersistentP01Harness(
+  root: string,
+  p01Expected: boolean,
+  resume = false,
+): Promise<PersistentP01Harness> {
+  const sessionsRoot = join(root, 'sessions')
+  const sqlitePath = join(root, 'session-query.sqlite')
+  await mkdir(sessionsRoot, { recursive: true })
+
+  const ctx = new Context()
+  contexts.push(ctx)
+  await mountAgentLoopTestDependencies(ctx)
+  await ctx.plugin(InvariantRegistry)
+  await ctx.plugin(SessionInvariant)
+  await ctx.plugin(AgentInvariant)
+  await ctx.plugin(AgentLoopInvariant)
+  await ctx.plugin(CompactionInvariant)
+  await ctx.plugin(CompactionBasicInvariant)
+  await ctx.plugin(RouteInvariant, p01Expected ? p01Config : {})
+  await ctx.plugin(JsonlSessionPersistence, { root: sessionsRoot, compression: 'none' })
+  await ctx.plugin(SqliteSessionQueryEngine, { path: sqlitePath })
+  await ctx.plugin(ToolSessionQuery)
+  await ctx.plugin(TokenMeter)
+  await ctx.plugin(DeterministicCompactionEngine, { auto: false })
+  const compaction = ctx.compaction as DeterministicCompactionEngine
+  if (p01Expected) {
+    await ctx.plugin(ContextRoutePlugin, {
+      reasoningEffort: 'off',
+      ...p01Config,
+    })
+  } else {
+    await ctx.plugin(ContextRoutePlugin, { reasoningEffort: 'off' })
+  }
+  await ctx.plugin(AgentLoop, { agents: [] })
+  const adapter = new RouteAwareAdapter()
+  ctx.llm.registerAdapter(['mock'], adapter)
+  const agent = resume
+    ? (await ctx.agents.resume({
+        resumeSessionId: SessionId(p01SessionId),
+        agentOptions: { provider: 'mock', model: 'mock' },
+      })).agent
+    : ctx.agentLoop.create(SessionId(p01SessionId), { provider: 'mock', model: 'mock' })
+  return { ctx, agent, adapter, compaction, root, sessionsRoot, sqlitePath }
+}
+
+async function persistentP01Harness(p01Expected = false): Promise<PersistentP01Harness> {
+  const root = await mkdtemp(join(tmpdir(), 'context-manager-p01-'))
+  roots.push(root)
+  return mountPersistentP01Harness(root, p01Expected)
 }
 
 async function send(agent: Agent, text: string): Promise<UserMessage> {
@@ -553,6 +644,201 @@ async function exerciseInputRequeueProductionIntegration(): Promise<void> {
 }
 
 describe('single-session context route through the real loop', () => {
+  it('keeps the implementation-before baseline explicit: a legacy-route session cannot recover old words after real compaction', async () => {
+    const h = await persistentP01Harness()
+    await send(h.agent, p01OldWords)
+    await send(h.agent, '继续增长会话：先核对院门是否已经上锁。')
+    await send(h.agent, '继续增长会话：再确认明早浇花。')
+
+    const oldEvent = h.agent.session.events.find(event => event.type === 'user/message'
+      && event.data.source.kind === 'user'
+      && messageText([event.data]).includes(p01OldWords))
+    expect(oldEvent?.type).toBe('user/message')
+    expect(() => assertRouteFreshForCompaction(h.agent.session.events)).not.toThrow()
+
+    const signal = new AbortController().signal
+    expect(await h.compaction.compactNow(h.agent, signal)).not.toBeNull()
+    const compactionEvents = h.agent.session.events.filter(event => event.type.startsWith('compaction/'))
+    expect(compactionEvents.map(event => event.type)).toStrictEqual([
+      'compaction/start',
+      'compaction/summary',
+      'compaction/end',
+    ])
+    expect(compactionEvents[0]?.seq).toBeLessThan(compactionEvents[1]?.seq ?? -1)
+    expect(compactionEvents[1]?.seq).toBeLessThan(compactionEvents[2]?.seq ?? -1)
+    const compactionEnd = compactionEvents[2]
+    expect(compactionEnd?.type).toBe('compaction/end')
+    expect(compactionEnd?.type === 'compaction/end' ? compactionEnd.data.error ?? null : 'missing')
+      .toBeNull()
+    expect(h.agent.session.surface.nodes).not.toContain(oldEvent?.seq)
+
+    const summaryEvent = h.agent.session.events.findLast(event => event.type === 'compaction/summary')
+    expect(summaryEvent?.type).toBe('compaction/summary')
+    expect(JSON.stringify(summaryEvent?.data)).not.toContain(p01OldWords)
+
+    expect(await h.ctx.sessions.flush(h.agent.session)).toBe(true)
+    const persisted = await h.ctx.sessionPersistence.readFrom(SessionId(p01SessionId), 0, signal)
+    const rawOldEvents = persisted.events.filter(event => event.type === 'user/message'
+      && event.data.source.kind === 'user'
+      && messageText([event.data]).includes(p01OldWords))
+    expect(rawOldEvents).toHaveLength(1)
+    expect(rawOldEvents[0]?.seq).toBe(oldEvent?.seq)
+    expect(await readFile(h.sqlitePath)).not.toHaveLength(0)
+
+    const current = '钥匙具体放在哪里？'
+    await send(h.agent, current)
+    const ordinaryRequest = h.adapter.conversationRequests.at(-1)
+    expect(ordinaryRequest).toBeDefined()
+    const ordinaryInput = `${ordinaryRequest?.system ?? ''}\n${modelInput(ordinaryRequest!)}`
+    expect(ordinaryInput.split(current).length - 1).toBe(1)
+    expect(ordinaryInput.split(p01OldWords).length - 1).toBe(0)
+    expect(foldRoute(h.agent.session.events)).toBeDefined()
+    const targetCarriers = ordinaryRequest!.messages.filter(message => message.source.kind !== 'user'
+      && messageText([message]).includes(p01OldWords))
+    expect(targetCarriers).toHaveLength(0)
+
+    expect(ordinaryInput.split(p01OldWords).length - 1).toBe(0)
+  })
+
+  it('runs real P01 compaction without an old route and adds the old words only through one P01 view', async () => {
+    const h = await persistentP01Harness(true)
+    await send(h.agent, p01OldWords)
+    await send(h.agent, `P01 增长消息一。${'甲'.repeat(600)}`)
+    await send(h.agent, `P01 增长消息二。${'乙'.repeat(600)}`)
+    expect(foldRoute(h.agent.session.events)).toBeUndefined()
+
+    const signal = new AbortController().signal
+    expect(await h.compaction.compactNow(h.agent, signal)).not.toBeNull()
+    const lifecycle = h.agent.session.events.filter(event => event.type.startsWith('compaction/'))
+    expect(lifecycle.map(event => event.type)).toStrictEqual([
+      'compaction/start', 'compaction/summary', 'compaction/end',
+    ])
+    expect(lifecycle[2]?.type === 'compaction/end' ? lifecycle[2].data.error ?? null : 'missing')
+      .toBeNull()
+
+    const oldEvent = h.agent.session.events.find(event => event.type === 'user/message'
+      && event.data.source.kind === 'user'
+      && messageText([event.data]).includes(p01OldWords))
+    expect(oldEvent?.type).toBe('user/message')
+    expect(h.agent.session.surface.nodes).not.toContain(oldEvent?.seq)
+    expect(JSON.stringify(h.agent.session.events.findLast(event => event.type === 'compaction/summary')?.data))
+      .not.toContain(p01OldWords)
+
+    const current = '庭院钥匙在哪里？'
+    await send(h.agent, current)
+    const request = h.adapter.conversationRequests.at(-1)!
+    const input = `${request.system ?? ''}\n${modelInput(request)}`
+    const views = p01ViewCarriers(request)
+    expect(views).toHaveLength(1)
+    expect(occurrenceCount(views[0]!, p01OldWords)).toBe(1)
+    expect(occurrenceCount(input, p01OldWords)).toBe(1)
+    expect(occurrenceCount(input, current)).toBe(1)
+    const withoutView = input.replace(views[0]!, '')
+    expect(occurrenceCount(withoutView, p01OldWords)).toBe(0)
+    expect(h.agent.session.events.filter(event => event.type === 'user/message'
+      && event.data.source.kind === ROUTE_CONTEXT_SOURCE)).toHaveLength(0)
+    expect(request.system ?? '').not.toContain('当前会话路线管理（内部政策）')
+    expect(h.adapter.reducerRequests).toHaveLength(0)
+    const answer = h.agent.session.events.findLast(event => event.type === 'assistant/message')
+    expect(answer?.type === 'assistant/message' ? messageText([answer.data.message]) : '')
+      .toContain('庭院钥匙在蓝色瓷杯后面')
+  })
+
+  it('silently omits the P01 view on history-read failure while the current ordinary turn continues', async () => {
+    const h = await persistentP01Harness(true)
+    let reads = 0
+    vi.spyOn(h.agent.session, 'events', 'get').mockImplementationOnce(() => {
+      reads += 1
+      throw new Error('deterministic P01 history read failure')
+    })
+
+    const current = '读取失败时仍要处理这条当前消息。'
+    await send(h.agent, current)
+    expect(reads).toBeGreaterThan(0)
+    expect(foldRoute(h.agent.session.events)).toBeUndefined()
+    const request = h.adapter.conversationRequests.at(-1)!
+    const input = `${request.system ?? ''}\n${modelInput(request)}`
+    expect(occurrenceCount(input, current)).toBe(1)
+    expect(p01ViewCarriers(request)).toHaveLength(0)
+    expect(h.agent.session.events.filter(event => event.type === 'assistant/message')).toHaveLength(1)
+  })
+
+  it('rejects a newly appended old-route snapshot in the allowlisted P01 session', async () => {
+    const h = await persistentP01Harness(true)
+    await send(h.agent, 'P01 route-free seed。')
+    expect(foldRoute(h.agent.session.events)).toBeUndefined()
+    const user = h.agent.session.events.find(event => event.type === 'user/message'
+      && event.data.source.kind === 'user')
+    const assistant = h.agent.session.events.find(event => event.type === 'assistant/message')
+    if (user === undefined || assistant === undefined) throw new Error('missing route-free seed events')
+    const material = `[seq ${user.seq} user] P01 route-free seed\n[seq ${assistant.seq} assistant] answer`
+    const route = parseRouteBody(
+      JSON.stringify(initialReducerBody(material)),
+      undefined,
+      assistant.seq,
+      h.agent.session.events,
+    )
+
+    expect(() => h.agent.session.append(
+      'user/message',
+      createRouteRevisionMessage(p01SessionId, route),
+      { surfaceOp: 'append' },
+    )).toThrow(/P01.*route|route.*P01/i)
+    expect(foldRoute(h.agent.session.events)).toBeUndefined()
+  })
+
+  it('rejects P01 activation when the persisted allowlisted session already has an old route', async () => {
+    const seed = await persistentP01Harness(false)
+    await send(seed.agent, '先建立一份现有旧 route。')
+    expect(foldRoute(seed.agent.session.events)).toBeDefined()
+    expect(await seed.ctx.sessions.flush(seed.agent.session)).toBe(true)
+    await seed.ctx.fiber.dispose()
+    contexts.splice(contexts.indexOf(seed.ctx), 1)
+
+    await expect(mountPersistentP01Harness(seed.root, true, true))
+      .rejects.toThrow(/P01.*route|route.*P01/i)
+  })
+
+  it('renders the same P01 view byte-for-byte after a real JSONL cold resume', async () => {
+    const live = await persistentP01Harness(true)
+    await send(live.agent, p01OldWords)
+    await send(live.agent, `冷恢复增长消息一。${'甲'.repeat(600)}`)
+    await send(live.agent, `冷恢复增长消息二。${'乙'.repeat(600)}`)
+    expect(foldRoute(live.agent.session.events)).toBeUndefined()
+    expect(await live.compaction.compactNow(live.agent, new AbortController().signal)).not.toBeNull()
+    await send(live.agent, '热态探测。')
+    const hotViews = p01ViewCarriers(live.adapter.conversationRequests.at(-1)!)
+    expect(hotViews).toHaveLength(1)
+    expect(await live.ctx.sessions.flush(live.agent.session)).toBe(true)
+    await live.ctx.fiber.dispose()
+    contexts.splice(contexts.indexOf(live.ctx), 1)
+
+    const cold = await mountPersistentP01Harness(live.root, true, true)
+    await cold.agent.whenIdle()
+    await send(cold.agent, '冷态探测。')
+    const coldViews = p01ViewCarriers(cold.adapter.conversationRequests.at(-1)!)
+    expect(coldViews).toHaveLength(1)
+    expect(coldViews[0]).toBe(hotViews[0])
+  })
+
+  it('keeps legacy route freshness unchanged for a non-allowlisted session under P01 config', async () => {
+    const h = await persistentP01Harness(true)
+    const other = h.ctx.agentLoop.create(SessionId('p01-nontrial-route-control'), {
+      provider: 'mock', model: 'mock',
+    })
+    await send(other, '非试用会话继续使用现有 route。')
+    expect(foldRoute(other.session.events)).toBeDefined()
+    expect(() => assertRouteFreshForCompaction(other.session.events, other.session.surface.nodes))
+      .not.toThrow()
+
+    other.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: '制造一个尚未被 route 覆盖的新事实。' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    expect(() => assertRouteFreshForCompaction(other.session.events, other.session.surface.nodes))
+      .toThrow(/latest semantic seq is/)
+  })
+
   it('uses the public web service and keeps the evidence canary subordinate to focus enforce', async () => {
     const ctx = new Context()
     contexts.push(ctx)
