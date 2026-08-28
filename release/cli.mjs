@@ -59,6 +59,10 @@ function run(command, args = [], options = {}) {
     maxBuffer: 128 * 1024 * 1024,
   })
   if (result.error) fail(`无法执行 ${command}: ${result.error.message}`, options.code)
+  if (options.cancelOnSignal && result.signal) {
+    const signalExitCode = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 }[result.signal] ?? 1
+    fail(`${options.cancelOnSignal} 已取消（${result.signal}）；既有开发环境保持不变`, signalExitCode)
+  }
   if (result.status !== 0) {
     const detail = options.capture ? `\n${String(result.stderr ?? '').trim()}` : ''
     fail(`${command} 退出码 ${result.status}${detail}`, options.code)
@@ -151,6 +155,22 @@ function verifyDevelopmentCandidateImage(candidate) {
   if (purpose !== 'development') fail(`开发底座镜像缺少用途身份: ${purpose || 'missing'}`, exitCodes.safety)
 }
 
+function verifyDevelopmentTestReceipt(candidate) {
+  for (const field of ['testReceiptPath', 'testReceiptSha256']) {
+    if (!candidate[field]) fail(`开发底座缺少 ${field}`, exitCodes.safety)
+  }
+  if (!existsSync(candidate.testReceiptPath)) fail(`开发底座镜像测试回执不存在: ${candidate.testReceiptPath}`, exitCodes.safety)
+  if (sha256File(candidate.testReceiptPath) !== candidate.testReceiptSha256) {
+    fail('开发底座镜像测试回执摘要不匹配', exitCodes.safety)
+  }
+  const receipt = readJson(candidate.testReceiptPath, 'development image test receipt')
+  if (receipt.schemaVersion !== 1) fail('开发底座镜像测试回执版本不匹配', exitCodes.safety)
+  if (receipt.imageId !== candidate.imageId) {
+    fail(`开发底座镜像测试回执身份不匹配: ${receipt.imageId ?? 'missing'} != ${candidate.imageId}`, exitCodes.safety)
+  }
+  return receipt
+}
+
 function candidateFrom(value, { verifyDevelopmentImage = true } = {}) {
   const path = value ? resolve(value) : join(stateRoot, 'candidates/latest.json')
   const candidate = readJson(path, 'candidate')
@@ -159,6 +179,7 @@ function candidateFrom(value, { verifyDevelopmentImage = true } = {}) {
   }
   if (candidate.status !== 'tested') fail(`candidate 尚未通过镜像测试，当前状态是 ${candidate.status ?? 'missing'}`, exitCodes.safety)
   if (candidatePurpose(candidate) === 'development') {
+    verifyDevelopmentTestReceipt(candidate)
     if (verifyDevelopmentImage) verifyDevelopmentCandidateImage(candidate)
     return { candidate, path }
   }
@@ -477,9 +498,9 @@ function developmentCandidates() {
 }
 
 function developmentTestReceiptValid(candidate) {
-  if (!candidate.testReceiptPath || !candidate.testReceiptSha256 || !existsSync(candidate.testReceiptPath)) return false
   try {
-    return sha256File(candidate.testReceiptPath) === candidate.testReceiptSha256
+    verifyDevelopmentTestReceipt(candidate)
+    return true
   } catch {
     return false
   }
@@ -670,7 +691,36 @@ const developmentPackages = Object.freeze([
   'ui-context-compactor',
 ])
 
-function editableSourceReceipt(source, candidate, scope) {
+function editableSourceFingerprint(sourcePath) {
+  const listed = run('git', ['-C', sourcePath, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+    capture: true,
+    announce: false,
+    code: exitCodes.safety,
+  })
+  const paths = [...new Set(listed.split('\0').filter(Boolean))].sort()
+  const digest = createHash('sha256')
+  for (const relativePath of paths) {
+    const path = join(sourcePath, relativePath)
+    let entry
+    try {
+      entry = lstatSync(path)
+    } catch (error) {
+      fail(`验证源码在计算指纹时变化: ${relativePath}`, exitCodes.safety)
+    }
+    digest.update(`${relativePath}\0`)
+    if (entry.isSymbolicLink()) {
+      digest.update('symlink\0').update(readlinkSync(path))
+    } else if (entry.isFile()) {
+      digest.update('file\0').update(readFileSync(path))
+    } else {
+      fail(`验证源码含不支持的 Git 输入类型: ${relativePath}`, exitCodes.safety)
+    }
+    digest.update('\0')
+  }
+  return `sha256:${digest.digest('hex')}`
+}
+
+function editableSourceReceipt(source, candidate, scope, sourceFingerprint) {
   const status = run('git', ['-C', source.sourcePath, 'status', '--porcelain=v1', '--untracked-files=all'], {
     capture: true,
     announce: false,
@@ -691,6 +741,7 @@ function editableSourceReceipt(source, candidate, scope) {
       originMain: source.originMain,
       workingTree: status ? 'dirty' : 'clean',
       workingTreeStatusSha256: sha256Text(status),
+      sourceFingerprint,
       scope,
       identities: {
         typeBuildBundle: 'rootless-toolbox-uid-0',
@@ -1208,22 +1259,27 @@ function commandDev(options) {
       fail('开发环境与当前共享 main 镜像不一致；请重新执行 dev prepare', exitCodes.safety)
     }
     if (!devContainerRunning(verifyRuntime.toolbox)) fail('开发 toolbox 没有运行；请重新执行 dev prepare', exitCodes.safety)
-    const receipt = editableSourceReceipt(source, candidate, scope)
+    const sourceFingerprint = editableSourceFingerprint(source.sourcePath)
     run(engine, [
       'exec', '--workdir', '/workspace/dsh-plugins', verifyRuntime.toolbox,
       'bash', '/opt/dsh/release-system/scripts/dev-source-verify.sh', scope,
-    ], { code: exitCodes.test })
+    ], { code: exitCodes.test, cancelOnSignal: 'dev verify' })
     const completedSource = inspectDevelopmentSource(source.sourcePath)
     if (candidate.pluginsCommit !== completedSource.originMain) {
       fail(`验证期间 main 已更新：candidate=${candidate.pluginsCommit}，origin/main=${completedSource.originMain}；请先 rebase 并重建开发基础镜像`, exitCodes.safety)
     }
+    const completedFingerprint = editableSourceFingerprint(completedSource.sourcePath)
+    if (completedFingerprint !== sourceFingerprint) {
+      fail('验证期间 editable source 已变化；拒绝为旧源码状态输出 verify 回执', exitCodes.safety)
+    }
+    const receipt = editableSourceReceipt(completedSource, candidate, scope, completedFingerprint)
     const result = {
       result: 'dev-source-verified',
       receipt,
       tests: {
         typeBuildBundle: scope === 'all' ? [...developmentPackages] : [scope],
         typeScript: scope === 'all' ? 'all-mounted-package-suites' : scope,
-        python: scope === 'all' || scope === 'x-feed' ? 'x-feed unittest discover' : 'not-applicable',
+        python: scope === 'all' || scope === 'x-feed' ? 'x-feed unittest discover + test_insight_engine' : 'not-applicable',
       },
       runtime: verifyRuntime,
     }

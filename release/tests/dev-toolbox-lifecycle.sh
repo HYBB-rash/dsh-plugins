@@ -35,6 +35,12 @@ case "$command" in
     if [[ "$*" == *'/opt/dsh/release-system/scripts/dev-source-verify.sh'* ]] && [[ "${MOCK_VERIFY_EXIT:-0}" != 0 ]]; then
       exit "$MOCK_VERIFY_EXIT"
     fi
+    if [[ "$*" == *'/opt/dsh/release-system/scripts/dev-source-verify.sh'* ]] && [[ -n "${MOCK_VERIFY_SIGNAL:-}" ]]; then
+      kill -s "$MOCK_VERIFY_SIGNAL" "$$"
+    fi
+    if [[ "$*" == *'/opt/dsh/release-system/scripts/dev-source-verify.sh'* ]] && [[ -n "${MOCK_MUTATE_SOURCE:-}" ]]; then
+      printf '%s\n' 'changed-during-verify' >"$MOCK_MUTATE_SOURCE"
+    fi
     exit 0
     ;;
   rm)
@@ -49,6 +55,15 @@ chmod +x "$mock_engine"
 
 candidate="$test_root/candidate.json"
 latest_main="$(git -C "$repo_root" rev-parse origin/main)"
+receipt="$test_root/image-tests.json"
+cat >"$receipt" <<'EOF'
+{
+  "schemaVersion": 1,
+  "imageId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "output": "fixture self-test"
+}
+EOF
+receipt_sha="sha256:$(sha256sum "$receipt" | awk '{print $1}')"
 cat >"$candidate" <<EOF
 {
   "schemaVersion": 2,
@@ -60,8 +75,8 @@ cat >"$candidate" <<EOF
   "harnessCommit": "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e",
   "pluginsCommit": "$latest_main",
   "releaseToolCommit": "$latest_main",
-  "testReceiptPath": "$test_root/image-tests.json",
-  "testReceiptSha256": "sha256:baseline-fixture"
+  "testReceiptPath": "$receipt",
+  "testReceiptSha256": "$receipt_sha"
 }
 EOF
 
@@ -118,7 +133,8 @@ if (all.result !== 'dev-source-verified') throw new Error('missing editable veri
 if (all.receipt.baseline.pluginsCommit !== latestMain) throw new Error('missing shared-main baseline receipt')
 if (all.receipt.editableSource.scope !== 'all') throw new Error('wrong full verification scope')
 if (focused.receipt.editableSource.scope !== 'x-feed') throw new Error('wrong focused verification scope')
-if (focused.tests.python !== 'x-feed unittest discover') throw new Error('focused x-feed must include Python tests')
+if (focused.tests.python !== 'x-feed unittest discover + test_insight_engine') throw new Error('focused x-feed must include both Python gates')
+if (!all.receipt.editableSource.sourceFingerprint) throw new Error('missing stable source fingerprint')
 NODE
 grep -Fq "exec --workdir /workspace/dsh-plugins $toolbox_a bash /opt/dsh/release-system/scripts/dev-source-verify.sh all" "$test_root/engine.log"
 grep -Fq "exec --workdir /workspace/dsh-plugins $toolbox_a bash /opt/dsh/release-system/scripts/dev-source-verify.sh x-feed" "$test_root/engine.log"
@@ -132,6 +148,61 @@ MOCK_VERIFY_EXIT=23 \
 verify_exit="$?"
 set -e
 test "$verify_exit" = 5
+test -f "$mock_state/running/$toolbox_a"
+test -f "$state_root/dev/leases/$key_a.json"
+
+make_candidate_variant() {
+  local kind="$1" output="$2"
+  node - <<'NODE' "$candidate" "$output" "$kind" "$test_root"
+const crypto = require('node:crypto')
+const fs = require('node:fs')
+const [candidatePath, outputPath, kind, root] = process.argv.slice(2)
+const candidate = JSON.parse(fs.readFileSync(candidatePath, 'utf8'))
+if (kind === 'missing') candidate.testReceiptPath = `${root}/missing-image-tests.json`
+if (kind === 'bad-sha') candidate.testReceiptSha256 = `sha256:${'0'.repeat(64)}`
+if (kind === 'wrong-image') {
+  const receiptPath = `${root}/wrong-image-tests.json`
+  fs.writeFileSync(receiptPath, JSON.stringify({ schemaVersion: 1, imageId: `sha256:${'b'.repeat(64)}` }) + '\n')
+  candidate.testReceiptPath = receiptPath
+  candidate.testReceiptSha256 = `sha256:${crypto.createHash('sha256').update(fs.readFileSync(receiptPath)).digest('hex')}`
+}
+fs.writeFileSync(outputPath, JSON.stringify(candidate) + '\n')
+NODE
+}
+
+for receipt_case in missing bad-sha wrong-image; do
+  bad_candidate="$test_root/candidate-$receipt_case.json"
+  make_candidate_variant "$receipt_case" "$bad_candidate"
+  set +e
+  run_dev dev verify --source "$source_a" --candidate "$bad_candidate" >"$test_root/verify-$receipt_case.stdout" 2>"$test_root/verify-$receipt_case.stderr"
+  receipt_exit="$?"
+  set -e
+  test "$receipt_exit" = 4
+  test -f "$mock_state/running/$toolbox_a"
+  test -f "$state_root/dev/leases/$key_a.json"
+done
+
+mutation_path="$repo_root/release/tests/.dev-verify-source-mutation-fixture"
+test ! -e "$mutation_path"
+set +e
+MOCK_MUTATE_SOURCE="$mutation_path" run_dev dev verify --source "$source_a" --candidate "$candidate" >"$test_root/verify-mutated.stdout" 2>"$test_root/verify-mutated.stderr"
+mutation_exit="$?"
+set -e
+test "$mutation_exit" = 4
+grep -q 'editable source 已变化' "$test_root/verify-mutated.stderr"
+! grep -q 'dev-source-verified' "$test_root/verify-mutated.stdout"
+test -f "$mock_state/running/$toolbox_a"
+test -f "$state_root/dev/leases/$key_a.json"
+find "$mutation_path" -maxdepth 0 -type f -delete
+test ! -e "$mutation_path"
+
+set +e
+MOCK_VERIFY_SIGNAL=TERM run_dev dev verify --source "$source_a" --candidate "$candidate" >"$test_root/verify-cancelled.stdout" 2>"$test_root/verify-cancelled.stderr"
+cancel_exit="$?"
+set -e
+test "$cancel_exit" = 143
+grep -q 'dev verify 已取消（SIGTERM）' "$test_root/verify-cancelled.stderr"
+! grep -q 'dev-source-verified' "$test_root/verify-cancelled.stdout"
 test -f "$mock_state/running/$toolbox_a"
 test -f "$state_root/dev/leases/$key_a.json"
 ! grep -Eq '^(create|start) ' "$test_root/engine.log"

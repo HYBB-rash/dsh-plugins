@@ -19,6 +19,7 @@ esac
 
 test -d "$source_root/.git" -o -f "$source_root/.git"
 test -f "$source_root/runtime-package-topology.json"
+unset NODE_PATH
 
 # Verify the source currently mounted in the existing toolbox, not the lib
 # outputs left by its earlier `dev prepare`.
@@ -47,7 +48,6 @@ trap cleanup EXIT
 mkdir -p "$verify_root/home" "$verify_root/cache/npm" "$verify_root/cache/xdg"
 chown -R 1000:1000 "$verify_root"
 chmod 700 "$verify_root" "$verify_root/home" "$verify_root/cache" "$verify_root/cache/npm" "$verify_root/cache/xdg"
-unset NODE_PATH
 
 for package in "${selected_packages[@]}"; do
   package_root="$harness_root/local-plugins/$package"
@@ -68,15 +68,17 @@ done
 
 if [[ " ${selected_packages[*]} " == *' x-feed '* ]]; then
   python_data="$verify_root/python-data"
-  mkdir -p "$python_data"
-  chown -R 1000:1000 "$python_data"
-  chmod 700 "$python_data"
+  python_pycache="$verify_root/python-pycache"
+  mkdir -p "$python_data" "$python_pycache"
+  chown -R 1000:1000 "$python_data" "$python_pycache"
+  chmod 700 "$python_data" "$python_pycache"
   (
     cd "$harness_root/local-plugins/x-feed/python"
     setpriv --reuid=1000 --regid=1000 --init-groups \
       env HOME="$verify_root/home" npm_config_cache="$verify_root/cache/npm" \
-      XDG_CACHE_HOME="$verify_root/cache/xdg" DSH_X_FEED_DATA_DIR="$python_data" PYTHONWARNINGS=ignore \
-      python3 -m unittest discover -p 'test_x_*.py'
+      XDG_CACHE_HOME="$verify_root/cache/xdg" DSH_X_FEED_DATA_DIR="$python_data" \
+      PYTHONPYCACHEPREFIX="$python_pycache" PYTHONWARNINGS=ignore \
+      bash -c "python3 -m unittest discover -p 'test_x_*.py' && python3 -m unittest test_insight_engine.py"
   )
 fi
 

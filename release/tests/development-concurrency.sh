@@ -86,6 +86,16 @@ printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_bin/curl"
 chmod +x "$fake_bin/curl"
 
 candidate="$test_root/candidate.json"
+receipt="$test_root/image-tests.json"
+image_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cat >"$receipt" <<EOF
+{
+  "schemaVersion": 1,
+  "imageId": "$image_id",
+  "output": "fixture self-test"
+}
+EOF
+receipt_sha="sha256:$(sha256sum "$receipt" | awk '{print $1}')"
 cat >"$candidate" <<EOF
 {
   "schemaVersion": 2,
@@ -98,7 +108,9 @@ cat >"$candidate" <<EOF
   "archiveSha256": null,
   "harnessCommit": "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e",
   "pluginsCommit": "1111111111111111111111111111111111111111",
-  "releaseToolCommit": "1111111111111111111111111111111111111111"
+  "releaseToolCommit": "1111111111111111111111111111111111111111",
+  "testReceiptPath": "$receipt",
+  "testReceiptSha256": "$receipt_sha"
 }
 EOF
 

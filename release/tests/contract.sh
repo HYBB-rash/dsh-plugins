@@ -34,7 +34,24 @@ EOF
 stale_candidate="$test_root/stale-candidate.json"
 sed "s/$latest_main/1111111111111111111111111111111111111111/" "$candidate" >"$stale_candidate"
 development_candidate="$test_root/development-candidate.json"
-sed 's/"purpose": "release"/"purpose": "development"/' "$candidate" >"$development_candidate"
+development_receipt="$test_root/development-image-tests.json"
+cat >"$development_receipt" <<'EOF'
+{
+  "schemaVersion": 1,
+  "imageId": "sha256:fixture",
+  "output": "fixture self-test"
+}
+EOF
+development_receipt_sha="sha256:$(sha256sum "$development_receipt" | awk '{print $1}')"
+node - <<'NODE' "$candidate" "$development_candidate" "$development_receipt" "$development_receipt_sha"
+const fs = require('node:fs')
+const [candidatePath, outputPath, receiptPath, receiptSha] = process.argv.slice(2)
+const candidate = JSON.parse(fs.readFileSync(candidatePath, 'utf8'))
+candidate.purpose = 'development'
+candidate.testReceiptPath = receiptPath
+candidate.testReceiptSha256 = receiptSha
+fs.writeFileSync(outputPath, `${JSON.stringify(candidate, null, 2)}\n`)
+NODE
 stale_development_candidate="$test_root/stale-development-candidate.json"
 sed "s/$latest_main/1111111111111111111111111111111111111111/" "$development_candidate" >"$stale_development_candidate"
 
@@ -116,6 +133,8 @@ grep -q "dev-source-verify.sh" "$repo_root/release/cli.mjs"
 grep -q 'unset NODE_PATH' "$repo_root/release/scripts/dev-source-verify.sh"
 grep -q 'mktemp -d /tmp/dsh-editable-verify' "$repo_root/release/scripts/dev-source-verify.sh"
 grep -q 'setpriv --reuid=1000 --regid=1000 --init-groups' "$repo_root/release/scripts/dev-source-verify.sh"
+grep -q 'PYTHONPYCACHEPREFIX="$python_pycache"' "$repo_root/release/scripts/dev-source-verify.sh"
+grep -q "python3 -m unittest test_insight_engine.py" "$repo_root/release/scripts/dev-source-verify.sh"
 grep -q 'build-identity=rootless-toolbox-uid-0; test-identity=1000:1000' "$repo_root/release/scripts/dev-source-verify.sh"
 "$repo_root/release/tests/dev-source-verify.sh"
 grep -q 'vitest/vitest.mjs' "$repo_root/release/Containerfile"
