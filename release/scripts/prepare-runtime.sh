@@ -4,12 +4,18 @@ set -Eeuo pipefail
 dsh_home="${DSH_HOME:-/home/herman/.dsh}"
 template_root="/opt/dsh/harness/local-profiles"
 skills_root="/opt/dsh/plugins-src/skills"
+automation_instructions="/opt/dsh/release-system/harness-automation-instructions.md"
 lock_file="$dsh_home/.container-profile.lock"
 
 mkdir -p "$dsh_home/profiles" "$dsh_home/skills" "$dsh_home/workspace"
+test -f "$automation_instructions"
 
 exec 9>"$lock_file"
 flock 9
+
+instructions_stage="$dsh_home/.AGENTS.md.next.$$"
+install -m 0644 "$automation_instructions" "$instructions_stage"
+mv -Tf "$instructions_stage" "$dsh_home/AGENTS.md"
 
 for profile in web telegram telegram-test; do
   template="$template_root/$profile"

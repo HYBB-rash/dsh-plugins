@@ -59,6 +59,12 @@ cleanup() {
 }
 trap cleanup EXIT
 DSH_HOME="$tmp_home/.dsh" /opt/dsh/release-system/scripts/prepare-runtime.sh >/dev/null
+cmp -s \
+  /opt/dsh/release-system/harness-automation-instructions.md \
+  "$tmp_home/.dsh/AGENTS.md"
+rg --fixed-strings 'automations/<对应业务名>/' "$tmp_home/.dsh/AGENTS.md" >/dev/null
+rg --fixed-strings 'automations/scripts/' "$tmp_home/.dsh/AGENTS.md" >/dev/null
+rg --fixed-strings '/opt/dsh/automations' "$tmp_home/.dsh/AGENTS.md" >/dev/null
 DSH_HOME="$tmp_home/.dsh" node /opt/dsh/harness/apps/cli/lib/bin.js --profile web --dump-config >/dev/null
 DSH_HOME="$tmp_home/.dsh" node /opt/dsh/harness/apps/cli/lib/bin.js --profile telegram --dump-config >/dev/null
 DSH_HOME="$tmp_home/.dsh" node /opt/dsh/harness/apps/cli/lib/bin.js --profile telegram-test --dump-config >/dev/null
