@@ -334,9 +334,13 @@ printf '%s\n' production-unchanged >"$production_sentinel/data"
 printf '%s\n' source-unchanged >"$source_fixture/source"
 sentinel_before="$(sha256sum "$production_sentinel/data" "$source_fixture/source")"
 
-node - <<'NODE' "$state_root/releases/accepted/release.json" "$formal_candidate_path" "$state_root/snapshots/latest.json"
+remote_current_image="sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+remote_historical_image="sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+remote_failed_image="sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+node - <<'NODE' "$state_root/releases/accepted/release.json" "$formal_candidate_path" "$state_root/snapshots/latest.json" "$remote_current_image"
 const fs = require('node:fs')
-const [releasePath, candidatePath, snapshotPath] = process.argv.slice(2)
+const [releasePath, candidatePath, snapshotPath, remoteCurrentImage] = process.argv.slice(2)
 const candidate = JSON.parse(fs.readFileSync(candidatePath, 'utf8'))
 const snapshot = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'))
 fs.writeFileSync(releasePath, `${JSON.stringify({
@@ -347,7 +351,7 @@ fs.writeFileSync(releasePath, `${JSON.stringify({
   candidate,
   snapshot,
   previous: {mode: 'docker', releaseId: 'previous', remoteDir: '/home/herman/.local/share/dsh-container/releases/previous', candidate: {imageId: 'sha256:old', imageTag: 'dsh-candidate:old'}, engineImageId: 'sha256:old'},
-  production: {engineImageId: candidate.imageId},
+  production: {engineImageId: remoteCurrentImage},
   userAcceptance: null,
   cleanup: null,
 }, null, 2)}\n`)
@@ -355,18 +359,18 @@ NODE
 
 remote_before="$test_root/remote-before.json"
 remote_after="$test_root/remote-after.json"
-node - <<'NODE' "$formal_candidate_path" "$remote_before" "$remote_after"
+node - <<'NODE' "$formal_candidate_path" "$remote_before" "$remote_after" "$remote_current_image" "$remote_historical_image" "$remote_failed_image"
 const fs = require('node:fs')
-const [candidatePath, beforePath, afterPath] = process.argv.slice(2)
+const [candidatePath, beforePath, afterPath, currentDockerImage, historicalDockerImage, failedDockerImage] = process.argv.slice(2)
 const candidate = JSON.parse(fs.readFileSync(candidatePath, 'utf8'))
 const root = '/home/herman/.local/share/dsh-container'
 const currentDir = `${root}/releases/accepted`
 const snapshotPath = `${root}/snapshots/snapshot-current.tar.zst`
-const currentRelease = {schemaVersion:1,releaseId:'accepted',status:'accepted',candidate,production:{engineImageId:candidate.imageId},rollbackBoundary:{status:'retired-at-accept'}}
-const item = (name, value, current = false) => ({
+const currentRelease = {schemaVersion:1,releaseId:'accepted',status:'accepted',candidate,production:{engineImageId:currentDockerImage},rollbackBoundary:{status:'retired-at-accept'}}
+const item = (name, value, current = false, engineImageId = null) => ({
   name,
   dir:`${root}/releases/${name}`,
-  release: current ? currentRelease : {schemaVersion:1,releaseId:name,status:name === 'failed' ? 'failed' : 'accepted',candidate:value},
+  release: current ? currentRelease : {schemaVersion:1,releaseId:name,status:name === 'failed' ? 'failed' : 'accepted',candidate:value,production:{engineImageId}},
   releaseError:null,
   candidate:value,
   candidateError:null,
@@ -388,21 +392,21 @@ const base = {
   errors:[],
 }
 const before = {...base,
-  releases:[item('accepted', candidate, true),item('previous', historical),item('failed', failed)],
+  releases:[item('accepted', candidate, true),item('previous', historical, false, historicalDockerImage),item('failed', failed, false, failedDockerImage)],
   snapshotArchives:[
     {path:snapshotPath,bytes:2000,metadataValid:true},
     {path:`${root}/snapshots/snapshot-old.tar.zst`,bytes:1800,metadataValid:true,metadata:{snapshotId:'snapshot-old',archivePath:`${root}/snapshots/snapshot-old.tar.zst`,archiveSha256:'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'}},
   ],
   images:{
-    [candidate.imageTag]:{id:candidate.imageId,size:5000},
-    [historical.imageTag]:{id:historical.imageId,size:4000},
-    [failed.imageTag]:{id:failed.imageId,size:3000},
+    [candidate.imageTag]:{id:currentDockerImage,size:5000},
+    [historical.imageTag]:{id:historicalDockerImage,size:4000},
+    [failed.imageTag]:{id:failedDockerImage,size:3000},
   },
 }
 const after = {...base,
   releases:[item('accepted', candidate, true)],
   snapshotArchives:[{path:snapshotPath,bytes:2000,metadataValid:true}],
-  images:{[candidate.imageTag]:{id:candidate.imageId,size:5000}},
+  images:{[candidate.imageTag]:{id:currentDockerImage,size:5000}},
 }
 fs.writeFileSync(beforePath, `${JSON.stringify(before)}\n`)
 fs.writeFileSync(afterPath, `${JSON.stringify(after)}\n`)
@@ -517,6 +521,18 @@ test "$broken_pointer_status" = 6
 test -e "$historical_dir/image.tar"
 node -e 'const value=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (!value.cleanup.errors.some((error)=>error.code==="release-pointers-incomplete")) process.exit(1)' "$test_root/broken-pointer.json"
 
+# A missing remote Docker engine identity must never fall back to the local
+# Podman candidate identity or delete any formal material.
+remote_missing_engine_id="$test_root/remote-missing-engine-id.json"
+node -e 'const fs=require("fs"); const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); delete value.releases[0].release.production.engineImageId; fs.writeFileSync(process.argv[2],JSON.stringify(value)+"\n")' "$remote_after" "$remote_missing_engine_id"
+set +e
+MOCK_REMOTE_INVENTORY="$remote_missing_engine_id" run_accept >"$test_root/missing-engine-id.json"
+missing_engine_id_status=$?
+set -e
+test "$missing_engine_id_status" = 6
+test -e "$historical_dir/image.tar"
+node -e 'const value=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (!value.cleanup.errors.some((error)=>error.code==="current-release-incomplete")) process.exit(1)' "$test_root/missing-engine-id.json"
+
 # Exact local/remote container references keep only those images and report
 # incomplete; the matching archives may still be removed safely.
 cp "$(find "$mock_state/images" -name '*.labels' -print -quit)" "$mock_state/images/$historical_engine_key.labels"
@@ -524,7 +540,7 @@ printf '%s\n' "$historical_tag" >"$mock_state/images/$historical_engine_key.tag"
 printf '%s\n' "$historical_image" >"$mock_state/images/$historical_engine_key.id"
 : >"$mock_state/images/$historical_engine_key.present"
 remote_referenced="$test_root/remote-referenced.json"
-node -e 'const fs=require("fs"); const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); value.containerImages=["sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]; fs.writeFileSync(process.argv[2],JSON.stringify(value)+"\n")' "$remote_before" "$remote_referenced"
+node -e 'const fs=require("fs"); const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); value.containerImages=[process.argv[3]]; fs.writeFileSync(process.argv[2],JSON.stringify(value)+"\n")' "$remote_before" "$remote_referenced" "$remote_historical_image"
 set +e
 MOCK_REFERENCED_IMAGE_ID="$historical_image" MOCK_REMOTE_INVENTORY="$remote_referenced" run_accept >"$test_root/referenced-image.json"
 referenced_status=$?

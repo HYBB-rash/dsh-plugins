@@ -1199,6 +1199,14 @@ function remoteCandidateMetadata(item) {
   return candidate
 }
 
+function remoteEngineImageId(item) {
+  const imageId = item.release?.production?.engineImageId
+  if (!/^(?:sha256:)?[0-9a-f]{64}$/u.test(imageId ?? '')) {
+    throw new Error('release production.engineImageId 不是完整远端 Docker 镜像 ID')
+  }
+  return imageId
+}
+
 function validateRemoteCleanupInventory(release, inventory, cleanup) {
   const remoteRoot = '/home/herman/.local/share/dsh-container'
   const expectedDir = `${remoteRoot}/releases/${release.releaseId}`
@@ -1223,8 +1231,12 @@ function validateRemoteCleanupInventory(release, inventory, cleanup) {
     if (current.release.rollbackBoundary?.status !== 'retired-at-accept') throw new Error('远端 rollbackBoundary 尚未在 accept 退休')
     if (!current.archive || current.archive.sha256 !== candidate.archiveSha256) throw new Error('远端当前 image.tar 缺失或摘要不匹配')
     if (!current.compose || !current.candidateFile) throw new Error('远端当前 Compose 或 candidate.json 缺失')
+    const engineImageId = remoteEngineImageId(current)
+    if (!sameImageId(engineImageId, release.production?.engineImageId)) {
+      throw new Error('远端当前 production.engineImageId 与本机 release.json 不一致')
+    }
     const image = inventory.images?.[candidate.imageTag]
-    if (!image || image.error || !sameImageId(image.id, candidate.imageId) || !sameImageId(image.id, release.production?.engineImageId)) {
+    if (!image || image.error || !sameImageId(image.id, engineImageId)) {
       throw new Error('远端当前 Docker 镜像身份缺失或不匹配')
     }
     for (const value of [
@@ -1435,18 +1447,28 @@ function cleanupRemoteFormalObjects(release, inventory, validated, cleanup) {
       cleanupError(cleanup, 'remote', 'image-inventory-failed', candidate.imageTag, image.error)
       continue
     }
-    if (!sameImageId(image.id, candidate.imageId)) {
-      pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'docker-image', imageId: image.id, imageTag: candidate.imageTag, bytes: image.size, reason: 'identity-mismatch' })
-      cleanupError(cleanup, 'remote', 'image-identity-mismatch', candidate.imageTag, `${image.id} != ${candidate.imageId}`)
-      continue
+    const target = imageTargets.get(candidate.imageTag) ?? { candidate, image, expectedImageIds: new Set(), metadataErrors: [] }
+    try {
+      target.expectedImageIds.add(normalizedImageId(remoteEngineImageId(item)))
+    } catch (error) {
+      target.metadataErrors.push(`${item.name}: ${error.message}`)
     }
-    const key = normalizedImageId(image.id)
-    if (!imageTargets.has(key)) imageTargets.set(key, { candidate, image })
+    imageTargets.set(candidate.imageTag, target)
   }
 
   const containerImages = new Set((inventory.containerImages ?? []).map(normalizedImageId))
-  for (const { candidate, image } of imageTargets.values()) {
+  for (const { candidate, image, expectedImageIds, metadataErrors } of imageTargets.values()) {
     if (sameImageId(image.id, currentImage.id)) continue
+    if (expectedImageIds.size === 0) {
+      pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'docker-image', imageId: image.id, imageTag: candidate.imageTag, bytes: image.size, reason: 'metadata-incomplete' })
+      cleanupError(cleanup, 'remote', 'image-identity-missing', candidate.imageTag, metadataErrors.join('; ') || '没有 release 记录远端 Docker 镜像 ID')
+      continue
+    }
+    if (expectedImageIds.size !== 1 || !expectedImageIds.has(normalizedImageId(image.id))) {
+      pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'docker-image', imageId: image.id, imageTag: candidate.imageTag, bytes: image.size, reason: 'identity-mismatch' })
+      cleanupError(cleanup, 'remote', 'image-identity-mismatch', candidate.imageTag, `${image.id} != ${[...expectedImageIds].join(',')}`)
+      continue
+    }
     if (!inventory.containersComplete) {
       pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'docker-image', imageId: image.id, imageTag: candidate.imageTag, bytes: image.size, reason: 'container-inventory-incomplete' })
       continue

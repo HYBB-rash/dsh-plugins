@@ -90,7 +90,7 @@
 
 `accept` 是不可逆的最终承诺点。真实健康验证通过并确认远端 `current`/`last-good` 同指本次 release 后，`release.json` 会记录 `rollbackBoundary.status=retired-at-accept`；从这一刻起不再支持恢复上一版本，清理失败也不会撤销 accepted。随后入口在同一全局镜像锁内幂等收敛正式材料：本机只保留当前 accepted candidate 的目录、`image.tar`、镜像测试回执和 Podman 镜像；远端只保留当前 release 的 `image.tar`、Compose、candidate 文件和正在运行的 Docker 镜像；本机与远端只保留 `snapshots/latest.json` 精确引用的一份一致生产快照归档。latest 生产快照继续保留给后续 `dev prepare` 使用。
 
-其他历史 `release.json`、`candidate.json`、镜像测试回执、上线前测试/验收/失败回执、摘要、用户证据和每次清理回执都保留；只删除 state root 内能由精确元数据识别、且没有容器引用的大体积归档和镜像。失效的 `candidates/latest.json` 会一并删除。指针、当前候选或 latest snapshot 元数据不完整，容器仍引用旧镜像，或远端只完成部分操作时，结果为 `accepted-cleanup-incomplete`、退出码 `6`；`status` 会显示残留。对同一 accepted release 再次执行 `accept` 只重试清理，不重复 Telegram/Web 业务验收。每次 `cleanup` 回执都记录 `status`、受保护对象、本机/远端删除与保留对象、前后字节、错误和完成时间。
+其他历史 `release.json`、`candidate.json`、镜像测试回执、上线前测试/验收/失败回执、摘要、用户证据和每次清理回执都保留；只删除 state root 内能由精确元数据识别、且没有容器引用的大体积归档和镜像。本机 Podman 镜像按 `candidate.imageId` 核对，远端 Docker 镜像按 `release.production.engineImageId` 核对；同一 archive 被两个引擎载入后的镜像 ID 不要求相同。失效的 `candidates/latest.json` 会一并删除。指针、当前候选或 latest snapshot 元数据不完整，容器仍引用旧镜像，或远端只完成部分操作时，结果为 `accepted-cleanup-incomplete`、退出码 `6`；`status` 会显示残留。对同一 accepted release 再次执行 `accept` 只重试清理，不重复 Telegram/Web 业务验收。每次 `cleanup` 回执都记录 `status`、受保护对象、本机/远端删除与保留对象、前后字节、错误和完成时间。
 
 正式 release 完成 `accept` 后，本地开发环境和共享开发镜像立即失效并清理；任务源码 worktree 原样保留。未完成任务下次继续时，必须先同步新 main，请求最新 main 的唯一开发镜像，再执行自己的 `dev prepare`。
 
