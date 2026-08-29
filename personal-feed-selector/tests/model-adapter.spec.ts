@@ -79,4 +79,31 @@ describe('DSH semantic judge', () => {
     const { judge } = fixture()
     await expect(judge.judge(input, controller.signal)).resolves.toEqual({ status: 'failed', code: 'aborted' })
   })
+
+  it('reports a stream exception as model-call failure', async () => {
+    const stream = vi.fn(async function* () { throw new Error('provider unavailable') })
+    const agent = {
+      session: { id: 'root', requestHeader: () => ({ config: { provider: 'p', model: 'm' } }) }, options: {},
+    }
+    const judge = createDshSemanticJudge({ llm: { stream } } as never, agent as never)
+    await expect(judge.judge(input, new AbortController().signal)).resolves.toEqual({
+      status: 'failed', code: 'model_call_failed',
+    })
+  })
+
+  it('reports timeout separately when the adapter observes the request signal', async () => {
+    const stream = vi.fn(async function* (options: { signal: AbortSignal }) {
+      await new Promise<void>((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      })
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    const agent = {
+      session: { id: 'root', requestHeader: () => ({ config: { provider: 'p', model: 'm' } }) }, options: {},
+    }
+    const judge = createDshSemanticJudge({ llm: { stream } } as never, agent as never, { timeoutMs: 1 })
+    await expect(judge.judge(input, new AbortController().signal)).resolves.toEqual({
+      status: 'failed', code: 'timeout',
+    })
+  })
 })
