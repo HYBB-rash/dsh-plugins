@@ -41,6 +41,20 @@ describe('DSH semantic judge', () => {
     expect(options.system).toContain('untrusted')
   })
 
+  it('uses the final text decision when a reasoning model also returns private reasoning', async () => {
+    const { judge } = fixture([
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'Candidate 0 adds new recovery evidence.' } },
+      { type: 'block-start', index: 1, blockType: 'text' },
+      { type: 'block-end', index: 1, block: { type: 'text', text: '{"kind":"selected","candidateIndex":0}' } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ])
+
+    await expect(judge.judge(input, new AbortController().signal)).resolves.toEqual({
+      status: 'completed', decision: { kind: 'selected', candidateIndex: 0 },
+    })
+  })
+
   it.each([
     ['```json\n{"kind":"empty"}\n```'],
     ['{"kind":"empty"}\nextra'],
@@ -57,6 +71,18 @@ describe('DSH semantic judge', () => {
 
   it('rejects tool-call termination', async () => {
     const { judge } = fixture(chunks('', 'tool-calls'))
+    await expect(judge.judge(input, new AbortController().signal)).resolves.toEqual({
+      status: 'failed', code: 'invalid_model_output',
+    })
+  })
+
+  it('rejects unsupported output blocks even when the text decision is valid', async () => {
+    const { judge } = fixture([
+      { type: 'block-end', index: 0, block: { type: 'text', text: '{"kind":"empty"}' } },
+      { type: 'block-end', index: 1, block: { type: 'tool-call', id: 'call-1', name: 'other', arguments: '{}' } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ])
+
     await expect(judge.judge(input, new AbortController().signal)).resolves.toEqual({
       status: 'failed', code: 'invalid_model_output',
     })

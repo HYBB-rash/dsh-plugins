@@ -144,7 +144,8 @@ export function createDshSemanticJudge(
       const textBlocks = blocks.filter(
         (block): block is Extract<(typeof blocks)[number], { type: 'text' }> => block.type === 'text',
       )
-      if (textBlocks.length === 0 || textBlocks.length !== blocks.length) {
+      const hasUnsupportedBlock = blocks.some(block => block.type !== 'text' && block.type !== 'reasoning')
+      if (textBlocks.length === 0 || hasUnsupportedBlock) {
         return failed('invalid_model_output')
       }
       const decision = parseDecision(textBlocks.map(block => block.text).join('\n'))
