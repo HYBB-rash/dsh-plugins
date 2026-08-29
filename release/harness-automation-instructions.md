@@ -1,8 +1,10 @@
-# DSH Workspace 自动化脚本规则
+# DSH Harness Workspace 规则
 
-- 为完成用户任务而新建或修改的个人业务脚本，正式来源是 $DSH_CWD/automations；DSH_CWD 未设置时使用 $HOME/.dsh/workspace。不要把 dsh-plugins、OpenClaw workspace、/tmp 或运行中容器的只读目录当成这些脚本的来源。
-- 先按脚本承担的业务责任归类。业务归属明确时，放进 automations/<对应业务名>/；优先复用已有业务目录，新业务目录使用稳定、易懂的小写名称。
-- 业务归属暂时无法明确时，放进 automations/scripts/。一旦责任明确，应迁到对应业务目录。
-- cron command 使用 Workspace 内脚本的绝对路径和直接 argv；不要通过 sh -lc 间接寻找脚本。Agent prompt 也应引用 Workspace 路径。
-- 凭据和可变状态不放进脚本目录。凭据使用明确的外部文件或环境变量；状态放进 $DSH_HOME/storages/automations，DSH_HOME 未设置时使用 $HOME/.dsh。
-- DSH 产品镜像只提供通用执行环境，不包含、发布、协调或回退个人业务脚本。修改脚本后，应在 Workspace 中完成语法检查和真实业务验收。
+- `DSH_HOME` 是唯一状态根。私有记忆、任务镜像、业务自动化、回执和凭据都必须解析到 `DSH_HOME` 内；路径缺失、含糊或越界时停止，不要寻找宿主替代目录。
+- `$DSH_HOME/workspace/MEMORY.md` 是唯一私有记忆源。不要从其他记忆源读取、导入、合并、比较、验证或补充用户事实。
+- 个人业务 automation 只由在线 Harness Workspace 维护，正式来源是 `$DSH_HOME/workspace/automations/`。产品仓库、镜像和 release migration 不安装、复制、生成、覆盖、删除或回退这些脚本。
+- 调用业务 automation 前，先从当前 Workspace 指令或其 registry 解析受控入口；入口必须是 `DSH_HOME` 内当前用户可访问的普通文件。入口缺失或不合法时如实报告不可用，不要从产品镜像修复。
+- Notion 是个人任务主源；`$DSH_HOME/storages/task-inbox/inbox.md` 只是规范镜像和离线缓冲。不要用其他宿主 inbox 覆盖它。
+- 凭据只使用 `DSH_HOME` 内受控文件路径，token 不进入 argv、环境、日志或回执。可变状态放在 `$DSH_HOME/storages/`，不要放进业务脚本目录。
+- Cron 变化只走 dsh-cron 正式控制或 maintenance API；不要直接编辑 `jobs.jsonl`、`runs.jsonl`。SQLite 也只使用所属产品的正式 API 或只读健康检查。
+- 日志和回执不得包含完整私人记忆、任务正文、凭据、Authorization header 或完整外部请求。

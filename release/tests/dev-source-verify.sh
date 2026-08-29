@@ -46,7 +46,7 @@ cat >"$fake_bin/python3" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 printf 'python setpriv_marker=%s home=%s data=%s pycache=%s node_path=%s args=%s\n' \
-  "${DSH_VERIFY_SETUID:-}" "$HOME" "$DSH_X_FEED_DATA_DIR" "$PYTHONPYCACHEPREFIX" "${NODE_PATH:-unset}" "$*" >>"$MOCK_VERIFY_LOG"
+  "${DSH_VERIFY_SETUID:-}" "$HOME" "${DSH_X_FEED_DATA_DIR:-unset}" "$PYTHONPYCACHEPREFIX" "${NODE_PATH:-unset}" "$*" >>"$MOCK_VERIFY_LOG"
 EOF
 cat >"$fake_bin/chown" <<'EOF'
 #!/usr/bin/env bash
@@ -69,10 +69,10 @@ MOCK_VERIFY_LOG="$log" \
 
 test "$(grep -Fc 'build tool=tsc setpriv_marker=' "$log")" = 12
 test "$(grep -Fc 'build tool=tsdown setpriv_marker=' "$log")" = 6
-test "$(grep -Fc 'setpriv args=--reuid=1000 --regid=1000 --init-groups' "$log")" = 7
+test "$(grep -Fc 'setpriv args=--reuid=1000 --regid=1000 --init-groups' "$log")" = 8
 test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 6
-test "$(grep -Fc 'python setpriv_marker=1000' "$log")" = 2
-test "$(grep -Fc 'chown args=-R 1000:1000' "$log")" = 2
+test "$(grep -Fc 'python setpriv_marker=1000' "$log")" = 3
+test "$(grep -Fc 'chown args=-R 1000:1000' "$log")" = 3
 grep -q 'build tool=tsc setpriv_marker= node_path=unset' "$log"
 grep -q 'build tool=tsdown setpriv_marker= node_path=unset' "$log"
 grep -q 'vitest setpriv_marker=1000 .*node_path=unset' "$log"
@@ -81,6 +81,7 @@ grep -q 'python setpriv_marker=1000 .*data=/tmp/dsh-editable-verify' "$log"
 grep -q 'python setpriv_marker=1000 .*pycache=/tmp/dsh-editable-verify.*/python-pycache ' "$log"
 grep -q 'python .*args=-m unittest discover -p test_x_\*\.py' "$log"
 grep -q 'python .*args=-m unittest test_insight_engine.py' "$log"
+grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/test_workspace_migration.py' "$log"
 test ! -e "$source_root/x-feed/python/__pycache__"
 verify_home="$(sed -n 's/^vitest .* home=\([^ ]*\) .*/\1/p' "$log" | head -n 1)"
 test -n "$verify_home"

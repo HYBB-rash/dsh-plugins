@@ -49,13 +49,17 @@ DSH_HOME="$tmp_home/.dsh" /opt/dsh/release-system/scripts/prepare-runtime.sh >/d
 cmp -s \
   /opt/dsh/release-system/harness-automation-instructions.md \
   "$tmp_home/.dsh/AGENTS.md"
-rg --fixed-strings 'automations/<对应业务名>/' "$tmp_home/.dsh/AGENTS.md" >/dev/null
-rg --fixed-strings 'automations/scripts/' "$tmp_home/.dsh/AGENTS.md" >/dev/null
-rg --fixed-strings 'DSH 产品镜像只提供通用执行环境' "$tmp_home/.dsh/AGENTS.md" >/dev/null
+rg --fixed-strings '$DSH_HOME/workspace/automations/' "$tmp_home/.dsh/AGENTS.md" >/dev/null
+rg --fixed-strings '产品仓库、镜像和 release migration 不安装' "$tmp_home/.dsh/AGENTS.md" >/dev/null
+rg --fixed-strings '$DSH_HOME/workspace/MEMORY.md' "$tmp_home/.dsh/AGENTS.md" >/dev/null
 if rg --fixed-strings '/opt/dsh/automations' "$tmp_home/.dsh/AGENTS.md"; then
   printf '%s\n' 'workspace instructions still advertise repository-owned automations' >&2
   exit 1
 fi
+for skill in explore-opportunity personal-task-list x-feed; do
+  test -L "$tmp_home/.dsh/skills/$skill"
+  test "$(readlink "$tmp_home/.dsh/skills/$skill")" = "/opt/dsh/plugins-src/skills/$skill"
+done
 for profile in web telegram telegram-test; do
   DSH_HOME="$tmp_home/.dsh" node /opt/dsh/harness/apps/cli/lib/bin.js \
     --profile "$profile" --dump-config >"$tmp_home/$profile.config.yml"

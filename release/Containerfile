@@ -108,7 +108,9 @@ RUN set -eu; \
      && DSH_X_FEED_DATA_DIR="$python_data" PYTHONWARNINGS=ignore \
         python3 -m unittest discover -p 'test_x_*.py' \
      && DSH_X_FEED_DATA_DIR="$python_data" PYTHONWARNINGS=ignore \
-        python3 -m unittest test_insight_engine.py)
+        python3 -m unittest test_insight_engine.py); \
+    PYTHONDONTWRITEBYTECODE=1 \
+      python3 /opt/dsh/release-system/tests/test_workspace_migration.py
 
 ARG DSH_PLUGINS_COMMIT
 ARG DSH_RELEASE_COMMIT

@@ -1565,6 +1565,7 @@ function containerBaseArgs(homePath) {
     '--read-only', '--user', localUser,
     '--tmpfs', '/tmp:rw,noexec,nosuid,size=512m', '--tmpfs', '/run:rw,nosuid,size=64m',
     '--tmpfs', '/home/herman/.openclaw:rw,noexec,nosuid,size=1m',
+    '--tmpfs', '/home/herman/task-inbox-workflow:rw,noexec,nosuid,size=1m',
     '--volume', `${homePath}:/home/herman:rw`,
     '--env', 'HOME=/home/herman', '--env', 'DSH_HOME=/home/herman/.dsh', '--env', 'DSH_CWD=/home/herman/.dsh/workspace',
     '--env', 'TZ=Asia/Shanghai',
@@ -1675,6 +1676,7 @@ function developmentSourceArgs(sourcePath) {
   args.push(
     '--volume', `${join(sourcePath, 'release/scripts')}:/opt/dsh/release-system/scripts:rw`,
     '--volume', `${join(sourcePath, 'release/harness-automation-instructions.md')}:/opt/dsh/release-system/harness-automation-instructions.md:ro`,
+    '--volume', `${join(sourcePath, 'release/workspace-migrations')}:/opt/dsh/release-system/workspace-migrations:ro`,
     '--volume', `${join(sourcePath, 'release/vitest.external.config.ts')}:/opt/dsh/harness/vitest.external.config.ts:ro`,
     '--volume', `${join(sourcePath, 'runtime-package-topology.json')}:/opt/dsh/harness/local-plugins/runtime-package-topology.json:rw`,
     '--volume', `${join(sourcePath, 'scripts/materialize-runtime-topology.mjs')}:/opt/dsh/harness/local-plugins/scripts/materialize-runtime-topology.mjs:rw`,
@@ -1742,6 +1744,7 @@ function inspectDevelopmentSource(value) {
   for (const required of [
     'release/scripts',
     'release/harness-automation-instructions.md',
+    'release/workspace-migrations',
     'skills',
     'release/profiles/web/cordis.patch.yml',
     'release/profiles/telegram/cordis.patch.yml',

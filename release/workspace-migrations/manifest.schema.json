@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dsh.local/schemas/workspace-migration-manifest-v1.json",
+  "title": "DSH workspace migration manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "migrationVersion",
+    "migrationId",
+    "workspace"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "migrationVersion": { "type": "integer", "minimum": 1 },
+    "migrationId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,95}$"
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agents", "memory", "removeSymlinks"],
+      "properties": {
+        "agents": { "$ref": "#/$defs/agentsTransition" },
+        "memory": { "$ref": "#/$defs/memoryTransition" },
+        "removeSymlinks": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/symlinkTransition" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "mode": {
+      "type": "string",
+      "pattern": "^0[0-7]{3}$"
+    },
+    "agentsTransition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "preimageSha256",
+        "postimageSha256",
+        "preimageMode",
+        "postimageMode",
+        "template"
+      ],
+      "properties": {
+        "path": { "const": "AGENTS.md" },
+        "preimageSha256": { "$ref": "#/$defs/sha256" },
+        "postimageSha256": { "$ref": "#/$defs/sha256" },
+        "preimageMode": { "$ref": "#/$defs/mode" },
+        "postimageMode": { "$ref": "#/$defs/mode" },
+        "template": { "type": "string", "minLength": 1 }
+      }
+    },
+    "memoryTransition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "preimageSha256",
+        "postimageSha256",
+        "preimageMode",
+        "postimageMode",
+        "lineTransforms"
+      ],
+      "properties": {
+        "path": { "const": "MEMORY.md" },
+        "preimageSha256": { "$ref": "#/$defs/sha256" },
+        "postimageSha256": { "$ref": "#/$defs/sha256" },
+        "preimageMode": { "$ref": "#/$defs/mode" },
+        "postimageMode": { "$ref": "#/$defs/mode" },
+        "lineTransforms": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "lineNumber",
+              "preLineSha256",
+              "removeStartByte",
+              "removeEndByte",
+              "removedSha256",
+              "postLineSha256",
+              "deleteLine"
+            ],
+            "properties": {
+              "lineNumber": { "type": "integer", "minimum": 1 },
+              "preLineSha256": { "$ref": "#/$defs/sha256" },
+              "removeStartByte": { "type": "integer", "minimum": 0 },
+              "removeEndByte": { "type": "integer", "minimum": 1 },
+              "removedSha256": { "$ref": "#/$defs/sha256" },
+              "postLineSha256": { "$ref": "#/$defs/sha256" },
+              "deleteLine": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "symlinkTransition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "targetSha256", "targetLength"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "targetSha256": { "$ref": "#/$defs/sha256" },
+        "targetLength": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

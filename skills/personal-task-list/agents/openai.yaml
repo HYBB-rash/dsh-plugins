@@ -1,0 +1,4 @@
+interface:
+  display_name: "个人任务清单"
+  short_description: "通过 Workspace 自有入口同步 Notion 主任务清单与本地离线镜像"
+  default_prompt: "使用 $personal-task-list 查询或修改个人任务，并如实报告同步、过期、排队或冲突状态。"

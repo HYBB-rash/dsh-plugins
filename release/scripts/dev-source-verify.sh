@@ -82,4 +82,14 @@ if [[ " ${selected_packages[*]} " == *' x-feed '* ]]; then
   )
 fi
 
+if [[ "$requested_package" == all ]]; then
+  workspace_test_root="$verify_root/workspace-migration"
+  mkdir -p "$workspace_test_root" "$verify_root/python-pycache"
+  chown -R 1000:1000 "$workspace_test_root" "$verify_root/python-pycache"
+  chmod 700 "$workspace_test_root" "$verify_root/python-pycache"
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \
+    python3 /opt/dsh/release-system/tests/test_workspace_migration.py
+fi
+
 printf '%s\n' "editable source verification passed; scope=$requested_package; build-identity=rootless-toolbox-uid-0; test-identity=1000:1000; cache=tmpfs"
