@@ -7,6 +7,7 @@ import {
   BlockAssembler,
   createUserMessage,
   deepFreeze,
+  ReasoningEffortId,
   type GenerateOptions,
 } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -107,6 +108,7 @@ export function createDshSemanticJudge(
       const options: GenerateOptions = deepFreeze({
         provider: route.provider,
         model: route.model,
+        reasoningEffort: ReasoningEffortId('off'),
         messages: [createUserMessage({
           content: [{ type: 'text', text: materialFor(input) }],
           source: { kind: 'plugin', plugin: 'personal-feed-selector' },

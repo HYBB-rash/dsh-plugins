@@ -32,7 +32,13 @@ describe('DSH semantic judge', () => {
     })
     expect(stream).toHaveBeenCalledTimes(1)
     const options = stream.mock.calls[0]![0]
-    expect(options).toMatchObject({ provider: 'provider-a', model: 'model-a', temperature: 0, maxTokens: 64 })
+    expect(options).toMatchObject({
+      provider: 'provider-a',
+      model: 'model-a',
+      reasoningEffort: 'off',
+      temperature: 0,
+      maxTokens: 64,
+    })
     expect(options.sessionId).not.toBe('root-session')
     expect(options.messages).toHaveLength(1)
     expect(options.system).toBe(selectionSystemPrompt())
