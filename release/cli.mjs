@@ -1755,9 +1755,16 @@ test "$(docker image inspect "$expected_tag" --format '{{index .Config.Labels "i
 test "$(docker image inspect "$expected_tag" --format '{{index .Config.Labels "io.dsh.harness.revision"}}')" = ${shellQuote(candidate.harnessCommit)}
 cd "$release_dir"
 DSH_IMAGE="$expected_tag" DSH_IMAGE_ID="$expected_image" docker compose -p dsh -f compose.production.yml up -d
-for attempt in $(seq 1 24); do curl --fail --silent --max-time 2 http://127.0.0.1:3080/ >/dev/null && break; sleep 5; done
-curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
-curl --fail --silent --max-time 3 http://192.168.6.240:3080/ >/dev/null
+wait_http() {
+  local url="$1"
+  for attempt in $(seq 1 24); do
+    if curl --fail --silent --max-time 2 "$url" >/dev/null; then return 0; fi
+    sleep 5
+  done
+  curl --fail --silent --max-time 3 "$url" >/dev/null
+}
+wait_http http://127.0.0.1:3080/
+wait_http http://192.168.6.240:3080/
 test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-telegram --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-lan-proxy --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
