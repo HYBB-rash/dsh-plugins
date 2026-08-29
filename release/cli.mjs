@@ -1585,6 +1585,7 @@ const developmentPackages = Object.freeze([
   'telegram-gateway',
   'dsh-cron',
   'dsh-assistant',
+  'personal-feed-selector',
   'personal-feed',
   'x-feed',
   'ui-context-compactor',
@@ -1675,6 +1676,12 @@ function developmentSourceArgs(sourcePath) {
       symlinkSync(imageNodeModules, localNodeModules, 'dir')
     }
     args.push('--volume', `${join(sourcePath, packageName)}:/opt/dsh/harness/local-plugins/${packageName}:rw`)
+  }
+  for (const profile of ['web', 'telegram', 'telegram-test']) {
+    args.push(
+      '--volume',
+      `${join(sourcePath, 'personal-feed-selector')}:/opt/dsh/harness/local-profiles/${profile}/node_modules/@herman/personal-feed-selector:rw`,
+    )
   }
   args.push(
     '--volume', `${join(sourcePath, 'release/scripts')}:/opt/dsh/release-system/scripts:rw`,

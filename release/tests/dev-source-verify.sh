@@ -13,7 +13,7 @@ log="$test_root/commands.log"
 mkdir -p "$source_root/.git" "$source_root/x-feed/python" "$fake_bin" "$harness_root/node_modules/.bin" "$harness_root/node_modules/vitest"
 printf '%s\n' '{}' >"$source_root/runtime-package-topology.json"
 
-for package in telegram-gateway dsh-cron dsh-assistant personal-feed x-feed ui-context-compactor; do
+for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed x-feed ui-context-compactor; do
   mkdir -p "$harness_root/local-plugins/$package/src" "$harness_root/local-plugins/$package/tests"
   printf '%s\n' '{}' >"$harness_root/local-plugins/$package/package.json"
 done
@@ -67,10 +67,10 @@ NODE_PATH='/must-not-reach-test-resolver' \
 MOCK_VERIFY_LOG="$log" \
   "$script" all
 
-test "$(grep -Fc 'build tool=tsc setpriv_marker=' "$log")" = 12
-test "$(grep -Fc 'build tool=tsdown setpriv_marker=' "$log")" = 6
-test "$(grep -Fc 'setpriv args=--reuid=1000 --regid=1000 --init-groups' "$log")" = 7
-test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 6
+test "$(grep -Fc 'build tool=tsc setpriv_marker=' "$log")" = 14
+test "$(grep -Fc 'build tool=tsdown setpriv_marker=' "$log")" = 7
+test "$(grep -Fc 'setpriv args=--reuid=1000 --regid=1000 --init-groups' "$log")" = 8
+test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 7
 test "$(grep -Fc 'python setpriv_marker=1000' "$log")" = 2
 test "$(grep -Fc 'chown args=-R 1000:1000' "$log")" = 2
 grep -q 'build tool=tsc setpriv_marker= node_path=unset' "$log"
