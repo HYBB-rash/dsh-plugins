@@ -4,14 +4,83 @@ set -Eeuo pipefail
 release_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 state_root="${DSH_RELEASE_STATE_ROOT:-$HOME/.local/share/dsh-container}"
 
-# The local container engine has one shared image/layer store.  Commands that
-# build, archive, load, or remove images must queue behind one process lock.
-# Runtime-only development commands deliberately stay outside this lock so
-# independent worktrees can run in parallel.
+# Production mutations share one outer lock.  Accept takes that lock before the
+# engine lock, so every caller has one fixed acquisition order.  Runtime-only
+# development, snapshots, and status stay outside.  Every Harness invocation
+# takes the production lock so malformed argv can never create a lock bypass;
+# an unapproved preview still performs no SSH or production mutation.
 case "${1:-}" in
-  build|accept)
+  accept)
+    mkdir -p -- "$state_root/locks"
+    exec flock --exclusive "$state_root/locks/production-operation.lock" \
+      flock --exclusive "$state_root/locks/container-engine.lock" \
+      node "$release_dir/cli.mjs" "$@"
+    ;;
+  build)
     mkdir -p -- "$state_root/locks"
     exec flock --exclusive "$state_root/locks/container-engine.lock" \
+      node "$release_dir/cli.mjs" "$@"
+    ;;
+  credential|release|rollback)
+    mkdir -p -- "$state_root/locks"
+    exec flock --exclusive "$state_root/locks/production-operation.lock" \
+      node "$release_dir/cli.mjs" "$@"
+    ;;
+  harness)
+    if [[ "$#" == 3 && "${2:-}" == notion-automation && "${3:-}" == --status \
+      && "${DSH_DEPLOY_TARGET:-herman.hermes}" == herman.hermes ]]; then
+      exec python3 -c '
+import fcntl, os, stat, sys
+
+path, cli, *arguments = sys.argv[1:]
+descriptor = None
+def identity(value):
+    return (
+        value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+        value.st_uid, value.st_gid, value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+    )
+try:
+    before = os.lstat(path)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_uid != os.geteuid()
+    ):
+        raise OSError
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NOATIME", 0)
+        | getattr(os, "O_NONBLOCK", 0),
+    )
+    opened = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or opened.st_uid != os.geteuid()
+        or identity(before) != identity(opened)
+    ):
+        raise OSError
+    fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    after = os.lstat(path)
+    if identity(after) != identity(opened):
+        raise OSError
+    os.set_inheritable(descriptor, True)
+except OSError:
+    if descriptor is not None:
+        os.close(descriptor)
+    sys.stderr.write("错误：Harness Notion automation 本机生产锁不可用\n")
+    raise SystemExit(6)
+os.execvp("node", ["node", cli, *arguments])
+' "$state_root/locks/production-operation.lock" "$release_dir/cli.mjs" "$@"
+    fi
+    if [[ "$#" != 3 || "${2:-}" != notion-automation || "${3:-}" != --approved ]]; then
+      exec node "$release_dir/cli.mjs" "$@"
+    fi
+    mkdir -p -- "$state_root/locks"
+    exec flock --exclusive "$state_root/locks/production-operation.lock" \
       node "$release_dir/cli.mjs" "$@"
     ;;
   *)

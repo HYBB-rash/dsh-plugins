@@ -4,8 +4,12 @@
 
 ## 不会偷偷发生的事
 
-- `build` 只接受 Harness 和产品插件两个完整 Git commit，并分别用 `git archive` 取源码。Dockerfile、Profiles 和验收脚本单独取当前分支 HEAD 的精确发版工具 commit。候选清单同时记录三者，未提交文件、旧 `node_modules` 和原工作树里的旧部署目录不会进入镜像。
-- `release` 默认只打印停机影响和回退边界，退出码为 `3`。只有明确添加 `--approved-stop` 才会停止生产写入者。
+- `build` 只接受 Harness 和产品插件两个完整 Git commit，并分别用 `git archive` 取源码。Dockerfile、Profiles 和验收脚本单独取当前分支 HEAD 的精确发版工具 commit；正式 `build` 在归档前还会比较当前整棵 `release/` 与该 commit 的 archive，任何字节漂移都会硬停止。候选清单同时记录三者，未提交文件、旧 `node_modules` 和原工作树里的旧部署目录不会进入镜像。
+- `release` 默认只打印停机影响和回退边界，退出码为 `3`。明确添加 `--approved-stop` 也只停止生产写入者并制作完整快照；随后仍须另行取得生产发布授权，使用 `--approved-release` 才会迁移和启动候选。
+- `credential notion` 默认只打印目标、影响和批准后的准确命令，不读取 stdin、不写生产。凭据写入授权与停机、发布授权彼此独立。
+- `harness notion-automation` 默认只打印一次性创建目标、隔离边界和准确批准命令，不连接生产。它是线上 Harness 创建自己业务代码的独立授权门，不属于凭据、停机、发布、验收或回退授权。
+- Harness one-shot、凭据写入、生产停机、生产发布、真实业务验收后的 `accept` 和 `rollback` 都是彼此独立的授权门。任一批准都不能推导出其他批准；缺少当前步骤的明确批准时，流程只报告证据和下一步。
+- Git merge 和 push 也分别需要独立授权；候选构建、生产授权或验收结论都不能替代这两个授权。
 - `rollback` 默认只报告方案。只有明确添加 `--approved` 才会恢复数据和旧运行版本。
 - 发版脚本不要求 OpenClaw 存在，也不会停止、重启或配置它；DSH 容器用空 tmpfs 遮蔽 `.openclaw`，避免残留目录成为隐式依赖。
 
@@ -44,16 +48,60 @@
   --harness-ref b150a551b8d465e31e418e1b2eaf5e79bbb7d28e \
   --plugins-ref <40位插件commit>
 
+# 只检查 Notion 凭据目标和影响；不读 stdin、不改生产
+./release/dsh credential notion
+
+# 这是独立的生产凭据写入授权。token 只能从 stdin 进入，不得放入 argv 或环境变量；
+# 已有不同 token 时还必须显式添加 --replace。
+./release/dsh credential notion --stdin --approved < /path/to/secure-token-input
+./release/dsh credential notion --stdin --approved --replace < /path/to/secure-token-input
+
+# 只预览线上 Harness 首次创建 Notion automation 的目标和隔离边界；
+# 返回退出码 3，不连接生产、不读取凭据、不创建业务代码。
+./release/dsh harness notion-automation
+
+# 这是独立的 Harness one-shot 授权。仅允许 herman.hermes，且目标目录必须不存在；
+# 不授权停机、发布、真实 Notion 调用、Cron 变更、accept 或 rollback。
+./release/dsh harness notion-automation --approved
+
 # 第一次调用只申请停机，不改生产
 ./release/dsh release --candidate /path/to/candidate.json
 
-# 用户明确批准停机后才执行
+# 用户明确批准停机后才执行；此命令只停止 writers、制作一致快照，
+# 然后返回 waiting release ID，不会迁移、传输、加载或启动候选。
 ./release/dsh release --candidate /path/to/candidate.json --approved-stop
 
-# 真实 Telegram 和 Web 验收通过后。accept 是不可逆的最终承诺点；
+# 用户基于停机快照证据另行明确批准生产发布后，才从 waiting release 继续。
+# 不能与 --approved-stop 合并，也不能由停机授权推断。
+./release/dsh release --release <release-id> --approved-release
+
+# 若停机后不再继续发布，waiting release 已有完整快照和上一 accepted image，
+# 可直接进入独立 rollback 授权门；不需要也不得先补 --approved-release。
+./release/dsh rollback --release <release-id>
+./release/dsh rollback --release <release-id> --approved
+
+# 真实 Telegram、Web、Notion 任务接口、Cron、提醒和记忆验收通过后，
+# 逐项填写固定 schema；不允许附加说明正文、任务内容或其他字段。
+cat >/path/to/dsh-acceptance-v1.json <<'JSON'
+{
+  "schemaVersion": 1,
+  "checks": {
+    "telegramWebTaskQuery": true,
+    "notionReversibleTask": true,
+    "temporaryMonitorLifecycle": true,
+    "shanghaiReminder": true,
+    "dailyCronNextRuns": true,
+    "existingMemoryFact": true,
+    "noLegacyPathEacces": true,
+    "assistantSqliteIntegrity": true
+  }
+}
+JSON
+
+# accept 是不可逆的最终承诺点；缺项、false、额外字段或正文都会被拒绝。
 # 若返回 accepted-cleanup-incomplete，修复清理错误后对同一 release 重试，
 # 不再提供 --evidence，也不会重复真实业务验收。
-./release/dsh accept --release <release-id> --evidence '真实 Telegram 单条回复且 Web 正常'
+./release/dsh accept --release <release-id> --evidence /path/to/dsh-acceptance-v1.json
 
 # 只有 accept 前可以回退。accept 后即使清理尚未完成也会立即拒绝 rollback。
 # accept 前，回退命令第一次只报告方案；用户明确批准后才能真正恢复。
@@ -74,21 +122,31 @@
 
 构建工作目录、未完成候选、失败构建标签和归档暂存文件都会由本次命令清理。开发底座与正式候选用途严格分开，开发底座不能发布。development 在镜像构建阶段完成六个包的构建、TypeScript/Python 全量测试和镜像自检，但不生成、保存或重载 Docker archive；它按完整 `origin/main` commit 使用稳定身份，本机始终只保留最新 main 的一份开发镜像。同一 main 的重复 build 在锁内确认镜像和测试回执后直接复用。main 前进时先完成新镜像构建和自检，再停止并删除所有旧开发容器、隔离数据、租约和旧开发镜像；旧开发候选的 JSON 与测试回执标记为 retired 后继续作为小体积历史证据保留，源码 worktree 始终保留。
 
-每个 worktree 的开发环境使用路径摘要派生的独立 toolbox、Web、Telegram、假 Telegram 容器和内部网络，并在一个短状态锁内分配独立 Web 端口。所有容器都带有同一个 worktree 身份；一套环境是最小生命周期单位。因此多个任务可以从同一只读 main 镜像并行运行，`dev down`、`dev retire`、main 镜像更新和正式发布验收都只按 worktree 整体停止和清理。不得恢复固定的全局容器名，也不得直接调用 Podman 或执行全局 prune。
+每个 worktree 的开发环境使用路径摘要派生的独立 toolbox、Web、Telegram、假 Telegram、假 Notion 容器和无外网内部网络。所有容器都带有同一个 worktree 身份；一套环境是最小生命周期单位。因此多个任务可以从同一只读 main 镜像并行运行，`dev down`、`dev retire`、main 镜像更新和正式发布验收都只按 worktree 整体停止和清理。不得恢复固定的全局容器名，也不得直接调用 Podman 或执行全局 prune。
 
 `dev prepare` 创建并持续运行该 worktree 的固定 toolbox；`dev shell` 只用容器引擎的 exec 进入它，不创建新容器、不登记 shell 状态。`dev verify` 同样只 exec 这个既有 toolbox，不新建验证容器、不写入生命周期状态；因此 shell、verify 和其他 worktree 可以并发。交互终端断开只会结束本次 bash，不会产生需要另行识别的容器。一个 worktree 可以同时打开多个终端，它们都进入同一个 toolbox；清理时只需要销毁整套 worktree 环境。
 
 正式发版的生产快照测试副本和临时开发副本在测试结束或失败后都会清理。生产候选启动后、用户执行 `accept` 前，当前候选与上一 accepted 版本两代完整材料同时存在，停机快照与上一镜像共同构成完整回退边界。流程不会执行无边界的 `podman system prune` 或 `docker system prune`。
 
-个人业务自动化的源码属于持久化 Workspace，默认放在 `$DSH_CWD/automations/<业务名>/`，难以归类的通用脚本放在 `$DSH_CWD/automations/scripts/`。它们的任务定义属于 dsh-cron 持久化账本。仓库、产品镜像和发版流程都不保存业务脚本副本、业务 manifest，也不安装、迁移、验收或回退这些任务。镜像只提供通用解释器、命令行工具和 Harness 指导；业务脚本的生命周期由 Workspace 自己管理。
+个人业务 automation 的唯一长期所有者是线上 DeepSeek Harness，源码只由它在持久化 `$DSH_HOME/workspace/automations/` 中维护；这些 automation 永远不进入仓库或产品镜像。它们的任务定义属于 dsh-cron 持久化账本。普通 build、release、migration 和 rollback 都不保存业务脚本副本或业务 manifest，也不安装、复制、生成、覆盖、删除、迁移或回退这些代码和任务。镜像只提供通用解释器、命令行工具、产品 Skill 行为和 Harness 指导；发布只读检查既有入口与 Cron binding 是否满足候选合同，缺失或漂移时停止，绝不自行 `ensure` 或修复。
 
-`accept` 是不可逆的最终承诺点。真实健康验证通过并确认远端 `current`/`last-good` 同指本次 release 后，`release.json` 会记录 `rollbackBoundary.status=retired-at-accept`；从这一刻起不再支持恢复上一版本，清理失败也不会撤销 accepted。随后入口在同一全局镜像锁内幂等收敛正式材料：本机只保留当前 accepted candidate 的目录、`image.tar`、镜像测试回执和 Podman 镜像；远端只保留当前 release 的 `image.tar`、Compose、candidate 文件和正在运行的 Docker 镜像；本机与远端只保留 `snapshots/latest.json` 精确引用的一份一致生产快照归档。latest 生产快照继续保留给后续 `dev prepare` 使用。
+`harness notion-automation --approved` 是这条规则的窄而显式的首次创建入口，不是生产发布。它只使用当前 `current == last-good` 的 accepted 镜像，在独立只读容器、临时 DSH_HOME、专用内部网络和只允许 DeepSeek chat-completions 的凭据 relay 中让线上 Harness 生成自己的三份业务文件；容器看不到生产 Workspace、Notion token、Telegram、Cron 或其他 automation。仓库只保存固定任务说明、Harness lockdown、通用隔离 runner 和 release-owned 黑盒 probe，不保存可用业务实现或正常路径 fixture。生成物必须在无外网假 Notion 上通过十二项独立合同门、原子写入与逐 rename 崩溃恢复门，随后才以 `renameat2(RENAME_NOREPLACE)` 把整个目录 create-only 安装到准确目标。目标已存在、accepted 身份漂移、生产容器不健康、测试自报、秘密泄漏、Docker 清理不完整或任一门失败都会保持目标不存在；该命令不访问真实 Notion、不改 Cron、不停服务，也不授予后续发布权限。
 
-其他历史 `release.json`、`candidate.json`、镜像测试回执、上线前测试/验收/失败回执、摘要、用户证据和每次清理回执都保留；只删除 state root 内能由精确元数据识别、且没有容器引用的大体积归档和镜像。本机 Podman 镜像按 `candidate.imageId` 核对，远端 Docker 镜像按 `release.production.engineImageId` 核对；同一 archive 被两个引擎载入后的镜像 ID 不要求相同。失效的 `candidates/latest.json` 会一并删除。指针、当前候选或 latest snapshot 元数据不完整，容器仍引用旧镜像，或远端只完成部分操作时，结果为 `accepted-cleanup-incomplete`、退出码 `6`；`status` 会显示残留。对同一 accepted release 再次执行 `accept` 只重试清理，不重复 Telegram/Web 业务验收。每次 `cleanup` 回执都记录 `status`、受保护对象、本机/远端删除与保留对象、前后字节、错误和完成时间。
+Notion 任务入口同样由线上 Harness 维护，准确入口为 `$DSH_HOME/workspace/automations/notion/notion_inbox_sync.py`，交接回执为同目录的 `notion_inbox_sync.handoff.json`。正式发布在请求停机之前只读核验这两个文件的身份、owner、大小、入口 SHA-256 和接口，并把脱敏 handoff 身份与哈希锁入 waiting release；入口或回执缺失、不安全、漂移或不匹配都会在 writers 仍运行时阻断，发版不会用仓库或镜像内容补齐它们。停止 writers 后还会要求现场结果与停机前锁定的回执完全一致，避免把停机前看到的脚本替换成另一份脚本。
+
+交接回执是严格的 schema v2 脱敏证据，只允许 `schemaVersion`、`interfaceVersion`、`artifactContract`、`entrypointSha256`、`testReceiptSha256`、`testedAt` 和 `tests`。`artifactContract.interfaceVersion=1`，并把本地状态固定为权限 `0600` 的 `state={role: state, path: storages/task-inbox/sync-state.json}` 与 `fingerprint={role: fingerprint, path: storages/task-inbox/notion-fingerprint.json}`；正文镜像仍由 `NOTION_INBOX_FILE` 固定在 `storages/task-inbox/inbox.md`。`tests` 必须准确包含并全部通过 `atomicArtifacts`、`firstPull`、`read`、`set`、`push`、`pendingRetry`、`conflict`、`force`、`networkRecovery`、`pullFailureNoPending`、`noPendingNoApi` 和 `secretRedaction`。入口还必须声明 `pull/set/push/force/retry-pending/json` 接口与 `NOTION_TOKEN_FILE`、`NOTION_INBOX_FILE`、`NOTION_API_BASE`、`NOTION_PAGE_ID` 配置接口，并不得引用退役路径或 OpenClaw。候选清单只声明业务 automation 的 owner 是 `live-harness-workspace` 且 `includedInCandidate=false`；发布回执只记录入口、交接回执及外部测试回执的哈希、大小、接口版本和测试时间，不记录 automation 实现、私有配置值、token、Authorization header、完整 HTTP 请求、任务正文或私人 Workspace 内容。
+
+首次任务镜像初始化只允许 mirror、state 和 fingerprint 三个 artifact 全部不存在；发版通用包装器随后调用上述线上脚本的 `--pull --json`，按接口合同只对固定 Notion 页面执行 GET。只有脚本返回结构化 `status=synced`，且三个 artifact 都是正确 owner、权限 `0600`、硬链接数为 1、读取前后身份稳定的普通文件时才继续；任一 artifact 单独存在、缺失、不安全或读取中变化都 fail closed。三个 artifact 已全部存在时，包装器只读核验后返回 `already-initialized`，不启动脚本也不访问 Notion。初始化回执对每个 artifact 只保存 `role`、相对 `path`、`mode`、文件字节 `length` 和 SHA-256，并保存入口、handoff 与外部测试回执哈希；不保存 mirror、state、fingerprint 的正文或任何私有值。
+
+上线前的停机快照副本会使用同一候选镜像、同一线上 Harness-owned 入口字节和一份额外隔离副本，在专用无外网内部网络中对通用 fake Notion sidecar 执行首次只读 GET 初始化；第二次调用必须直接返回已有 artifact 且 sidecar 请求计数不增加。两次回执中的 mirror、state、fingerprint 三份 `role/path/mode/length/SHA-256` 证据必须逐项完全不变。该门只证明已交接入口能在假服务上原子生成三个 artifact，并完成首次 GET 与第二次幂等 no-op，不把业务脚本、测试实现、artifact 正文或私有值收入仓库、镜像或候选。入口或 handoff 尚未由线上 Harness 提供时，发布必须在停机前阻断，不能由仓库 fixture 代替。
+
+`accept` 是不可逆的最终承诺点。`--evidence` 必须是字段精确的结构化 JSON：`schemaVersion=1`，且上述八个固定 `checks` 必须逐项为布尔值 `true`；缺项、`false`、额外字段、说明正文、任务内容或私人事实都会在任何远端动作前被拒绝。命令只把规范化清单转换成固定摘要、SHA-256、UTF-8 字节长度、记录时间、版本化清单及通过计数；`release.json` 不保存输入 JSON、说明原文、任务正文或私人事实。真实健康验证通过并确认远端 `current`/`last-good` 同指本次 release 后，`release.json` 会记录 `rollbackBoundary.status=retired-at-accept`；从这一刻起不再支持恢复上一版本，清理失败也不会撤销 accepted。随后入口在同一全局镜像锁内幂等收敛正式材料：本机只保留当前 accepted candidate 的目录、`image.tar`、镜像测试回执和 Podman 镜像；远端只保留当前 release 的 `image.tar`、Compose、candidate 文件和正在运行的 Docker 镜像；本机与远端只保留 `snapshots/latest.json` 精确引用的一份一致生产快照归档。latest 生产快照继续保留给后续 `dev prepare` 使用。`accepted-cleanup-incomplete` 重试不再接收新 `--evidence`，且只有已保存的脱敏验收回执和健康回执仍精确符合当前 schema 时才继续清理；任何旧格式或漂移都会 fail closed。
+
+其他历史 `release.json`、`candidate.json`、镜像测试回执、上线前测试/验收/失败回执、摘要、只含 SHA-256、长度、固定清单和计数的脱敏用户验收回执，以及每次清理回执都会保留；用户验收说明原文不会落盘。流程只删除 state root 内能由精确元数据识别、且没有容器引用的大体积归档和镜像。本机 Podman 镜像按 `candidate.imageId` 核对，远端 Docker 镜像按 `release.production.engineImageId` 核对；同一 archive 被两个引擎载入后的镜像 ID 不要求相同。失效的 `candidates/latest.json` 会一并删除。指针、当前候选或 latest snapshot 元数据不完整，容器仍引用旧镜像，或远端只完成部分操作时，结果为 `accepted-cleanup-incomplete`、退出码 `6`；`status` 会显示残留。对同一 accepted release 再次执行 `accept` 只重试清理，不重复 Telegram/Web 业务验收。每次 `cleanup` 回执都记录 `status`、受保护对象、本机/远端删除与保留对象、前后字节、错误和完成时间。
 
 正式 release 完成 `accept` 后，本地开发环境和共享开发镜像立即失效并清理；任务源码 worktree 原样保留。未完成任务下次继续时，必须先同步新 main，请求最新 main 的唯一开发镜像，再执行自己的 `dev prepare`。
 
-开发态的 Telegram/cron 容器只连接无外网的内部网络和假 Bot API；Web 由于 Harness 强制只绑定 loopback，使用宿主网络供本机浏览器访问，但只持有测试凭据，不承担 Telegram 或 cron 写入。生产容器固定使用 `1000:1000`；本机 rootless Podman 为了让快照副本保持宿主用户可读写，在容器内显示为 uid 0，但仍映射为宿主普通用户，不获得宿主 root 权限。
+开发和预发布都禁止 host network。开发态的 Telegram、Web、cron 和测试 sidecar 只连接无外网内部网络；预发布中不需要 sidecar 的门使用 `--network none`，需要 fake Telegram/Notion 的运行门只使用本次隔离副本的专用内部网络。Harness Web 仍只绑定容器自己的 loopback，健康检查通过容器内 `curl` 完成，不为方便本机浏览器而恢复 host network；若以后需要交互浏览器入口，必须另设显式且只监听宿主 loopback 的受控 relay。Notion 测试只访问通用 fake sidecar 的固定 GET 页面；sidecar 不包含任务同步业务，也不读取 Workspace automation、生产 token 或私人正文。生产容器固定使用 `1000:1000`；本机 rootless Podman 为了让快照副本保持宿主用户可读写，在容器内显示为 uid 0，但仍映射为宿主普通用户，不获得宿主 root 权限。
 
 `dev prepare` 是源码开发入口，不是测试或发版入口。它在准备开始和完成后都会重新 fetch：独立任务分支必须包含最新 `origin/main`，开发基础镜像的插件 commit 也必须精确等于该 `origin/main`；期间 main 一旦更新，就停止并要求 rebase、重建基础镜像和重新准备环境。正式 `build` 和 `release` 也会拒绝任何没有基于最新 `origin/main` 的产品或发版工具 commit。它只下载已有的一致生产快照，不会为开发申请停机或在线生成快照；远端没有快照、摘要不匹配或下载失败都会停止，不会退回合成数据。Harness 始终使用 `harness.lock.json` 的只读固定 commit。六个插件、Skills、Profiles、runtime topology、materializer 和镜像运行脚本都从独立 worktree 可写挂入；镜像根文件系统仍为只读，编译产物留在 worktree 的忽略目录。由于可编辑挂载会遮住镜像内预构建的 `lib`，`prepare` 只快速重新编译六个包，然后检查 Web、假 Telegram、空 cron、真实 Telegram 阻断和镜像身份；它不重复 Vitest 或 Python unittest。需要验证当前未提交源码时，显式执行 `dev verify`：它在 rootless toolbox uid 0 中重做当前范围的 type/build/bundle，避免改变宿主挂载源码的 ownership；随后以 Containerfile 相同的 1000:1000 身份、Harness、Vitest 配置和默认模块解析跑 TypeScript/Python 测试，以保留 chmod 等权限测试语义。验证专用 HOME、npm/XDG cache 与 Python data 均在 toolbox tmpfs 中创建、仅交给 1000:1000 并在结束时清理，且清除外部 `NODE_PATH`，避免污染模块拓扑边界。回执同时列出共享 main 镜像的全量测试回执与本次 editable source 的状态摘要；后者不是可发布候选。生产目录和真实凭据不会被挂载。
 
@@ -104,11 +162,14 @@
 
 ## 固定边界
 
-- 产品代码和发版工具都来自清单记录的精确 Git commit；工作树中的未提交文件不会进入镜像。
-- `release` 在获得停机许可前不停止任何写入者；许可只覆盖该次候选和该次停机窗口。
-- 停机后先做一致快照，再用快照副本执行上线前测试；测试失败时生产保持停止并报告，不在线改产品代码。
+- 产品代码和发版工具都来自清单记录的精确 Git commit；正式 `build`、生产 `release`、`approved-release`、`accept` 和 `rollback` 都会拒绝当前 `release/` 整树与绑定 commit 的任何字节漂移，候选中的 `release/` 只取该 commit 的 archive。工作树中的未提交文件不会进入镜像。
+- `release` 在获得停机许可前不停止任何写入者；许可只覆盖该次候选和该次停机窗口，不覆盖生产发布。
+- `harness notion-automation` 未批准时只返回计划。批准后也只允许在 `herman.hermes` 的稳定 accepted 运行边界中 create-only 安装一个此前不存在的 Harness-owned 目录；它不消费候选、不切换镜像，也不能替代任何发布授权。
+- `--approved-stop` 只停止全部 writers 并做一致快照，然后固定为 `waiting-for-release-authorization`。只有另一次 `--approved-release` 才允许用 scrub 后的快照副本测试、执行迁移、传输候选和启动生产；它必须用 `--release <release-id>` 消费这份已存在的 waiting receipt，不能同时再传 candidate，也不能把停机批准当作发布批准。
+- `waiting-for-release-authorization` 已具备完整停机快照和上一 accepted image，可不经过生产发布授权直接请求 `rollback`；真正恢复仍须单独添加 `rollback --approved`，停机授权或生产发布授权都不能代替回退授权。
+- 快照副本在进入任何候选容器前清除真实 Telegram、Harness、Notion 凭据和外部写入能力；测试失败时生产保持停止并报告，不在线改产品代码。
 - 明确属于挂载、权限、Compose、路径或启动参数的发版小问题，可在限定现场窗口内修正后重新验收；需要改 Harness、插件、数据语义或原因不清时，先向用户报告。只有用户批准后才能回退。
-- 上线后状态先是 `awaiting-user-acceptance`。真实 Telegram、Web 和本次产品改动验收通过并执行 `accept` 后，该镜像才成为 `last-good`，随后只保留当前正式版本自身的恢复材料与 latest 生产快照。Workspace 业务任务不属于产品发版验收边界。
+- 上线后状态先是 `awaiting-user-acceptance`。真实 Telegram、Web 和本次产品改动验收通过并执行 `accept` 后，该镜像才成为 `last-good`，随后只保留当前正式版本自身的恢复材料与 latest 生产快照。本次明确纳入的 Notion 任务入口、镜像和冲突/离线行为属于产品接口验收；其他无关 Workspace 业务任务仍不属于本次产品发版边界。
 - 回退默认只打印恢复对象、快照和影响；只有 accept 前且显式添加 `--approved` 才能恢复上一 Docker 镜像及对应停机前数据。accepted release 在任何远端恢复动作前都会被拒绝。
 - OpenClaw 始终在流程外且可完全不存在：不得停止、重启、改配置或接管其写入权，DSH 也不得读取它的目录、凭据、CLI、插件或状态。
 

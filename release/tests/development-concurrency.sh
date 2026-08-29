@@ -52,6 +52,14 @@ case "$command" in
       printf '[{"Id":"%s","Name":"/%s","Config":{"Cmd":["runtime"],"Labels":{}},"Mounts":[],"NetworkSettings":{"Networks":{}}}]\n' "$name" "$name"
     elif [[ "$*" == *'.State.Running'* ]]; then
       printf '%s\n' true
+    elif [[ "$*" == *'.NetworkSettings.Networks'* ]]; then
+      if [[ "$name" == *-fake-notion ]]; then
+        printf '{"%s":{}}\n' "${name%-fake-notion}-internal"
+      elif [[ "$name" == *-fake-telegram ]]; then
+        printf '{"%s":{}}\n' "${name%-fake-telegram}-internal"
+      else
+        printf '{"%s":{}}\n' "${name%-*}-internal"
+      fi
     else
       printf '%s|true\n' "$image_id"
     fi
@@ -60,6 +68,16 @@ case "$command" in
     name="$1"
     shift
     if [[ "$name" == *-telegram && "$*" == *'https://api.telegram.org'* ]]; then exit 7; fi
+    if [[ "$name" == *-web && "$*" == *'https://api.notion.com'* ]]; then exit 7; fi
+    if [[ "$name" == *-web && "$*" == *'printenv NOTION_API_BASE'* ]]; then
+      printf '%s\n' 'http://fake-notion:8081/v1'
+    fi
+    if [[ "$name" == *-fake-notion && "$*" == *'request-count'* ]]; then
+      printf '%s\n' '{"schemaVersion":1,"successfulGetCount":0,"rejectedGetCount":0,"mutationRequestCount":0,"otherApiRequestCount":0,"fixtureLength":17,"fixtureSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+    fi
+    if [[ "$*" == *'check-assistant-cron-ready.mjs'* ]]; then
+      printf '%s\n' '{"state":"ready","protocolVersion":1}'
+    fi
     if [[ "$*" == *getRequests* ]]; then
       printf '%s\n' '/getMe /getUpdates /sendMessage'
     fi
@@ -76,7 +94,10 @@ case "$command" in
   ps)
     find "$MOCK_ENGINE_STATE/running" -mindepth 1 -maxdepth 1 -printf '%f\n'
     ;;
-  network) exit 0 ;;
+  network)
+    if [[ "${1:-}" == inspect ]]; then printf '%s\n' true; fi
+    exit 0
+    ;;
   *) exit 64 ;;
 esac
 EOF
@@ -212,7 +233,7 @@ node - <<'NODE' "$test_root/a.json" "$test_root/b.json"
 const fs = require('node:fs')
 const a = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 const b = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'))
-for (const key of ['network', 'toolbox', 'fakeTelegram', 'telegram', 'web', 'webPort']) {
+for (const key of ['network', 'toolbox', 'fakeTelegram', 'fakeNotion', 'telegram', 'web', 'webPort']) {
   if (a.runtime[key] === b.runtime[key]) throw new Error(`runtime field collided: ${key}`)
 }
 if (a.homePath === b.homePath || a.leasePath === b.leasePath) throw new Error('development data or lease collided')
@@ -222,18 +243,29 @@ runtime_a_web="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFile
 runtime_b_web="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).runtime.web)' "$test_root/b.json")"
 runtime_a_toolbox="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).runtime.toolbox)' "$test_root/a.json")"
 runtime_b_toolbox="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).runtime.toolbox)' "$test_root/b.json")"
+runtime_a_fake_notion="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).runtime.fakeNotion)' "$test_root/a.json")"
+runtime_b_fake_notion="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).runtime.fakeNotion)' "$test_root/b.json")"
 test -f "$mock_state/running/$runtime_a_web"
 test -f "$mock_state/running/$runtime_b_web"
 test -f "$mock_state/running/$runtime_a_toolbox"
 test -f "$mock_state/running/$runtime_b_toolbox"
+test -f "$mock_state/running/$runtime_a_fake_notion"
+test -f "$mock_state/running/$runtime_b_fake_notion"
 grep -Fq "io.dsh.dev.source-path=$source_a" "$test_root/engine.log"
 grep -Fq 'io.dsh.dev.role=toolbox' "$test_root/engine.log"
+grep -Fq 'io.dsh.dev.role=fake-notion' "$test_root/engine.log"
+grep -Fq -- "--name $runtime_a_fake_notion --network dsh-dev-" "$test_root/engine.log"
+grep -Fq -- "--name $runtime_a_web --network dsh-dev-" "$test_root/engine.log"
+grep -Fq 'NOTION_API_BASE=http://fake-notion:8081/v1' "$test_root/engine.log"
+grep -Fq 'NOTION_PAGE_ID=00000000000000000000000000000001' "$test_root/engine.log"
 
 run_dev dev down --source "$source_a" >"$test_root/down-a.json"
 test ! -e "$mock_state/running/$runtime_a_web"
 test ! -e "$mock_state/running/$runtime_a_toolbox"
+test ! -e "$mock_state/running/$runtime_a_fake_notion"
 test -e "$mock_state/running/$runtime_b_web"
 test -e "$mock_state/running/$runtime_b_toolbox"
+test -e "$mock_state/running/$runtime_b_fake_notion"
 
 run_dev dev down --source "$source_b" >"$test_root/down-b.json"
 run_dev dev retire --source "$source_a" >"$test_root/retire-a.json"

@@ -90,6 +90,65 @@ if [[ "$requested_package" == all ]]; then
   setpriv --reuid=1000 --regid=1000 --init-groups \
     env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \
     python3 /opt/dsh/release-system/tests/test_workspace_migration.py
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \
+    python3 /opt/dsh/release-system/tests/credential-notion.py
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \
+    python3 /opt/dsh/release-system/tests/notion-page-check.py
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \
+    python3 /opt/dsh/release-system/tests/notion-automation-entrypoint.py
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \
+    python3 /opt/dsh/release-system/tests/harness-notion-automation-probe.py
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \
+    python3 /opt/dsh/release-system/tests/harness-notion-automation-runner.py
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \
+    python3 /opt/dsh/release-system/tests/harness-notion-automation-bridge.py
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \
+    python3 /opt/dsh/release-system/tests/harness-notion-automation-status.py
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" \
+    bash /opt/dsh/release-system/tests/harness-notion-automation-command.sh
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" \
+    bash /opt/dsh/release-system/tests/engine-lock.sh
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" \
+    bash /opt/dsh/release-system/tests/production-operation-lock.sh
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \
+    python3 /opt/dsh/release-system/tests/notion-inbox-init.py
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \
+    python3 /opt/dsh/release-system/tests/test_scrub_preflight_state.py
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \
+    python3 /opt/dsh/release-system/tests/test_workspace_migration_content.py
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" npm_config_cache="$verify_root/cache/npm" \
+    XDG_CACHE_HOME="$verify_root/cache/xdg" \
+    node --test /opt/dsh/release-system/tests/assistant-cron-health.mjs
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" npm_config_cache="$verify_root/cache/npm" \
+    XDG_CACHE_HOME="$verify_root/cache/xdg" \
+    node --test /opt/dsh/release-system/tests/fake-notion.mjs
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" npm_config_cache="$verify_root/cache/npm" \
+    XDG_CACHE_HOME="$verify_root/cache/xdg" \
+    node --test /opt/dsh/release-system/tests/notion-retry-binding.mjs
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" npm_config_cache="$verify_root/cache/npm" \
+    XDG_CACHE_HOME="$verify_root/cache/xdg" \
+    node --test /opt/dsh/release-system/tests/inspect-cron-reanchor.mjs
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" npm_config_cache="$verify_root/cache/npm" \
+    XDG_CACHE_HOME="$verify_root/cache/xdg" NODE_NO_WARNINGS=1 \
+    node /opt/dsh/release-system/tests/validate-assistant-state.mjs
 fi
 
 printf '%s\n' "editable source verification passed; scope=$requested_package; build-identity=rootless-toolbox-uid-0; test-identity=1000:1000; cache=tmpfs"

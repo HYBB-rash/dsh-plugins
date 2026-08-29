@@ -20,6 +20,21 @@ test ! -e /opt/dsh/harness/local-plugins/dsh-assistant/lib/migrate-cli.js
 test ! -e /opt/dsh/harness/local-plugins/dsh-assistant/lib/historical-recovery.js
 test ! -e /opt/dsh/harness/local-plugins/ui-context-compactor
 test ! -e /opt/dsh/automations
+for script in \
+  check-assistant-cron-ready.mjs check-harness-only-state.py \
+  check-notion-automation-entrypoint.py check-notion-page.py \
+  check-notion-retry-binding.mjs fake-notion.mjs \
+  harness-notion-automation-bridge.mjs harness-notion-automation-remote.py \
+  inspect-cron-reanchor.mjs migrate-workspace-state.py notion-credential-remote.py \
+  reanchor-cron-schedules.mjs run-notion-inbox-init.py \
+  scrub-preflight-state.py verify-harness-notion-automation.py \
+  verify-workspace-migration-content.py; do
+  test -f "/opt/dsh/release-system/scripts/$script"
+done
+test -f /opt/dsh/release-system/scripts/harness-notion-automation-task.md
+test -f /opt/dsh/release-system/scripts/harness-notion-automation.patch.yml
+test -f /opt/dsh/release-system/workspace-migrations/harness-only-v1/manifest.json
+test -f /opt/dsh/release-system/notion.production.json
 
 for executable in bash bluetoothctl curl gatttool git node openssl python3 rg socat ssh; do
   command -v "$executable" >/dev/null
@@ -31,6 +46,68 @@ import paho.mqtt.client
 import pexpect
 import websocket
 PY
+
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path('/opt/dsh/release-system/notion.production.json')
+value = json.loads(path.read_bytes())
+expected = {
+    'schemaVersion', 'apiBase', 'apiVersion', 'pageId',
+    'credentialPath', 'inboxPath',
+}
+assert set(value) == expected
+assert value['schemaVersion'] == 1
+assert value['apiBase'] == 'https://api.notion.com/v1'
+assert value['apiVersion'] == '2026-03-11'
+assert value['pageId'] == '3b059c119f80803cb8ace3ead7eefc81'
+assert value['credentialPath'] == '/home/herman/.dsh/secrets/notion.token'
+assert value['inboxPath'] == '/home/herman/.dsh/storages/task-inbox/inbox.md'
+PY
+
+entrypoint_help="$("/opt/dsh/release-system/scripts/entrypoint.sh" help)"
+for command in \
+  workspace-migrate workspace-migration-verify harness-only-health \
+  scrub-preflight-state cron-reanchor cron-reanchor-inspect assistant-cron-health \
+  notion-page-check notion-automation-health notion-inbox-init \
+  notion-credential-install notion-retry-health fake-notion; do
+  grep -Fq "$command" <<<"$entrypoint_help"
+done
+
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 /opt/dsh/release-system/tests/test_workspace_migration.py
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 /opt/dsh/release-system/tests/credential-notion.py
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 /opt/dsh/release-system/tests/notion-page-check.py
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 /opt/dsh/release-system/tests/notion-automation-entrypoint.py
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 /opt/dsh/release-system/tests/harness-notion-automation-probe.py
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 /opt/dsh/release-system/tests/harness-notion-automation-runner.py
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 /opt/dsh/release-system/tests/harness-notion-automation-bridge.py
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 /opt/dsh/release-system/tests/harness-notion-automation-status.py
+bash /opt/dsh/release-system/tests/harness-notion-automation-command.sh
+bash /opt/dsh/release-system/tests/engine-lock.sh
+bash /opt/dsh/release-system/tests/production-operation-lock.sh
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 /opt/dsh/release-system/tests/notion-inbox-init.py
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 /opt/dsh/release-system/tests/test_scrub_preflight_state.py
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 /opt/dsh/release-system/tests/test_workspace_migration_content.py
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 /opt/dsh/release-system/scripts/verify-workspace-migration-content.py >/dev/null
+node --test /opt/dsh/release-system/tests/assistant-cron-health.mjs
+node --test /opt/dsh/release-system/tests/fake-notion.mjs
+node --test /opt/dsh/release-system/tests/notion-retry-binding.mjs
+node --test /opt/dsh/release-system/tests/inspect-cron-reanchor.mjs
+NODE_NO_WARNINGS=1 node /opt/dsh/release-system/tests/validate-assistant-state.mjs
+test ! -e /opt/dsh/automations
 
 if rg -n 'link:/home/herman|/home/herman/Documents/Codex/.*/deepseek-harness|/home/herman/Projects/dsh-plugins' \
   /opt/dsh/harness/local-profiles; then
@@ -56,7 +133,7 @@ if rg --fixed-strings '/opt/dsh/automations' "$tmp_home/.dsh/AGENTS.md"; then
   printf '%s\n' 'workspace instructions still advertise repository-owned automations' >&2
   exit 1
 fi
-for skill in explore-opportunity personal-task-list x-feed; do
+for skill in explore-opportunity personal-feed-selector personal-task-list x-feed; do
   test -L "$tmp_home/.dsh/skills/$skill"
   test "$(readlink "$tmp_home/.dsh/skills/$skill")" = "/opt/dsh/plugins-src/skills/$skill"
 done

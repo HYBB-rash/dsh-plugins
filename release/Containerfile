@@ -110,7 +110,35 @@ RUN set -eu; \
      && DSH_X_FEED_DATA_DIR="$python_data" PYTHONWARNINGS=ignore \
         python3 -m unittest test_insight_engine.py); \
     PYTHONDONTWRITEBYTECODE=1 \
-      python3 /opt/dsh/release-system/tests/test_workspace_migration.py
+      python3 /opt/dsh/release-system/tests/test_workspace_migration.py; \
+    PYTHONDONTWRITEBYTECODE=1 \
+      python3 /opt/dsh/release-system/tests/credential-notion.py; \
+    PYTHONDONTWRITEBYTECODE=1 \
+      python3 /opt/dsh/release-system/tests/notion-page-check.py; \
+    PYTHONDONTWRITEBYTECODE=1 \
+      python3 /opt/dsh/release-system/tests/notion-automation-entrypoint.py; \
+    PYTHONDONTWRITEBYTECODE=1 \
+      python3 /opt/dsh/release-system/tests/harness-notion-automation-probe.py; \
+    PYTHONDONTWRITEBYTECODE=1 \
+      python3 /opt/dsh/release-system/tests/harness-notion-automation-runner.py; \
+    PYTHONDONTWRITEBYTECODE=1 \
+      python3 /opt/dsh/release-system/tests/harness-notion-automation-bridge.py; \
+    PYTHONDONTWRITEBYTECODE=1 \
+      python3 /opt/dsh/release-system/tests/harness-notion-automation-status.py; \
+    bash /opt/dsh/release-system/tests/harness-notion-automation-command.sh; \
+    bash /opt/dsh/release-system/tests/engine-lock.sh; \
+    bash /opt/dsh/release-system/tests/production-operation-lock.sh; \
+    PYTHONDONTWRITEBYTECODE=1 \
+      python3 /opt/dsh/release-system/tests/notion-inbox-init.py; \
+    PYTHONDONTWRITEBYTECODE=1 \
+      python3 /opt/dsh/release-system/tests/test_scrub_preflight_state.py; \
+    PYTHONDONTWRITEBYTECODE=1 \
+      python3 /opt/dsh/release-system/tests/test_workspace_migration_content.py; \
+    node --test /opt/dsh/release-system/tests/assistant-cron-health.mjs; \
+    node --test /opt/dsh/release-system/tests/fake-notion.mjs; \
+    node --test /opt/dsh/release-system/tests/notion-retry-binding.mjs; \
+    node --test /opt/dsh/release-system/tests/inspect-cron-reanchor.mjs; \
+    NODE_NO_WARNINGS=1 node /opt/dsh/release-system/tests/validate-assistant-state.mjs
 
 ARG DSH_PLUGINS_COMMIT
 ARG DSH_RELEASE_COMMIT

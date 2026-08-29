@@ -76,4 +76,10 @@
 - 2026-08-29：自动选择运行后端时，镜像测试不能只导入公共依赖；必须覆盖生产环境会被实际选中的后端及其条件依赖。BZP 镜像同时提供 `gatttool` 后会自动选择该后端，因此 `pexpect` 必须进入锁定依赖并由镜像 self-test 直接导入，否则单元测试和假 BLE 都可能通过、真实读表却在连接前失败。
 - 2026-08-29：个人业务自动化源码归持久化 DSH Workspace，任务定义归 dsh-cron 账本；产品仓库只保留通用执行环境和 Workspace 编写指导，不保存业务脚本、重复 manifest 或 reconciler。发版只验证 DSH 产品，不安装、迁移、验收或回退 Rita、BZP、OOM 等 Workspace 业务设施；本条取代 2026-08-28 的“仓库自管 automations”路线。
 - 2026-08-31：退休数据库旧 schema 兼容前，先同时证明当前 accepted image 只接受目标 schema、正在运行的数据和 latest 一致快照都已处于该版本，并确认回退边界已退休。`accepted-cleanup-incomplete` 留下的历史归档不等于当前支持的恢复输入；应保留残留而不读取或删除，也不应让它阻塞 current-only 兼容退休。
-- 2026-08-31：退休公开开发命令前要先查内部调用；旧 `dev up` 同时承担正式 release 停机后的候选预检。正确收缩是把候选启动验证私有化，并与 `dev prepare` 共用启动器，只删除公开 `up`、`synthetic`、`reset` 和专属接线，不能删除发布预检。
+- 2026-08-30：业务 automation 由线上 Harness 维护时，候选不能把脚本字节或测试实现收入仓库，也不能假定入口已经存在。发布应在停机前只读核验 Workspace 中精确入口、接口版本、源码哈希和脱敏测试回执，停机后再核同一身份；缺失或漂移必须在写状态迁移前失败，release 只消费结果，不创建、覆盖、删除脚本或修复其 cron binding。
+- 2026-08-30：线上 automation 的历史测试布尔不能替代本次发布的状态证据。首次外部初始化需用隔离假服务分别统计成功 GET、被拒 GET、变更和异常请求，并把返回 fixture 与本地正文镜像哈希对应；正文、状态和指纹三件 artifact 均应以 nofollow 身份、权限、长度和摘要进入脱敏回执，第二次运行必须三件都不变且零新增请求。
+- 2026-08-30：Podman 的 `--tmpfs` 默认会把镜像目录或父 bind mount 的原内容 copy-up 到新 tmpfs；小容量 `/tmp` 会因此在容器启动前误报 ENOSPC，嵌套遮蔽目录也可能先读取本应隔离的父内容。本地 Podman 的临时目录和旧路径遮蔽必须显式使用 `notmpcopyup`，并用父目录 sentinel 验证容器不可见且宿主字节不变；生产 Docker Compose 保持 Docker 支持的 tmpfs 语法，因为 Docker 直接遮蔽既有内容而不做该 copy-up。
+- 2026-08-30：Podman 容器接入自定义 bridge 时，`HostConfig.NetworkMode` 仍可能只显示 `bridge`，不能用它证明连接了哪张网络。跨 Podman/Docker 的隔离健康门应同时要求目标 network 自身 `Internal=true`，并从每个容器的 `NetworkSettings.Networks` 核验唯一成员就是本次 worktree 的内部网络。
+- 2026-08-30：线上 Harness 首次创建 Workspace 业务 automation 不能伪装成普通镜像发布，也不能让模型直接写生产目标。应使用单独授权的一次性入口和当前 accepted 镜像，在无生产 Workspace/Notion/Cron 挂载的暂存区生成；由 release-owned 假服务黑盒门独立验证接口、脱敏、原子写和崩溃恢复后，再以目标必须不存在的目录级 `RENAME_NOREPLACE` 原子安装。仓库只保存通用隔离编排和可信验证器，不保存生成的业务源码或正确实现 fixture。
+- 2026-08-30：Docker CLI 的 `--mount type=bind` 可写挂载应依赖默认可写语义，不能附加无值的 `rw` 字段；线上 Harness one-shot 又使用 `--log-driver none` 时，任务等待器必须把 stdout 直接丢弃、只从有界 stderr 流提取固定白名单错误码，并显式约束模型输出预算和重试次数，否则 Docker 参数错误或 `max-tokens`/API 失败只会坍缩成不可诊断的统一退出码。
+- 2026-08-30：不写生产的 one-shot 状态快照仍必须同时持有本机和远端 production operation 共享锁，否则会与正常 `release`/`accept`/`rollback` 入口拼出撕裂状态；若入口从精确 Git commit 读取 helper，helper 未提交前只能做本地聚焦测试，不能把工作树字节当作真实正常入口验收。

@@ -89,19 +89,21 @@ run_dev() {
 }
 
 prepare_fixture() {
-  local source="$1" key suffix dev_root toolbox network
+  local source="$1" key suffix dev_root toolbox fake_notion network
   key="$(printf '%s' "$source" | sha256sum | awk '{print $1}')"
   suffix="${key:0:12}"
   dev_root="$state_root/dev/environments/$key"
   toolbox="dsh-dev-$suffix-toolbox"
+  fake_notion="dsh-dev-$suffix-fake-notion"
   network="dsh-dev-$suffix-internal"
   mkdir -p "$source" "$dev_root/home/herman"
   : >"$mock_state/running/$toolbox"
+  : >"$mock_state/running/$fake_notion"
   node - <<'NODE' "$dev_root/dev.json" "$state_root/dev/leases/$key.json" "$state_root/dev/runtimes/$key.json" "$source" "$dev_root" "$network" "$key" "$candidate"
 const fs = require('node:fs')
 const [metaPath, leasePath, runtimePath, sourcePath, devRoot, network, key, candidatePath] = process.argv.slice(2)
 const candidate = JSON.parse(fs.readFileSync(candidatePath, 'utf8'))
-const runtime = { schemaVersion: 2, sourcePath, key, network, web: `dsh-dev-${key.slice(0, 12)}-web`, telegram: `dsh-dev-${key.slice(0, 12)}-telegram`, fakeTelegram: `dsh-dev-${key.slice(0, 12)}-fake-telegram`, webPort: 31000 }
+const runtime = { schemaVersion: 3, sourcePath, key, network, toolbox: `dsh-dev-${key.slice(0, 12)}-toolbox`, web: `dsh-dev-${key.slice(0, 12)}-web`, telegram: `dsh-dev-${key.slice(0, 12)}-telegram`, fakeTelegram: `dsh-dev-${key.slice(0, 12)}-fake-telegram`, fakeNotion: `dsh-dev-${key.slice(0, 12)}-fake-notion`, webPort: 31000 }
 fs.writeFileSync(metaPath, JSON.stringify({ schemaVersion: 2, mode: 'editable-source', sourcePath, runtime }) + '\n')
 fs.writeFileSync(runtimePath, JSON.stringify(runtime) + '\n')
 fs.writeFileSync(leasePath, JSON.stringify({ schemaVersion: 2, sourcePath, candidateId: candidate.candidateId, candidatePath, imageId: candidate.imageId, imageTag: candidate.imageTag, devRoot, runtime }) + '\n')
@@ -120,6 +122,8 @@ key_a="$(printf '%s' "$source_a" | sha256sum | awk '{print $1}')"
 key_b="$(printf '%s' "$source_b" | sha256sum | awk '{print $1}')"
 toolbox_a="dsh-dev-${key_a:0:12}-toolbox"
 toolbox_b="dsh-dev-${key_b:0:12}-toolbox"
+fake_notion_a="dsh-dev-${key_a:0:12}-fake-notion"
+fake_notion_b="dsh-dev-${key_b:0:12}-fake-notion"
 
 test "$(grep -Fc "exec --interactive --tty --workdir /workspace/dsh-plugins $toolbox_a bash" "$test_root/engine.log")" = 2
 run_dev dev verify --source "$source_a" --candidate "$candidate" >"$test_root/verify-all.json"
@@ -209,12 +213,14 @@ test -f "$state_root/dev/leases/$key_a.json"
 ! grep -Eq '^run ' "$test_root/engine.log"
 test ! -e "$state_root/dev/shells"
 
-node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(r.schemaVersion!==3 || r.toolbox!==process.argv[2]) process.exit(1)' \
-  "$state_root/dev/runtimes/$key_a.json" "$toolbox_a"
+node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(r.schemaVersion!==3 || r.toolbox!==process.argv[2] || r.fakeNotion!==process.argv[3]) process.exit(1)' \
+  "$state_root/dev/runtimes/$key_a.json" "$toolbox_a" "$fake_notion_a"
 
 run_dev dev down --source "$source_a" >"$test_root/down-a.json"
 test ! -e "$mock_state/running/$toolbox_a"
+test ! -e "$mock_state/running/$fake_notion_a"
 test -e "$mock_state/running/$toolbox_b"
+test -e "$mock_state/running/$fake_notion_b"
 
 run_dev dev retire --source "$source_a" >"$test_root/retire-a.json"
 test ! -e "$state_root/dev/environments/$key_a"
@@ -223,5 +229,6 @@ test ! -e "$state_root/dev/runtimes/$key_a.json"
 
 run_dev dev retire --source "$source_b" >"$test_root/retire-b.json"
 test ! -e "$mock_state/running/$toolbox_b"
+test ! -e "$mock_state/running/$fake_notion_b"
 
 printf 'fixed per-worktree development toolbox lifecycle and editable verification contract passed\n'

@@ -10,6 +10,7 @@ source_root="$test_root/source"
 harness_root="$test_root/harness"
 fake_bin="$test_root/fake-bin"
 log="$test_root/commands.log"
+real_bash="$(command -v bash)"
 mkdir -p "$source_root/.git" "$source_root/x-feed/python" "$fake_bin" "$harness_root/node_modules/.bin" "$harness_root/node_modules/vitest"
 printf '%s\n' '{}' >"$source_root/runtime-package-topology.json"
 
@@ -39,8 +40,8 @@ EOF
 cat >"$fake_bin/node" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-printf 'vitest setpriv_marker=%s home=%s npm=%s xdg=%s node_path=%s\n' \
-  "${DSH_VERIFY_SETUID:-}" "$HOME" "$npm_config_cache" "$XDG_CACHE_HOME" "${NODE_PATH:-unset}" >>"$MOCK_VERIFY_LOG"
+printf 'vitest setpriv_marker=%s home=%s npm=%s xdg=%s node_path=%s args=%s\n' \
+  "${DSH_VERIFY_SETUID:-}" "$HOME" "$npm_config_cache" "$XDG_CACHE_HOME" "${NODE_PATH:-unset}" "$*" >>"$MOCK_VERIFY_LOG"
 EOF
 cat >"$fake_bin/python3" <<'EOF'
 #!/usr/bin/env bash
@@ -53,7 +54,17 @@ cat >"$fake_bin/chown" <<'EOF'
 set -Eeuo pipefail
 printf 'chown args=%s\n' "$*" >>"$MOCK_VERIFY_LOG"
 EOF
-chmod +x "$fake_bin/setpriv" "$fake_bin/node" "$fake_bin/python3" "$fake_bin/chown"
+cat >"$fake_bin/bash" <<EOF
+#!/bin/sh
+case "\${1:-}" in
+  /opt/dsh/release-system/tests/*.sh)
+    printf 'bash args=%s\n' "\$*" >>"\$MOCK_VERIFY_LOG"
+    exit 0
+    ;;
+esac
+exec "$real_bash" "\$@"
+EOF
+chmod +x "$fake_bin/setpriv" "$fake_bin/node" "$fake_bin/python3" "$fake_bin/chown" "$fake_bin/bash"
 
 script="$test_root/dev-source-verify.sh"
 sed \
@@ -69,9 +80,9 @@ MOCK_VERIFY_LOG="$log" \
 
 test "$(grep -Fc 'build tool=tsc setpriv_marker=' "$log")" = 12
 test "$(grep -Fc 'build tool=tsdown setpriv_marker=' "$log")" = 6
-test "$(grep -Fc 'setpriv args=--reuid=1000 --regid=1000 --init-groups' "$log")" = 8
-test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 6
-test "$(grep -Fc 'python setpriv_marker=1000' "$log")" = 3
+test "$(grep -Fc 'setpriv args=--reuid=1000 --regid=1000 --init-groups' "$log")" = 26
+test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 11
+test "$(grep -Fc 'python setpriv_marker=1000' "$log")" = 13
 test "$(grep -Fc 'chown args=-R 1000:1000' "$log")" = 3
 grep -q 'build tool=tsc setpriv_marker= node_path=unset' "$log"
 grep -q 'build tool=tsdown setpriv_marker= node_path=unset' "$log"
@@ -82,6 +93,25 @@ grep -q 'python setpriv_marker=1000 .*pycache=/tmp/dsh-editable-verify.*/python-
 grep -q 'python .*args=-m unittest discover -p test_x_\*\.py' "$log"
 grep -q 'python .*args=-m unittest test_insight_engine.py' "$log"
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/test_workspace_migration.py' "$log"
+grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/credential-notion.py' "$log"
+grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/notion-page-check.py' "$log"
+grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/notion-automation-entrypoint.py' "$log"
+grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/harness-notion-automation-probe.py' "$log"
+grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/harness-notion-automation-runner.py' "$log"
+grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/harness-notion-automation-bridge.py' "$log"
+grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/harness-notion-automation-status.py' "$log"
+grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/notion-inbox-init.py' "$log"
+grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/test_scrub_preflight_state.py' "$log"
+grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/test_workspace_migration_content.py' "$log"
+test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 12
+test "$(grep -Fc 'args=--test /opt/dsh/release-system/tests/assistant-cron-health.mjs' "$log")" = 1
+test "$(grep -Fc 'args=--test /opt/dsh/release-system/tests/fake-notion.mjs' "$log")" = 1
+test "$(grep -Fc 'args=--test /opt/dsh/release-system/tests/notion-retry-binding.mjs' "$log")" = 1
+test "$(grep -Fc 'args=--test /opt/dsh/release-system/tests/inspect-cron-reanchor.mjs' "$log")" = 1
+test "$(grep -Fc 'args=/opt/dsh/release-system/tests/validate-assistant-state.mjs' "$log")" = 1
+test "$(grep -Fc 'bash args=/opt/dsh/release-system/tests/harness-notion-automation-command.sh' "$log")" = 1
+test "$(grep -Fc 'bash args=/opt/dsh/release-system/tests/engine-lock.sh' "$log")" = 1
+test "$(grep -Fc 'bash args=/opt/dsh/release-system/tests/production-operation-lock.sh' "$log")" = 1
 test ! -e "$source_root/x-feed/python/__pycache__"
 verify_home="$(sed -n 's/^vitest .* home=\([^ ]*\) .*/\1/p' "$log" | head -n 1)"
 test -n "$verify_home"

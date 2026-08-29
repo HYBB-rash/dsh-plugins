@@ -457,11 +457,28 @@ run_accept() {
     "$repo_root/release/dsh" accept --release accepted "$@"
 }
 
+acceptance_evidence="$test_root/acceptance-evidence.json"
+cat >"$acceptance_evidence" <<'EOF'
+{
+  "schemaVersion": 1,
+  "checks": {
+    "telegramWebTaskQuery": true,
+    "notionReversibleTask": true,
+    "temporaryMonitorLifecycle": true,
+    "shanghaiReminder": true,
+    "dailyCronNextRuns": true,
+    "existingMemoryFact": true,
+    "noLegacyPathEacces": true,
+    "assistantSqliteIntegrity": true
+  }
+}
+EOF
+
 # A partial cleanup-receipt transfer leaves production accepted, reports exit
 # 6, and preserves a retryable incomplete receipt instead of rolling back.
 set +e
 MOCK_REMOTE_INVENTORY="$remote_before" MOCK_FAIL_CLEANUP_RECEIPT_ONCE="$test_root/fail-receipt-once" \
-  run_accept --evidence passed >"$test_root/accept-incomplete.json"
+  run_accept --evidence "$acceptance_evidence" >"$test_root/accept-incomplete.json"
 accept_status=$?
 set -e
 test "$accept_status" = 6
