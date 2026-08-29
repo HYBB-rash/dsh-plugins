@@ -210,6 +210,74 @@ function imageId(name) {
   return run(engine, ['image', 'inspect', name, '--format', '{{.Id}}'], { capture: true, code: exitCodes.safety })
 }
 
+function staleFormalBuildRoots(buildRoot, pluginsCommit) {
+  const buildsRoot = join(stateRoot, 'builds')
+  if (!existsSync(buildsRoot)) return []
+  const buildName = new RegExp(`^\\d{8}T\\d{9}Z-${pluginsCommit.slice(0, 12)}$`, 'u')
+  return readdirSync(buildsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && buildName.test(entry.name))
+    .map((entry) => join(buildsRoot, entry.name))
+    .filter((path) => path !== buildRoot
+      && ['harness.tar', 'plugins.tar', 'release-system.tar', 'context'].every((name) => existsSync(join(path, name))))
+}
+
+function removeFormalImageForArchiveRoundTrip({ imageTag, builtImageId, pluginsCommit, buildRoot }) {
+  const staleBuildRoots = staleFormalBuildRoots(buildRoot, pluginsCommit)
+  const removedExternalContainers = []
+
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    process.stderr.write(`+ ${commandText(engine, ['image', 'rm', imageTag])}\n`)
+    const removal = runStatus(engine, ['image', 'rm', imageTag])
+    if (removal.status === 0) {
+      if (removedExternalContainers.length > 0) {
+        for (const path of staleBuildRoots) removeControlledPath(join(stateRoot, 'builds'), path)
+      }
+      return {
+        removedExternalContainers,
+        removedStaleBuildRoots: removedExternalContainers.length > 0 ? staleBuildRoots.map((path) => basename(path)) : [],
+      }
+    }
+
+    const detail = String(removal.stderr ?? '').trim()
+    if (basename(engine) !== 'podman' || staleBuildRoots.length === 0) {
+      fail(`${engine} 退出码 ${removal.status}${detail ? `\n${detail}` : ''}`, exitCodes.test)
+    }
+    const blockerMatch = /image used by ([0-9a-f]{12,64})\b/u.exec(detail)
+    if (blockerMatch === null) {
+      fail(`无法确认镜像删除失败来自中断构建残留\n${detail}`, exitCodes.test)
+    }
+    const blockerId = blockerMatch[1]
+    if (removedExternalContainers.some((id) => id.startsWith(blockerId))) {
+      fail(`清理外部构建残留后镜像仍被同一容器占用: ${blockerId}`, exitCodes.test)
+    }
+
+    const external = run(engine, [
+      'ps', '--all', '--external', '--no-trunc',
+      '--filter', `id=${blockerId}`,
+      '--filter', `ancestor=${builtImageId}`,
+      '--format', '{{.ID}}\t{{.ImageID}}\t{{.Command}}\t{{.Status}}',
+    ], { capture: true, code: exitCodes.test })
+    const records = external.split('\n').filter(Boolean).map((line) => {
+      const [id, image, command, status, ...unexpected] = line.split('\t')
+      return { id, image, command, status, unexpected }
+    })
+    const record = records.find(({ id }) => id?.startsWith(blockerId))
+    const expectedImageId = builtImageId.replace(/^sha256:/u, '')
+    const actualImageId = record?.image?.replace(/^sha256:/u, '')
+    if (records.length !== 1 || record === undefined || record.unexpected.length > 0
+      || actualImageId !== expectedImageId || record.status?.trim().toLowerCase() !== 'storage'
+      || !['buildah', 'storage'].some((kind) => record.command?.toLowerCase().includes(kind))) {
+      fail(`占用镜像的容器不是可确认的 Buildah 外部存储残留: ${blockerId}`, exitCodes.test)
+    }
+
+    process.stderr.write(`检测到同 commit 的中断构建目录；仅清理外部 Buildah 存储残留 ${record.id}\n`)
+    run(engine, ['rm', '--force', record.id], { capture: true, code: exitCodes.test })
+    removedExternalContainers.push(record.id)
+  }
+
+  fail('外部构建残留超过安全清理上限，拒绝继续归档', exitCodes.test)
+}
+
 function archiveStagingRoot(candidateDir) {
   if (process.env.DSH_RELEASE_ARCHIVE_STAGING_ROOT) {
     const configured = resolve(process.env.DSH_RELEASE_ARCHIVE_STAGING_ROOT)
@@ -927,6 +995,7 @@ function commandBuild(options) {
   const archivePath = join(candidateDir, 'image.tar')
   let stagedArchivePath = null
   let imageTag = null
+  let archiveRoundTripCleanup = null
   let admitted = false
 
   try {
@@ -1009,7 +1078,12 @@ function commandBuild(options) {
       // Formal releases prove that the transferred archive restores the exact
       // admitted image identity.  The wrapper serializes this shared-store
       // mutation; development bases never perform this destructive round-trip.
-      run(engine, ['image', 'rm', imageTag], { code: exitCodes.test })
+      archiveRoundTripCleanup = removeFormalImageForArchiveRoundTrip({
+        imageTag,
+        builtImageId,
+        pluginsCommit,
+        buildRoot,
+      })
       run(engine, ['load', ...engineArchiveOptions, '--input', stagedArchivePath], { code: exitCodes.test })
       const loadedImageId = imageId(imageTag)
       if (loadedImageId !== builtImageId) fail(`归档重载后的 image ID 改变: ${builtImageId} -> ${loadedImageId}`, exitCodes.test)
@@ -1029,6 +1103,7 @@ function commandBuild(options) {
       imageTag,
       archivePath: purpose === 'release' ? archivePath : null,
       archiveSha256,
+      archiveRoundTripCleanup,
       harnessCommit,
       harnessPatchSha256: patchSha256,
       pluginsCommit,

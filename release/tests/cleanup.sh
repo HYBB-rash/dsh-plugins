@@ -6,7 +6,7 @@ test_root="$(mktemp -d)"
 cleanup() { find "$test_root" -depth -delete; }
 trap cleanup EXIT
 
-mock_engine="$test_root/mock-engine"
+mock_engine="$test_root/podman"
 state_root="$test_root/state"
 staging_root="$test_root/staging"
 mock_state="$test_root/mock-state"
@@ -62,6 +62,10 @@ case "$command" in
         fi
         ;;
       rm)
+        if test -f "$MOCK_ENGINE_STATE/formal-saved" && ! test -f "$MOCK_ENGINE_STATE/external-residue-removed"; then
+          printf '%s\n' 'Error: image used by 41eb7fd26a0295dd3194a16cfd67c40bc17d7f9a1146b093390e1b977ee07669: image is in use by a container' >&2
+          exit 2
+        fi
         find "$MOCK_ENGINE_STATE/images/$key.present" "$MOCK_ENGINE_STATE/images/$key.labels" "$MOCK_ENGINE_STATE/images/$key.tag" -delete
         ;;
       *) exit 64 ;;
@@ -85,6 +89,7 @@ case "$command" in
     printf '%s\n' '{}' >"$archive_root/$config"
     python3 -c 'import json,sys; print(json.dumps([{"Config":sys.argv[1],"RepoTags":[sys.argv[2]],"Layers":[]}]))' "$config" "$tag" >"$archive_root/manifest.json"
     tar -C "$archive_root" -cf "$output" "$config" manifest.json
+    : >"$MOCK_ENGINE_STATE/formal-saved"
     ;;
   load)
     tag="$(cat "$MOCK_ENGINE_STATE/saved-tag")"
@@ -94,8 +99,21 @@ case "$command" in
     : >"$MOCK_ENGINE_STATE/images/$key.present"
     ;;
   inspect) exit 1 ;;
-  ps) exit 0 ;;
-  rm|network) exit 0 ;;
+  ps)
+    if [[ " $* " == *' --external '* ]]; then
+      printf '%s\t%s\t%s\t%s\n' \
+        '41eb7fd26a0295dd3194a16cfd67c40bc17d7f9a1146b093390e1b977ee07669' \
+        "$image_id" "${MOCK_EXTERNAL_COMMAND:-buildah}" "${MOCK_EXTERNAL_STATUS:-storage}"
+    fi
+    ;;
+  rm)
+    if [[ "${1:-}" == --force && "${2:-}" == 41eb7fd26a0295dd3194a16cfd67c40bc17d7f9a1146b093390e1b977ee07669 && $# == 2 ]]; then
+      : >"$MOCK_ENGINE_STATE/external-residue-removed"
+      exit 0
+    fi
+    exit 64
+    ;;
+  network) exit 0 ;;
   *) exit 64 ;;
 esac
 EOF
@@ -115,6 +133,8 @@ run_build() {
   DSH_CONTAINER_ENGINE="$mock_engine" \
   MOCK_ENGINE_STATE="$mock_state" \
   MOCK_ENGINE_LOG="$test_root/engine.log" \
+  MOCK_EXTERNAL_COMMAND="${MOCK_EXTERNAL_COMMAND:-}" \
+  MOCK_EXTERNAL_STATUS="${MOCK_EXTERNAL_STATUS:-}" \
     "$repo_root/release/dsh" build --purpose "$purpose" \
       --harness-ref "$harness_commit" --plugins-ref "$plugins_commit"
 }
@@ -171,12 +191,38 @@ test ! -e "$stale_dir"
 test ! -e "$stale_dev"
 test -d "$source_fixture/stale"
 
+stale_build="$state_root/builds/20260829T000000000Z-${plugins_commit:0:12}"
+mkdir -p "$stale_build/context"
+touch "$stale_build/harness.tar" "$stale_build/plugins.tar" "$stale_build/release-system.tar"
+
 run_build release >"$test_root/formal-build.json"
 formal_candidate_path="$(json_field "$test_root/formal-build.json" candidatePath)"
 test -f "$(json_field "$formal_candidate_path" archivePath)"
+node -e 'const value=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); const cleanup=value.archiveRoundTripCleanup; if (cleanup.removedExternalContainers.length !== 1 || cleanup.removedStaleBuildRoots.length !== 1) process.exit(1)' "$formal_candidate_path"
+test ! -e "$stale_build"
 grep -Eq '^save ' "$test_root/engine.log"
 grep -Eq '^load ' "$test_root/engine.log"
 grep -Eq '^image rm ' "$test_root/engine.log"
+test "$(grep -Ec '^image rm ' "$test_root/engine.log")" -ge 2
+grep -Eq '^ps --all --external --no-trunc ' "$test_root/engine.log"
+grep -Eq '^rm --force 41eb7fd26a0295dd3194a16cfd67c40bc17d7f9a1146b093390e1b977ee07669 ' "$test_root/engine.log"
+! grep -Eq '^(system prune|rm .* (--all|--volumes)( |$))' "$test_root/engine.log"
+
+# The same image-removal error must remain a hard stop when the blocker is an
+# ordinary/running container rather than an external Buildah storage residue.
+mkdir -p "$stale_build/context"
+touch "$stale_build/harness.tar" "$stale_build/plugins.tar" "$stale_build/release-system.tar"
+find "$mock_state/external-residue-removed" -delete
+forced_removals_before="$(grep -Ec '^rm --force ' "$test_root/engine.log")"
+set +e
+MOCK_EXTERNAL_STATUS=running run_build release >"$test_root/unsafe-build.json" 2>"$test_root/unsafe-build.err"
+unsafe_status=$?
+set -e
+test "$unsafe_status" = 5
+grep -Fq '不是可确认的 Buildah 外部存储残留' "$test_root/unsafe-build.err"
+test "$(grep -Ec '^rm --force ' "$test_root/engine.log")" = "$forced_removals_before"
+test -d "$stale_build"
+: >"$mock_state/external-residue-removed"
 
 # Accepted production invalidates and removes the current development base
 # while preserving task source and formal release evidence.
