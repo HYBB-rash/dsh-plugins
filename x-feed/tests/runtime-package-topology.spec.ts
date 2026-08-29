@@ -21,6 +21,7 @@ const pluginDirectories = [
   'dsh-assistant',
   'dsh-cron',
   'personal-feed',
+  'personal-feed-selector',
   'telegram-gateway',
   'ui-context-compactor',
   'x-feed',
