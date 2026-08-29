@@ -49,6 +49,7 @@
 
 ## 经验记录
 
+- 2026-08-30：插件通过 `ctx.llm.stream` 手工发起的嵌套模型调用不会自动继承主会话 UI 的 `reasoningEffort`；Max、High、Low、Off 的外层切换都不能证明内部请求改变。只需要短结构化结果的内部判断应在 `GenerateOptions` 显式指定 `ReasoningEffortId('off')`，用请求参数测试锁定，并以真实 Web 普通入口同时验收 selected、empty 与刷新重进；否则单元测试和主会话档位都可能掩盖生产 `invalid_model_output`。
 - 2026-08-29：同一 Docker archive 在本机 Podman 与远端 Docker 中载入后，engine image ID 可能不同。清理时本机候选只与 `candidate.imageId` 比较，远端镜像只与 `release.production.engineImageId` 及实际容器引用比较；不能跨引擎强求 ID 相等。
 - 2026-08-29：正式 Docker release 的 `accept` 是不可逆承诺点：真实健康通过且 `current`/`last-good` 同指本次 release 后先将 `rollbackBoundary` 标为 `retired-at-accept`，再幂等清理旧大体积归档和无容器引用的精确镜像。指针、当前候选或 latest snapshot 元数据不完整及任何部分失败都只记录 `accepted-cleanup-incomplete` 并保留残留；重试同一 accepted release 只重试清理，不重复业务验收，不得用 engine prune 扩大范围；小体积 JSON、测试/验收/失败与清理回执永久保留。
 - 2026-08-29：新增运行时包后，除更新正式拓扑的 `requiredBy` 外，还要把该消费者加入拓扑测试构造的最终插件目录；否则测试夹具会先因“拓扑声明了不存在的消费者”失败，遮住它原本要验证的缺链、冲突路径和越界目标。只删真实 `requiredBy` 会压绿测试却破坏发布依赖真相。
