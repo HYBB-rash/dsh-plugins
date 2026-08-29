@@ -191,7 +191,7 @@ test ! -e "$stale_dir"
 test ! -e "$stale_dev"
 test -d "$source_fixture/stale"
 
-stale_build="$state_root/builds/20260829T000000000Z-${plugins_commit:0:12}"
+stale_build="$state_root/builds/20260829T000000000Z-111111111111"
 mkdir -p "$stale_build/context"
 touch "$stale_build/harness.tar" "$stale_build/plugins.tar" "$stale_build/release-system.tar"
 
@@ -204,7 +204,8 @@ grep -Eq '^save ' "$test_root/engine.log"
 grep -Eq '^load ' "$test_root/engine.log"
 grep -Eq '^image rm ' "$test_root/engine.log"
 test "$(grep -Ec '^image rm ' "$test_root/engine.log")" -ge 2
-grep -Eq '^ps --all --external --no-trunc ' "$test_root/engine.log"
+grep -Eq '^ps --all --external --no-trunc --filter id=' "$test_root/engine.log"
+! grep -Eq '^ps .*--filter ancestor=' "$test_root/engine.log"
 grep -Eq '^rm --force 41eb7fd26a0295dd3194a16cfd67c40bc17d7f9a1146b093390e1b977ee07669 ' "$test_root/engine.log"
 ! grep -Eq '^(system prune|rm .* (--all|--volumes)( |$))' "$test_root/engine.log"
 

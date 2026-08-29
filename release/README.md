@@ -71,7 +71,7 @@
 
 本机 Podman 构建显式使用目录内的 `containers-policy.json`，不修改用户全局容器配置。该策略不额外要求镜像签名；基础镜像身份由 `image.lock.json` 中不可变的完整 digest 锁定。
 
-正式发版候选仍会在删除其唯一标签后重载 Docker archive，证明归档可以恢复同一个 image ID。这个共享存储敏感段和所有镜像构建、验收清理都由 `release/dsh` 的全局锁自动排队，不需要 Agent 人工协调窗口。若上一次同 commit 的正式构建被中断，Podman 可能留下一个占用候选镜像的 Buildah 外部存储容器；下一次构建只有在同时找到同 commit 的未完成构建目录、删除报错中的精确容器 ID、相同 image ID 和 `storage` 状态时，才会移除这个外部残留并记录到 candidate。普通容器、运行容器、身份不明的外部容器仍会硬停止，流程不会执行全局清理。若 `/dev/shm` 至少有 8 GiB 可用空间，正式归档会自动在那里暂存，重载成功后再复制到证据目录；也可用 `DSH_RELEASE_ARCHIVE_STAGING_ROOT` 指定其他临时文件系统。暂存归档未完成摘要校验前不会生成正式 `candidate.json`。
+正式发版候选仍会在删除其唯一标签后重载 Docker archive，证明归档可以恢复同一个 image ID。这个共享存储敏感段和所有镜像构建、验收清理都由 `release/dsh` 的全局锁自动排队，不需要 Agent 人工协调窗口。若某次正式构建被中断，Podman 可能留下一个通过共享镜像层阻塞后续候选的 Buildah 外部存储容器；下一次构建只有在同时找到完整的未完成正式构建目录、删除报错中的精确容器 ID、有效 image ID、`buildah` 命令和 `storage` 状态时，才会移除这个外部残留并记录到 candidate。普通容器、运行容器、身份不明的外部容器仍会硬停止，流程不会执行全局清理。若 `/dev/shm` 至少有 8 GiB 可用空间，正式归档会自动在那里暂存，重载成功后再复制到证据目录；也可用 `DSH_RELEASE_ARCHIVE_STAGING_ROOT` 指定其他临时文件系统。暂存归档未完成摘要校验前不会生成正式 `candidate.json`。
 
 构建工作目录、未完成候选、失败构建标签和归档暂存文件都会由本次命令清理。开发底座与正式候选用途严格分开，开发底座不能发布。development 在镜像构建阶段完成六个包的构建、TypeScript/Python 全量测试和镜像自检，但不生成、保存或重载 Docker archive；它按完整 `origin/main` commit 使用稳定身份，本机始终只保留最新 main 的一份开发镜像。同一 main 的重复 build 在锁内确认镜像和测试回执后直接复用。main 前进时先完成新镜像构建和自检，再停止并删除所有旧开发容器、隔离数据、租约、旧候选和旧开发镜像；源码 worktree 始终保留。
 

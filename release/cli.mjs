@@ -210,10 +210,10 @@ function imageId(name) {
   return run(engine, ['image', 'inspect', name, '--format', '{{.Id}}'], { capture: true, code: exitCodes.safety })
 }
 
-function staleFormalBuildRoots(buildRoot, pluginsCommit) {
+function staleFormalBuildRoots(buildRoot) {
   const buildsRoot = join(stateRoot, 'builds')
   if (!existsSync(buildsRoot)) return []
-  const buildName = new RegExp(`^\\d{8}T\\d{9}Z-${pluginsCommit.slice(0, 12)}$`, 'u')
+  const buildName = /^\d{8}T\d{9}Z-[0-9a-f]{12}$/u
   return readdirSync(buildsRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && buildName.test(entry.name))
     .map((entry) => join(buildsRoot, entry.name))
@@ -221,8 +221,8 @@ function staleFormalBuildRoots(buildRoot, pluginsCommit) {
       && ['harness.tar', 'plugins.tar', 'release-system.tar', 'context'].every((name) => existsSync(join(path, name))))
 }
 
-function removeFormalImageForArchiveRoundTrip({ imageTag, builtImageId, pluginsCommit, buildRoot }) {
-  const staleBuildRoots = staleFormalBuildRoots(buildRoot, pluginsCommit)
+function removeFormalImageForArchiveRoundTrip({ imageTag, buildRoot }) {
+  const staleBuildRoots = staleFormalBuildRoots(buildRoot)
   const removedExternalContainers = []
 
   for (let attempt = 0; attempt < 16; attempt += 1) {
@@ -254,7 +254,6 @@ function removeFormalImageForArchiveRoundTrip({ imageTag, builtImageId, pluginsC
     const external = run(engine, [
       'ps', '--all', '--external', '--no-trunc',
       '--filter', `id=${blockerId}`,
-      '--filter', `ancestor=${builtImageId}`,
       '--format', '{{.ID}}\t{{.ImageID}}\t{{.Command}}\t{{.Status}}',
     ], { capture: true, code: exitCodes.test })
     const records = external.split('\n').filter(Boolean).map((line) => {
@@ -262,15 +261,14 @@ function removeFormalImageForArchiveRoundTrip({ imageTag, builtImageId, pluginsC
       return { id, image, command, status, unexpected }
     })
     const record = records.find(({ id }) => id?.startsWith(blockerId))
-    const expectedImageId = builtImageId.replace(/^sha256:/u, '')
-    const actualImageId = record?.image?.replace(/^sha256:/u, '')
     if (records.length !== 1 || record === undefined || record.unexpected.length > 0
-      || actualImageId !== expectedImageId || record.status?.trim().toLowerCase() !== 'storage'
+      || !/^(sha256:)?[0-9a-f]{64}$/u.test(record.image ?? '')
+      || record.status?.trim().toLowerCase() !== 'storage'
       || !['buildah', 'storage'].some((kind) => record.command?.toLowerCase().includes(kind))) {
       fail(`占用镜像的容器不是可确认的 Buildah 外部存储残留: ${blockerId}`, exitCodes.test)
     }
 
-    process.stderr.write(`检测到同 commit 的中断构建目录；仅清理外部 Buildah 存储残留 ${record.id}\n`)
+    process.stderr.write(`检测到未完成正式构建目录；仅清理外部 Buildah 存储残留 ${record.id}\n`)
     run(engine, ['rm', '--force', record.id], { capture: true, code: exitCodes.test })
     removedExternalContainers.push(record.id)
   }
@@ -1080,8 +1078,6 @@ function commandBuild(options) {
       // mutation; development bases never perform this destructive round-trip.
       archiveRoundTripCleanup = removeFormalImageForArchiveRoundTrip({
         imageTag,
-        builtImageId,
-        pluginsCommit,
         buildRoot,
       })
       run(engine, ['load', ...engineArchiveOptions, '--input', stagedArchivePath], { code: exitCodes.test })
