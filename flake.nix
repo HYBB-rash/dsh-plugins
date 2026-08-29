@@ -29,7 +29,7 @@
               pnpm_11
               typescript
 
-              # Repository-owned Python automations (automations/requirements.lock).
+              # Python compatibility environment for user-owned Workspace scripts.
               python
 
               # Host commands required by release tooling, scripts, and checks.

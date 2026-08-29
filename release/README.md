@@ -69,7 +69,7 @@
 
 状态默认存放在 `~/.local/share/dsh-container`。可以用 `DSH_RELEASE_STATE_ROOT` 指向测试目录。本地默认使用 Podman；生产默认通过 SSH 连接 `herman.hermes` 并使用 Docker Compose。镜像不经过镜像仓库。
 
-生产启动会分别等待本机 Web 入口和 LAN 代理入口就绪，再执行任务 reconciliation、Rita 刷新链路与 OOM 退役。不得把 Web 容器的健康状态当成刚启动的 LAN 代理已经可达；两个入口在各自的有界等待后仍失败，发布才会停止并保留回退边界。
+生产启动会分别等待本机 Web 入口、LAN 代理入口和 cron 控制面就绪。不得把 Web 容器的健康状态当成刚启动的 LAN 代理已经可达；两个入口在各自的有界等待后仍失败，发布才会停止并保留回退边界。
 
 本机 Podman 构建显式使用目录内的 `containers-policy.json`，不修改用户全局容器配置。该策略不额外要求镜像签名；基础镜像身份由 `image.lock.json` 中不可变的完整 digest 锁定。
 
@@ -83,9 +83,7 @@
 
 正式发版的生产快照测试副本和临时开发副本在测试结束或失败后都会清理，只保留快照、测试回执、候选归档和发布证据这些回退与审计所需内容。流程不会执行无边界的 `podman system prune` 或 `docker system prune`。
 
-仓库管理的生产任务定义位于各业务目录的 `jobs.production.json`。停机快照副本先通过同一版 dsh-cron v1 控制接口执行迁移；候选生产启动后再通过在线控制 socket 执行，并立即做一次只读对账。只有 manifest 明确列出的 predecessor 摘要可以被替换；未知漂移、重复 externalRef、任务类型变化、持久化不确定、任一活跃任务的旧 home 路径，以及通过 `sh -lc` 间接执行 `/opt/dsh/automations` 都会失败关闭。迁移回执保存旧新 job ID 和前后 spec 摘要。
-
-BZP 发布另有基础设施硬门：停机前必须证明 Herman 可通过专用 key 到达 Rita、Rita 的反向刷新 key 已就位、BLE/DBus 与 mode-0600 auth 文件可用，并备份 Rita 原 `latest.json` 的存在状态、摘要和权限。候选启动后安装 marker-scoped forced key，要求 Rita 的真实 `refresh all` 立即只返回 `收到`，并由每分钟 worker 异步刷新合并 JSON。任一 SSH、远端原子落盘或摘要校验失败都会使任务失败。微信 OOM unit 只在候选期 stop/disable；回退会按发布前状态恢复，只有 `accept` 才删除 unit 文件和 inactive/disabled 的旧 BZP 用户 unit。
+个人业务自动化的源码属于持久化 Workspace，默认放在 `$DSH_CWD/automations/<业务名>/`，难以归类的通用脚本放在 `$DSH_CWD/automations/scripts/`。它们的任务定义属于 dsh-cron 持久化账本。仓库、产品镜像和发版流程都不保存业务脚本副本、业务 manifest，也不安装、迁移、验收或回退这些任务。镜像只提供通用解释器、命令行工具和 Harness 指导；业务脚本的生命周期由 Workspace 自己管理。
 
 正式 release 完成 `accept` 后，本地开发环境和共享开发镜像立即失效并清理；任务源码 worktree 原样保留。未完成任务下次继续时，必须先同步新 main，请求最新 main 的唯一开发镜像，再执行自己的 `dev prepare`。
 
@@ -109,7 +107,7 @@ BZP 发布另有基础设施硬门：停机前必须证明 Herman 可通过专�
 - `release` 在获得停机许可前不停止任何写入者；许可只覆盖该次候选和该次停机窗口。
 - 停机后先做一致快照，再用快照副本执行上线前测试；测试失败时生产保持停止并报告，不在线改产品代码。
 - 明确属于挂载、权限、Compose、路径或启动参数的发版小问题，可在限定现场窗口内修正后重新验收；需要改 Harness、插件、数据语义或原因不清时，先向用户报告。只有用户批准后才能回退。
-- 上线后状态先是 `awaiting-user-acceptance`。真实 Telegram、Web、五个既有任务、两块 BLE 表、Rita 合并文件和反向 `refresh all` 全部验收通过并执行 `accept` 后，该镜像才成为 `last-good`。
+- 上线后状态先是 `awaiting-user-acceptance`。真实 Telegram、Web 和本次产品改动验收通过并执行 `accept` 后，该镜像才成为 `last-good`。Workspace 业务任务不属于产品发版验收边界。
 - 回退默认只打印恢复对象、快照和影响；只有显式 `--approved` 才能恢复上一 Docker 镜像及对应停机前数据。
 - OpenClaw 始终在流程外且可完全不存在：不得停止、重启、改配置或接管其写入权，DSH 也不得读取它的目录、凭据、CLI、插件或状态。
 

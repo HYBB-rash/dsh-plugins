@@ -1,0 +1,8 @@
+# Python modules available to user-owned scripts under DSH Workspace.
+# This file contains runtime compatibility dependencies, not business source.
+bleak==3.0.2
+dbus-fast==5.0.22
+paho-mqtt==2.1.0
+pexpect==4.9.0
+selenium==4.47.0
+websocket-client==1.9.0

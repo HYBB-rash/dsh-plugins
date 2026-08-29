@@ -16,31 +16,9 @@ test -f /opt/dsh/harness/apps/cli/lib/bin.js
 for package in dsh-assistant dsh-cron telegram-gateway ui-context-compactor x-feed personal-feed; do
   test -d "/opt/dsh/harness/local-plugins/$package/lib"
 done
-for automation_dir in bzp cron deepseek github mywechat notion relay-sites scripts search telegram zerochan; do
-  test -d "/opt/dsh/automations/$automation_dir"
-done
-for automation_entrypoint in \
-  bzp/bzp_ble_monitor.py \
-  bzp/bzp_ble_read_until_success.py \
-  bzp/bzp_dual_dispatch.py \
-  bzp/bzp_snapshot.py \
-  bzp/bzp_refresh_enqueue.py \
-  bzp/bzp_refresh_worker.py \
-  bzp/bzp_forced_key.py \
-  cron/cron_conflict_check.py \
-  deepseek/deepseek_daily.sh \
-  mywechat/mywechat_ai_context_daily.sh \
-  mywechat/mywechat_ai_context_hourly.sh \
-  mywechat/mywechat_pull.sh \
-  mywechat/mywechat_watchdog.sh \
-  scripts/reconcile_production_jobs.mjs \
-  telegram/send_tg_ops.sh; do
-  test -x "/opt/dsh/automations/$automation_entrypoint"
-done
-test -f /opt/dsh/automations/requirements.lock
-node --input-type=module -e "const m=await import('file:///opt/dsh/automations/scripts/reconcile_production_jobs.mjs'); const jobs=m.loadManifests('/opt/dsh/automations'); m.validateImageTargets(jobs);"
+test ! -e /opt/dsh/automations
 
-for executable in bash bluetoothctl curl git node openssl python3 rg socat ssh; do
+for executable in bash bluetoothctl curl gatttool git node openssl python3 rg socat ssh; do
   command -v "$executable" >/dev/null
 done
 
@@ -70,7 +48,11 @@ cmp -s \
   "$tmp_home/.dsh/AGENTS.md"
 rg --fixed-strings 'automations/<对应业务名>/' "$tmp_home/.dsh/AGENTS.md" >/dev/null
 rg --fixed-strings 'automations/scripts/' "$tmp_home/.dsh/AGENTS.md" >/dev/null
-rg --fixed-strings '/opt/dsh/automations' "$tmp_home/.dsh/AGENTS.md" >/dev/null
+rg --fixed-strings 'DSH 产品镜像只提供通用执行环境' "$tmp_home/.dsh/AGENTS.md" >/dev/null
+if rg --fixed-strings '/opt/dsh/automations' "$tmp_home/.dsh/AGENTS.md"; then
+  printf '%s\n' 'workspace instructions still advertise repository-owned automations' >&2
+  exit 1
+fi
 DSH_HOME="$tmp_home/.dsh" node /opt/dsh/harness/apps/cli/lib/bin.js --profile web --dump-config >/dev/null
 DSH_HOME="$tmp_home/.dsh" node /opt/dsh/harness/apps/cli/lib/bin.js --profile telegram --dump-config >/dev/null
 DSH_HOME="$tmp_home/.dsh" node /opt/dsh/harness/apps/cli/lib/bin.js --profile telegram-test --dump-config >/dev/null
