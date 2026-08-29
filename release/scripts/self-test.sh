@@ -47,6 +47,7 @@ done
 python3 - <<'PY'
 import bleak
 import paho.mqtt.client
+import pexpect
 import websocket
 PY
 

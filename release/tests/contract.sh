@@ -172,6 +172,8 @@ grep -Fq 'wait_http http://192.168.6.240:3080/' "$repo_root/release/cli.mjs"
 test ! -e "$repo_root/automations/wechat/wechat_oom_protect.py"
 test ! -e "$repo_root/automations/bzp/bzp_weixin_relay.py"
 test -x "$repo_root/release/tests/dev-toolbox-lifecycle.sh"
+grep -Fxq 'pexpect==4.9.0' "$repo_root/automations/requirements.lock"
+grep -Fxq 'import pexpect' "$repo_root/release/scripts/self-test.sh"
 test ! -e "$repo_root/release/tests/dev-shell-lifecycle.sh"
 ! grep -Eq 'developmentShell|dev/shells|engineContainerInspections|stopCandidateDevelopmentShells' "$repo_root/release/cli.mjs"
 printf 'release command contract passed\n'
