@@ -229,9 +229,71 @@ function staleFormalBuildRoots(buildRoot) {
       && ['harness.tar', 'plugins.tar', 'release-system.tar', 'context'].every((name) => existsSync(join(path, name))))
 }
 
+const formalBuildName = /^\d{8}T\d{9}Z-[0-9a-f]{12}$/u
+
+function recordedStaleFormalBuildIds() {
+  const candidatesRoot = join(stateRoot, 'candidates')
+  if (!existsSync(candidatesRoot)) return []
+  const recorded = new Set()
+  for (const entry of readdirSync(candidatesRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const path = join(candidatesRoot, entry.name, 'candidate.json')
+    if (!existsSync(path)) continue
+    try {
+      const candidate = readJson(path, 'formal candidate cleanup receipt')
+      const cleanup = candidate.archiveRoundTripCleanup
+      if (candidate.candidateId !== entry.name
+        || candidate.status !== 'tested'
+        || candidatePurpose(candidate) !== 'release'
+        || !Array.isArray(cleanup?.removedExternalContainers)
+        || cleanup.removedExternalContainers.length === 0
+        || !cleanup.removedExternalContainers.every((id) => /^[0-9a-f]{64}$/u.test(id))) continue
+      const evidenceIds = [
+        ...(Array.isArray(cleanup.removedStaleBuildRoots) ? cleanup.removedStaleBuildRoots : []),
+        ...(Array.isArray(cleanup.staleBuildEvidenceIds) ? cleanup.staleBuildEvidenceIds : []),
+      ]
+      if (!evidenceIds.every((id) => formalBuildName.test(id))) continue
+      for (const id of evidenceIds) recorded.add(id)
+    } catch {}
+  }
+  return [...recorded]
+}
+
+function formalBuildStartedAt(buildId) {
+  const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(\d{3})Z-[0-9a-f]{12}$/u.exec(buildId)
+  if (match === null) return null
+  const [, year, month, day, hour, minute, second, millisecond] = match
+  return Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second), Number(millisecond))
+}
+
+function externalCreatedAt(value) {
+  const match = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d+))?\s*(Z|[+-]\d{2}:?\d{2})(?:\s+UTC)?$/u.exec(value?.trim() ?? '')
+  if (match === null) return null
+  const [, date, time, fraction = '', zone] = match
+  const millisecond = `${fraction}000`.slice(0, 3)
+  const normalizedZone = zone === 'Z' ? zone : `${zone.slice(0, 3)}:${zone.slice(-2)}`
+  const parsed = Date.parse(`${date}T${time}.${millisecond}${normalizedZone}`)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function matchingStaleBuildId(createdAt, buildIds) {
+  const created = externalCreatedAt(createdAt)
+  if (created === null) return null
+  const maximumBuildDurationMs = 30 * 60 * 1000
+  return buildIds.find((buildId) => {
+    const started = formalBuildStartedAt(buildId)
+    return started !== null && created >= started && created < started + maximumBuildDurationMs
+  }) ?? null
+}
+
 function removeFormalImageForArchiveRoundTrip({ imageTag, buildRoot }) {
   const staleBuildRoots = staleFormalBuildRoots(buildRoot)
+  const staleBuildIds = [...new Set([
+    ...staleBuildRoots.map((path) => basename(path)),
+    ...recordedStaleFormalBuildIds(),
+  ])]
   const removedExternalContainers = []
+  const staleBuildEvidenceIds = new Set()
 
   for (let attempt = 0; attempt < 16; attempt += 1) {
     process.stderr.write(`+ ${commandText(engine, ['image', 'rm', imageTag])}\n`)
@@ -250,11 +312,12 @@ function removeFormalImageForArchiveRoundTrip({ imageTag, buildRoot }) {
       return {
         removedExternalContainers,
         removedStaleBuildRoots: removedExternalContainers.length > 0 ? staleBuildRoots.map((path) => basename(path)) : [],
+        staleBuildEvidenceIds: [...staleBuildEvidenceIds],
       }
     }
 
     const detail = String(removal.stderr ?? '').trim()
-    if (basename(engine) !== 'podman' || staleBuildRoots.length === 0) {
+    if (basename(engine) !== 'podman' || staleBuildIds.length === 0) {
       fail(`${engine} 退出码 ${removal.status}${detail ? `\n${detail}` : ''}`, exitCodes.test)
     }
     const blockerMatch = /image used by ([0-9a-f]{12,64})\b/u.exec(detail)
@@ -269,11 +332,11 @@ function removeFormalImageForArchiveRoundTrip({ imageTag, buildRoot }) {
     const external = run(engine, [
       'ps', '--all', '--external', '--no-trunc',
       '--filter', `id=${blockerId}`,
-      '--format', '{{.ID}}\t{{.ImageID}}\t{{.Command}}\t{{.Status}}',
+      '--format', '{{.ID}}\t{{.ImageID}}\t{{.Command}}\t{{.Status}}\t{{.CreatedAt}}',
     ], { capture: true, code: exitCodes.test })
     const records = external.split('\n').filter(Boolean).map((line) => {
-      const [id, image, command, status, ...unexpected] = line.split('\t')
-      return { id, image, command, status, unexpected }
+      const [id, image, command, status, createdAt, ...unexpected] = line.split('\t')
+      return { id, image, command, status, createdAt, unexpected }
     })
     const record = records.find(({ id }) => id?.startsWith(blockerId))
     if (records.length !== 1 || record === undefined || record.unexpected.length > 0
@@ -283,9 +346,15 @@ function removeFormalImageForArchiveRoundTrip({ imageTag, buildRoot }) {
       fail(`占用镜像的容器不是可确认的 Buildah 外部存储残留: ${blockerId}`, exitCodes.test)
     }
 
-    process.stderr.write(`检测到未完成正式构建目录；仅清理外部 Buildah 存储残留 ${record.id}\n`)
+    const staleBuildId = matchingStaleBuildId(record.createdAt, staleBuildIds)
+    if (staleBuildId === null) {
+      fail(`Buildah 外部存储残留的创建时间不属于已确认的中断正式构建: ${blockerId}`, exitCodes.test)
+    }
+
+    process.stderr.write(`检测到中断正式构建 ${staleBuildId} 的残留；仅清理外部 Buildah 存储残留 ${record.id}\n`)
     run(engine, ['rm', '--force', record.id], { capture: true, code: exitCodes.test })
     removedExternalContainers.push(record.id)
+    staleBuildEvidenceIds.add(staleBuildId)
   }
 
   fail('外部构建残留超过安全清理上限，拒绝继续归档', exitCodes.test)

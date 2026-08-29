@@ -105,9 +105,10 @@ case "$command" in
   inspect) exit 1 ;;
   ps)
     if [[ " $* " == *' --external '* ]]; then
-      printf '%s\t%s\t%s\t%s\n' \
+      printf '%s\t%s\t%s\t%s\t%s\n' \
         '41eb7fd26a0295dd3194a16cfd67c40bc17d7f9a1146b093390e1b977ee07669' \
-        "$image_id" "${MOCK_EXTERNAL_COMMAND:-buildah}" "${MOCK_EXTERNAL_STATUS:-storage}"
+        "$image_id" "${MOCK_EXTERNAL_COMMAND:-buildah}" "${MOCK_EXTERNAL_STATUS:-storage}" \
+        "${MOCK_EXTERNAL_CREATED_AT:-2026-08-29T00:00:02.000Z}"
     fi
     ;;
   rm)
@@ -142,6 +143,7 @@ run_build() {
   MOCK_ENGINE_LOG="$test_root/engine.log" \
   MOCK_EXTERNAL_COMMAND="${MOCK_EXTERNAL_COMMAND:-}" \
   MOCK_EXTERNAL_STATUS="${MOCK_EXTERNAL_STATUS:-}" \
+  MOCK_EXTERNAL_CREATED_AT="${MOCK_EXTERNAL_CREATED_AT:-}" \
     "$repo_root/release/dsh" build --purpose "$purpose" \
       --harness-ref "$harness_commit" --plugins-ref "$plugins_commit"
 }
@@ -205,7 +207,7 @@ touch "$stale_build/harness.tar" "$stale_build/plugins.tar" "$stale_build/releas
 run_build release >"$test_root/formal-build.json"
 formal_candidate_path="$(json_field "$test_root/formal-build.json" candidatePath)"
 test -f "$(json_field "$formal_candidate_path" archivePath)"
-node -e 'const value=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); const cleanup=value.archiveRoundTripCleanup; if (cleanup.removedExternalContainers.length !== 1 || cleanup.removedStaleBuildRoots.length !== 1) process.exit(1)' "$formal_candidate_path"
+node -e 'const value=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); const cleanup=value.archiveRoundTripCleanup; if (cleanup.removedExternalContainers.length !== 1 || cleanup.removedStaleBuildRoots.length !== 1 || cleanup.staleBuildEvidenceIds[0] !== "20260829T000000000Z-111111111111") process.exit(1)' "$formal_candidate_path"
 test ! -e "$stale_build"
 grep -Eq '^save ' "$test_root/engine.log"
 grep -Eq '^load ' "$test_root/engine.log"
@@ -215,6 +217,14 @@ grep -Eq '^ps --all --external --no-trunc --filter id=' "$test_root/engine.log"
 ! grep -Eq '^ps .*--filter ancestor=' "$test_root/engine.log"
 grep -Eq '^rm --force 41eb7fd26a0295dd3194a16cfd67c40bc17d7f9a1146b093390e1b977ee07669 ' "$test_root/engine.log"
 ! grep -Eq '^(system prune|rm .* (--all|--volumes)( |$))' "$test_root/engine.log"
+
+# Once the physical stale build root is gone, its tested candidate cleanup
+# receipt remains bounded evidence for another exact residue from that build.
+find "$mock_state/external-residue-removed" -delete
+run_build release >"$test_root/receipt-backed-build.json"
+receipt_backed_candidate_path="$(json_field "$test_root/receipt-backed-build.json" candidatePath)"
+node -e 'const value=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); const cleanup=value.archiveRoundTripCleanup; if (cleanup.removedExternalContainers.length !== 1 || cleanup.removedStaleBuildRoots.length !== 0 || cleanup.staleBuildEvidenceIds[0] !== "20260829T000000000Z-111111111111") process.exit(1)' "$receipt_backed_candidate_path"
+test ! -e "$stale_build"
 
 # The same image-removal error must remain a hard stop when the blocker is an
 # ordinary/running container rather than an external Buildah storage residue.
@@ -228,6 +238,20 @@ unsafe_status=$?
 set -e
 test "$unsafe_status" = 5
 grep -Fq '不是可确认的 Buildah 外部存储残留' "$test_root/unsafe-build.err"
+test "$(grep -Ec '^rm --force ' "$test_root/engine.log")" = "$forced_removals_before"
+test -d "$stale_build"
+: >"$mock_state/external-residue-removed"
+
+# A storage residue outside every live or recorded build window is unrelated
+# and must not be deleted even when all other fields look like Buildah output.
+find "$mock_state/external-residue-removed" -delete
+forced_removals_before="$(grep -Ec '^rm --force ' "$test_root/engine.log")"
+set +e
+MOCK_EXTERNAL_CREATED_AT=2026-08-30T00:00:00.000Z run_build release >"$test_root/unrelated-build.json" 2>"$test_root/unrelated-build.err"
+unrelated_status=$?
+set -e
+test "$unrelated_status" = 5
+grep -Fq '创建时间不属于已确认的中断正式构建' "$test_root/unrelated-build.err"
 test "$(grep -Ec '^rm --force ' "$test_root/engine.log")" = "$forced_removals_before"
 test -d "$stale_build"
 : >"$mock_state/external-residue-removed"
