@@ -25,19 +25,6 @@
     openAt: first-search
 
 - insert:
-    - id: ui-context-compactor
-      name: '@deepseek-ai/dsh-client-ui-context-compactor'
-      config:
-        reasoningEffort: off
-        maxOutputTokens: 8192
-        largeToolResultPreprocessing:
-          enabled: true
-          minChars: 2500
-        compactEveryTurns: 5
-    - id: ui-context-compactor-invariant-registry
-      name: '@deepseek-ai/dsh-invariants'
-    - id: ui-context-compactor-invariant
-      name: '@deepseek-ai/dsh-client-ui-context-compactor/invariant'
     - id: tool-session-query
       name: '@deepseek-ai/dsh-tool-session-query'
     - id: telegram-gateway

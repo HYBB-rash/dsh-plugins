@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { access, readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
-const P01_SESSION_ID = 'session-2ad8a3dd-1e0b-4126-aca8-4f129ad02b54'
 const EDITABLE_PROFILES_ROOT = '/workspace/dsh-plugins/release/profiles'
 
 async function profilesRoot(): Promise<string> {
@@ -27,44 +26,40 @@ async function profilesRoot(): Promise<string> {
   }
 }
 
-function pluginBlock(profile: string, id: string): string {
+function topLevelBlock(profile: string, id: string): string {
   const lines = profile.split('\n')
-  const start = lines.findIndex(line => line === `    - id: ${id}`)
+  const start = lines.findIndex(line => line === `- id: ${id}`)
   if (start < 0) throw new Error(`missing profile plugin ${id}`)
-  const endOffset = lines.slice(start + 1).findIndex(line => line.startsWith('    - id: '))
+  const endOffset = lines.slice(start + 1).findIndex(line => line.startsWith('- id: ') || line === '- insert:')
   const end = endOffset < 0 ? lines.length : start + 1 + endOffset
   return lines.slice(start, end).join('\n')
 }
 
-function p01ConfigBlock(plugin: string): string {
-  const lines = plugin.split('\n')
-  const start = lines.findIndex(line => line.trim() === 'p01UserWordsView:')
-  if (start < 0) throw new Error('missing p01UserWordsView config')
-  const indent = lines[start]!.search(/\S/u)
-  const endOffset = lines.slice(start + 1).findIndex((line) => {
-    const nextIndent = line.search(/\S/u)
-    return nextIndent >= 0 && nextIndent <= indent
-  })
-  const end = endOffset < 0 ? lines.length : start + 1 + endOffset
-  return lines.slice(start, end).map(line => line.slice(indent)).join('\n').trim()
-}
-
-describe('P01 production profile contract', () => {
-  it('keeps one identical exact allowlist in the Web runtime and invariant, and none in Telegram', async () => {
+describe('native context production profile contract', () => {
+  it('uses Harness compaction and session query without the custom context runtime', async () => {
     const root = await profilesRoot()
-    const [web, telegram] = await Promise.all([
-      readFile(resolve(root, 'web/cordis.patch.yml'), 'utf8'),
-      readFile(resolve(root, 'telegram/cordis.patch.yml'), 'utf8'),
-    ])
-    const runtime = p01ConfigBlock(pluginBlock(web, 'ui-context-compactor'))
-    const invariant = p01ConfigBlock(pluginBlock(web, 'ui-context-compactor-invariant'))
+    const profiles = await Promise.all(['web', 'telegram'].map(async (name) => ({
+      name,
+      patch: await readFile(resolve(root, name, 'cordis.patch.yml'), 'utf8'),
+      manifest: JSON.parse(await readFile(resolve(root, name, 'package.json'), 'utf8')) as {
+        dependencies?: Record<string, string>
+      },
+    })))
 
-    expect(runtime).toBe(invariant)
-    expect(runtime).toContain('mode: enforce')
-    expect(runtime.match(new RegExp(P01_SESSION_ID, 'gu'))).toHaveLength(1)
-    expect(runtime).not.toMatch(/maxChars|observe|fallback|\*/u)
-    expect(web.match(new RegExp(P01_SESSION_ID, 'gu'))).toHaveLength(2)
-    expect(telegram).not.toContain('p01UserWordsView')
-    expect(telegram).not.toContain(P01_SESSION_ID)
+    for (const { name, patch, manifest } of profiles) {
+      const compaction = topLevelBlock(patch, 'compaction-basic')
+      expect(compaction, `${name} native compaction`).toContain('disabled: false')
+      expect(compaction, `${name} automatic compaction`).toContain('auto: true')
+      expect(topLevelBlock(patch, 'command-compact'), `${name} manual compaction`).toContain('disabled: false')
+      expect(topLevelBlock(patch, 'session-query-sqlite'), `${name} native session query`).toContain('openAt: first-search')
+      expect(patch, `${name} model query tools`).toContain("name: '@deepseek-ai/dsh-tool-session-query'")
+
+      expect(patch, `${name} custom context runtime`).not.toContain('ui-context-compactor')
+      expect(patch, `${name} custom context invariant`).not.toContain("name: '@deepseek-ai/dsh-invariants'")
+      expect(manifest.dependencies, `${name} native query dependency`)
+        .toHaveProperty('@deepseek-ai/dsh-tool-session-query', 'workspace:*')
+      expect(manifest.dependencies, `${name} custom context dependency`)
+        .not.toHaveProperty('@deepseek-ai/dsh-client-ui-context-compactor')
+    }
   })
 })
