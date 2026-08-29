@@ -56,10 +56,13 @@
 # 用户明确批准停机后才执行
 ./release/dsh release --candidate /path/to/candidate.json --approved-stop
 
-# 真实 Telegram 和 Web 验收通过后
+# 真实 Telegram 和 Web 验收通过后。accept 是不可逆的最终承诺点；
+# 若返回 accepted-cleanup-incomplete，修复清理错误后对同一 release 重试，
+# 不再提供 --evidence，也不会重复真实业务验收。
 ./release/dsh accept --release <release-id> --evidence '真实 Telegram 单条回复且 Web 正常'
 
-# 回退命令第一次只报告方案；用户明确批准后才能真正恢复
+# 只有 accept 前可以回退。accept 后即使清理尚未完成也会立即拒绝 rollback。
+# accept 前，回退命令第一次只报告方案；用户明确批准后才能真正恢复。
 ./release/dsh rollback --release <release-id>
 ./release/dsh rollback --release <release-id> --approved
 
@@ -75,15 +78,19 @@
 
 正式发版候选仍会在删除其唯一标签后重载 Docker archive，证明归档可以恢复同一个 image ID。这个共享存储敏感段和所有镜像构建、验收清理都由 `release/dsh` 的全局锁自动排队，不需要 Agent 人工协调窗口。若某次正式构建被中断，Podman 可能留下一个通过共享镜像层阻塞后续候选的 Buildah 外部存储容器；下一次构建只有在同时找到完整的未完成正式构建目录或先前测试候选保存的清理回执、删除报错中的精确容器 ID、有效 image ID、`buildah` 命令、`storage` 状态，并确认容器创建时间落在该中断构建开始后的 30 分钟内时，才会移除这个外部残留并记录到 candidate。清理回执会持续保存匹配的中断构建 ID，使一个构建留下的多个外部残留可以在后续构建中逐个受控清除，而不扩大成批量清理。清理该残留可能同时移除候选镜像；流程会在确认目标镜像确实不存在后直接从已写完的归档重载，其他“找不到镜像”仍视为失败。普通容器、运行容器、创建时间不属于已确认构建或身份不明的外部容器仍会硬停止，流程不会执行全局清理。若 `/dev/shm` 至少有 8 GiB 可用空间，正式归档会自动在那里暂存，重载成功后再复制到证据目录；也可用 `DSH_RELEASE_ARCHIVE_STAGING_ROOT` 指定其他临时文件系统。暂存归档未完成摘要校验前不会生成正式 `candidate.json`。
 
-构建工作目录、未完成候选、失败构建标签和归档暂存文件都会由本次命令清理。开发底座与正式候选用途严格分开，开发底座不能发布。development 在镜像构建阶段完成六个包的构建、TypeScript/Python 全量测试和镜像自检，但不生成、保存或重载 Docker archive；它按完整 `origin/main` commit 使用稳定身份，本机始终只保留最新 main 的一份开发镜像。同一 main 的重复 build 在锁内确认镜像和测试回执后直接复用。main 前进时先完成新镜像构建和自检，再停止并删除所有旧开发容器、隔离数据、租约、旧候选和旧开发镜像；源码 worktree 始终保留。
+构建工作目录、未完成候选、失败构建标签和归档暂存文件都会由本次命令清理。开发底座与正式候选用途严格分开，开发底座不能发布。development 在镜像构建阶段完成六个包的构建、TypeScript/Python 全量测试和镜像自检，但不生成、保存或重载 Docker archive；它按完整 `origin/main` commit 使用稳定身份，本机始终只保留最新 main 的一份开发镜像。同一 main 的重复 build 在锁内确认镜像和测试回执后直接复用。main 前进时先完成新镜像构建和自检，再停止并删除所有旧开发容器、隔离数据、租约和旧开发镜像；旧开发候选的 JSON 与测试回执标记为 retired 后继续作为小体积历史证据保留，源码 worktree 始终保留。
 
 每个 worktree 的开发环境使用路径摘要派生的独立 toolbox、Web、Telegram、假 Telegram 容器和内部网络，并在一个短状态锁内分配独立 Web 端口。所有容器都带有同一个 worktree 身份；一套环境是最小生命周期单位。因此多个任务可以从同一只读 main 镜像并行运行，`dev down`、`dev retire`、main 镜像更新和正式发布验收都只按 worktree 整体停止和清理。不得恢复固定的全局容器名，也不得直接调用 Podman 或执行全局 prune。
 
 `dev prepare` 创建并持续运行该 worktree 的固定 toolbox；`dev shell` 只用容器引擎的 exec 进入它，不创建新容器、不登记 shell 状态。`dev verify` 同样只 exec 这个既有 toolbox，不新建验证容器、不写入生命周期状态；因此 shell、verify 和其他 worktree 可以并发。交互终端断开只会结束本次 bash，不会产生需要另行识别的容器。一个 worktree 可以同时打开多个终端，它们都进入同一个 toolbox；清理时只需要销毁整套 worktree 环境。
 
-正式发版的生产快照测试副本和临时开发副本在测试结束或失败后都会清理，只保留快照、测试回执、候选归档和发布证据这些回退与审计所需内容。流程不会执行无边界的 `podman system prune` 或 `docker system prune`。
+正式发版的生产快照测试副本和临时开发副本在测试结束或失败后都会清理。生产候选启动后、用户执行 `accept` 前，当前候选与上一 accepted 版本两代完整材料同时存在，停机快照与上一镜像共同构成完整回退边界。流程不会执行无边界的 `podman system prune` 或 `docker system prune`。
 
 个人业务自动化的源码属于持久化 Workspace，默认放在 `$DSH_CWD/automations/<业务名>/`，难以归类的通用脚本放在 `$DSH_CWD/automations/scripts/`。它们的任务定义属于 dsh-cron 持久化账本。仓库、产品镜像和发版流程都不保存业务脚本副本、业务 manifest，也不安装、迁移、验收或回退这些任务。镜像只提供通用解释器、命令行工具和 Harness 指导；业务脚本的生命周期由 Workspace 自己管理。
+
+`accept` 是不可逆的最终承诺点。真实健康验证通过并确认远端 `current`/`last-good` 同指本次 release 后，`release.json` 会记录 `rollbackBoundary.status=retired-at-accept`；从这一刻起不再支持恢复上一版本，清理失败也不会撤销 accepted。随后入口在同一全局镜像锁内幂等收敛正式材料：本机只保留当前 accepted candidate 的目录、`image.tar`、镜像测试回执和 Podman 镜像；远端只保留当前 release 的 `image.tar`、Compose、candidate 文件和正在运行的 Docker 镜像；本机与远端只保留 `snapshots/latest.json` 精确引用的一份一致生产快照归档。latest 生产快照继续保留给后续 `dev prepare` 使用。
+
+其他历史 `release.json`、`candidate.json`、镜像测试回执、上线前测试/验收/失败回执、摘要、用户证据和每次清理回执都保留；只删除 state root 内能由精确元数据识别、且没有容器引用的大体积归档和镜像。失效的 `candidates/latest.json` 会一并删除。指针、当前候选或 latest snapshot 元数据不完整，容器仍引用旧镜像，或远端只完成部分操作时，结果为 `accepted-cleanup-incomplete`、退出码 `6`；`status` 会显示残留。对同一 accepted release 再次执行 `accept` 只重试清理，不重复 Telegram/Web 业务验收。每次 `cleanup` 回执都记录 `status`、受保护对象、本机/远端删除与保留对象、前后字节、错误和完成时间。
 
 正式 release 完成 `accept` 后，本地开发环境和共享开发镜像立即失效并清理；任务源码 worktree 原样保留。未完成任务下次继续时，必须先同步新 main，请求最新 main 的唯一开发镜像，再执行自己的 `dev prepare`。
 
@@ -99,7 +106,7 @@
 | `3` | 正在等待用户授权，未修改生产 |
 | `4` | 安全门失败 |
 | `5` | 构建或测试失败 |
-| `6` | 生产启动或验收失败 |
+| `6` | 生产启动/验收失败，或验收已成功但清理不完整 |
 
 ## 固定边界
 
@@ -107,8 +114,8 @@
 - `release` 在获得停机许可前不停止任何写入者；许可只覆盖该次候选和该次停机窗口。
 - 停机后先做一致快照，再用快照副本执行上线前测试；测试失败时生产保持停止并报告，不在线改产品代码。
 - 明确属于挂载、权限、Compose、路径或启动参数的发版小问题，可在限定现场窗口内修正后重新验收；需要改 Harness、插件、数据语义或原因不清时，先向用户报告。只有用户批准后才能回退。
-- 上线后状态先是 `awaiting-user-acceptance`。真实 Telegram、Web 和本次产品改动验收通过并执行 `accept` 后，该镜像才成为 `last-good`。Workspace 业务任务不属于产品发版验收边界。
-- 回退默认只打印恢复对象、快照和影响；只有显式 `--approved` 才能恢复上一 Docker 镜像及对应停机前数据。
+- 上线后状态先是 `awaiting-user-acceptance`。真实 Telegram、Web 和本次产品改动验收通过并执行 `accept` 后，该镜像才成为 `last-good`，随后只保留当前正式版本自身的恢复材料与 latest 生产快照。Workspace 业务任务不属于产品发版验收边界。
+- 回退默认只打印恢复对象、快照和影响；只有 accept 前且显式添加 `--approved` 才能恢复上一 Docker 镜像及对应停机前数据。accepted release 在任何远端恢复动作前都会被拒绝。
 - OpenClaw 始终在流程外且可完全不存在：不得停止、重启、改配置或接管其写入权，DSH 也不得读取它的目录、凭据、CLI、插件或状态。
 
 ## 已完成的切换

@@ -105,7 +105,7 @@ accepted_release="$test_root/accepted-release.json"
 sed 's/"status": "awaiting-user-acceptance"/"status": "accepted"/' \
   "$release_dir/release.json" >"$accepted_release"
 run_expect 4 rollback --release "$accepted_release"
-grep -q '只有未 accept 的候选' "$test_root/stderr"
+grep -q '回退边界已在 accept 退休' "$test_root/stderr"
 
 run_expect 2 accept --release fixture
 grep -q -- '--evidence' "$test_root/stderr"

@@ -231,7 +231,7 @@ function recordedStaleFormalBuildIds() {
     if (!entry.isDirectory()) continue
     const path = join(candidatesRoot, entry.name, 'candidate.json')
     if (!existsSync(path)) continue
-    try {
+  try {
       const candidate = readJson(path, 'formal candidate cleanup receipt')
       const cleanup = candidate.archiveRoundTripCleanup
       if (candidate.candidateId !== entry.name
@@ -671,7 +671,10 @@ function removeObsoleteDevelopmentCandidates(currentCandidateId) {
         fail(`旧开发镜像仍被未知容器使用，无法保持单一 main 镜像: ${candidate.imageTag}\n${String(removal.stderr ?? '').trim()}`, exitCodes.safety)
       }
     }
-    removeControlledPath(join(stateRoot, 'candidates'), dirname(path))
+    candidate.status = 'retired'
+    candidate.retiredAt = candidate.retiredAt ?? new Date().toISOString()
+    candidate.retiredReason = 'superseded-development-base'
+    writeJson(path, candidate)
     cleaned.push(candidate.candidateId)
   }
   return cleaned
@@ -754,7 +757,10 @@ function cleanupAcceptedDevelopmentState() {
         kept.push(candidate.candidateId)
         continue
       }
-      removeControlledPath(candidatesRoot, candidateDir)
+      candidate.status = 'retired'
+      candidate.retiredAt = candidate.retiredAt ?? new Date().toISOString()
+      candidate.retiredReason = 'accepted-production-release'
+      writeJson(candidatePath, candidate)
       cleaned.push(candidate.candidateId)
     }
   }
@@ -762,9 +768,738 @@ function cleanupAcceptedDevelopmentState() {
     result: 'accepted-release-invalidated-development',
     cleanedCandidateIds: cleaned,
     keptReferencedCandidateIds: kept,
+    candidateAndTestReceipts: 'preserved',
     invalidatedSourcePaths,
     sourceWorktrees: 'preserved',
   }
+}
+
+function normalizedImageId(value) {
+  return String(value ?? '').replace(/^sha256:/u, '')
+}
+
+function sameImageId(left, right) {
+  return normalizedImageId(left) !== '' && normalizedImageId(left) === normalizedImageId(right)
+}
+
+function cleanupObjectKey(value) {
+  return `${value.kind}:${value.path ?? value.imageId ?? value.id ?? ''}`
+}
+
+function pushUniqueCleanupObject(values, value) {
+  const key = cleanupObjectKey(value)
+  if (!values.some((existing) => cleanupObjectKey(existing) === key)) values.push(value)
+}
+
+function cleanupError(cleanup, scope, code, object, message) {
+  cleanup.errors.push({ scope, code, object, message })
+}
+
+function cleanupAttempt(release) {
+  return {
+    status: 'incomplete',
+    protected: [],
+    local: { deleted: [], kept: [], bytes: { before: 0, after: 0, reclaimed: 0 } },
+    remote: { deleted: [], kept: [], bytes: { before: 0, after: 0, reclaimed: 0 } },
+    errors: [],
+    completedAt: null,
+    releaseId: release.releaseId,
+    candidateId: release.candidate?.candidateId ?? null,
+  }
+}
+
+function finishCleanupAttempt(cleanup) {
+  for (const scopeName of ['local', 'remote']) {
+    const scope = cleanup[scopeName]
+    const before = new Map()
+    const after = new Map()
+    for (const value of [...scope.deleted, ...scope.kept]) {
+      const key = cleanupObjectKey(value)
+      before.set(key, Math.max(before.get(key) ?? 0, Number(value.bytes ?? 0)))
+    }
+    for (const value of scope.kept) {
+      const key = cleanupObjectKey(value)
+      after.set(key, Math.max(after.get(key) ?? 0, Number(value.bytes ?? 0)))
+    }
+    scope.bytes.before = [...before.values()].reduce((sum, value) => sum + value, 0)
+    scope.bytes.after = [...after.values()].reduce((sum, value) => sum + value, 0)
+    scope.bytes.reclaimed = Math.max(0, scope.bytes.before - scope.bytes.after)
+  }
+  cleanup.status = cleanup.errors.length === 0 ? 'complete' : 'incomplete'
+  cleanup.completedAt = new Date().toISOString()
+  return cleanup
+}
+
+function filesRecursively(root, predicate) {
+  if (!existsSync(root)) return []
+  const found = []
+  const visit = (directory) => {
+    for (const name of readdirSync(directory)) {
+      const path = join(directory, name)
+      const entry = lstatSync(path)
+      if (entry.isDirectory() && !entry.isSymbolicLink()) visit(path)
+      else if (entry.isFile() && predicate(path)) found.push(path)
+    }
+  }
+  visit(root)
+  return found.sort()
+}
+
+function requiredCandidateMetadata(candidate, candidatePath, expected = null) {
+  const candidatesRoot = join(stateRoot, 'candidates')
+  const resolvedPath = resolve(candidatePath)
+  const candidateDir = dirname(resolvedPath)
+  if (!controlledChild(candidatesRoot, candidateDir) || basename(resolvedPath) !== 'candidate.json') {
+    throw new Error(`candidate 不在受控目录: ${candidatePath}`)
+  }
+  if (!existsSync(candidateDir) || !lstatSync(candidateDir).isDirectory() || lstatSync(candidateDir).isSymbolicLink()) {
+    throw new Error('candidate 目录不是受控普通目录')
+  }
+  if (!existsSync(resolvedPath) || !lstatSync(resolvedPath).isFile() || lstatSync(resolvedPath).isSymbolicLink()) {
+    throw new Error('candidate.json 不是受控普通文件')
+  }
+  for (const field of ['candidateId', 'imageId', 'imageTag', 'archivePath', 'archiveSha256', 'testReceiptPath', 'testReceiptSha256']) {
+    if (!candidate?.[field]) throw new Error(`candidate 缺少 ${field}`)
+  }
+  if (candidatePurpose(candidate) !== 'release') throw new Error(`candidate 用途不是 release: ${candidatePurpose(candidate)}`)
+  if (candidate.candidateId !== basename(candidateDir)) throw new Error('candidateId 与受控目录不一致')
+  if (!/^(?:sha256:)?[0-9a-f]{64}$/u.test(candidate.imageId)) throw new Error('candidate imageId 不是完整镜像 ID')
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*:[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(candidate.imageTag)) throw new Error('candidate imageTag 不是受控精确标签')
+  if (!/^sha256:[0-9a-f]{64}$/u.test(candidate.archiveSha256) || !/^sha256:[0-9a-f]{64}$/u.test(candidate.testReceiptSha256)) {
+    throw new Error('candidate 归档或测试回执摘要格式不完整')
+  }
+  if (resolve(candidate.archivePath) !== join(candidateDir, 'image.tar')) throw new Error('candidate archivePath 不是候选目录内的 image.tar')
+  if (resolve(candidate.testReceiptPath) !== join(candidateDir, 'image-tests.json')) throw new Error('candidate testReceiptPath 不是候选目录内的 image-tests.json')
+  if (expected) {
+    for (const field of ['candidateId', 'imageId', 'imageTag', 'archiveSha256', 'testReceiptSha256']) {
+      if (candidate[field] !== expected[field]) throw new Error(`candidate ${field} 与 release.json 不一致`)
+    }
+  }
+  return { candidate, candidatePath: resolvedPath, candidateDir }
+}
+
+function localImageInventory(imageTag) {
+  const inspection = runStatus(engine, ['image', 'inspect', imageTag, '--format', '{{.Id}}|{{.Size}}'])
+  if (inspection.status !== 0) return null
+  const [id, sizeText = '0'] = String(inspection.stdout ?? '').trim().split('|')
+  return { id, size: Number(sizeText) || 0 }
+}
+
+function localContainerImageIds() {
+  const listed = runStatus(engine, ['ps', '--all', '--quiet'])
+  if (listed.status !== 0) throw new Error(`无法列出本机容器: ${String(listed.stderr ?? '').trim()}`)
+  const ids = String(listed.stdout ?? '').trim().split(/\s+/u).filter(Boolean)
+  const images = new Set()
+  for (const id of ids) {
+    const inspected = runStatus(engine, ['inspect', id, '--format', '{{.Image}}'])
+    if (inspected.status !== 0) throw new Error(`无法检查本机容器 ${id} 的镜像引用`)
+    images.add(normalizedImageId(String(inspected.stdout ?? '').trim()))
+  }
+  return images
+}
+
+function collectRemoteCleanupInventory() {
+  const remoteRoot = '/home/herman/.local/share/dsh-container'
+  const text = ssh(`set -Eeuo pipefail
+# DSH_ACCEPT_CLEANUP_INVENTORY_V1
+python3 - <<'PY'
+import hashlib
+import json
+import os
+import re
+import subprocess
+
+root = '/home/herman/.local/share/dsh-container'
+errors = []
+
+def load_json(path, label):
+    try:
+        if not os.path.isfile(path) or os.path.islink(path):
+            raise ValueError('not a regular file')
+        with open(path, 'r', encoding='utf-8') as handle:
+            return json.load(handle), None
+    except Exception as error:
+        return None, f'{label}: {error}'
+
+def file_record(path, with_sha=False):
+    if not os.path.isfile(path) or os.path.islink(path):
+        return None
+    value = {'path': os.path.realpath(path), 'bytes': os.path.getsize(path)}
+    if with_sha:
+        digest = hashlib.sha256()
+        with open(path, 'rb') as handle:
+            for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b''):
+                digest.update(chunk)
+        value['sha256'] = 'sha256:' + digest.hexdigest()
+    return value
+
+def run(*args):
+    return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+def pointer(name):
+    path = os.path.join(root, name)
+    return os.path.realpath(path) if os.path.lexists(path) else None
+
+releases = []
+release_root = os.path.join(root, 'releases')
+if os.path.isdir(release_root):
+    for entry in sorted(os.scandir(release_root), key=lambda value: value.name):
+        name = entry.name
+        directory = entry.path
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        release, release_error = load_json(os.path.join(directory, 'release.json'), f'release {name}')
+        candidate, candidate_error = load_json(os.path.join(directory, 'candidate.json'), f'candidate {name}')
+        releases.append({
+            'name': name,
+            'dir': os.path.realpath(directory),
+            'release': release,
+            'releaseError': release_error,
+            'candidate': candidate,
+            'candidateError': candidate_error,
+            'archive': file_record(os.path.join(directory, 'image.tar')),
+            'compose': file_record(os.path.join(directory, 'compose.production.yml')),
+            'candidateFile': file_record(os.path.join(directory, 'candidate.json')),
+        })
+
+snapshot_root = os.path.join(root, 'snapshots')
+latest, latest_error = load_json(os.path.join(snapshot_root, 'latest.json'), 'latest snapshot')
+snapshot_archives = []
+if os.path.isdir(snapshot_root):
+    for directory, _, names in os.walk(snapshot_root):
+        for name in sorted(names):
+            if name.endswith('.tar.zst'):
+                archive_path = os.path.join(directory, name)
+                record = file_record(archive_path)
+                if record is None:
+                    continue
+                metadata_path = os.path.join(directory, 'snapshot.json') if name == 'home.tar.zst' else archive_path[:-len('.tar.zst')] + '.json'
+                metadata, metadata_error = load_json(metadata_path, f'snapshot {name}')
+                record.update({'metadataPath': metadata_path, 'metadata': metadata, 'metadataError': metadata_error, 'metadataValid': False})
+                expected_snapshot_id = os.path.basename(directory) if name == 'home.tar.zst' else name[:-len('.tar.zst')]
+                if isinstance(metadata, dict) and metadata.get('snapshotId') == expected_snapshot_id and re.fullmatch(r'sha256:[0-9a-f]{64}', str(metadata.get('archiveSha256', ''))) and os.path.realpath(str(metadata.get('archivePath', ''))) == os.path.realpath(archive_path):
+                    record['metadataValid'] = True
+                elif metadata_error is None:
+                    record['metadataError'] = 'snapshot metadata does not identify archive'
+                snapshot_archives.append(record)
+
+container_images = []
+containers_complete = True
+listed = run('docker', 'ps', '--all', '--quiet')
+if listed.returncode != 0:
+    containers_complete = False
+    errors.append('docker containers: ' + listed.stderr.strip())
+else:
+    for container_id in listed.stdout.split():
+        inspected = run('docker', 'inspect', container_id, '--format', '{{.Image}}')
+        if inspected.returncode != 0:
+            containers_complete = False
+            errors.append(f'docker container {container_id}: ' + inspected.stderr.strip())
+        else:
+            container_images.append(inspected.stdout.strip())
+
+tags = set()
+for item in releases:
+    for source in (item.get('candidate'), (item.get('release') or {}).get('candidate')):
+        if isinstance(source, dict) and isinstance(source.get('imageTag'), str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]*:[A-Za-z0-9][A-Za-z0-9._-]*', source['imageTag']):
+            tags.add(source['imageTag'])
+images = {}
+for tag in sorted(tags):
+    inspected = run('docker', 'image', 'inspect', tag, '--format', '{{.Id}}|{{.Size}}')
+    if inspected.returncode == 0:
+        parts = inspected.stdout.strip().split('|', 1)
+        images[tag] = {'id': parts[0], 'size': int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else 0}
+    elif 'No such image' not in inspected.stderr and 'No such object' not in inspected.stderr:
+        images[tag] = {'error': inspected.stderr.strip() or f'exit {inspected.returncode}'}
+
+current_path = pointer('current')
+last_good_path = pointer('last-good')
+for item in releases:
+    if item['dir'] == current_path and item.get('archive'):
+        item['archive'] = file_record(item['archive']['path'], with_sha=True)
+
+latest_archive = None
+if isinstance(latest, dict) and isinstance(latest.get('archivePath'), str):
+    requested = os.path.realpath(latest['archivePath'])
+    snapshot_id = latest.get('snapshotId')
+    expected = os.path.join(snapshot_root, f'{snapshot_id}.tar.zst') if isinstance(snapshot_id, str) else None
+    if expected is not None and requested == expected and requested.startswith(snapshot_root + os.sep):
+        latest_archive = file_record(requested, with_sha=True)
+
+print(json.dumps({
+    'root': root,
+    'currentPath': current_path,
+    'lastGoodPath': last_good_path,
+    'releases': releases,
+    'latestSnapshot': latest,
+    'latestSnapshotError': latest_error,
+    'latestSnapshotArchive': latest_archive,
+    'snapshotArchives': [value for value in snapshot_archives if value],
+    'containerImages': container_images,
+    'containersComplete': containers_complete,
+    'images': images,
+    'errors': errors,
+}, separators=(',', ':')))
+PY
+`)
+  try { return JSON.parse(text) } catch (error) { throw new Error(`无法解析远端清理盘点: ${error.message}`) }
+}
+
+function remoteCleanupStatus(script) {
+  return runStatus('ssh', ['-o', 'BatchMode=yes', target, 'bash', '-s'], { input: script })
+}
+
+function localSnapshotArchiveEvidence(path) {
+  const suffix = '.tar.zst'
+  const metadataPath = basename(path) === 'home.tar.zst'
+    ? join(dirname(path), 'snapshot.json')
+    : `${path.slice(0, -suffix.length)}.json`
+  const record = { path, bytes: statSync(path).size, metadataPath, metadataValid: false, metadataError: null }
+  try {
+    if (!existsSync(metadataPath) || !lstatSync(metadataPath).isFile() || lstatSync(metadataPath).isSymbolicLink()) throw new Error('对应快照元数据不是普通文件')
+    const metadata = readJson(metadataPath, 'snapshot evidence')
+    if (!metadata.snapshotId || !/^sha256:[0-9a-f]{64}$/u.test(metadata.archiveSha256 ?? '')) throw new Error('快照元数据缺少完整 snapshotId/archiveSha256')
+    const expectedSnapshotId = basename(path) === 'home.tar.zst' ? basename(dirname(path)) : basename(path, suffix)
+    if (metadata.snapshotId !== expectedSnapshotId) throw new Error('快照元数据 snapshotId 与归档名不一致')
+    if (resolve(metadata.archivePath) !== path) throw new Error('快照元数据 archivePath 与归档不一致')
+    record.metadata = metadata
+    record.metadataValid = true
+  } catch (error) {
+    record.metadataError = error.message
+  }
+  return record
+}
+
+function collectLocalCleanupInventory(release, cleanup) {
+  const candidatesRoot = join(stateRoot, 'candidates')
+  const snapshotsRoot = join(stateRoot, 'snapshots')
+  const inventory = {
+    gateComplete: true,
+    current: null,
+    candidates: [],
+    latestSnapshot: null,
+    snapshotArchives: filesRecursively(snapshotsRoot, (path) => path.endsWith('.tar.zst'))
+      .map(localSnapshotArchiveEvidence),
+    containerImageIds: null,
+  }
+  try {
+    if (!release.candidatePath) throw new Error('release.json 缺少 candidatePath')
+    const candidatePath = resolve(release.candidatePath)
+    if (!existsSync(candidatePath) || !lstatSync(candidatePath).isFile() || lstatSync(candidatePath).isSymbolicLink()) throw new Error(`当前 candidate.json 不是普通文件: ${candidatePath}`)
+    const candidate = readJson(candidatePath, 'accepted candidate')
+    const current = requiredCandidateMetadata(candidate, candidatePath, release.candidate)
+    if (!existsSync(current.candidate.archivePath) || !lstatSync(current.candidate.archivePath).isFile() || lstatSync(current.candidate.archivePath).isSymbolicLink()) throw new Error('当前候选 image.tar 不是普通文件')
+    if (sha256File(current.candidate.archivePath) !== current.candidate.archiveSha256) throw new Error('当前候选 image.tar 摘要不匹配')
+    if (!existsSync(current.candidate.testReceiptPath) || !lstatSync(current.candidate.testReceiptPath).isFile() || lstatSync(current.candidate.testReceiptPath).isSymbolicLink()) throw new Error('当前候选测试回执不是普通文件')
+    if (sha256File(current.candidate.testReceiptPath) !== current.candidate.testReceiptSha256) throw new Error('当前候选测试回执摘要不匹配')
+    const image = localImageInventory(current.candidate.imageTag)
+    if (!image || !sameImageId(image.id, current.candidate.imageId)) throw new Error('当前候选 Podman 镜像身份缺失或不匹配')
+    inventory.current = {
+      ...current,
+      archive: { path: current.candidate.archivePath, bytes: statSync(current.candidate.archivePath).size },
+      testReceipt: { path: current.candidate.testReceiptPath, bytes: statSync(current.candidate.testReceiptPath).size },
+      image,
+    }
+    for (const value of [
+      { scope: 'local', kind: 'candidate-directory', path: current.candidateDir },
+      { scope: 'local', kind: 'candidate', path: current.candidatePath },
+      { scope: 'local', kind: 'candidate-archive', path: current.candidate.archivePath },
+      { scope: 'local', kind: 'test-receipt', path: current.candidate.testReceiptPath },
+      { scope: 'local', kind: 'podman-image', imageId: current.candidate.imageId, imageTag: current.candidate.imageTag },
+    ]) pushUniqueCleanupObject(cleanup.protected, value)
+  } catch (error) {
+    inventory.gateComplete = false
+    cleanupError(cleanup, 'local', 'current-candidate-incomplete', release.candidatePath ?? null, error.message)
+  }
+
+  if (existsSync(candidatesRoot)) {
+    for (const name of readdirSync(candidatesRoot).sort()) {
+      const candidateDir = join(candidatesRoot, name)
+      if (!lstatSync(candidateDir).isDirectory()) continue
+      const candidatePath = join(candidateDir, 'candidate.json')
+      const archivePath = join(candidateDir, 'image.tar')
+      const archiveIsRegular = existsSync(archivePath) && lstatSync(archivePath).isFile() && !lstatSync(archivePath).isSymbolicLink()
+      if (!existsSync(candidatePath)) {
+        if (archiveIsRegular) {
+          inventory.candidates.push({ valid: false, candidateDir, candidatePath, archive: { path: archivePath, bytes: statSync(archivePath).size } })
+          cleanupError(cleanup, 'local', 'candidate-metadata-missing', archivePath, 'image.tar 没有对应 candidate.json')
+        }
+        continue
+      }
+      if (!lstatSync(candidatePath).isFile() || lstatSync(candidatePath).isSymbolicLink()) {
+        const archive = archiveIsRegular ? { path: archivePath, bytes: statSync(archivePath).size } : null
+        inventory.candidates.push({ valid: false, candidateDir, candidatePath, archive })
+        if (archive) cleanupError(cleanup, 'local', 'candidate-metadata-invalid', archive.path, 'candidate.json 不是普通文件')
+        continue
+      }
+      try {
+        const candidate = readJson(candidatePath, 'candidate evidence')
+        if (candidatePurpose(candidate) !== 'release') continue
+        const validated = requiredCandidateMetadata(candidate, candidatePath)
+        inventory.candidates.push({
+          valid: true,
+          ...validated,
+          archive: archiveIsRegular ? { path: archivePath, bytes: statSync(archivePath).size } : null,
+          image: localImageInventory(candidate.imageTag),
+        })
+      } catch (error) {
+        const archive = archiveIsRegular ? { path: archivePath, bytes: statSync(archivePath).size } : null
+        inventory.candidates.push({ valid: false, candidateDir, candidatePath, archive })
+        if (archive) cleanupError(cleanup, 'local', 'candidate-metadata-invalid', archive.path, error.message)
+      }
+    }
+  }
+
+  try {
+    const latestPath = join(snapshotsRoot, 'latest.json')
+    if (!existsSync(latestPath) || !lstatSync(latestPath).isFile() || lstatSync(latestPath).isSymbolicLink()) throw new Error('latest snapshot 元数据不是普通文件')
+    const latest = readJson(latestPath, 'latest snapshot')
+    for (const field of ['snapshotId', 'archivePath', 'archiveSha256']) {
+      if (!latest[field]) throw new Error(`latest snapshot 缺少 ${field}`)
+    }
+    const archivePath = resolve(latest.archivePath)
+    const allowedPaths = new Set([
+      join(snapshotsRoot, `${latest.snapshotId}.tar.zst`),
+      join(snapshotsRoot, latest.snapshotId, 'home.tar.zst'),
+    ])
+    if (!allowedPaths.has(archivePath) || !controlledChild(snapshotsRoot, archivePath)) throw new Error('latest snapshot archivePath 不在受控快照路径')
+    if (!existsSync(archivePath) || !lstatSync(archivePath).isFile() || lstatSync(archivePath).isSymbolicLink()) throw new Error('latest snapshot 归档不是普通文件')
+    if (sha256File(archivePath) !== latest.archiveSha256) throw new Error('latest snapshot 归档摘要不匹配')
+    inventory.latestSnapshot = { metadata: latest, metadataPath: latestPath, archive: { path: archivePath, bytes: statSync(archivePath).size } }
+    pushUniqueCleanupObject(cleanup.protected, { scope: 'local', kind: 'snapshot-metadata', path: latestPath })
+    pushUniqueCleanupObject(cleanup.protected, { scope: 'local', kind: 'snapshot-archive', path: archivePath })
+  } catch (error) {
+    inventory.gateComplete = false
+    cleanupError(cleanup, 'local', 'latest-snapshot-incomplete', join(snapshotsRoot, 'latest.json'), error.message)
+  }
+
+  try { inventory.containerImageIds = localContainerImageIds() } catch (error) {
+    cleanupError(cleanup, 'local', 'container-inventory-failed', 'podman containers', error.message)
+  }
+  return inventory
+}
+
+function remoteCandidateMetadata(item) {
+  const remoteRoot = '/home/herman/.local/share/dsh-container'
+  const expectedDir = `${remoteRoot}/releases/${item.name}`
+  if (item.dir !== expectedDir || item.release?.releaseId !== item.name) throw new Error('releaseId 或 release 目录不一致')
+  if (!item.candidate || !item.release?.candidate) throw new Error(item.candidateError ?? item.releaseError ?? '缺少 candidate/release 元数据')
+  const candidate = item.candidate
+  for (const field of ['candidateId', 'imageId', 'imageTag', 'archiveSha256']) {
+    if (!candidate[field]) throw new Error(`candidate 缺少 ${field}`)
+    if (candidate[field] !== item.release.candidate[field]) throw new Error(`candidate ${field} 与 release.json 不一致`)
+  }
+  if (candidatePurpose(candidate) !== 'release') throw new Error('candidate 用途不是 release')
+  if (!/^(?:sha256:)?[0-9a-f]{64}$/u.test(candidate.imageId)) throw new Error('candidate imageId 不是完整镜像 ID')
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*:[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(candidate.imageTag)) throw new Error('candidate imageTag 不是受控精确标签')
+  if (!/^sha256:[0-9a-f]{64}$/u.test(candidate.archiveSha256)) throw new Error('candidate archiveSha256 不完整')
+  if (item.archive && item.archive.path !== `${expectedDir}/image.tar`) throw new Error('release image.tar 路径不精确')
+  if (item.compose && item.compose.path !== `${expectedDir}/compose.production.yml`) throw new Error('release Compose 路径不精确')
+  if (item.candidateFile && item.candidateFile.path !== `${expectedDir}/candidate.json`) throw new Error('release candidate.json 路径不精确')
+  return candidate
+}
+
+function validateRemoteCleanupInventory(release, inventory, cleanup) {
+  const remoteRoot = '/home/herman/.local/share/dsh-container'
+  const expectedDir = `${remoteRoot}/releases/${release.releaseId}`
+  let gateComplete = true
+  if (!inventory || inventory.root !== remoteRoot) {
+    cleanupError(cleanup, 'remote', 'inventory-incomplete', target, '远端 state root 盘点缺失或不匹配')
+    return { gateComplete: false, current: null }
+  }
+  for (const message of inventory.errors ?? []) cleanupError(cleanup, 'remote', 'inventory-warning', target, message)
+  if (inventory.currentPath !== expectedDir || inventory.lastGoodPath !== expectedDir) {
+    gateComplete = false
+    cleanupError(cleanup, 'remote', 'release-pointers-incomplete', expectedDir, `current=${inventory.currentPath ?? 'missing'} last-good=${inventory.lastGoodPath ?? 'missing'}`)
+  }
+  const current = inventory.releases?.find((item) => item.dir === expectedDir) ?? null
+  try {
+    if (!current) throw new Error('当前 release 目录不在远端盘点中')
+    const candidate = remoteCandidateMetadata(current)
+    for (const field of ['candidateId', 'imageId', 'imageTag', 'archiveSha256']) {
+      if (candidate[field] !== release.candidate?.[field]) throw new Error(`远端当前 candidate ${field} 与本机 release.json 不一致`)
+    }
+    if (current.release.status !== 'accepted') throw new Error(`远端当前 release 状态不是 accepted: ${current.release.status ?? 'missing'}`)
+    if (current.release.rollbackBoundary?.status !== 'retired-at-accept') throw new Error('远端 rollbackBoundary 尚未在 accept 退休')
+    if (!current.archive || current.archive.sha256 !== candidate.archiveSha256) throw new Error('远端当前 image.tar 缺失或摘要不匹配')
+    if (!current.compose || !current.candidateFile) throw new Error('远端当前 Compose 或 candidate.json 缺失')
+    const image = inventory.images?.[candidate.imageTag]
+    if (!image || image.error || !sameImageId(image.id, candidate.imageId) || !sameImageId(image.id, release.production?.engineImageId)) {
+      throw new Error('远端当前 Docker 镜像身份缺失或不匹配')
+    }
+    for (const value of [
+      { scope: 'remote', kind: 'release-directory', path: current.dir },
+      { scope: 'remote', kind: 'release-archive', path: current.archive.path },
+      { scope: 'remote', kind: 'compose', path: current.compose.path },
+      { scope: 'remote', kind: 'candidate', path: current.candidateFile.path },
+      { scope: 'remote', kind: 'docker-image', imageId: image.id, imageTag: candidate.imageTag },
+    ]) pushUniqueCleanupObject(cleanup.protected, value)
+  } catch (error) {
+    gateComplete = false
+    cleanupError(cleanup, 'remote', 'current-release-incomplete', expectedDir, error.message)
+  }
+
+  try {
+    const latest = inventory.latestSnapshot
+    for (const field of ['snapshotId', 'archivePath', 'archiveSha256']) {
+      if (!latest?.[field]) throw new Error(`latest snapshot 缺少 ${field}`)
+    }
+    const archivePath = resolve(latest.archivePath)
+    const snapshotsRoot = `${remoteRoot}/snapshots`
+    if (archivePath !== `${snapshotsRoot}/${latest.snapshotId}.tar.zst` || !controlledChild(snapshotsRoot, archivePath)) {
+      throw new Error('latest snapshot archivePath 不在受控快照路径')
+    }
+    const actual = inventory.latestSnapshotArchive
+    if (!actual || actual.path !== archivePath || actual.sha256 !== latest.archiveSha256) throw new Error('latest snapshot 归档缺失或摘要不匹配')
+    pushUniqueCleanupObject(cleanup.protected, { scope: 'remote', kind: 'snapshot-metadata', path: `${snapshotsRoot}/latest.json` })
+    pushUniqueCleanupObject(cleanup.protected, { scope: 'remote', kind: 'snapshot-archive', path: archivePath })
+  } catch (error) {
+    gateComplete = false
+    cleanupError(cleanup, 'remote', 'latest-snapshot-incomplete', `${remoteRoot}/snapshots/latest.json`, error.message)
+  }
+  return { gateComplete, current }
+}
+
+function keepLocalFormalInventory(inventory, cleanup, reason) {
+  for (const item of inventory.candidates) {
+    if (item.archive) pushUniqueCleanupObject(cleanup.local.kept, { kind: 'candidate-archive', path: item.archive.path, bytes: item.archive.bytes, reason })
+    if (item.image) pushUniqueCleanupObject(cleanup.local.kept, { kind: 'podman-image', imageId: item.image.id, imageTag: item.candidate?.imageTag, bytes: item.image.size, reason })
+  }
+  for (const item of inventory.snapshotArchives) {
+    pushUniqueCleanupObject(cleanup.local.kept, { kind: 'snapshot-archive', path: item.path, bytes: item.bytes, reason })
+  }
+}
+
+function keepRemoteFormalInventory(inventory, cleanup, reason) {
+  for (const item of inventory?.releases ?? []) {
+    if (item.archive) pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'release-archive', path: item.archive.path, bytes: item.archive.bytes, reason })
+    const candidate = item.candidate ?? item.release?.candidate
+    const image = candidate?.imageTag ? inventory.images?.[candidate.imageTag] : null
+    if (image?.id) pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'docker-image', imageId: image.id, imageTag: candidate.imageTag, bytes: image.size, reason })
+  }
+  for (const item of inventory?.snapshotArchives ?? []) {
+    pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'snapshot-archive', path: item.path, bytes: item.bytes, reason })
+  }
+}
+
+function removeLocalFileForCleanup(path, kind, bytes, cleanup) {
+  try {
+    rmSync(path, { force: true })
+    pushUniqueCleanupObject(cleanup.local.deleted, { kind, path, bytes })
+    return true
+  } catch (error) {
+    pushUniqueCleanupObject(cleanup.local.kept, { kind, path, bytes, reason: 'delete-failed' })
+    cleanupError(cleanup, 'local', 'delete-failed', path, error.message)
+    return false
+  }
+}
+
+function removeRemoteFileForCleanup(path, kind, bytes, cleanup) {
+  const remoteRoot = '/home/herman/.local/share/dsh-container'
+  if (!controlledChild(remoteRoot, path)) {
+    pushUniqueCleanupObject(cleanup.remote.kept, { kind, path, bytes, reason: 'uncontrolled-path' })
+    cleanupError(cleanup, 'remote', 'uncontrolled-path', path, '拒绝删除不受控远端路径')
+    return false
+  }
+  const result = remoteCleanupStatus(`set -Eeuo pipefail
+# DSH_ACCEPT_CLEANUP_REMOVE_FILE_V1
+root=${shellQuote(remoteRoot)}
+path=${shellQuote(path)}
+case "$path" in "$root"/*) ;; *) echo 'uncontrolled path' >&2; exit 71 ;; esac
+if test -f "$path"; then rm -- "$path"; fi
+`)
+  if (result.status === 0) {
+    pushUniqueCleanupObject(cleanup.remote.deleted, { kind, path, bytes })
+    return true
+  }
+  pushUniqueCleanupObject(cleanup.remote.kept, { kind, path, bytes, reason: 'delete-failed' })
+  cleanupError(cleanup, 'remote', 'delete-failed', path, String(result.stderr ?? '').trim() || `ssh exit ${result.status}`)
+  return false
+}
+
+function removeRemoteImageForCleanup(imageTag, imageIdValue, bytes, cleanup) {
+  const result = remoteCleanupStatus(`set -Eeuo pipefail
+# DSH_ACCEPT_CLEANUP_REMOVE_IMAGE_V1
+expected_tag=${shellQuote(imageTag)}
+expected_id=${shellQuote(imageIdValue)}
+if ! docker image inspect "$expected_tag" >/dev/null 2>&1; then exit 0; fi
+actual_id="$(docker image inspect "$expected_tag" --format '{{.Id}}')"
+test "$actual_id" = "$expected_id" || { echo "image identity changed: $actual_id" >&2; exit 72; }
+while read -r container_id; do
+  test -n "$container_id" || continue
+  container_image="$(docker inspect "$container_id" --format '{{.Image}}')"
+  test "$container_image" != "$expected_id" || { echo "image referenced by container $container_id" >&2; exit 73; }
+done < <(docker ps --all --quiet)
+docker image rm "$expected_id"
+`)
+  if (result.status === 0) {
+    pushUniqueCleanupObject(cleanup.remote.deleted, { kind: 'docker-image', imageId: imageIdValue, imageTag, bytes })
+    return true
+  }
+  pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'docker-image', imageId: imageIdValue, imageTag, bytes, reason: 'delete-failed' })
+  cleanupError(cleanup, 'remote', 'image-delete-failed', imageIdValue, String(result.stderr ?? '').trim() || `ssh exit ${result.status}`)
+  return false
+}
+
+function cleanupLocalFormalObjects(release, inventory, cleanup) {
+  const currentCandidatePath = inventory.current?.candidatePath
+  const currentImageId = inventory.current?.candidate.imageId
+  const imageTargets = new Map()
+
+  if (inventory.current) {
+    pushUniqueCleanupObject(cleanup.local.kept, { kind: 'candidate-archive', path: inventory.current.archive.path, bytes: inventory.current.archive.bytes, reason: 'current-accepted-candidate' })
+    pushUniqueCleanupObject(cleanup.local.kept, { kind: 'test-receipt', path: inventory.current.testReceipt.path, bytes: inventory.current.testReceipt.bytes, reason: 'historical-evidence' })
+    pushUniqueCleanupObject(cleanup.local.kept, { kind: 'podman-image', imageId: inventory.current.image.id, imageTag: inventory.current.candidate.imageTag, bytes: inventory.current.image.size, reason: 'current-accepted-candidate' })
+  }
+
+  for (const item of inventory.candidates) {
+    if (item.valid && item.candidatePath === currentCandidatePath) continue
+    if (!item.valid) {
+      if (item.archive) pushUniqueCleanupObject(cleanup.local.kept, { kind: 'candidate-archive', path: item.archive.path, bytes: item.archive.bytes, reason: 'metadata-incomplete' })
+      continue
+    }
+    if (item.archive) removeLocalFileForCleanup(item.archive.path, 'candidate-archive', item.archive.bytes, cleanup)
+    if (!item.image) continue
+    if (!sameImageId(item.image.id, item.candidate.imageId)) {
+      pushUniqueCleanupObject(cleanup.local.kept, { kind: 'podman-image', imageId: item.image.id, imageTag: item.candidate.imageTag, bytes: item.image.size, reason: 'identity-mismatch' })
+      cleanupError(cleanup, 'local', 'image-identity-mismatch', item.candidate.imageTag, `${item.image.id} != ${item.candidate.imageId}`)
+      continue
+    }
+    const key = normalizedImageId(item.image.id)
+    if (!imageTargets.has(key)) imageTargets.set(key, item)
+  }
+
+  for (const item of imageTargets.values()) {
+    const image = item.image
+    if (sameImageId(image.id, currentImageId)) continue
+    if (inventory.containerImageIds === null) {
+      pushUniqueCleanupObject(cleanup.local.kept, { kind: 'podman-image', imageId: image.id, imageTag: item.candidate.imageTag, bytes: image.size, reason: 'container-inventory-incomplete' })
+      continue
+    }
+    if (inventory.containerImageIds.has(normalizedImageId(image.id))) {
+      pushUniqueCleanupObject(cleanup.local.kept, { kind: 'podman-image', imageId: image.id, imageTag: item.candidate.imageTag, bytes: image.size, reason: 'container-reference' })
+      cleanupError(cleanup, 'local', 'image-referenced', image.id, 'Podman 镜像仍被容器引用')
+      continue
+    }
+    const removed = runStatus(engine, ['image', 'rm', image.id])
+    if (removed.status === 0) {
+      pushUniqueCleanupObject(cleanup.local.deleted, { kind: 'podman-image', imageId: image.id, imageTag: item.candidate.imageTag, bytes: image.size })
+    } else {
+      pushUniqueCleanupObject(cleanup.local.kept, { kind: 'podman-image', imageId: image.id, imageTag: item.candidate.imageTag, bytes: image.size, reason: 'delete-failed' })
+      cleanupError(cleanup, 'local', 'image-delete-failed', image.id, String(removed.stderr ?? '').trim() || `engine exit ${removed.status}`)
+    }
+  }
+
+  const protectedSnapshot = inventory.latestSnapshot?.archive.path
+  if (inventory.latestSnapshot) {
+    pushUniqueCleanupObject(cleanup.local.kept, { kind: 'snapshot-archive', path: protectedSnapshot, bytes: inventory.latestSnapshot.archive.bytes, reason: 'latest-snapshot' })
+  }
+  for (const item of inventory.snapshotArchives) {
+    if (item.path === protectedSnapshot) continue
+    if (!item.metadataValid) {
+      pushUniqueCleanupObject(cleanup.local.kept, { kind: 'snapshot-archive', path: item.path, bytes: item.bytes, reason: 'metadata-incomplete' })
+      cleanupError(cleanup, 'local', 'snapshot-metadata-invalid', item.path, item.metadataError)
+      continue
+    }
+    removeLocalFileForCleanup(item.path, 'snapshot-archive', item.bytes, cleanup)
+  }
+
+  const latestCandidatePointer = join(stateRoot, 'candidates/latest.json')
+  if (existsSync(latestCandidatePointer)) {
+    removeLocalFileForCleanup(latestCandidatePointer, 'candidate-pointer', statSync(latestCandidatePointer).size, cleanup)
+  }
+}
+
+function cleanupRemoteFormalObjects(release, inventory, validated, cleanup) {
+  const currentDir = validated.current.dir
+  const currentCandidate = validated.current.candidate
+  const currentImage = inventory.images[currentCandidate.imageTag]
+  const imageTargets = new Map()
+  pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'release-archive', path: validated.current.archive.path, bytes: validated.current.archive.bytes, reason: 'current-accepted-release' })
+  pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'docker-image', imageId: currentImage.id, imageTag: currentCandidate.imageTag, bytes: currentImage.size, reason: 'current-running-release' })
+
+  for (const item of inventory.releases ?? []) {
+    if (item.dir === currentDir) continue
+    let candidate
+    try { candidate = remoteCandidateMetadata(item) } catch (error) {
+      if (item.archive) {
+        pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'release-archive', path: item.archive.path, bytes: item.archive.bytes, reason: 'metadata-incomplete' })
+        cleanupError(cleanup, 'remote', 'release-metadata-invalid', item.dir, error.message)
+      }
+      continue
+    }
+    if (item.archive) removeRemoteFileForCleanup(item.archive.path, 'release-archive', item.archive.bytes, cleanup)
+    const image = inventory.images?.[candidate.imageTag]
+    if (!image) continue
+    if (image.error) {
+      cleanupError(cleanup, 'remote', 'image-inventory-failed', candidate.imageTag, image.error)
+      continue
+    }
+    if (!sameImageId(image.id, candidate.imageId)) {
+      pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'docker-image', imageId: image.id, imageTag: candidate.imageTag, bytes: image.size, reason: 'identity-mismatch' })
+      cleanupError(cleanup, 'remote', 'image-identity-mismatch', candidate.imageTag, `${image.id} != ${candidate.imageId}`)
+      continue
+    }
+    const key = normalizedImageId(image.id)
+    if (!imageTargets.has(key)) imageTargets.set(key, { candidate, image })
+  }
+
+  const containerImages = new Set((inventory.containerImages ?? []).map(normalizedImageId))
+  for (const { candidate, image } of imageTargets.values()) {
+    if (sameImageId(image.id, currentImage.id)) continue
+    if (!inventory.containersComplete) {
+      pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'docker-image', imageId: image.id, imageTag: candidate.imageTag, bytes: image.size, reason: 'container-inventory-incomplete' })
+      continue
+    }
+    if (containerImages.has(normalizedImageId(image.id))) {
+      pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'docker-image', imageId: image.id, imageTag: candidate.imageTag, bytes: image.size, reason: 'container-reference' })
+      cleanupError(cleanup, 'remote', 'image-referenced', image.id, 'Docker 镜像仍被容器引用')
+      continue
+    }
+    removeRemoteImageForCleanup(candidate.imageTag, image.id, image.size, cleanup)
+  }
+
+  const protectedSnapshot = resolve(inventory.latestSnapshot.archivePath)
+  const protectedRecord = inventory.snapshotArchives.find((item) => item.path === protectedSnapshot) ?? inventory.latestSnapshotArchive
+  if (protectedRecord) pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'snapshot-archive', path: protectedSnapshot, bytes: protectedRecord.bytes, reason: 'latest-snapshot' })
+  for (const item of inventory.snapshotArchives ?? []) {
+    if (item.path === protectedSnapshot) continue
+    if (!item.metadataValid) {
+      pushUniqueCleanupObject(cleanup.remote.kept, { kind: 'snapshot-archive', path: item.path, bytes: item.bytes, reason: 'metadata-incomplete' })
+      cleanupError(cleanup, 'remote', 'snapshot-metadata-invalid', item.path, item.metadataError ?? '快照元数据不能精确识别归档')
+      continue
+    }
+    removeRemoteFileForCleanup(item.path, 'snapshot-archive', item.bytes, cleanup)
+  }
+}
+
+function cleanupAcceptedRelease(release) {
+  const cleanup = cleanupAttempt(release)
+  try {
+    cleanup.development = cleanupAcceptedDevelopmentState()
+    if (cleanup.development.keptReferencedCandidateIds.length > 0) {
+      cleanupError(cleanup, 'local', 'development-image-retained', cleanup.development.keptReferencedCandidateIds, '开发镜像仍有受保护引用')
+    }
+  } catch (error) {
+    cleanup.development = { result: 'incomplete', error: error.message }
+    cleanupError(cleanup, 'local', 'development-cleanup-failed', join(stateRoot, 'dev'), error.message)
+  }
+
+  const localInventory = collectLocalCleanupInventory(release, cleanup)
+  let remoteInventory = null
+  try { remoteInventory = collectRemoteCleanupInventory() } catch (error) {
+    cleanupError(cleanup, 'remote', 'inventory-failed', target, error.message)
+  }
+  const remoteValidation = validateRemoteCleanupInventory(release, remoteInventory, cleanup)
+  const formalGateComplete = localInventory.gateComplete && remoteValidation.gateComplete
+  if (!formalGateComplete) {
+    keepLocalFormalInventory(localInventory, cleanup, 'formal-metadata-incomplete')
+    keepRemoteFormalInventory(remoteInventory, cleanup, 'formal-metadata-incomplete')
+  } else {
+    cleanupLocalFormalObjects(release, localInventory, cleanup)
+    cleanupRemoteFormalObjects(release, remoteInventory, remoteValidation, cleanup)
+  }
+  return finishCleanupAttempt(cleanup)
 }
 
 function writeTestCredentials(path) {
@@ -1532,6 +2267,8 @@ function performProductionRelease(candidate, candidatePath) {
     production: null,
     createdAt: new Date().toISOString(),
     userAcceptance: null,
+    rollbackBoundary: null,
+    cleanup: null,
   }
   const stage = (currentStage, details = {}) => {
     evidence.currentStage = currentStage
@@ -1728,6 +2465,13 @@ printf '{"imageId":"%s","engineImageId":"%s","prepare":"exited/0","web":"%s","te
     production: productionReceipt,
     createdAt: new Date().toISOString(),
     userAcceptance: null,
+    rollbackBoundary: {
+      status: 'available-before-accept',
+      previousReleaseId: previous.releaseId,
+      snapshotId: snapshotMeta.snapshotId,
+      snapshotArchiveSha256: snapshotMeta.archiveSha256,
+    },
+    cleanup: null,
   }
   const releasePath = join(localReleaseDir, 'release.json')
   writeJson(releasePath, release)
@@ -1746,13 +2490,80 @@ function findRelease(value) {
   return { path, release: readJson(path, 'release') }
 }
 
+function ensureAcceptedRemotePointers(release) {
+  const remoteRoot = '/home/herman/.local/share/dsh-container'
+  const remoteDir = `${remoteRoot}/releases/${release.releaseId}`
+  ssh(`set -Eeuo pipefail
+root=${shellQuote(remoteRoot)}
+release_dir=${shellQuote(remoteDir)}
+test -f "$release_dir/release.json"
+test "$(readlink -f "$root/current")" = "$release_dir" || { echo 'current does not point at accepted release' >&2; exit 61; }
+ln -sfn "$release_dir" "$root/last-good.next"
+mv -Tf "$root/last-good.next" "$root/last-good"
+test "$(readlink -f "$root/current")" = "$release_dir"
+test "$(readlink -f "$root/last-good")" = "$release_dir"
+`)
+  return remoteDir
+}
+
+function pendingAcceptedCleanup(release, code, message) {
+  const cleanup = cleanupAttempt(release)
+  cleanupError(cleanup, 'remote', code, target, message)
+  return finishCleanupAttempt(cleanup)
+}
+
+function writeCleanupReceipt(path, release, cleanup) {
+  const releaseDir = dirname(path)
+  const receiptName = cleanup.receiptName ?? `cleanup-${nowId()}.json`
+  cleanup.receiptName = receiptName
+  const receiptPath = join(releaseDir, receiptName)
+  writeJson(receiptPath, cleanup)
+  release.cleanup = cleanup
+  const history = Array.isArray(release.cleanupHistory) ? release.cleanupHistory : []
+  const existing = history.find((entry) => entry.receiptName === receiptName)
+  if (existing) {
+    existing.status = cleanup.status
+    existing.completedAt = cleanup.completedAt
+  } else {
+    history.push({ receiptName, status: cleanup.status, completedAt: cleanup.completedAt })
+  }
+  release.cleanupHistory = history
+  writeJson(path, release)
+  return { receiptName, receiptPath }
+}
+
+function syncCleanupReceipt(path, release, cleanup, remoteDir) {
+  const { receiptName, receiptPath } = writeCleanupReceipt(path, release, cleanup)
+  const receiptSync = runStatus('scp', ['-p', receiptPath, `${target}:${remoteDir}/${receiptName}`])
+  if (receiptSync.status !== 0) {
+    cleanupError(cleanup, 'remote', 'cleanup-receipt-sync-failed', `${remoteDir}/${receiptName}`, String(receiptSync.stderr ?? '').trim() || `scp exit ${receiptSync.status}`)
+  }
+  finishCleanupAttempt(cleanup)
+  writeCleanupReceipt(path, release, cleanup)
+  const releaseSync = runStatus('scp', ['-p', path, `${target}:${remoteDir}/release.json`])
+  if (releaseSync.status !== 0) {
+    cleanupError(cleanup, 'remote', 'release-evidence-sync-failed', `${remoteDir}/release.json`, String(releaseSync.stderr ?? '').trim() || `scp exit ${releaseSync.status}`)
+    finishCleanupAttempt(cleanup)
+    writeCleanupReceipt(path, release, cleanup)
+  }
+}
+
 function commandAccept(options) {
   const { path, release } = findRelease(options.release)
-  if (release.status !== 'awaiting-user-acceptance') fail(`只有 awaiting-user-acceptance 可验收，当前是 ${release.status}`, exitCodes.safety)
-  if (!options.evidence) fail('accept 必须提供 --evidence，记录真实 Telegram/Web 验收结论', exitCodes.usage)
-  const evidence = existsSync(options.evidence) ? readFileSync(options.evidence, 'utf8').trim() : options.evidence
-  if (!evidence) fail('验收证据不能为空', exitCodes.usage)
-  const acceptanceHealth = ssh(`set -Eeuo pipefail
+  const firstAcceptance = release.status === 'awaiting-user-acceptance'
+  const cleanupRetry = release.status === 'accepted' && release.cleanup?.status === 'incomplete'
+  if (release.status === 'accepted' && release.cleanup?.status === 'complete') {
+    out({ result: 'accepted', releaseId: release.releaseId, imageId: release.candidate.imageId, cleanup: release.cleanup, next: '该 release 已 accepted，正式材料已经收敛。' })
+    return
+  }
+  if (!firstAcceptance && !cleanupRetry) fail(`只有 awaiting-user-acceptance 或 cleanup incomplete 的 accepted release 可执行 accept，当前是 ${release.status}`, exitCodes.safety)
+
+  if (firstAcceptance && !options.evidence) fail('accept 必须提供 --evidence，记录真实 Telegram/Web 验收结论', exitCodes.usage)
+  const evidence = firstAcceptance
+    ? (existsSync(options.evidence) ? readFileSync(options.evidence, 'utf8').trim() : options.evidence)
+    : release.userAcceptance?.evidence
+  if (firstAcceptance && !evidence) fail('验收证据不能为空', exitCodes.usage)
+  const acceptanceHealth = firstAcceptance ? ssh(`set -Eeuo pipefail
 test "sha256:$(sha256sum ${shellQuote(`/home/herman/.local/share/dsh-container/releases/${release.releaseId}/image.tar`)} | awk '{print $1}')" = ${shellQuote(release.candidate.archiveSha256)}
 test "$(docker image inspect ${shellQuote(release.candidate.imageTag)} --format '{{.Id}}')" = ${shellQuote(release.production.engineImageId)}
 test "$(docker inspect dsh-web --format '{{.Image}}')" = ${shellQuote(release.production.engineImageId)}
@@ -1767,31 +2578,66 @@ curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
 curl --fail --silent --max-time 3 http://192.168.6.240:3080/ >/dev/null
 docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs >/dev/null
 printf '%s\n' 'containers-and-web-healthy'
-`)
-  release.status = 'accepted'
-  release.currentStage = 'accepted'
-  release.acceptedAt = new Date().toISOString()
-  release.userAcceptance = { evidence, acceptanceHealth }
-  writeJson(path, release)
-  const remoteDir = `/home/herman/.local/share/dsh-container/releases/${release.releaseId}`
-  run('scp', ['-p', path, `${target}:${remoteDir}/release.json`], { code: exitCodes.production })
-  ssh(`set -Eeuo pipefail
-root=/home/herman/.local/share/dsh-container
-release_dir=${shellQuote(remoteDir)}
-test -f "$release_dir/release.json"
-ln -sfn "$release_dir" "$root/last-good.next"
-mv -Tf "$root/last-good.next" "$root/last-good"
-`)
-  const developmentCleanup = cleanupAcceptedDevelopmentState()
-  release.localDevelopmentCleanup = developmentCleanup
-  writeJson(path, release)
-  const cleanupEvidenceSync = runStatus('scp', ['-p', path, `${target}:${remoteDir}/release.json`])
-  if (cleanupEvidenceSync.status !== 0) warn('开发环境清理回执未能同步到远端 release.json；本地证据已保存')
-  out({ result: 'accepted', releaseId: release.releaseId, imageId: release.candidate.imageId, developmentCleanup, next: '该 release 已固定为 current 和 last-good；旧开发环境已失效并清理。' })
+`) : release.userAcceptance?.acceptanceHealth
+
+  let remoteDir
+  if (firstAcceptance) {
+    remoteDir = ensureAcceptedRemotePointers(release)
+    const acceptedAt = new Date().toISOString()
+    release.status = 'accepted'
+    release.currentStage = 'accepted'
+    release.acceptedAt = acceptedAt
+    release.userAcceptance = { evidence, acceptanceHealth }
+    release.rollbackBoundary = {
+      status: 'retired-at-accept',
+      retiredAt: acceptedAt,
+      previousReleaseId: release.previous?.releaseId ?? null,
+      snapshotId: release.snapshot?.snapshotId ?? null,
+      recovery: 'current-release-only',
+    }
+    release.cleanup = pendingAcceptedCleanup(release, 'cleanup-pending', 'accepted 状态已提交，正式材料清理尚未完成')
+    writeJson(path, release)
+  } else {
+    remoteDir = `/home/herman/.local/share/dsh-container/releases/${release.releaseId}`
+    try { ensureAcceptedRemotePointers(release) } catch (error) {
+      const cleanup = pendingAcceptedCleanup(release, 'release-pointers-incomplete', error.message)
+      syncCleanupReceipt(path, release, cleanup, remoteDir)
+      out({ result: 'accepted-cleanup-incomplete', releaseId: release.releaseId, imageId: release.candidate.imageId, cleanup })
+      process.exitCode = exitCodes.production
+      return
+    }
+  }
+
+  const acceptedSync = runStatus('scp', ['-p', path, `${target}:${remoteDir}/release.json`])
+  if (acceptedSync.status !== 0) {
+    const cleanup = pendingAcceptedCleanup(release, 'accepted-evidence-sync-failed', String(acceptedSync.stderr ?? '').trim() || `scp exit ${acceptedSync.status}`)
+    syncCleanupReceipt(path, release, cleanup, remoteDir)
+    out({ result: 'accepted-cleanup-incomplete', releaseId: release.releaseId, imageId: release.candidate.imageId, cleanup })
+    process.exitCode = exitCodes.production
+    return
+  }
+
+  const cleanup = cleanupAcceptedRelease(release)
+  release.localDevelopmentCleanup = cleanup.development
+  syncCleanupReceipt(path, release, cleanup, remoteDir)
+  const result = cleanup.status === 'complete' ? 'accepted' : 'accepted-cleanup-incomplete'
+  out({
+    result,
+    releaseId: release.releaseId,
+    imageId: release.candidate.imageId,
+    cleanup,
+    next: cleanup.status === 'complete'
+      ? '该 release 已固定为 current 和 last-good；只保留当前正式版本与 latest 生产快照。'
+      : 'accepted 状态不会回退；修复清理错误后，对同一 release 再次执行 accept 只会重试清理。',
+  })
+  if (cleanup.status === 'incomplete') process.exitCode = exitCodes.production
 }
 
 function commandRollback(options) {
   const { path, release } = findRelease(options.release)
+  if (release.status === 'accepted' || release.rollbackBoundary?.status === 'retired-at-accept') {
+    fail(`release ${release.releaseId} 已 accepted，回退边界已在 accept 退休；拒绝任何远端恢复动作`, exitCodes.safety)
+  }
   if (!['awaiting-user-acceptance', 'failed'].includes(release.status)) {
     fail(`只有未 accept 的候选可以按本快照回退，当前是 ${release.status}`, exitCodes.safety)
   }
@@ -1851,9 +2697,35 @@ ${restartPrevious}
   out({ result: 'rolled-back', releaseId: release.releaseId, restored: `${release.previous.mode} + downtime snapshot`, note: '失败版本现场数据另存，未直接删除。' })
 }
 
+function cleanupResidualStatus() {
+  const releasesRoot = join(stateRoot, 'releases')
+  if (!existsSync(releasesRoot)) return { status: 'complete', residuals: [] }
+  const residuals = []
+  for (const name of readdirSync(releasesRoot).sort()) {
+    const path = join(releasesRoot, name, 'release.json')
+    if (!existsSync(path)) continue
+    try {
+      const release = readJson(path, 'release status')
+      if (release.status === 'accepted' && release.cleanup?.status === 'incomplete') {
+        residuals.push({
+          releaseId: release.releaseId,
+          completedAt: release.cleanup.completedAt ?? null,
+          errors: release.cleanup.errors ?? [],
+          localKept: release.cleanup.local?.kept ?? [],
+          remoteKept: release.cleanup.remote?.kept ?? [],
+        })
+      }
+    } catch (error) {
+      residuals.push({ releaseId: name, completedAt: null, errors: [{ code: 'release-json-invalid', message: error.message }], localKept: [], remoteKept: [] })
+    }
+  }
+  return { status: residuals.length === 0 ? 'complete' : 'incomplete', residuals }
+}
+
 function commandStatus() {
   const localCandidate = existsSync(join(stateRoot, 'candidates/latest.json')) ? readJson(join(stateRoot, 'candidates/latest.json')) : null
   const developmentCandidate = existsSync(developmentCandidatePointerPath()) ? readJson(developmentCandidatePointerPath()) : null
+  const cleanup = cleanupResidualStatus()
   const remoteResult = runStatus('ssh', ['-o', 'BatchMode=yes', target, 'bash', '-s'], { input: `set -u
 if command -v docker >/dev/null 2>&1; then
   docker ps --filter name='^dsh-' --format '{{.Names}} {{.Image}} {{.Status}}' 2>/dev/null || true
@@ -1863,7 +2735,7 @@ fi
 printf 'current='; readlink -f /home/herman/.local/share/dsh-container/current 2>/dev/null || true
 printf 'last-good='; readlink -f /home/herman/.local/share/dsh-container/last-good 2>/dev/null || true
 ` })
-  out({ local: { stateRoot, latestCandidate: localCandidate, developmentMain: developmentCandidate }, remote: { target, reachable: remoteResult.status === 0, output: String(remoteResult.stdout ?? '').trim(), error: String(remoteResult.stderr ?? '').trim() } })
+  out({ local: { stateRoot, latestCandidate: localCandidate, developmentMain: developmentCandidate, cleanup }, remote: { target, reachable: remoteResult.status === 0, output: String(remoteResult.stdout ?? '').trim(), error: String(remoteResult.stderr ?? '').trim() } })
 }
 
 function usage() {

@@ -49,6 +49,7 @@
 
 ## 经验记录
 
+- 2026-08-29：正式 Docker release 的 `accept` 是不可逆承诺点：真实健康通过且 `current`/`last-good` 同指本次 release 后先将 `rollbackBoundary` 标为 `retired-at-accept`，再幂等清理旧大体积归档和无容器引用的精确镜像。指针、当前候选或 latest snapshot 元数据不完整及任何部分失败都只记录 `accepted-cleanup-incomplete` 并保留残留；重试同一 accepted release 只重试清理，不重复业务验收，不得用 engine prune 扩大范围；小体积 JSON、测试/验收/失败与清理回执永久保留。
 - 2026-08-29：任何用户功能实现前，必须用用户可见入口、亲自动作和预期结果定义验收；内部 ID、配置、fixture、日志和测试不能替代用户路径。经过同等生命周期边界后用户仍不可达时，返回需求层；形成入口所需的责任属于该纵向切面。
 - 2026-08-28：仓库自管自动化按明确业务拆出 `automations/<business>/` 后，`automations/scripts/` 只保留跨业务支持代码；镜像的 Python 编译、shell 语法、OpenClaw 缺席和退役文件门禁必须递归覆盖整个 `automations/`，不能继续只检查旧的平铺 `scripts/`。直接执行的业务脚本若复用共享模块，也要验证从新目录独立加载时的导入路径。
 - 2026-08-28：开发容器的最小生命周期单位应是 worktree 环境，不是每次交互 shell。`dev prepare` 为每个 worktree 创建一个带明确归属的固定 toolbox，`dev shell` 只 exec 进入它；多个终端共用该 toolbox，不创建或登记额外容器。`dev down`、`dev retire`、main 镜像换代和发版验收都按 worktree 整体停止并清理，避免 shell 状态、孤儿识别和人工资源窗口。
