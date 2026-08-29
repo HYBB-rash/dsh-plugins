@@ -111,7 +111,7 @@ export function installSelectionTools(host: SelectionHost, config: Config): () =
     const dispose = agent.ctx.effect(
       () => registerSelectionTool(
         agent.ctx,
-        createDshSemanticJudge(host as Pick<Context, 'llm'>, agent, { timeoutMs: config.timeoutMs ?? 30_000 }),
+        createDshSemanticJudge(host, agent, { timeoutMs: config.timeoutMs ?? 30_000 }),
       ),
       'personal-feed-selector.root()',
     )
