@@ -35,7 +35,7 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
    ./release/dsh build --purpose development --harness-ref <locked-harness-commit> --plugins-ref <origin-main-commit>
    ```
 
-   The command is safe to repeat. Under one repository-managed engine lock it reuses the already-tested image when the full main commit is unchanged; only the first request after main advances performs a real build and the full six-package TypeScript/Python test gate. Development bases do not create or reload Docker archives and cannot be published as release candidates.
+   The command is safe to repeat. Under one repository-managed engine lock it reuses the already-tested image when the full main commit is unchanged; only the first request after main advances performs a real build and the full seven-package TypeScript/Python test gate. Development bases do not create or reload Docker archives and cannot be published as release candidates.
 3. Run:
 
    ```bash
@@ -43,8 +43,8 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
    ```
 
 4. Let the command download the latest existing consistent production snapshot. It must not stop production or create a new online snapshot. If no valid snapshot exists, report and stop; never silently substitute synthetic data.
-5. Let the deterministic command create one worktree-owned environment: a fixed toolbox plus Web, Telegram, fake Telegram, an internal network, an isolated data copy, and a Web port. Every container carries the same worktree identity. It mounts the six packages, product Skills, Profiles, runtime topology, materializer, and image runtime scripts as editable worktree inputs, plus an isolated snapshot copy. The image root stays read-only. The command must replace credentials, empty cron work, remove production Telegram offsets and locks, block real Telegram egress, and leave production directories unmounted. Other worktrees may prepare and run at the same time.
-6. Do not claim readiness until the command reports `dev-source-ready`. Editable mounts hide the image's prebuilt `lib`, so preparation recompiles the six mounted packages, but it does not repeat their test suites. The receipt means that compilation, Web health, fake Telegram polling and delivery, empty cron verification, real Telegram blocking, and common image identity checks passed. The full TypeScript/Python baseline belongs to the shared main image's build receipt.
+5. Let the deterministic command create one worktree-owned environment: a fixed toolbox plus Web, Telegram, fake Telegram, an internal network, an isolated data copy, and a Web port. Every container carries the same worktree identity. It mounts the seven packages, product Skills, Profiles, runtime topology, materializer, and image runtime scripts as editable worktree inputs, plus an isolated snapshot copy. The image root stays read-only. The command must replace credentials, empty cron work, remove production Telegram offsets and locks, block real Telegram egress, and leave production directories unmounted. Other worktrees may prepare and run at the same time.
+6. Do not claim readiness until the command reports `dev-source-ready`. Editable mounts hide the image's prebuilt `lib`, so preparation recompiles the seven mounted packages, but it does not repeat their test suites. The receipt means that compilation, Web health, fake Telegram polling and delivery, empty cron verification, real Telegram blocking, and common image identity checks passed. The full TypeScript/Python baseline belongs to the shared main image's build receipt.
 
 ## Develop inside the boundary
 

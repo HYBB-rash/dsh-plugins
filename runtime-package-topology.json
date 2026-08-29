@@ -8,6 +8,7 @@
         "@deepseek-ai/dsh-client-ui-context-compactor",
         "@deepseek-ai/dsh-cron",
         "@deepseek-ai/dsh-telegram-gateway",
+        "@herman/personal-feed-selector",
         "@herman/x-feed"
       ]
     },
@@ -51,6 +52,7 @@
         "@deepseek-ai/dsh-client-ui-context-compactor",
         "@deepseek-ai/dsh-cron",
         "@deepseek-ai/dsh-telegram-gateway",
+        "@herman/personal-feed-selector",
         "@herman/x-feed"
       ]
     },
@@ -62,6 +64,7 @@
         "@deepseek-ai/dsh-client-ui-context-compactor",
         "@deepseek-ai/dsh-cron",
         "@deepseek-ai/dsh-telegram-gateway",
+        "@herman/personal-feed-selector",
         "@herman/x-feed"
       ]
     },
@@ -85,6 +88,7 @@
       "requiredBy": [
         "@deepseek-ai/dsh-assistant",
         "@deepseek-ai/dsh-cron",
+        "@herman/personal-feed-selector",
         "@herman/x-feed"
       ]
     },
@@ -95,6 +99,7 @@
         "@deepseek-ai/dsh-assistant",
         "@deepseek-ai/dsh-client-ui-context-compactor",
         "@deepseek-ai/dsh-cron",
+        "@herman/personal-feed-selector",
         "@deepseek-ai/dsh-telegram-gateway"
       ]
     },

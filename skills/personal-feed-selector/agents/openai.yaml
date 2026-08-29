@@ -1,0 +1,4 @@
+interface:
+  display_name: "个人 Feed 选择器"
+  short_description: "从给定的 X 内容中只选一条真正值得投入注意力的原文链接"
+  default_prompt: "使用 $personal-feed-selector，根据我的长期关注和已有认识，从这些 X 内容中只选一条最值得读的原文；没有足够信息增量就返回空。"

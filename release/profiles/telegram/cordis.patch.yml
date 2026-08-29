@@ -27,6 +27,11 @@
 - insert:
     - id: tool-session-query
       name: '@deepseek-ai/dsh-tool-session-query'
+    - id: personal-feed-selector
+      name: '@herman/personal-feed-selector'
+      config:
+        mode: telegram
+        telegramParentSessionId: session-telegram
     - id: telegram-gateway
       name: '@deepseek-ai/dsh-telegram-gateway'
       config:

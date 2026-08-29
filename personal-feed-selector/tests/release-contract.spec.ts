@@ -1,9 +1,13 @@
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-const repositoryRoot = resolve(import.meta.dirname, '../..')
-const read = (path: string): string => readFileSync(resolve(repositoryRoot, path), 'utf8')
+const repositoryRoot = ['/workspace/dsh-plugins', '/opt/dsh/plugins-src']
+  .find(root => existsSync(join(root, 'release/Containerfile')))
+
+if (repositoryRoot === undefined) throw new Error('cannot locate archived or editable repository root')
+
+const read = (path: string): string => readFileSync(join(repositoryRoot, path), 'utf8')
 
 describe('release integration contract', () => {
   it.each([
