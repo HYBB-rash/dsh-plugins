@@ -8,13 +8,14 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  realpathSync,
   readFileSync,
   readdirSync,
   renameSync,
   writeFileSync,
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const DEFAULT_MODULE = '/opt/dsh/harness/local-plugins/dsh-cron/lib/index.js'
 const DEFAULT_MANIFEST_ROOT = '/opt/dsh/automations'
@@ -395,7 +396,16 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+function isMainModule(metaUrl = import.meta.url, argvPath = process.argv[1]) {
+  if (argvPath === undefined) return false
+  try {
+    return realpathSync(fileURLToPath(metaUrl)) === realpathSync(argvPath)
+  } catch {
+    return false
+  }
+}
+
+if (isMainModule()) {
   main().catch(error => {
     process.stderr.write(`${String(error?.message ?? error).slice(0, 800)}\n`)
     process.exitCode = 1
