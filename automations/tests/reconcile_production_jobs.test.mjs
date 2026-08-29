@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import {
   forbiddenRuntimeReferences,
   planReconciliation,
@@ -9,6 +14,9 @@ import {
   validateImageTargets,
   validateManifest,
 } from '../scripts/reconcile_production_jobs.mjs'
+
+const testDirectory = dirname(fileURLToPath(import.meta.url))
+const reconcilerPath = join(testDirectory, '../scripts/reconcile_production_jobs.mjs')
 
 const desired = {
   externalRef: 'legacy:watchdog',
@@ -177,4 +185,17 @@ test('reconciler records a verified replacement and closes persistence uncertain
     inspectActive: () => [inspection()],
     manifestJobs: [manifestJob()],
   }), /persistence_uncertain/)
+})
+
+test('CLI executes when invoked through the image automations symlink', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'dsh-reconcile-symlink-'))
+  try {
+    const linkedPath = join(scratch, 'reconcile_production_jobs.mjs')
+    symlinkSync(reconcilerPath, linkedPath)
+    const result = spawnSync(process.execPath, [linkedPath], { encoding: 'utf8' })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /usage: reconcile_production_jobs[.]mjs check\|migrate/)
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
 })
