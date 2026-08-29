@@ -24,6 +24,7 @@ import type {
   RunEnvironmentSettleRecord,
   RunEnvironmentPrefinishSettleRecord,
   RunPreparedDeliveryRecord,
+  RunScheduleReanchorRecord,
   RunFailureAlertClaimRecord,
   RunFinishRecord,
   RunHistoryRecord,
@@ -352,6 +353,7 @@ export class RunStore {
         || parsed.kind === 'claim'
         || parsed.kind === 'failure-alert-claim'
         || parsed.kind === 'finish'
+        || parsed.kind === 'schedule-reanchor'
         || parsed.kind === 'environment-settle'
         || parsed.kind === 'prepared-delivery'
         || parsed.kind === 'delivery-attempt-claim'
@@ -397,6 +399,7 @@ export type ParsedRunLine =
   | { readonly kind: 'claim'; readonly record: RunClaimRecord }
   | { readonly kind: 'failure-alert-claim'; readonly record: RunFailureAlertClaimRecord }
   | { readonly kind: 'finish'; readonly record: RunFinishRecord }
+  | { readonly kind: 'schedule-reanchor'; readonly record: RunScheduleReanchorRecord }
   | { readonly kind: 'environment-settle'; readonly record: RunEnvironmentSettleRecord }
   | { readonly kind: 'prepared-delivery'; readonly record: RunPreparedDeliveryRecord }
   | { readonly kind: 'delivery-attempt-claim'; readonly record: RunDeliveryAttemptClaimRecord }
@@ -475,6 +478,23 @@ export function parseRunLine(raw: string): ParsedRunLine {
         && (record.nextRunAt === undefined || isValidTime(record.nextRunAt))
       ) {
         return { kind: 'finish', record: record as unknown as RunFinishRecord }
+      }
+      if (
+        record.event === 'schedule-reanchor'
+        && record.migrationVersion === 1
+        && isNonEmptyString(record.jobId)
+        && isNonEmptyString(record.migrationId)
+        && record.fromTimeZone === 'Etc/UTC'
+        && record.toTimeZone === 'Asia/Shanghai'
+        && isValidTime(record.cutoverAt)
+        && isValidTime(record.reanchoredAt)
+        && typeof record.inputSha256 === 'string'
+        && /^[a-f0-9]{64}$/u.test(record.inputSha256)
+        && typeof record.scheduleSha256 === 'string'
+        && /^[a-f0-9]{64}$/u.test(record.scheduleSha256)
+        && isValidTime(record.nextRunAt)
+      ) {
+        return { kind: 'schedule-reanchor', record: record as unknown as RunScheduleReanchorRecord }
       }
       if (
         record.event === 'failure-alert-claim'
@@ -568,6 +588,12 @@ export interface FoldedJobRuns {
   readonly lifecycleConflicts: ReadonlySet<string>
   /** Claim identity conflicts; these are never eligible for recovery. */
   readonly claimConflicts: ReadonlySet<string>
+  /** Exact migration event retained per migration id for idempotent CAS. */
+  readonly scheduleReanchors: ReadonlyMap<string, RunScheduleReanchorRecord>
+  /** Migration ids whose durable rows disagree. */
+  readonly scheduleReanchorConflicts: ReadonlySet<string>
+  /** Recognizable but malformed reanchor rows; maintenance must stop. */
+  readonly invalidScheduleReanchorMigrationIds: ReadonlySet<string>
   readonly invalidLifecycleRunIds: ReadonlySet<string>
 }
 
@@ -589,6 +615,9 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
   const prefinishSettledDeliveries = new Map<string, RunEnvironmentPrefinishSettleRecord>()
   const lifecycleConflicts = new Set<string>()
   const claimConflicts = new Set<string>()
+  const scheduleReanchors = new Map<string, RunScheduleReanchorRecord>()
+  const scheduleReanchorConflicts = new Set<string>()
+  const invalidScheduleReanchorMigrationIds = new Set<string>()
   const invalidLifecycleRunIds = new Set<string>()
   const retainExact = <T extends { readonly runId: string }>(map: Map<string, T>, record: T, equivalent: (a: T, b: T) => boolean) => {
     const previous = map.get(record.runId)
@@ -609,6 +638,11 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
     if (parsed.kind === 'skip') {
       try {
         const value = JSON.parse(raw) as Record<string, unknown>
+        if (value.jobId === jobId
+          && value.event === 'schedule-reanchor'
+          && isNonEmptyString(value.migrationId)) {
+          invalidScheduleReanchorMigrationIds.add(value.migrationId)
+        }
         const lifecycleEvent = value.event === 'claim'
           || value.event === 'prepared-delivery'
           || value.event === 'delivery-attempt-claim'
@@ -656,6 +690,15 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
     }
     if (parsed.kind === 'environment-prefinish-settle') {
       retainExact(prefinishSettledDeliveries, parsed.record, (a, b) => a.objectId === b.objectId && a.deliveryState === b.deliveryState && a.settledAt === b.settledAt && a.sessionId === b.sessionId && a.scheduledFor === b.scheduledFor && a.deliveredAt === b.deliveredAt && a.deliveryError === b.deliveryError)
+      continue
+    }
+    if (parsed.kind === 'schedule-reanchor') {
+      const previous = scheduleReanchors.get(parsed.record.migrationId)
+      if (previous === undefined) scheduleReanchors.set(parsed.record.migrationId, parsed.record)
+      else if (JSON.stringify(previous) !== JSON.stringify(parsed.record)) {
+        scheduleReanchorConflicts.add(parsed.record.migrationId)
+      }
+      nextRunAt = parsed.record.nextRunAt
       continue
     }
     if (parsed.kind === 'claim') {
@@ -710,6 +753,9 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
     prefinishSettledDeliveries,
     lifecycleConflicts,
     claimConflicts,
+    scheduleReanchors,
+    scheduleReanchorConflicts,
+    invalidScheduleReanchorMigrationIds,
     invalidLifecycleRunIds,
   }
 }
@@ -729,6 +775,55 @@ export class RunLedger {
   /** Fold one job's projection from the current file contents. */
   foldJob(jobId: string): FoldedJobRuns {
     return foldRunLines(this.store.readLines(), jobId)
+  }
+
+  /**
+   * Inspect every durable row for one migration id, including jobs that are
+   * no longer active.  A recognizable malformed row is a hard conflict;
+   * callers must not silently treat it as absent.
+   */
+  inspectScheduleReanchorMigration(migrationId: string): readonly RunScheduleReanchorRecord[] {
+    const records: RunScheduleReanchorRecord[] = []
+    for (const raw of this.store.readLines()) {
+      let value: unknown
+      try { value = JSON.parse(raw) } catch { continue }
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
+      const candidate = value as Record<string, unknown>
+      if (candidate.event !== 'schedule-reanchor' || candidate.migrationId !== migrationId) continue
+      const parsed = parseRunLine(raw)
+      if (parsed.kind !== 'schedule-reanchor') {
+        throw new Error(`malformed schedule reanchor for migration ${migrationId}`)
+      }
+      records.push(parsed.record)
+    }
+    return records
+  }
+
+  /**
+   * Append one exact schedule anchor, or return an idempotent no-op.  The
+   * same migration id may never identify different input or output bytes.
+   */
+  scheduleReanchor(record: RunScheduleReanchorRecord): 'reanchored' | 'already_applied' {
+    const parsed = parseRunLine(JSON.stringify(record))
+    if (parsed.kind !== 'schedule-reanchor') throw new Error('invalid schedule reanchor record')
+    const folded = this.foldJob(record.jobId)
+    if (folded.invalidScheduleReanchorMigrationIds.has(record.migrationId)
+      || folded.scheduleReanchorConflicts.has(record.migrationId)) {
+      throw new Error(`conflicting schedule reanchor for migration ${record.migrationId}`)
+    }
+    const current = folded.scheduleReanchors.get(record.migrationId)
+    if (current !== undefined) {
+      if (JSON.stringify(current) !== JSON.stringify(record)) {
+        throw new Error(`schedule reanchor input or result changed for migration ${record.migrationId}`)
+      }
+      return 'already_applied'
+    }
+    this.store.append(record)
+    const post = this.foldJob(record.jobId).scheduleReanchors.get(record.migrationId)
+    if (post === undefined || JSON.stringify(post) !== JSON.stringify(record)) {
+      throw new Error(`schedule reanchor verification failed for migration ${record.migrationId}`)
+    }
+    return 'reanchored'
   }
 
   private requirePreparedClaim(

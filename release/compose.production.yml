@@ -9,6 +9,7 @@ x-dsh-common: &dsh-common
     HOME: /home/herman
     DSH_HOME: /home/herman/.dsh
     DSH_CWD: /home/herman/.dsh/workspace
+    TZ: Asia/Shanghai
     DSH_IMAGE_ID: ${DSH_IMAGE_ID:?DSH_IMAGE_ID is required}
     DSH_X_FEED_DATA_DIR: /home/herman/.dsh/storages/dsh-x-feed
     TINI_SUBREAPER: "1"

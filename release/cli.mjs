@@ -1567,6 +1567,7 @@ function containerBaseArgs(homePath) {
     '--tmpfs', '/home/herman/.openclaw:rw,noexec,nosuid,size=1m',
     '--volume', `${homePath}:/home/herman:rw`,
     '--env', 'HOME=/home/herman', '--env', 'DSH_HOME=/home/herman/.dsh', '--env', 'DSH_CWD=/home/herman/.dsh/workspace',
+    '--env', 'TZ=Asia/Shanghai',
   ]
 }
 

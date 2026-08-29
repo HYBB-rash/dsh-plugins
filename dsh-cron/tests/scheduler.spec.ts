@@ -30,7 +30,7 @@ vi.mock('@deepseek-ai/dsh-telegram-gateway', async importOriginal => {
 
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TelegramApiError } from '@deepseek-ai/dsh-telegram-gateway'
-import { createControlService } from '../src/control.ts'
+import { createControlService, createMaintenanceControl } from '../src/control.ts'
 import {
   CRON_AGENT_ENVIRONMENT_REGISTRY,
   createCronAgentEnvironmentRegistry,
@@ -2438,6 +2438,54 @@ function seedFailureFinish(
     deliveryState,
   })
 }
+
+describe('schedule reanchor restart recovery', () => {
+  it('rebuilds the Shanghai anchor from the migration event after every restart', async () => {
+    const previousTimeZone = process.env.TZ
+    process.env.TZ = 'Asia/Shanghai'
+    const dir = tempDir()
+    const job: Job = {
+      id: 'daily-shanghai-0805',
+      schedule: { kind: 'cron', expr: '5 8 * * *' },
+      prompt: 'daily',
+      deliver: 'silent',
+      createdAt: '2026-08-01T00:00:00.000Z',
+    }
+    seedJob(dir, job)
+    try {
+      expect(createMaintenanceControl({ storeDir: dir }).reanchorCronSchedules({
+        migrationVersion: 1,
+        migrationId: 'dsh-cron:utc-to-shanghai:restart-v1',
+        fromTimeZone: 'Etc/UTC',
+        toTimeZone: 'Asia/Shanghai',
+        cutoverAt: '2026-08-30T00:00:00.000Z',
+        reanchoredAt: '2026-08-30T00:00:01.000Z',
+      })).toMatchObject({ ok: true, changed: true })
+      type Inspectable = {
+        reload(): void
+        jobs: Map<string, { readonly job: Job; readonly nextRunAt: number | undefined }>
+      }
+      const firstRuntime = new SchedulerRuntime(
+        fakeCtx([]), makeConfig(dir), {} as never, 0, new AbortController().signal,
+      )
+      const first = firstRuntime as unknown as Inspectable
+      first.reload()
+      expect(first.jobs.get(job.id)?.nextRunAt).toBe(Date.parse('2026-08-30T00:05:00.000Z'))
+
+      const restartedRuntime = new SchedulerRuntime(
+        fakeCtx([]), makeConfig(dir), {} as never, 0, new AbortController().signal,
+      )
+      const restarted = restartedRuntime as unknown as Inspectable
+      restarted.reload()
+      expect(restarted.jobs.get(job.id)?.nextRunAt).toBe(Date.parse('2026-08-30T00:05:00.000Z'))
+      await firstRuntime.dispose()
+      await restartedRuntime.dispose()
+    } finally {
+      if (previousTimeZone === undefined) delete process.env.TZ
+      else process.env.TZ = previousTimeZone
+    }
+  })
+})
 
 describe('durable per-job failure alerts', () => {
   it('refreshes a same-id policy upsert without moving the in-memory or restart schedule anchor', async () => {

@@ -56,9 +56,38 @@ if rg --fixed-strings '/opt/dsh/automations' "$tmp_home/.dsh/AGENTS.md"; then
   printf '%s\n' 'workspace instructions still advertise repository-owned automations' >&2
   exit 1
 fi
-DSH_HOME="$tmp_home/.dsh" node /opt/dsh/harness/apps/cli/lib/bin.js --profile web --dump-config >/dev/null
-DSH_HOME="$tmp_home/.dsh" node /opt/dsh/harness/apps/cli/lib/bin.js --profile telegram --dump-config >/dev/null
-DSH_HOME="$tmp_home/.dsh" node /opt/dsh/harness/apps/cli/lib/bin.js --profile telegram-test --dump-config >/dev/null
+for profile in web telegram telegram-test; do
+  DSH_HOME="$tmp_home/.dsh" node /opt/dsh/harness/apps/cli/lib/bin.js \
+    --profile "$profile" --dump-config >"$tmp_home/$profile.config.yml"
+done
+python3 - "$tmp_home" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+socket_path = "/home/herman/.dsh/storages/dsh-cron/control.sock"
+
+def assistant_block(profile: str) -> str:
+    lines = (root / f"{profile}.config.yml").read_text(encoding="utf-8").splitlines()
+    try:
+        start = lines.index("- id: dsh-assistant")
+    except ValueError as error:
+        raise SystemExit(f"{profile}: effective dsh-assistant config is missing") from error
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("- id: ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+for profile in ("telegram", "telegram-test"):
+    block = assistant_block(profile)
+    expected = f"cronControlSocketPath: {socket_path}"
+    if block.count(expected) != 1:
+        raise SystemExit(f"{profile}: dsh-assistant cron control socket is not exact")
+
+if "cronControlSocketPath:" in assistant_block("web"):
+    raise SystemExit("web: dsh-assistant must not receive a cron control socket")
+PY
 
 cat >"$tmp_home/.dsh/.credentials.yaml" <<'EOF'
 version: 1

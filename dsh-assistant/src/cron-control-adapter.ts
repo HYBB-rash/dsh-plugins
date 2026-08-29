@@ -25,6 +25,9 @@ import type {
 
 type ClientLike = Pick<DshCronControlClient, 'ensureBound' | 'replaceBound' | 'deleteBound' | 'getBound' | 'readiness'>
 
+/** Protocol version independently expected by the assistant boundary. */
+export const ASSISTANT_CRON_CONTROL_PROTOCOL_VERSION = 1 as const
+
 type AssistantCronControlFailure = Extract<AssistantCronControlResult, { readonly ok: false }>
 
 function errorResult(error: unknown, fallbackCode = 'control_unavailable'): AssistantCronControlFailure {
@@ -75,7 +78,11 @@ function mapSnapshot(snapshot: BoundCronSnapshot): AssistantCronBindingSnapshot 
 
 function mapResponse(response: ControlResponse | DshCronControlClientError | unknown): AssistantCronControlResult {
   if (typeof response === 'object' && response !== null) {
-    const candidate = response as { ok?: unknown; snapshot?: unknown; errorCode?: unknown; code?: unknown; message?: unknown }
+    const candidate = response as { protocolVersion?: unknown; ok?: unknown; snapshot?: unknown; errorCode?: unknown; code?: unknown; message?: unknown }
+    if (typeof candidate.ok === 'boolean'
+      && candidate.protocolVersion !== ASSISTANT_CRON_CONTROL_PROTOCOL_VERSION) {
+      return { ok: false, code: 'protocol_error', message: 'dsh-cron control protocol version mismatch' }
+    }
     if (candidate.ok === true && typeof candidate.snapshot === 'object' && candidate.snapshot !== null) {
       return { ok: true, snapshot: mapSnapshot(candidate.snapshot as BoundCronSnapshot) }
     }
@@ -123,7 +130,11 @@ export function createAssistantCronControlAdapter(input: { readonly client: Clie
     readiness: async () => {
       try {
         const health = await input.client.readiness()
-        return health.ready ? { state: 'ready' } : { state: 'unavailable', reason: 'dsh-cron control plane is not ready' }
+        return health.protocolVersion === ASSISTANT_CRON_CONTROL_PROTOCOL_VERSION
+          && health.writer === 'manager'
+          && health.ready
+          ? { state: 'ready' }
+          : { state: 'unavailable', reason: 'dsh-cron control protocol or readiness mismatch' }
       } catch (error: unknown) {
         const mapped = errorResult(error)
         return { state: 'unavailable', reason: mapped.message }

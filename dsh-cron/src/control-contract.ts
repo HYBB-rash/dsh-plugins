@@ -44,6 +44,10 @@ export type MaintenanceControlErrorCode =
   | 'marker_gate_conflict'
   | 'persistence_uncertain'
   | 'verification_failed'
+  | 'invalid_job_log'
+  | 'timezone_mismatch'
+  | 'migration_not_found'
+  | 'migration_conflict'
 
 export interface MaintenanceControlError {
   readonly ok: false
@@ -68,6 +72,70 @@ export type TransitionAgentBindingResult =
   | TransitionAgentBindingSuccess
   | MaintenanceControlError
 
+/** Exact offline request for the one UTC-to-Shanghai schedule cutover. */
+export interface ReanchorCronSchedulesRequest {
+  readonly migrationVersion: 1
+  readonly migrationId: string
+  readonly fromTimeZone: 'Etc/UTC'
+  readonly toTimeZone: 'Asia/Shanghai'
+  /** Exclusive lower bound used to calculate the first Shanghai occurrence. */
+  readonly cutoverAt: string
+  /** Audit time supplied once by the release and reused on exact retries. */
+  readonly reanchoredAt: string
+}
+
+export interface ReanchoredCronJob {
+  readonly jobId: string
+  readonly scheduleSha256: string
+  readonly nextRunAt: string
+  readonly changed: boolean
+}
+
+export interface ReanchorCronSchedulesSuccess {
+  readonly ok: true
+  readonly changed: boolean
+  readonly migrationVersion: 1
+  readonly migrationId: string
+  readonly inputSha256: string
+  readonly cronJobCount: number
+  readonly appendedCount: number
+  readonly jobs: readonly ReanchoredCronJob[]
+}
+
+export type ReanchorCronSchedulesResult =
+  | ReanchorCronSchedulesSuccess
+  | MaintenanceControlError
+
+/** Private-free evidence retained by an accepted release for one cron row. */
+export interface ScheduleReanchorJobEvidence {
+  readonly jobId: string
+  readonly scheduleSha256: string
+  readonly nextRunAt: string
+}
+
+/**
+ * Exact accepted-release evidence used to prove that an inherited migration
+ * is still present in the live run ledger.  Inspection never consults or
+ * rewrites the current job definitions: normal post-cutover edits and runs do
+ * not change the historical migration fact.
+ */
+export interface InspectScheduleReanchorMigrationRequest
+  extends ReanchorCronSchedulesRequest {
+  readonly inputSha256: string
+  readonly cronJobCount: number
+  readonly jobs: readonly ScheduleReanchorJobEvidence[]
+}
+
+export interface InspectScheduleReanchorMigrationSuccess
+  extends InspectScheduleReanchorMigrationRequest {
+  readonly ok: true
+  readonly ledgerRecordCount: number
+}
+
+export type InspectScheduleReanchorMigrationResult =
+  | InspectScheduleReanchorMigrationSuccess
+  | MaintenanceControlError
+
 /**
  * Narrow in-process maintenance port. It is intentionally not part of the
  * Unix-socket RPC client: deployment code imports this from the built package
@@ -78,6 +146,12 @@ export interface DshCronMaintenanceControl {
   transitionAgentBindingById(
     request: TransitionAgentBindingRequest,
   ): TransitionAgentBindingResult
+  reanchorCronSchedules(
+    request: ReanchorCronSchedulesRequest,
+  ): ReanchorCronSchedulesResult
+  inspectScheduleReanchorMigration(
+    request: InspectScheduleReanchorMigrationRequest,
+  ): InspectScheduleReanchorMigrationResult
 }
 
 /** The only control protocol version understood by this package. */

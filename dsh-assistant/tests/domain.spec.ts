@@ -264,8 +264,8 @@ describe('time helpers', () => {
     expect(result).toBe('2026-08-15T02:02:00.000Z')
   })
 
-  it('formatLocalTime renders local HH:MM', () => {
-    expect(formatLocalTime('2026-08-15T02:00:00.000Z')).toMatch(/^\d{2}:\d{2}$/)
+  it('formatLocalTime renders the fixed Shanghai wall clock', () => {
+    expect(formatLocalTime('2026-08-15T02:00:00.000Z')).toBe('10:00')
   })
 })
 

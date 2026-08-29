@@ -243,4 +243,26 @@ describe('dsh-assistant cron control boundary (first red)', () => {
       reason: expect.stringContaining('manager socket is unavailable'),
     })
   })
+
+  it('fails closed when the assistant and manager protocol versions differ', async () => {
+    const loaded = await loadAdapter()
+    expect(loaded.error).toBeUndefined()
+    if (loaded.error !== undefined || loaded.module === undefined) return
+    const mismatch = {
+      ensureBound: async () => ({ protocolVersion: 2, ok: true, operation: 'ensure-bound', snapshot: WIRE_SNAPSHOT }),
+      replaceBound: async () => ({ protocolVersion: 2, ok: true, operation: 'replace-bound', snapshot: WIRE_SNAPSHOT }),
+      deleteBound: async (externalRef: string) => ({ protocolVersion: 2, ok: true, operation: 'delete-bound', snapshot: { externalRef, activeJob: null, latestRun: null } }),
+      getBound: async (externalRef: string) => ({ protocolVersion: 2, ok: true, operation: 'get-bound', snapshot: { externalRef, activeJob: null, latestRun: null } }),
+      readiness: async () => ({ protocolVersion: 2, writer: 'manager', ready: true }),
+    }
+    const port = loaded.module.createAssistantCronControlAdapter({ client: mismatch as never })
+    await expect(port.getBound('dsh:health:read-only:v1')).resolves.toMatchObject({
+      ok: false,
+      code: 'protocol_error',
+    })
+    await expect(port.readiness()).resolves.toMatchObject({
+      state: 'unavailable',
+      reason: expect.stringContaining('protocol'),
+    })
+  })
 })

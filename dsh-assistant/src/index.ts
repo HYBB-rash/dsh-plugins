@@ -35,6 +35,12 @@ import { registerAssistantTools, buildStatusOutput, type CronBindingView, type C
 import { WorkerController } from './worker.ts'
 import { WebTaskObserver } from './observer.ts'
 
+/** Release health gates use the same public adapter as the running assistant. */
+export {
+  ASSISTANT_CRON_CONTROL_PROTOCOL_VERSION,
+  createAssistantCronControlAdapterFromSocket,
+} from './cron-control-adapter.ts'
+
 /** Whether a message is one of the assistant worker's internal notices. */
 function noticeKindOf(message: unknown): 'subagent-report' | 'subagent-settled' | undefined {
   if (typeof message !== 'object' || message === null) return undefined

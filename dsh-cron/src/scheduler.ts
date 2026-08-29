@@ -850,6 +850,8 @@ export class SchedulerRuntime implements RunNowPort {
       const runProjection = this.ledger.foldJob(job.id)
       const hasInvalidRunEvidence = runProjection.invalidLifecycleRunIds.size > 0
         || runProjection.claimConflicts.size > 0
+        || runProjection.invalidScheduleReanchorMigrationIds.size > 0
+        || runProjection.scheduleReanchorConflicts.size > 0
       const existing = this.jobs.get(job.id)
       if (existing !== undefined) {
         // Manager policy-only upserts deliberately retain the same identity.

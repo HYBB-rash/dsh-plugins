@@ -736,11 +736,13 @@ describe('assistant_task_update (user route)', () => {
     const resumed = await tools.get('assistant_task_update')!.execute({ action: 'resume', checkInMinutes: 5 }, exec())
     expect((resumed as MutationOutput).current.status).toBe('active')
     expect((resumed as MutationOutput).reply).toContain('已恢复')
+    expect((resumed as MutationOutput).reply).toContain('10:05')
     expect(store.getCurrent()?.reminderDueAt).toBe('2026-08-15T02:05:00.000Z')
 
     const working = await tools.get('assistant_task_update')!.execute({ action: 'still_working' }, exec())
     expect((working as MutationOutput).current.status).toBe('active')
     expect((working as MutationOutput).reply).toContain('再问你')
+    expect((working as MutationOutput).reply).toContain('10:05')
 
     const completed = await tools.get('assistant_task_update')!.execute({ action: 'complete', result: '全部收好' }, exec())
     expect((completed as MutationOutput).current.status).toBe('completed')

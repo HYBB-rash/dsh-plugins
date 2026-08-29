@@ -353,11 +353,34 @@ export interface RunFinishRecord {
   readonly outputPreview?: string
 }
 
+/**
+ * One offline schedule-anchor migration.  This is durable scheduler state,
+ * not an execution: it has no run/session identity and must never affect run,
+ * delivery, or failure accounting.
+ */
+export interface RunScheduleReanchorRecord {
+  readonly schemaVersion: 2
+  readonly event: 'schedule-reanchor'
+  readonly migrationVersion: 1
+  readonly jobId: string
+  readonly migrationId: string
+  readonly fromTimeZone: 'Etc/UTC'
+  readonly toTimeZone: 'Asia/Shanghai'
+  readonly cutoverAt: string
+  readonly reanchoredAt: string
+  /** Hash of the complete active cron input set for this migration. */
+  readonly inputSha256: string
+  /** Hash of this exact job id and five-field expression. */
+  readonly scheduleSha256: string
+  readonly nextRunAt: string
+}
+
 /** Any V2 ledger event line. */
 export type RunEventRecord =
   | RunClaimRecord
   | RunFailureAlertClaimRecord
   | RunFinishRecord
+  | RunScheduleReanchorRecord
   | RunEnvironmentSettleRecord
   | RunPreparedDeliveryRecord
   | RunDeliveryAttemptClaimRecord

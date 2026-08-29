@@ -13,6 +13,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
   renderDelegateAccepted,
   renderTrackAccepted,
+  formatLocalTime,
   isOpenStatus,
   validateCheckInMinutes,
   validateTitle,
@@ -402,11 +403,11 @@ function userReply(action: UpdateAction, row: CommitmentRow, nextContactAt: stri
     case 'resume':
       return nextContactAt === null
         ? `已恢复：${row.title}。`
-        : `已恢复：${row.title}。我会在 ${new Date(nextContactAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 再跟进。`
+        : `已恢复：${row.title}。我会在 ${formatLocalTime(nextContactAt)} 再跟进。`
     case 'still_working':
       return nextContactAt === null
         ? `好的，继续跟进：${row.title}。`
-        : `好的，我会在 ${new Date(nextContactAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 再问你。`
+        : `好的，我会在 ${formatLocalTime(nextContactAt)} 再问你。`
     case 'block':
       return `已标记受阻：${row.title}。`
     case 'complete':

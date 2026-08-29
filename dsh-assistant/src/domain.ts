@@ -474,12 +474,14 @@ export function addMinutes(iso: string, minutes: number, now: () => number): str
   return new Date(base + minutes * 60_000).toISOString()
 }
 
-/** Local clock formatting for user-facing "我会在 HH:MM 回来问你" text. */
+/** Shanghai clock formatting for user-facing reminder text. */
 export function formatLocalTime(iso: string): string {
-  const date = new Date(iso)
-  const hh = String(date.getHours()).padStart(2, '0')
-  const mm = String(date.getMinutes()).padStart(2, '0')
-  return `${hh}:${mm}`
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Shanghai',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).format(new Date(iso))
 }
 
 /** Render the user-visible acceptance text for a tracked user task (§10.1). */

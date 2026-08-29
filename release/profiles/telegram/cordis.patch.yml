@@ -56,3 +56,4 @@
         mode: telegram
         pollIntervalMs: 5000
         telegramParentSessionId: session-telegram
+        cronControlSocketPath: /home/herman/.dsh/storages/dsh-cron/control.sock

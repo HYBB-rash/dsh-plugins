@@ -7,8 +7,8 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { parseCron } from './cron.ts'
-import { JobStore, RunStore } from './store.ts'
+import { nextRunAfter, parseCron } from './cron.ts'
+import { JobStore, RunLedger, RunStore } from './store.ts'
 import type {
   BoundCronCommandJobView,
   BoundCronCommandSnapshot,
@@ -33,6 +33,10 @@ import type {
   MaintenanceControlError,
   TransitionAgentBindingRequest,
   TransitionAgentBindingResult,
+  ReanchorCronSchedulesRequest,
+  ReanchorCronSchedulesResult,
+  InspectScheduleReanchorMigrationRequest,
+  InspectScheduleReanchorMigrationResult,
 } from './control-contract.ts'
 import {
   MAX_COMMAND_OUTPUT_BYTES,
@@ -52,6 +56,7 @@ import type {
   JobSessionMode,
   RunFinishRecord,
   RunRecord,
+  RunScheduleReanchorRecord,
 } from './types.ts'
 
 const SUMMARY_LIMIT = 400
@@ -130,6 +135,16 @@ function serializeAgentImmutable(job: AgentJob): string {
 
 function agentImmutableSha256(job: AgentJob): string {
   return createHash('sha256').update(serializeAgentImmutable(job), 'utf8').digest('hex')
+}
+
+function canonicalSha256(value: unknown): string {
+  return createHash('sha256').update(canonicalize(value), 'utf8').digest('hex')
+}
+
+function isCanonicalIso(value: unknown): value is string {
+  return typeof value === 'string'
+    && Number.isFinite(Date.parse(value))
+    && new Date(value).toISOString() === value
 }
 
 function agentBinding(job: AgentJob): AgentBinding {
@@ -705,6 +720,7 @@ export function createControlService(config: ControlServiceConfig): DshCronContr
  */
 export function createMaintenanceControl(config: MaintenanceControlConfig): DshCronMaintenanceControl {
   const jobs = new JobStore(config.storeDir)
+  const runs = new RunLedger(config.storeDir)
 
   function inspectAgentBindingById(jobId: string): AgentBindingInspection | null {
     if (typeof jobId !== 'string' || jobId.trim() === '') return null
@@ -830,7 +846,237 @@ export function createMaintenanceControl(config: MaintenanceControlConfig): DshC
     }
   }
 
-  return { inspectAgentBindingById, transitionAgentBindingById }
+  function reanchorCronSchedules(
+    request: ReanchorCronSchedulesRequest,
+  ): ReanchorCronSchedulesResult {
+    if (!isObject(request)
+      || request.migrationVersion !== 1
+      || typeof request.migrationId !== 'string'
+      || !/^[a-z0-9][a-z0-9:._-]{2,127}$/u.test(request.migrationId)
+      || request.fromTimeZone !== 'Etc/UTC'
+      || request.toTimeZone !== 'Asia/Shanghai'
+      || !isCanonicalIso(request.cutoverAt)
+      || !isCanonicalIso(request.reanchoredAt)) {
+      return maintenanceError('invalid_request', 'The schedule reanchor request is invalid.')
+    }
+    if (Intl.DateTimeFormat().resolvedOptions().timeZone !== request.toTimeZone) {
+      return maintenanceError(
+        'timezone_mismatch',
+        `Schedule reanchor requires runtime timezone ${request.toTimeZone}.`,
+      )
+    }
+
+    const foldedJobs = jobs.fold()
+    if ((foldedJobs.invalid?.length ?? 0) > 0) {
+      return maintenanceError('invalid_job_log', 'The active job log contains invalid create rows.')
+    }
+    const cronJobs = foldedJobs.active
+      .filter(job => job.schedule.kind === 'cron')
+      .sort((left, right) => left.id.localeCompare(right.id))
+    if (cronJobs.length === 0) {
+      return maintenanceError('invalid_request', 'Schedule reanchor requires at least one active cron job.')
+    }
+    const input = {
+      migrationVersion: request.migrationVersion,
+      migrationId: request.migrationId,
+      fromTimeZone: request.fromTimeZone,
+      toTimeZone: request.toTimeZone,
+      cutoverAt: request.cutoverAt,
+      reanchoredAt: request.reanchoredAt,
+      jobs: cronJobs.map(job => ({ jobId: job.id, expr: job.schedule.kind === 'cron' ? job.schedule.expr : '' })),
+    }
+    const inputSha256 = canonicalSha256(input)
+    const expected = cronJobs.map((job): RunScheduleReanchorRecord => {
+      if (job.schedule.kind !== 'cron') throw new Error('unreachable non-cron schedule')
+      return {
+        schemaVersion: 2,
+        event: 'schedule-reanchor',
+        migrationVersion: 1,
+        jobId: job.id,
+        migrationId: request.migrationId,
+        fromTimeZone: request.fromTimeZone,
+        toTimeZone: request.toTimeZone,
+        cutoverAt: request.cutoverAt,
+        reanchoredAt: request.reanchoredAt,
+        inputSha256,
+        scheduleSha256: canonicalSha256({ jobId: job.id, schedule: job.schedule }),
+        nextRunAt: new Date(nextRunAfter(job.schedule, Date.parse(request.cutoverAt))).toISOString(),
+      }
+    })
+
+    let existing: readonly RunScheduleReanchorRecord[]
+    try {
+      existing = runs.inspectScheduleReanchorMigration(request.migrationId)
+    } catch {
+      return maintenanceError('migration_conflict', 'The schedule reanchor ledger contains a malformed migration row.')
+    }
+    const expectedByJob = new Map(expected.map(record => [record.jobId, record]))
+    for (const record of existing) {
+      const wanted = expectedByJob.get(record.jobId)
+      if (wanted === undefined || JSON.stringify(record) !== JSON.stringify(wanted)) {
+        return maintenanceError('migration_conflict', 'The migration id is already bound to different input or output.')
+      }
+    }
+
+    let appendedCount = 0
+    const results: Array<{ jobId: string; scheduleSha256: string; nextRunAt: string; changed: boolean }> = []
+    for (const record of expected) {
+      try {
+        const result = runs.scheduleReanchor(record)
+        const changed = result === 'reanchored'
+        if (changed) appendedCount += 1
+        results.push({
+          jobId: record.jobId,
+          scheduleSha256: record.scheduleSha256,
+          nextRunAt: record.nextRunAt,
+          changed,
+        })
+      } catch {
+        return maintenanceError(
+          'persistence_uncertain',
+          'The schedule reanchor did not finish; retry only the exact same migration request.',
+        )
+      }
+    }
+
+    let verified: readonly RunScheduleReanchorRecord[]
+    try {
+      verified = runs.inspectScheduleReanchorMigration(request.migrationId)
+    } catch {
+      return maintenanceError('verification_failed', 'The schedule reanchor ledger failed post-write validation.')
+    }
+    const verifiedJobs = new Set(verified.map(record => record.jobId))
+    if (verified.some(record => record.inputSha256 !== inputSha256)
+      || expected.some(record => !verifiedJobs.has(record.jobId))) {
+      return maintenanceError('verification_failed', 'The schedule reanchor ledger is incomplete or inconsistent.')
+    }
+    return {
+      ok: true,
+      changed: appendedCount > 0,
+      migrationVersion: 1,
+      migrationId: request.migrationId,
+      inputSha256,
+      cronJobCount: expected.length,
+      appendedCount,
+      jobs: results,
+    }
+  }
+
+  function inspectScheduleReanchorMigration(
+    request: InspectScheduleReanchorMigrationRequest,
+  ): InspectScheduleReanchorMigrationResult {
+    const requestKeys = [
+      'cronJobCount',
+      'cutoverAt',
+      'fromTimeZone',
+      'inputSha256',
+      'jobs',
+      'migrationId',
+      'migrationVersion',
+      'reanchoredAt',
+      'toTimeZone',
+    ]
+    if (!isObject(request)
+      || Object.keys(request).sort().join('\0') !== requestKeys.sort().join('\0')
+      || request.migrationVersion !== 1
+      || typeof request.migrationId !== 'string'
+      || !/^[a-z0-9][a-z0-9:._-]{2,127}$/u.test(request.migrationId)
+      || request.fromTimeZone !== 'Etc/UTC'
+      || request.toTimeZone !== 'Asia/Shanghai'
+      || !isCanonicalIso(request.cutoverAt)
+      || !isCanonicalIso(request.reanchoredAt)
+      || typeof request.inputSha256 !== 'string'
+      || !/^[a-f0-9]{64}$/u.test(request.inputSha256)
+      || !Number.isSafeInteger(request.cronJobCount)
+      || request.cronJobCount < 1
+      || !Array.isArray(request.jobs)
+      || request.jobs.length !== request.cronJobCount) {
+      return maintenanceError('invalid_request', 'The schedule reanchor inspection evidence is invalid.')
+    }
+
+    const jobKeys = ['jobId', 'nextRunAt', 'scheduleSha256']
+    const jobIds = new Set<string>()
+    for (const job of request.jobs) {
+      if (!isObject(job)
+        || Object.keys(job).sort().join('\0') !== jobKeys.join('\0')
+        || typeof job.jobId !== 'string'
+        || job.jobId.trim() === ''
+        || jobIds.has(job.jobId)
+        || typeof job.scheduleSha256 !== 'string'
+        || !/^[a-f0-9]{64}$/u.test(job.scheduleSha256)
+        || !isCanonicalIso(job.nextRunAt)) {
+        return maintenanceError('invalid_request', 'The schedule reanchor inspection job evidence is invalid.')
+      }
+      jobIds.add(job.jobId)
+    }
+
+    let records: readonly RunScheduleReanchorRecord[]
+    try {
+      records = runs.inspectScheduleReanchorMigration(request.migrationId)
+    } catch {
+      return maintenanceError('migration_conflict', 'The schedule reanchor ledger contains malformed evidence.')
+    }
+    if (records.length === 0) {
+      return maintenanceError('migration_not_found', 'The accepted schedule reanchor migration is absent from the ledger.')
+    }
+    if (records.length !== request.cronJobCount) {
+      return maintenanceError('migration_conflict', 'The schedule reanchor ledger row set differs from the accepted evidence.')
+    }
+
+    const expected = new Map<string, RunScheduleReanchorRecord>()
+    for (const job of request.jobs) {
+      expected.set(job.jobId, {
+        schemaVersion: 2,
+        event: 'schedule-reanchor',
+        migrationVersion: request.migrationVersion,
+        jobId: job.jobId,
+        migrationId: request.migrationId,
+        fromTimeZone: request.fromTimeZone,
+        toTimeZone: request.toTimeZone,
+        cutoverAt: request.cutoverAt,
+        reanchoredAt: request.reanchoredAt,
+        inputSha256: request.inputSha256,
+        scheduleSha256: job.scheduleSha256,
+        nextRunAt: job.nextRunAt,
+      })
+    }
+    const seen = new Set<string>()
+    for (const record of records) {
+      const accepted = expected.get(record.jobId)
+      if (accepted === undefined
+        || seen.has(record.jobId)
+        || JSON.stringify(record) !== JSON.stringify(accepted)) {
+        return maintenanceError('migration_conflict', 'The schedule reanchor ledger differs from the accepted evidence.')
+      }
+      seen.add(record.jobId)
+    }
+    if (seen.size !== expected.size) {
+      return maintenanceError('migration_conflict', 'The schedule reanchor ledger is missing accepted job evidence.')
+    }
+
+    return {
+      ok: true,
+      migrationVersion: request.migrationVersion,
+      migrationId: request.migrationId,
+      fromTimeZone: request.fromTimeZone,
+      toTimeZone: request.toTimeZone,
+      cutoverAt: request.cutoverAt,
+      reanchoredAt: request.reanchoredAt,
+      inputSha256: request.inputSha256,
+      cronJobCount: request.cronJobCount,
+      jobs: [...request.jobs]
+        .map(job => ({ ...job }))
+        .sort((left, right) => left.jobId.localeCompare(right.jobId)),
+      ledgerRecordCount: records.length,
+    }
+  }
+
+  return {
+    inspectAgentBindingById,
+    transitionAgentBindingById,
+    reanchorCronSchedules,
+    inspectScheduleReanchorMigration,
+  }
 }
 
 /** Keep a named type available to callers that need to classify local errors. */
