@@ -66,3 +66,4 @@
 - 2026-08-28：共享 development candidate 的 `tested` 不能只信候选字段；消费时须验证镜像测试回执文件存在、摘要匹配且回执 `imageId` 绑定该 candidate。editable verify 还须在前后对全部 tracked 与非忽略 untracked 输入的路径和字节取同一指纹；变化或显式取消时不签 verify 回执，并保留既有 toolbox 与租约。
 - 2026-08-28：盘点 OpenClaw 依赖时不能只查任务声明或同名脚本；应同时核对实际状态库、启用任务的调用链、systemd、插件和跨主机入口。历史 `jobs.json` 路径可能已不存在，而现役状态已迁到 SQLite；文件存在或名称相同也不能证明仍在运行或内容一致。
 - 2026-08-29：`release/dsh dev verify` 的可编辑源码指纹会把本次删除但尚未提交的 tracked 路径继续列入输入，随后因路径不存在而拒绝验证。替换测试合同时应先保留原 tracked 路径改写内容；在验证器支持删除与重命名的脏工作树前，不要用删除或重命名作为待验证改动。
+- 2026-08-29：中断的正式 Podman 构建可能留下通过共享层阻塞后续不同 commit 候选的 Buildah external storage 容器。只允许 `release/dsh` 在全局锁内，凭完整未完成构建目录、镜像删除报错中的精确 ID、有效 image ID、`buildah` 命令和 `storage` 状态移除；该操作可能连带移除候选镜像，确认镜像确实不存在后应直接从已完成归档重载，其他“找不到镜像”仍须失败。

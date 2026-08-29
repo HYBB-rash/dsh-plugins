@@ -228,7 +228,14 @@ function removeFormalImageForArchiveRoundTrip({ imageTag, buildRoot }) {
   for (let attempt = 0; attempt < 16; attempt += 1) {
     process.stderr.write(`+ ${commandText(engine, ['image', 'rm', imageTag])}\n`)
     const removal = runStatus(engine, ['image', 'rm', imageTag])
-    if (removal.status === 0) {
+    let imageRemoved = removal.status === 0
+    if (!imageRemoved && removedExternalContainers.length > 0) {
+      process.stderr.write(`+ ${commandText(engine, ['image', 'inspect', imageTag])}\n`)
+      const inspection = runStatus(engine, ['image', 'inspect', imageTag])
+      const missingDetail = `${String(removal.stderr ?? '')}\n${String(inspection.stderr ?? '')}`
+      imageRemoved = inspection.status !== 0 && /(image not known|no such image|image .* not found)/iu.test(missingDetail)
+    }
+    if (imageRemoved) {
       if (removedExternalContainers.length > 0) {
         for (const path of staleBuildRoots) removeControlledPath(join(stateRoot, 'builds'), path)
       }

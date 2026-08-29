@@ -66,6 +66,10 @@ case "$command" in
           printf '%s\n' 'Error: image used by 41eb7fd26a0295dd3194a16cfd67c40bc17d7f9a1146b093390e1b977ee07669: image is in use by a container' >&2
           exit 2
         fi
+        if ! test -f "$MOCK_ENGINE_STATE/images/$key.present"; then
+          printf 'Error: %s: image not known\n' "$tag" >&2
+          exit 125
+        fi
         find "$MOCK_ENGINE_STATE/images/$key.present" "$MOCK_ENGINE_STATE/images/$key.labels" "$MOCK_ENGINE_STATE/images/$key.tag" -delete
         ;;
       *) exit 64 ;;
@@ -109,6 +113,9 @@ case "$command" in
   rm)
     if [[ "${1:-}" == --force && "${2:-}" == 41eb7fd26a0295dd3194a16cfd67c40bc17d7f9a1146b093390e1b977ee07669 && $# == 2 ]]; then
       : >"$MOCK_ENGINE_STATE/external-residue-removed"
+      saved_tag="$(cat "$MOCK_ENGINE_STATE/saved-tag")"
+      saved_key="$(tag_key "$saved_tag")"
+      find "$MOCK_ENGINE_STATE/images/$saved_key.present" "$MOCK_ENGINE_STATE/images/$saved_key.labels" "$MOCK_ENGINE_STATE/images/$saved_key.tag" -delete
       exit 0
     fi
     exit 64
