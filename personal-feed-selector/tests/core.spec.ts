@@ -77,6 +77,15 @@ describe('selection use case', () => {
     })
   })
 
+  it('contains an unexpected judge exception as a model-call failure', async () => {
+    const judge: SemanticJudge = {
+      judge: vi.fn(async () => { throw new Error('adapter escaped its contract') }),
+    }
+    await expect(selectAttention(validInput, judge, new AbortController().signal)).resolves.toEqual({
+      status: 'failed', code: 'model_call_failed',
+    })
+  })
+
   it('rejects an out-of-range model index instead of accepting a fabricated URL', async () => {
     const judge: SemanticJudge = {
       judge: vi.fn(async () => ({ status: 'completed', decision: { kind: 'selected', candidateIndex: 99 } })),

@@ -118,7 +118,12 @@ export async function selectAttention(
     return { status: 'completed', outcome: { kind: 'empty' } }
   }
 
-  const judgment = await judge.judge(validated.input, signal)
+  let judgment: SemanticJudgmentResult
+  try {
+    judgment = await judge.judge(validated.input, signal)
+  } catch {
+    return { status: 'failed', code: signal.aborted ? 'aborted' : 'model_call_failed' }
+  }
   if (judgment.status === 'failed') return judgment
   if (judgment.decision.kind === 'empty') {
     return { status: 'completed', outcome: { kind: 'empty' } }

@@ -62,6 +62,16 @@ describe('DSH semantic judge', () => {
     })
   })
 
+  it('rejects a stream that never supplies a terminal finish reason', async () => {
+    const { judge } = fixture([
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: '{"kind":"empty"}' } },
+    ])
+    await expect(judge.judge(input, new AbortController().signal)).resolves.toEqual({
+      status: 'failed', code: 'invalid_model_output',
+    })
+  })
+
   it('reports a missing model route', async () => {
     const stream = vi.fn()
     const judge = createDshSemanticJudge({ llm: { stream } } as never, {

@@ -119,8 +119,12 @@ export function createDshSemanticJudge(
       })
 
       const assembler = new BlockAssembler()
+      let sawFinish = false
       try {
-        for await (const chunk of ctx.llm.stream(options)) assembler.push(chunk)
+        for await (const chunk of ctx.llm.stream(options)) {
+          if (chunk.type === 'finish') sawFinish = true
+          assembler.push(chunk)
+        }
       } catch {
         if (callerSignal.aborted) return failed('aborted')
         if (timeoutController.signal.aborted) return failed('timeout')
@@ -130,6 +134,7 @@ export function createDshSemanticJudge(
       }
       if (callerSignal.aborted) return failed('aborted')
       if (timeoutController.signal.aborted) return failed('timeout')
+      if (!sawFinish) return failed('invalid_model_output')
       if (assembler.finish.kind === 'error' || assembler.finish.kind === 'aborted') {
         return failed('model_call_failed')
       }
