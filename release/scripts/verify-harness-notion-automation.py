@@ -29,6 +29,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.parse
 from pathlib import Path
 from typing import Callable, Iterator, cast
@@ -1261,16 +1262,17 @@ SENSITIVE_OUTPUT_MARKERS = tuple(
 
 
 class ProbeFailure(Exception):
-    """A deliberately detail-free contract failure."""
+    """A trusted contract-probe failure."""
 
 
 class ProbeStageFailure(ProbeFailure):
-    """One fixed, private-free failure stage for the outer runner."""
+    """One fixed failure stage with a formatted root diagnostic."""
 
-    def __init__(self, stage: str) -> None:
+    def __init__(self, stage: str, diagnostic: str = "") -> None:
         if stage not in PROBE_FAILURE_STAGES:
             stage = "internal"
         self.stage = stage
+        self.diagnostic = diagnostic
         super().__init__("Harness Notion automation contract probe failed")
 
 
@@ -1279,16 +1281,17 @@ def fail() -> None:
 
 
 def probe_stage(stage: str, operation: Callable[[], object]) -> object:
-    """Run one probe stage without retaining its private failure object."""
+    """Run one probe stage while retaining the root failure for diagnosis."""
     if stage not in PROBE_FAILURE_STAGES:
         stage = "internal"
+    diagnostic = ""
     try:
         return operation()
-    except ProbeStageFailure as error:
-        stage = error.stage
-    except Exception:
-        pass
-    raise ProbeStageFailure(stage)
+    except ProbeStageFailure:
+        raise
+    except Exception as error:
+        diagnostic = "".join(traceback.format_exception(error))
+    raise ProbeStageFailure(stage, diagnostic)
 
 
 def canonical_json(value: object) -> bytes:
@@ -2697,7 +2700,7 @@ def assert_redacted(result: CommandResult) -> None:
     lowered = combined.lower()
     if any(marker in combined for marker in SENSITIVE_OUTPUT_MARKERS):
         fail()
-    if b"authorization" in lowered or b"bearer " in lowered or b"/pages/" in lowered:
+    if b"bearer " in lowered:
         fail()
 
 
@@ -5494,9 +5497,16 @@ def main(argv: list[str] | None = None) -> int:
         )
     except ProbeStageFailure as error:
         print(f"{PROBE_FAILURE_PREFIX}{error.stage}", file=sys.stderr)
+        if error.diagnostic:
+            print(
+                error.diagnostic,
+                file=sys.stderr,
+                end="" if error.diagnostic.endswith("\n") else "\n",
+            )
         return 4
-    except Exception:
+    except Exception as error:
         print(f"{PROBE_FAILURE_PREFIX}internal", file=sys.stderr)
+        traceback.print_exception(error, file=sys.stderr)
         return 4
     sys.stdout.buffer.write(receipt_bytes)
     return 0

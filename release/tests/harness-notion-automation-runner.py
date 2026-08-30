@@ -546,7 +546,7 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
                 self.assertEqual(expected, classifier.terminal_class())
                 self.assertNotIn("synthetic private message", repr(classifier.__dict__))
 
-    def test_trusted_probe_stderr_classifier_is_allowlisted_bounded_and_redacted(
+    def test_trusted_probe_stderr_classifier_accepts_bounded_diagnostics(
         self,
     ) -> None:
         canary = "SYNTHETIC_TOKEN_PATH_SOURCE_BODY_CANARY"
@@ -572,7 +572,6 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
         for value in (
             MODULE.TRUSTED_PROBE_FAILURE_PREFIX + canary.encode() + b"\n",
             b"x" * (MODULE.TRUSTED_PROBE_DIAGNOSTIC_LIMIT + 1),
-            MODULE.TRUSTED_PROBE_FAILURE_PREFIX + b"receipt\nextra",
             b"",
         ):
             with self.subTest(invalid_length=len(value)):
@@ -581,7 +580,14 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
                 self.assertEqual("internal", classifier.terminal_stage())
                 self.assertNotIn(canary, repr(classifier.__dict__))
 
-    def test_trusted_probe_wait_promotes_only_fixed_stage_and_cleans_container(
+        classifier = MODULE.TrustedProbeStderrClassifier()
+        classifier.feed(
+            MODULE.TRUSTED_PROBE_FAILURE_PREFIX
+            + b"receipt\nTraceback: synthetic root diagnostic\n"
+        )
+        self.assertEqual("receipt", classifier.terminal_stage())
+
+    def test_trusted_probe_wait_promotes_stage_diagnostic_and_cleans_container(
         self,
     ) -> None:
         container = MODULE.ContainerRef(
@@ -632,8 +638,10 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
                         )
                 self.assertEqual(expected, raised.exception.stage)
                 self.assertIsNone(raised.exception.__context__)
-                self.assertNotIn(canary, repr(raised.exception))
-                self.assertNotIn(canary, repr(raised.exception.__dict__))
+                self.assertEqual(
+                    stderr[:MODULE.TRUSTED_PROBE_DIAGNOSTIC_LIMIT],
+                    raised.exception.diagnostic,
+                )
                 self.assertIs(subprocess.PIPE, popen.call_args.kwargs["stderr"])
                 cleanup.assert_called_once_with(container, strict=True)
                 inspect.assert_called_once_with(
@@ -882,7 +890,7 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
                 )
                 self.assertNotIn(canary, stderr.getvalue())
 
-    def test_trusted_probe_failure_main_output_is_allowlisted_and_redacted(
+    def test_trusted_probe_failure_main_outputs_stage_and_diagnostic(
         self,
     ) -> None:
         canary = "SYNTHETIC_TOKEN_PATH_SOURCE_BODY_CANARY"
@@ -907,6 +915,21 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
                     stderr.getvalue(),
                 )
                 self.assertNotIn(canary, stderr.getvalue())
+
+        stderr = io.StringIO()
+        diagnostic = f"Traceback: {canary}\n".encode()
+        with mock.patch.dict(MODULE.__dict__, values), mock.patch.object(
+            MODULE,
+            "execute",
+            side_effect=MODULE.TrustedProbeFailure("internal", diagnostic),
+        ), redirect_stderr(stderr):
+            self.assertEqual(6, MODULE.main())
+        self.assertEqual(
+            "harness notion automation remote operation failed "
+            "(post-authoring/trusted-probe-internal)\n"
+            f"Traceback: {canary}\n",
+            stderr.getvalue(),
+        )
 
     def test_headless_patch_has_one_bounded_attempt_and_larger_output_budget(self) -> None:
         patch = (RELEASE_ROOT / "scripts/harness-notion-automation.patch.yml").read_text()

@@ -216,7 +216,7 @@ TRUSTED_PROBE_STAGES = (
     "receipt",
     "internal",
 )
-TRUSTED_PROBE_DIAGNOSTIC_LIMIT = 128
+TRUSTED_PROBE_DIAGNOSTIC_LIMIT = 256 * 1024
 TRUSTED_PROBE_FAILURE_PREFIX = b"dsh-probe: "
 FIXED_GATE_CATEGORIES = frozenset({
     "authoring-teardown",
@@ -280,12 +280,13 @@ class FixedGateFailure(RunnerError):
 
 
 class TrustedProbeFailure(RunnerError):
-    """One allowlisted, private-free trusted-probe failure stage."""
+    """One allowlisted trusted-probe stage plus bounded diagnostics."""
 
-    def __init__(self, stage: str) -> None:
+    def __init__(self, stage: str, diagnostic: bytes = b"") -> None:
         if stage not in TRUSTED_PROBE_STAGES:
             stage = "internal"
         self.stage = stage
+        self.diagnostic = bytes(diagnostic[:TRUSTED_PROBE_DIAGNOSTIC_LIMIT])
         super().__init__("harness notion automation trusted probe failed")
 
 
@@ -371,7 +372,6 @@ class TrustedProbeStderrClassifier:
             if self.invalid or self.overflow:
                 continue
             if self.stage is not None:
-                self.invalid = True
                 continue
             self.candidates = tuple(
                 stage
@@ -420,17 +420,16 @@ def fixed_gate(category: str, operation: Any) -> Any:
 
 
 def trusted_probe_gate(default_stage: str, operation: Any) -> Any:
-    """Run a probe boundary and retain only one fixed failure stage."""
+    """Run a probe boundary without discarding trusted diagnostics."""
     if default_stage not in TRUSTED_PROBE_STAGES:
         default_stage = "internal"
-    stage = default_stage
     try:
         return operation()
-    except TrustedProbeFailure as error:
-        stage = error.stage
+    except TrustedProbeFailure:
+        raise
     except Exception:
         pass
-    raise TrustedProbeFailure(stage)
+    raise TrustedProbeFailure(default_stage)
 
 
 def canonical_json(value: object) -> bytes:
@@ -1627,11 +1626,12 @@ def wait_trusted_probe_container(
     maximum_output: int,
     probe_source: bytes,
 ) -> bytes:
-    """Capture a bounded receipt while classifying stderr without retaining it."""
+    """Capture a bounded receipt and bounded trusted-probe diagnostics."""
     process: subprocess.Popen[bytes] | None = None
     workers: list[threading.Thread] = []
     classifier = TrustedProbeStderrClassifier()
     output = bytearray()
+    diagnostic = bytearray()
     output_overflow = False
     stream_failed = False
 
@@ -1658,6 +1658,12 @@ def wait_trusted_probe_container(
                 if not chunk:
                     return
                 classifier.feed(chunk)
+                remaining = max(
+                    0,
+                    TRUSTED_PROBE_DIAGNOSTIC_LIMIT - len(diagnostic),
+                )
+                if remaining:
+                    diagnostic.extend(chunk[:remaining])
         except Exception:
             stream_failed = True
 
@@ -1713,19 +1719,21 @@ def wait_trusted_probe_container(
         match = re.fullmatch(r"exited (-?[0-9]+) (true|false)", state)
         if match is None or process.returncode != int(match.group(1)):
             output.clear()
-            raise TrustedProbeFailure("internal")
+            raise TrustedProbeFailure("internal", bytes(diagnostic))
         exit_code = int(match.group(1))
         if exit_code != 0:
             output.clear()
             if exit_code == 4 and match.group(2) == "false":
-                raise TrustedProbeFailure(classifier.terminal_stage())
-            raise TrustedProbeFailure("internal")
+                raise TrustedProbeFailure(
+                    classifier.terminal_stage(), bytes(diagnostic)
+                )
+            raise TrustedProbeFailure("internal", bytes(diagnostic))
         if match.group(2) != "false":
             output.clear()
-            raise TrustedProbeFailure("internal")
+            raise TrustedProbeFailure("internal", bytes(diagnostic))
         if classifier.total != 0:
             output.clear()
-            raise TrustedProbeFailure("internal")
+            raise TrustedProbeFailure("internal", bytes(diagnostic))
         if output_overflow:
             output.clear()
             raise TrustedProbeFailure("receipt")
@@ -2597,6 +2605,13 @@ def main() -> int:
             f"(post-authoring/trusted-probe-{error.stage})",
             file=sys.stderr,
         )
+        if error.diagnostic:
+            diagnostic = error.diagnostic.decode("utf-8", "backslashreplace")
+            print(
+                diagnostic,
+                file=sys.stderr,
+                end="" if diagnostic.endswith("\n") else "\n",
+            )
         return 6
     except FixedGateFailure as error:
         print(

@@ -1941,6 +1941,37 @@ raise SystemExit(1)
         self.assertTrue(set(expected) <= set(PROBE.ATOMIC_PROBE_STAGES))
         self.assertTrue(set(expected) <= set(PROBE.PROBE_FAILURE_STAGES))
 
+    def test_symlink_preflight_allows_nonsecret_authorization_and_pages_words(
+        self,
+    ) -> None:
+        source = r'''#!/usr/bin/env python3
+import os
+import stat
+
+inbox = os.environ["NOTION_INBOX_FILE"]
+artifact_directory = os.path.dirname(inbox)
+paths = (
+    os.environ["NOTION_TOKEN_FILE"],
+    inbox,
+    os.path.join(artifact_directory, "sync-state.json"),
+    os.path.join(artifact_directory, "notion-fingerprint.json"),
+)
+for path in paths:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        continue
+    if stat.S_ISLNK(metadata.st_mode):
+        print("authorization unavailable; /pages/ route unavailable")
+        raise SystemExit(2)
+raise SystemExit(1)
+'''
+        with malicious_fixture(source) as entrypoint:
+            probe = PROBE.ContractProbe(entrypoint)
+            probe.assert_symlink_token_rejected()
+            for role in ("mirror", "state", "fingerprint"):
+                probe.assert_symlink_artifact_rejected(role)
+
     def test_token_symlink_resolved_read_then_fixed_failure_is_outcome_failure(
         self,
     ) -> None:
@@ -2848,7 +2879,7 @@ raise SystemExit(1)
 '''
         self.assert_rejected(source, "atomicArtifacts")
 
-    def test_probe_stage_mapping_is_fixed_and_discards_private_failures(self) -> None:
+    def test_probe_stage_mapping_is_fixed_and_retains_root_diagnostics(self) -> None:
         canary = "SYNTHETIC_TOKEN_PATH_SOURCE_BODY_CANARY"
 
         class SyntheticProbe:
@@ -2868,7 +2899,7 @@ raise SystemExit(1)
                 PROBE.verify_entrypoint(Path("/synthetic/notion_inbox_sync.py"))
         self.assertEqual("source-policy", raised.exception.stage)
         self.assertIsNone(raised.exception.__context__)
-        self.assertNotIn(canary, repr(raised.exception.__dict__))
+        self.assertIn(canary, raised.exception.diagnostic)
 
         for name in PROBE.TEST_NAMES:
             with self.subTest(test_name=name):
@@ -2886,7 +2917,7 @@ raise SystemExit(1)
                     PROBE.PROBE_TEST_STAGES[name], raised.exception.stage
                 )
                 self.assertIsNone(raised.exception.__context__)
-                self.assertNotIn(canary, repr(raised.exception.__dict__))
+                self.assertIn(canary, raised.exception.diagnostic)
 
         synthetic = SyntheticProbe()
         with mock.patch.object(
@@ -2898,7 +2929,7 @@ raise SystemExit(1)
                 PROBE.verify_entrypoint(Path("/synthetic/notion_inbox_sync.py"))
         self.assertEqual("receipt", raised.exception.stage)
         self.assertIsNone(raised.exception.__context__)
-        self.assertNotIn(canary, repr(raised.exception.__dict__))
+        self.assertIn(canary, raised.exception.diagnostic)
 
         def private_failure() -> None:
             raise RuntimeError(canary)
@@ -2915,7 +2946,7 @@ raise SystemExit(1)
                     )
                 self.assertEqual(stage, raised.exception.stage)
                 self.assertIsNone(raised.exception.__context__)
-                self.assertNotIn(canary, repr(raised.exception.__dict__))
+                self.assertIn(canary, raised.exception.diagnostic)
 
         with mock.patch.object(
             PROBE, "ContractProbe", return_value=SyntheticProbe()
@@ -2936,9 +2967,10 @@ raise SystemExit(1)
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             self.assertEqual(4, PROBE.main(["--invalid"]))
-        self.assertEqual(
-            f"{PROBE.PROBE_FAILURE_PREFIX}initialization\n", stderr.getvalue()
-        )
+        self.assertTrue(stderr.getvalue().startswith(
+            f"{PROBE.PROBE_FAILURE_PREFIX}initialization\n"
+        ))
+        self.assertIn("ProbeFailure", stderr.getvalue())
 
         for stage in PROBE.PROBE_FAILURE_STAGES:
             with self.subTest(stage=stage):
@@ -2967,10 +2999,10 @@ raise SystemExit(1)
                 4,
                 PROBE.main(["--entrypoint", "/synthetic/notion_inbox_sync.py"]),
             )
-        self.assertEqual(
-            f"{PROBE.PROBE_FAILURE_PREFIX}internal\n", stderr.getvalue()
-        )
-        self.assertNotIn(canary, stderr.getvalue())
+        self.assertTrue(stderr.getvalue().startswith(
+            f"{PROBE.PROBE_FAILURE_PREFIX}internal\n"
+        ))
+        self.assertIn(canary, stderr.getvalue())
 
     def test_failed_probe_cli_emits_no_receipt_or_child_output(self) -> None:
         source = r'''#!/usr/bin/env python3
@@ -2988,10 +3020,10 @@ print(json.dumps({"status": "synced", "private": "must not be forwarded"}))
             )
         self.assertEqual(completed.returncode, 4)
         self.assertEqual(completed.stdout, b"")
-        self.assertEqual(
-            completed.stderr,
-            b"dsh-probe: test-atomic-artifacts-preflight-token-symlink-outcome\n",
-        )
+        self.assertTrue(completed.stderr.startswith(
+            b"dsh-probe: test-atomic-artifacts-preflight-token-symlink-outcome\n"
+        ))
+        self.assertIn(b"ProbeFailure", completed.stderr)
         self.assertNotIn(b"must not be forwarded", completed.stderr)
 
     @unittest.skipUnless(hasattr(os, "fork"), "requires POSIX process groups")
