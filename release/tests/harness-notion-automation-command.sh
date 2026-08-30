@@ -1,30 +1,50 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+case "${0##*/}" in
+  ssh)
+    : >"$DSH_TEST_SSH_MARKER"
+    if [[ "${DSH_TEST_SSH_MODE:-}" == status ]]; then
+      if env | grep -Eq '^(NOTION_|AUTHORIZATION_)'; then
+        : >"$DSH_TEST_CREDENTIAL_MARKER"
+      fi
+      printf '%s\n' "$*" >"$DSH_TEST_SSH_ARGS"
+      tee "$DSH_TEST_STATUS_INPUT" >/dev/null
+      if [[ "${DSH_TEST_STATUS_FAIL:-0}" == 1 ]]; then
+        printf '%s\n' 'PRIVATE REMOTE FAILURE BODY' >&2
+        exit 9
+      fi
+      exec cat -- "$DSH_TEST_STATUS_RECEIPT"
+    fi
+    exit 97
+    ;;
+  git)
+    printf '%s\n' "$*" >>"$DSH_TEST_GIT_LOG"
+    if [[ "$*" == *' fetch '* || "$*" == *' fetch' ]]; then
+      : >"$DSH_TEST_FETCH_MARKER"
+      exit 98
+    fi
+    if [[ "$*" == *'rev-parse --verify HEAD^{commit}'* ]]; then
+      printf '%s\n' "$DSH_TEST_STATUS_COMMIT"
+      exit 0
+    fi
+    if [[ "$*" == *' show '* \
+      && "${*: -1}" == "$DSH_TEST_STATUS_COMMIT:release/scripts/harness-notion-automation-status.py" ]]; then
+      exec cat -- "$DSH_TEST_STATUS_HELPER"
+    fi
+    exit 97
+    ;;
+esac
+
 release_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 test_root="$(mktemp -d)"
 cleanup() { rm -rf -- "$test_root"; }
 trap cleanup EXIT
 
 mkdir -p -- "$test_root/bin"
-cat >"$test_root/bin/ssh" <<'EOF'
-#!/usr/bin/env bash
-: >"$DSH_TEST_SSH_MARKER"
-if [[ "${DSH_TEST_SSH_MODE:-}" == status ]]; then
-  if env | grep -Eq '^(NOTION_|AUTHORIZATION_)'; then
-    : >"$DSH_TEST_CREDENTIAL_MARKER"
-  fi
-  printf '%s\n' "$*" >"$DSH_TEST_SSH_ARGS"
-  tee "$DSH_TEST_STATUS_INPUT" >/dev/null
-  if [[ "${DSH_TEST_STATUS_FAIL:-0}" == 1 ]]; then
-    printf '%s\n' 'PRIVATE REMOTE FAILURE BODY' >&2
-    exit 9
-  fi
-  exec cat -- "$DSH_TEST_STATUS_RECEIPT"
-fi
-exit 97
-EOF
-chmod 755 "$test_root/bin/ssh"
+# Formal image self-test mounts /tmp noexec.  Execute the tracked 0755 test
+# inode through temporary command-name symlinks instead of executing temp files.
+ln -s -- "$release_root/tests/harness-notion-automation-command.sh" "$test_root/bin/ssh"
 
 run_case() {
   local expected_status="$1"
@@ -105,24 +125,7 @@ test ! -e "$test_root/ssh-called"
 status_commit="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 status_sha256="$(sha256sum "$release_root/scripts/harness-notion-automation-status.py" | awk '{print $1}')"
 mkdir -p -- "$test_root/status-bin"
-cat >"$test_root/status-bin/git" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >>"$DSH_TEST_GIT_LOG"
-if [[ "$*" == *' fetch '* || "$*" == *' fetch' ]]; then
-  : >"$DSH_TEST_FETCH_MARKER"
-  exit 98
-fi
-if [[ "$*" == *'rev-parse --verify HEAD^{commit}'* ]]; then
-  printf '%s\n' "$DSH_TEST_STATUS_COMMIT"
-  exit 0
-fi
-if [[ "$*" == *' show '* \
-  && "${*: -1}" == "$DSH_TEST_STATUS_COMMIT:release/scripts/harness-notion-automation-status.py" ]]; then
-  exec cat -- "$DSH_TEST_STATUS_HELPER"
-fi
-exit 97
-EOF
-chmod 755 "$test_root/status-bin/git"
+ln -s -- "$release_root/tests/harness-notion-automation-command.sh" "$test_root/status-bin/git"
 
 python3 - "$test_root/status-receipt.json" "$status_commit" "$status_sha256" <<'PY'
 import json, sys
