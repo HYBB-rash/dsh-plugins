@@ -115,7 +115,16 @@ and converge.  Crash residues must be direct-child regular files in the task
 directory, owned by the current process uid and gid, mode 0600 with one link.  Never publish a staged file left by a prior
 process: remove it, create and fsync a replacement at a fresh direct-child
 pathname, then publish that new file.  Keep every staged or journal path directly
-inside the task directory.  Fsync the task directory after removing crash residue.  A second
+inside the task directory.  Fsync the task directory after removing crash residue.  The
+task directory after any completed invocation must contain exactly the three
+canonical artifacts and nothing else: inspect every direct-child entry first,
+and any direct-child regular file that is not one of the three canonical
+artifacts (a staged, journal, or residue file) must be validated as owned by
+the current process uid and gid, mode 0600, one link, removed, and the task
+directory fsynced before any further work.  The same invariant holds after a
+crash-recovery: if any boundary is interrupted, the next invocation must return
+the task directory to exactly those three files even when the recovery finds
+nothing more to upload.  A second
 equivalent pull must leave all three canonical artifact bytes unchanged.  A
 crash-recovery invocation must converge the journal as well: immediately
 afterwards the same `--retry-pending --json` with no pending operation must be
