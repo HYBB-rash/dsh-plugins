@@ -129,6 +129,10 @@ equivalent pull must leave all three canonical artifact bytes unchanged.  A
 crash-recovery invocation must converge the journal as well: immediately
 afterwards the same `--retry-pending --json` with no pending operation must be
 the silent success described above, with no token touch and no API request.
+Every crash-recovery invocation must end by opening the task directory itself
+and `os.fsync`ing that directory descriptor as its final durability step, after
+removing every residue and after the final canonical rename; fsyncing a file
+descriptor or any other directory does not satisfy this.
 
 Read the token only from `NOTION_TOKEN_FILE`, using a read-only descriptor opened
 with both `O_NOFOLLOW` and `O_CLOEXEC`, and check that its identity is stable
