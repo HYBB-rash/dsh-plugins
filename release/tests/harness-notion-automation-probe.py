@@ -1455,6 +1455,30 @@ os.unlink(task / "crash-residue.tmp")
                             require_recovery_fsync=True,
                         )
 
+    def test_traced_no_pending_transition_rejects_token_metadata_preflight(self) -> None:
+        metadata_only = r'''#!/usr/bin/env python3
+import os
+import sys
+
+if "--retry-pending" in sys.argv:
+    os.lstat(os.environ["NOTION_TOKEN_FILE"])
+    raise SystemExit(0)
+raise SystemExit(1)
+'''
+        with malicious_fixture(metadata_only) as entrypoint:
+            probe = PROBE.ContractProbe(entrypoint)
+            with probe.sandbox() as sandbox, PROBE.LoopbackNotion() as notion:
+                self.seed_atomic_tree(sandbox, residue=False)
+                notion.state.reset()
+                with self.assertRaises(PROBE.ProbeFailure):
+                    probe.traced_atomic_transition(
+                        sandbox,
+                        notion,
+                        ["--retry-pending", "--json"],
+                        expected_mirror=PROBE.REMOTE_INITIAL,
+                        token_forbidden=True,
+                    )
+
     def test_traced_transition_rejects_untracked_temp_and_rename_shapes(self) -> None:
         high_level_cleanup = r'''#!/usr/bin/env python3
 import os

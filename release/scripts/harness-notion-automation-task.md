@@ -68,11 +68,16 @@ tokens, Authorization headers, response bodies, and private inbox text.
 Diagnostics must be fixed and similarly redacted.  Never refer to `.openclaw`,
 old task-inbox workflow paths, Telegram, cron, or a real Notion endpoint/page/token.
 
-At the start of every invocation, use non-following metadata checks to reject a
-symbolic-link preimage at `NOTION_TOKEN_FILE` or at any of the three canonical
-artifact paths.  Complete all four preflight checks before opening or reading the
-token, making any API request, creating a directory or temporary file, or making
-any other persistent write.  If any preimage is a symlink, exit nonzero without
+At the start of every invocation that performs an operation, use non-following
+metadata checks to reject a symbolic-link preimage at `NOTION_TOKEN_FILE` or at
+any of the three canonical artifact paths.  Complete all four preflight checks
+before opening or reading the token, making any API request, creating a directory
+or temporary file, or making any other persistent write.  The no-op
+`--retry-pending --json` path is the sole exception: when the persisted journal
+holds no pending operation, resolve nothing token-related at all (no stat,
+readlink, open, or read of `NOTION_TOKEN_FILE`) and call no API; decide from the
+journal alone before any token or preflight handling, and exit zero with empty
+stdout and stderr.  If any preimage is a symlink, exit nonzero without
 opening or reading its target and without GET, PATCH, or other HTTP traffic.  The
 task directory and every other writable path available to the invocation must
 remain exactly as they were before the call; do not even create and remove an
@@ -111,7 +116,10 @@ directory, owned by the current process uid and gid, mode 0600 with one link.  N
 process: remove it, create and fsync a replacement at a fresh direct-child
 pathname, then publish that new file.  Keep every staged or journal path directly
 inside the task directory.  Fsync the task directory after removing crash residue.  A second
-equivalent pull must leave all three canonical artifact bytes unchanged.
+equivalent pull must leave all three canonical artifact bytes unchanged.  A
+crash-recovery invocation must converge the journal as well: immediately
+afterwards the same `--retry-pending --json` with no pending operation must be
+the silent success described above, with no token touch and no API request.
 
 Read the token only from `NOTION_TOKEN_FILE`, using a read-only descriptor opened
 with both `O_NOFOLLOW` and `O_CLOEXEC`, and check that its identity is stable
@@ -120,8 +128,9 @@ with `os.read` from offset zero through the exact `fstat` size.  Do not seek,
 duplicate, transfer, wrap, or reopen that descriptor with `fdopen`, `open(fd)`,
 `io.open`, or `io.FileIO`.  Never put the token in argv, durable state, JSON, or
 diagnostics.  `--retry-pending --json` with no pending operation is the sole
-silent success: exit zero with empty stdout and stderr, read no token file, and
-make no API request.
+silent success: exit zero with empty stdout and stderr, and make no API request;
+it must not even perform a metadata check (stat or readlink) on
+`NOTION_TOKEN_FILE`, much less open or read it.
 
 Every non-silent JSON result has one fixed `status`, chosen only from `synced`,
 `queued`, `stale`, `conflict`, or `error`.  A GET failure with an existing mirror
@@ -189,7 +198,14 @@ while
 and `NOTION_API_BASE` ends exactly in `/v1` with no trailing slash.  The fake
 server must require the final request path to be exactly
 `/v1/pages/{NOTION_PAGE_ID}/markdown`, proving that URL construction preserves
-the configured base path.  Treat the contents of
+the configured base path.  `test_no_pending_no_api` must prove the no-op
+boundary at the filesystem level: after the common base is established, relocate
+`NOTION_TOKEN_FILE` to a path whose parent directory has no search permission
+(or otherwise make every pathname resolution of it fail), run
+`--retry-pending --json`, and require exit zero with empty stdout and stderr,
+zero fake-server requests, and all three artifact bytes unchanged.  A FIFO or an
+unreadable file alone is insufficient: a metadata-only check still succeeds on
+both, while the contract forbids even that.  Treat the contents of
 `sync-state.json` and `notion-fingerprint.json` as private implementation details:
 tests may verify that they are safe JSON files, but must not fabricate, rewrite,
 or depend on any private field or schema.  Use the mirror as the only directly
@@ -198,7 +214,13 @@ body.  In `test_atomic_artifacts`, start with all three canonical artifacts
 absent, run the first pull and require `synced`, save the bytes of all three
 artifacts, leave both the mirror and fake remote body unchanged, then immediately
 run an equivalent second pull and require `synced` with all three artifact bytes
-unchanged.  Do not turn `test_atomic_artifacts` into a conflict scenario; exercise
+unchanged, then run the same silent no-op proof with the un-resolvable
+`NOTION_TOKEN_FILE`.  Also inject at least one hard crash into the first pull by
+terminating the CLI subprocess with SIGKILL once the task directory first gains
+any entry, then run a recovery pull requiring `synced`, the equivalent second
+pull with all three artifact bytes unchanged, the silent no-op proof, and a task
+directory containing exactly the three canonical artifacts with no extra
+residue.  Do not turn `test_atomic_artifacts` into a conflict scenario; exercise
 the two-sided divergence rule in `test_conflict`.
 
 The appended phase directive is the sole authority for the current phase's output
