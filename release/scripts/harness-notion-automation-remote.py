@@ -173,6 +173,7 @@ GENERATED_TEST_GATE_CATEGORIES = (
     "generated-test-10",
     "generated-test-11",
 )
+GENERATED_TEST_DIAGNOSTIC_LIMIT = 256 * 1024
 TRUSTED_PROBE_STAGES = (
     "initialization",
     "source-policy",
@@ -270,12 +271,13 @@ class HeadlessTaskFailure(RunnerError):
 
 
 class FixedGateFailure(RunnerError):
-    """One allowlisted, private-free structural gate failure."""
+    """One allowlisted structural gate failure with optional diagnostics."""
 
-    def __init__(self, category: str) -> None:
+    def __init__(self, category: str, diagnostic: bytes = b"") -> None:
         if category not in FIXED_GATE_CATEGORIES:
             raise RunnerError("harness notion automation operation failed")
         self.category = category
+        self.diagnostic = bytes(diagnostic[:GENERATED_TEST_DIAGNOSTIC_LIMIT])
         super().__init__("harness notion automation fixed gate failed")
 
 
@@ -1515,6 +1517,185 @@ def wait_detached_container(container: ContainerRef, timeout: int) -> None:
         fail()
 
 
+def bounded_generated_test_diagnostic(
+    diagnostic: bytes | bytearray,
+    suffix: bytes = b"",
+) -> bytes:
+    if len(suffix) > GENERATED_TEST_DIAGNOSTIC_LIMIT:
+        suffix = suffix[-GENERATED_TEST_DIAGNOSTIC_LIMIT:]
+    prefix_limit = GENERATED_TEST_DIAGNOSTIC_LIMIT - len(suffix)
+    return bytes(diagnostic[:prefix_limit]) + suffix
+
+
+def wait_generated_test_container(
+    container: ContainerRef,
+    timeout: int,
+    category: str,
+) -> None:
+    """Run one generated unittest and retain bounded combined diagnostics."""
+    if category not in GENERATED_TEST_GATE_CATEGORIES:
+        fail()
+    process: subprocess.Popen[bytes] | None = None
+    reader: threading.Thread | None = None
+    reader_started = False
+    diagnostic = bytearray()
+    diagnostic_overflow = False
+    stream_failed = False
+    failure: FixedGateFailure | None = None
+    succeeded = False
+    cleanup_failed = False
+
+    def drain_output(stream: Any) -> None:
+        nonlocal diagnostic_overflow, stream_failed
+        try:
+            while True:
+                chunk = stream.read(4096)
+                if not chunk:
+                    return
+                remaining = max(
+                    0,
+                    GENERATED_TEST_DIAGNOSTIC_LIMIT - len(diagnostic),
+                )
+                diagnostic.extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    diagnostic_overflow = True
+        except Exception:
+            stream_failed = True
+
+    try:
+        process = subprocess.Popen(
+            ["docker", "start", "--attach", container.resource_id],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=DOCKER_ENV,
+        )
+        if process.stdout is None:
+            fail()
+        reader = threading.Thread(
+            target=drain_output,
+            args=(process.stdout,),
+            daemon=True,
+        )
+        reader.start()
+        reader_started = True
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            stop_container(container, strict=False)
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+            if reader_started:
+                reader.join(timeout=10)
+            suffix = b"\ngenerated unittest timed out\n"
+            if not reader_started or reader.is_alive() or stream_failed:
+                suffix = b"\ngenerated unittest runtime failed after timeout\n"
+            raise FixedGateFailure(
+                category,
+                bounded_generated_test_diagnostic(diagnostic, suffix),
+            )
+        if reader_started:
+            reader.join(timeout=10)
+        if (
+            not reader_started
+            or reader.is_alive()
+            or stream_failed
+        ):
+            raise FixedGateFailure(
+                category,
+                bounded_generated_test_diagnostic(
+                    diagnostic,
+                    b"\ngenerated unittest runtime failed\n",
+                ),
+            )
+        try:
+            state = docker(
+                "container", "inspect", "--format",
+                "{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}",
+                container.resource_id,
+                timeout=30,
+            ).decode("ascii", "strict").strip()
+        except Exception:
+            raise FixedGateFailure(
+                category,
+                bounded_generated_test_diagnostic(
+                    diagnostic,
+                    b"\ngenerated unittest state inspection failed\n",
+                ),
+            )
+        match = re.fullmatch(r"exited (-?[0-9]+) (true|false)", state)
+        if match is None or process.returncode != int(match.group(1)):
+            raise FixedGateFailure(
+                category,
+                bounded_generated_test_diagnostic(
+                    diagnostic,
+                    b"\ngenerated unittest runtime failed\n",
+                ),
+            )
+        exit_code = int(match.group(1))
+        if exit_code == 0 and match.group(2) == "false" and not diagnostic_overflow:
+            succeeded = True
+        else:
+            suffix = b""
+            if match.group(2) == "true":
+                suffix = b"\ngenerated unittest container was OOM-killed\n"
+            elif diagnostic_overflow:
+                suffix = b"\ngenerated unittest diagnostic exceeded limit\n"
+            failure = FixedGateFailure(
+                category,
+                bounded_generated_test_diagnostic(diagnostic, suffix),
+            )
+    except FixedGateFailure as error:
+        failure = error
+    except Exception:
+        failure = FixedGateFailure(
+            category,
+            bounded_generated_test_diagnostic(
+                diagnostic,
+                b"\ngenerated unittest runtime failed\n",
+            ),
+        )
+    finally:
+        try:
+            if process is not None and process.poll() is None:
+                stop_container(container, strict=False)
+                process.kill()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    cleanup_failed = True
+            if reader_started:
+                reader.join(timeout=10)
+                if reader.is_alive():
+                    cleanup_failed = True
+        except Exception:
+            cleanup_failed = True
+        try:
+            stop_container(container, strict=True)
+        except Exception:
+            cleanup_failed = True
+    if cleanup_failed:
+        existing = failure.diagnostic if failure is not None else diagnostic
+        raise FixedGateFailure(
+            category,
+            bounded_generated_test_diagnostic(
+                existing,
+                b"\ngenerated unittest cleanup failed\n",
+            ),
+        )
+    if failure is not None:
+        raise failure
+    if not succeeded:
+        raise FixedGateFailure(
+            category,
+            bounded_generated_test_diagnostic(
+                diagnostic,
+                b"\ngenerated unittest runtime failed\n",
+            ),
+        )
+
+
 def wait_headless_container(container: ContainerRef, timeout: int, phase: str) -> None:
     """Run the authoring task while retaining no model text or raw diagnostic."""
     if phase not in AUTHORING_PHASES:
@@ -2154,7 +2335,7 @@ def run_tests(
                 "-B", "-m", "unittest", selector,
             ]
             container = create_container(name, args, nonce, image_id)
-            wait_detached_container(container, 180)
+            wait_generated_test_container(container, 180, category)
             if generated_manifest(notion) != baseline:
                 fail()
 
@@ -2619,6 +2800,13 @@ def main() -> int:
             f"(post-authoring/{error.category})",
             file=sys.stderr,
         )
+        if error.diagnostic:
+            diagnostic = error.diagnostic.decode("utf-8", "backslashreplace")
+            print(
+                diagnostic,
+                file=sys.stderr,
+                end="" if diagnostic.endswith("\n") else "\n",
+            )
         return 6
     except Exception:
         print("harness notion automation remote operation failed", file=sys.stderr)

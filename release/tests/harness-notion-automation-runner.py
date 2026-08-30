@@ -490,6 +490,179 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
         )
         cleanup.assert_called_once_with(container, strict=True)
 
+    def test_generated_test_wait_returns_bounded_unittest_diagnostic(self) -> None:
+        container = MODULE.ContainerRef(
+            "dsh-harness-notion-deadbeef-test",
+            "b" * 64,
+            self.NONCE,
+            self.IMAGE_ID,
+        )
+        output = b"AssertionError: expected conflict status\n"
+
+        class AttachedProcess:
+            def __init__(self) -> None:
+                self.stdout = io.BytesIO(output)
+                self.returncode = 1
+
+            def wait(self, timeout: int) -> int:
+                return self.returncode
+
+            def poll(self) -> int:
+                return self.returncode
+
+            def kill(self) -> None:
+                self.returncode = -9
+
+        process = AttachedProcess()
+        with mock.patch.object(
+            MODULE.subprocess, "Popen", return_value=process
+        ) as popen, mock.patch.object(
+            MODULE, "docker", return_value=b"exited 1 false\n"
+        ) as docker_call, mock.patch.object(MODULE, "stop_container") as cleanup:
+            with self.assertRaises(MODULE.FixedGateFailure) as raised:
+                MODULE.wait_generated_test_container(
+                    container, 30, "generated-test-01"
+                )
+        self.assertEqual("generated-test-01", raised.exception.category)
+        self.assertEqual(output, raised.exception.diagnostic)
+        self.assertIs(subprocess.PIPE, popen.call_args.kwargs["stdout"])
+        self.assertIs(subprocess.STDOUT, popen.call_args.kwargs["stderr"])
+        docker_call.assert_called_once_with(
+            "container", "inspect", "--format",
+            "{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}",
+            container.resource_id,
+            timeout=30,
+        )
+        cleanup.assert_called_once_with(container, strict=True)
+
+        suffix = b"\ngenerated unittest diagnostic exceeded limit\n"
+        bounded = MODULE.bounded_generated_test_diagnostic(
+            b"x" * (MODULE.GENERATED_TEST_DIAGNOSTIC_LIMIT + 1),
+            suffix,
+        )
+        self.assertEqual(MODULE.GENERATED_TEST_DIAGNOSTIC_LIMIT, len(bounded))
+        self.assertTrue(bounded.endswith(suffix))
+
+    def test_generated_test_reader_start_failure_still_cleans_container(self) -> None:
+        container = MODULE.ContainerRef(
+            "dsh-harness-notion-deadbeef-test",
+            "b" * 64,
+            self.NONCE,
+            self.IMAGE_ID,
+        )
+
+        class AttachedProcess:
+            stdout = io.BytesIO(b"")
+            returncode = 1
+
+            def poll(self) -> int:
+                return self.returncode
+
+        class FailedReader:
+            def start(self) -> None:
+                raise RuntimeError("synthetic thread failure")
+
+            def join(self, timeout: int) -> None:
+                raise AssertionError("unstarted reader must not be joined")
+
+        with mock.patch.object(
+            MODULE.subprocess, "Popen", return_value=AttachedProcess()
+        ), mock.patch.object(
+            MODULE.threading, "Thread", return_value=FailedReader()
+        ), mock.patch.object(MODULE, "stop_container") as cleanup:
+            with self.assertRaises(MODULE.FixedGateFailure) as raised:
+                MODULE.wait_generated_test_container(
+                    container, 30, "generated-test-01"
+                )
+        self.assertEqual("generated-test-01", raised.exception.category)
+        self.assertTrue(
+            raised.exception.diagnostic.endswith(
+                b"generated unittest runtime failed\n"
+            )
+        )
+        cleanup.assert_called_once_with(container, strict=True)
+
+    def test_generated_test_cleanup_failure_preserves_category_and_output(self) -> None:
+        container = MODULE.ContainerRef(
+            "dsh-harness-notion-deadbeef-test",
+            "b" * 64,
+            self.NONCE,
+            self.IMAGE_ID,
+        )
+        output = b"AssertionError: expected conflict status\n"
+
+        class AttachedProcess:
+            def __init__(self) -> None:
+                self.stdout = io.BytesIO(output)
+                self.returncode = 1
+
+            def wait(self, timeout: int) -> int:
+                return self.returncode
+
+            def poll(self) -> int:
+                return self.returncode
+
+        with mock.patch.object(
+            MODULE.subprocess, "Popen", return_value=AttachedProcess()
+        ), mock.patch.object(
+            MODULE, "docker", return_value=b"exited 1 false\n"
+        ), mock.patch.object(
+            MODULE,
+            "stop_container",
+            side_effect=MODULE.RunnerError("synthetic cleanup failure"),
+        ):
+            with self.assertRaises(MODULE.FixedGateFailure) as raised:
+                MODULE.wait_generated_test_container(
+                    container, 30, "generated-test-01"
+                )
+        self.assertEqual("generated-test-01", raised.exception.category)
+        self.assertTrue(raised.exception.diagnostic.startswith(output))
+        self.assertTrue(
+            raised.exception.diagnostic.endswith(
+                b"generated unittest cleanup failed\n"
+            )
+        )
+
+    def test_generated_test_inspect_failure_has_fixed_diagnostic(self) -> None:
+        container = MODULE.ContainerRef(
+            "dsh-harness-notion-deadbeef-test",
+            "b" * 64,
+            self.NONCE,
+            self.IMAGE_ID,
+        )
+        output = b"unittest process output\n"
+
+        class AttachedProcess:
+            def __init__(self) -> None:
+                self.stdout = io.BytesIO(output)
+                self.returncode = 1
+
+            def wait(self, timeout: int) -> int:
+                return self.returncode
+
+            def poll(self) -> int:
+                return self.returncode
+
+        with mock.patch.object(
+            MODULE.subprocess, "Popen", return_value=AttachedProcess()
+        ), mock.patch.object(
+            MODULE,
+            "docker",
+            side_effect=MODULE.RunnerError("synthetic inspect failure"),
+        ), mock.patch.object(MODULE, "stop_container") as cleanup:
+            with self.assertRaises(MODULE.FixedGateFailure) as raised:
+                MODULE.wait_generated_test_container(
+                    container, 30, "generated-test-01"
+                )
+        self.assertEqual("generated-test-01", raised.exception.category)
+        self.assertTrue(raised.exception.diagnostic.startswith(output))
+        self.assertTrue(
+            raised.exception.diagnostic.endswith(
+                b"generated unittest state inspection failed\n"
+            )
+        )
+        cleanup.assert_called_once_with(container, strict=True)
+
     def test_headless_wait_keeps_only_allowlisted_code(self) -> None:
         container = MODULE.ContainerRef(
             "dsh-harness-notion-deadbeef-task",
@@ -889,6 +1062,23 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
                     stderr.getvalue(),
                 )
                 self.assertNotIn(canary, stderr.getvalue())
+
+        stderr = io.StringIO()
+        diagnostic = f"AssertionError: {canary}\n".encode()
+        with mock.patch.dict(MODULE.__dict__, values), mock.patch.object(
+            MODULE,
+            "execute",
+            side_effect=MODULE.FixedGateFailure(
+                "generated-test-01", diagnostic
+            ),
+        ), redirect_stderr(stderr):
+            self.assertEqual(6, MODULE.main())
+        self.assertEqual(
+            "harness notion automation remote operation failed "
+            "(post-authoring/generated-test-01)\n"
+            f"AssertionError: {canary}\n",
+            stderr.getvalue(),
+        )
 
     def test_trusted_probe_failure_main_outputs_stage_and_diagnostic(
         self,
@@ -1493,7 +1683,9 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
             MODULE, "generated_manifest", return_value={}
         ), mock.patch.object(
             MODULE, "create_container", return_value=container
-        ) as create, mock.patch.object(MODULE, "wait_detached_container"):
+        ) as create, mock.patch.object(
+            MODULE, "wait_generated_test_container"
+        ) as wait:
             MODULE.run_tests(self.IMAGE_ID, notion, self.NONCE, {})
         self.assertEqual(len(MODULE.TEST_METHODS), create.call_count)
         for call in create.call_args_list:
@@ -1502,6 +1694,10 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
                 f"type=bind,src={notion},dst=/work,readonly", args
             )
             self.assertNotIn(f"type=bind,src={notion},dst=/work", args)
+        self.assertEqual(
+            list(MODULE.GENERATED_TEST_GATE_CATEGORIES),
+            [call.args[2] for call in wait.call_args_list],
+        )
 
     def test_generated_test_07_wait_and_manifest_failures_are_fixed_and_redacted(
         self,
@@ -1518,7 +1714,11 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
                 wait_count = 0
                 manifest_count = 0
 
-                def wait(_container: object, _timeout: int) -> None:
+                def wait(
+                    _container: object,
+                    _timeout: int,
+                    _category: str,
+                ) -> None:
                     nonlocal wait_count
                     index = wait_count
                     wait_count += 1
@@ -1536,7 +1736,7 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
                 with mock.patch.object(
                     MODULE, "create_container", side_effect=created
                 ) as create, mock.patch.object(
-                    MODULE, "wait_detached_container", side_effect=wait
+                    MODULE, "wait_generated_test_container", side_effect=wait
                 ), mock.patch.object(
                     MODULE, "generated_manifest", side_effect=manifest
                 ):
