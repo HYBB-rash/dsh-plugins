@@ -2462,6 +2462,7 @@ class ProbeSandbox:
         self.dsh_home = self.root / "dsh-home"
         self.process_home = self.root / "process-home"
         self.run_directory = self.root / "run"
+        self.storages_directory = self.dsh_home / "storages"
         self.task_directory = self.dsh_home / "storages/task-inbox"
         self.inbox = self.task_directory / "inbox.md"
         self.state = self.task_directory / "sync-state.json"
@@ -2470,9 +2471,10 @@ class ProbeSandbox:
         self.dsh_home.mkdir(mode=0o700)
         self.process_home.mkdir(mode=0o700)
         self.run_directory.mkdir(mode=0o700)
+        self.storages_directory.mkdir(mode=0o700)
         descriptor = os.open(self.token, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            os.write(descriptor, (FAKE_TOKEN + "\n").encode("utf-8"))
+            os.write(descriptor, FAKE_TOKEN.encode("utf-8"))
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
@@ -2515,7 +2517,7 @@ class ProbeSandbox:
                     continue
                 accessed.set()
                 try:
-                    os.write(descriptor, (FAKE_TOKEN + "\n").encode("utf-8"))
+                    os.write(descriptor, FAKE_TOKEN.encode("utf-8"))
                 except OSError:
                     pass
                 finally:
@@ -2546,7 +2548,7 @@ class ProbeSandbox:
             "notion.token",
         }:
             fail()
-        if read_regular(self.token, 1024, mode=0o600) != (FAKE_TOKEN + "\n").encode("utf-8"):
+        if read_regular(self.token, 1024, mode=0o600) != FAKE_TOKEN.encode("utf-8"):
             fail()
         if list(self.process_home.iterdir()) or list(self.run_directory.iterdir()):
             fail()
@@ -4370,7 +4372,7 @@ class ContractProbe:
                 canary.unlink()
                 write_private_file(
                     sandbox.token,
-                    (FAKE_TOKEN + "\n").encode("utf-8"),
+                    FAKE_TOKEN.encode("utf-8"),
                 )
                 sandbox.assert_no_logs()
 

@@ -179,6 +179,17 @@ class HarnessNotionAutomationProbeTests(unittest.TestCase):
             with self.assertRaises(PROBE.ProbeFailure):
                 PROBE.ContractProbe(entrypoint).run_named(check)
 
+    def test_probe_sandbox_matches_the_production_first_pull_boundary(self) -> None:
+        with malicious_fixture("raise SystemExit(0)\n") as entrypoint:
+            probe = PROBE.ContractProbe(entrypoint)
+            with probe.sandbox() as sandbox:
+                self.assertTrue(sandbox.storages_directory.is_dir())
+                self.assertFalse(sandbox.task_directory.exists())
+                self.assertEqual(
+                    PROBE.read_regular(sandbox.token, 1024, mode=0o600),
+                    PROBE.FAKE_TOKEN.encode("utf-8"),
+                )
+
     def test_probe_and_remote_runner_failure_stage_allowlists_match(self) -> None:
         runner_path = RELEASE_ROOT / "scripts/harness-notion-automation-remote.py"
         tree = ast.parse(runner_path.read_text(encoding="utf-8"))

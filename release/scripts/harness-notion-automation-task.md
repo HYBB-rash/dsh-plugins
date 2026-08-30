@@ -181,7 +181,15 @@ working directory.
 Every test that needs an initialized state must establish its common base by
 running a successful first pull through the public CLI against the fake server;
 a test that explicitly verifies a failed first pull may start without a common
-base.  Treat the contents of
+base.  Use this exact production-equivalent boundary for every first-pull test:
+the visibly fake token file contains printable non-whitespace ASCII token bytes
+with no line terminator; `Path(NOTION_INBOX_FILE).parent.parent` already exists,
+while
+`Path(NOTION_INBOX_FILE).parent` and all three canonical artifacts are absent;
+and `NOTION_API_BASE` ends exactly in `/v1` with no trailing slash.  The fake
+server must require the final request path to be exactly
+`/v1/pages/{NOTION_PAGE_ID}/markdown`, proving that URL construction preserves
+the configured base path.  Treat the contents of
 `sync-state.json` and `notion-fingerprint.json` as private implementation details:
 tests may verify that they are safe JSON files, but must not fabricate, rewrite,
 or depend on any private field or schema.  Use the mirror as the only directly
