@@ -162,6 +162,18 @@ state transitions consistently in both the implementation and its tests:
 - whenever the candidate local body and current remote body are already equal,
   the operation returns `synced` even if both differ from the older common base.
 
+Every request must obey the exact wire contract (the release-owned contract
+probe enforces these counts; per operation since the previous API call, never
+more and never fewer): a `--pull` that returns `synced` or `stale` performs
+exactly one GET and zero PATCHes; `--pull --force` also performs exactly one GET
+and zero PATCHes; `conflict` detection for `--pull`, `--push`, or `--set`
+performs exactly one GET (to fetch the current remote body) and zero PATCHes;
+a successful `--push` or `--set` performs at most one GET (its conflict
+detection fetch) and exactly one PATCH carrying the complete candidate body; a
+`queued` result performs exactly one attempted PATCH, and the later
+`--retry-pending` replays exactly one PATCH with the same body; the no-op
+`--retry-pending --json` performs zero requests.  Never PATCH on a `--pull`.
+
 `tests/test_notion_inbox_sync.py` must use only the Python standard library and a
 loopback fake HTTP Notion server.  It must use a visibly fake token and synthetic
 task text.  Define exactly one public unittest class named
@@ -220,7 +232,13 @@ terminating the CLI subprocess with SIGKILL once the task directory first gains
 any entry, then run a recovery pull requiring `synced`, the equivalent second
 pull with all three artifact bytes unchanged, the silent no-op proof, and a task
 directory containing exactly the three canonical artifacts with no extra
-residue.  Do not turn `test_atomic_artifacts` into a conflict scenario; exercise
+residue.  Each scenario method must also assert the exact wire counts above from
+the fake server's method/path records, not only the final status: for example, a
+`conflict` `--push` is not request-free — it performs exactly one GET on top of
+the baseline.  The harness reruns every test method in its own fresh process and
+container, so every method must be self-contained, must establish its own
+baseline, and must pass independently of any other method.  Do not turn
+`test_atomic_artifacts` into a conflict scenario; exercise
 the two-sided divergence rule in `test_conflict`.
 
 The appended phase directive is the sole authority for the current phase's output

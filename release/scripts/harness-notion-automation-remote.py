@@ -250,6 +250,10 @@ create exactly two persistent files: an empty `/work/tests/__init__.py` and
 rename, or unlink the implementation.  Do not create any other file, directory,
 cache, receipt, handoff, log, fixture, or configuration artifact under
 `/work/tests`.  Implement all twelve tests described by the shared contract.
+Before finishing, run the complete suite yourself and require every test to
+pass; the harness will rerun each test method in its own fresh process and
+container, so every method must be self-contained and pass independently, and
+every assertion must match the exact wire contract in the shared prompt.
 Your final response must contain no source, test body, token, task text, or
 workspace content; say only that the two test files were created for external
 verification.
