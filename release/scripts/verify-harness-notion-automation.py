@@ -20,6 +20,7 @@ import hmac
 import http.server
 import json
 import os
+import resource
 import selectors
 import signal
 import socket
@@ -1499,6 +1500,26 @@ def write_private_file(path: Path, value: bytes) -> None:
         os.close(descriptor)
 
 
+def randomized_descriptor_floor() -> int:
+    """Choose a high randomized descriptor floor within the active fd limit."""
+    try:
+        soft_limit, _hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (OSError, ValueError):
+        fail()
+    if soft_limit == resource.RLIM_INFINITY:
+        ceiling = 65536
+    else:
+        ceiling = min(int(soft_limit), 65536)
+    if ceiling < 256:
+        fail()
+    lower = ceiling // 2
+    upper = ceiling - max(64, ceiling // 8)
+    if upper <= lower:
+        fail()
+    entropy = int.from_bytes(os.urandom(4), "big")
+    return lower + entropy % (upper - lower)
+
+
 def anonymous_descriptor(name: str, initial: bytes = b"", *, seal: bool = False) -> int:
     if not hasattr(os, "memfd_create") or not hasattr(fcntl, "F_ADD_SEALS"):
         fail()
@@ -1518,7 +1539,7 @@ def anonymous_descriptor(name: str, initial: bytes = b"", *, seal: bool = False)
                 | fcntl.F_SEAL_WRITE
             )
             fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
-        minimum = 32768 + int.from_bytes(os.urandom(2), "big") // 2
+        minimum = randomized_descriptor_floor()
         relocated = fcntl.fcntl(descriptor, fcntl.F_DUPFD_CLOEXEC, minimum)
         os.close(descriptor)
         return relocated
@@ -1543,7 +1564,7 @@ def one_shot_key_descriptor(value: bytes) -> int:
             f"/proc/self/fd/{writable_descriptor}",
             os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
         )
-        minimum = 32768 + int.from_bytes(os.urandom(2), "big") // 2
+        minimum = randomized_descriptor_floor()
         relocated = fcntl.fcntl(readonly_descriptor, fcntl.F_DUPFD_CLOEXEC, minimum)
         os.close(readonly_descriptor)
         readonly_descriptor = -1

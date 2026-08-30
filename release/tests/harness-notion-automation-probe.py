@@ -799,6 +799,45 @@ if __name__ == "__main__":
             os.close(trace)
             os.close(wrapper)
 
+    def test_anonymous_descriptors_respect_a_1024_soft_fd_limit(self) -> None:
+        script = f'''\
+import os
+import resource
+import runpy
+
+soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+if hard_limit != resource.RLIM_INFINITY and hard_limit < 1024:
+    raise SystemExit(77)
+resource.setrlimit(resource.RLIMIT_NOFILE, (1024, hard_limit))
+probe = runpy.run_path({str(PROBE_PATH)!r}, run_name="fd_limit_probe")
+wrapper = probe["anonymous_descriptor"]("limited-wrapper", b"print('x')\\n", seal=True)
+trace = probe["anonymous_descriptor"]("limited-trace")
+key = probe["one_shot_key_descriptor"](b"k" * 32)
+try:
+    descriptors = (wrapper, trace, key)
+    if not all(512 <= descriptor < 1024 for descriptor in descriptors):
+        raise SystemExit(78)
+finally:
+    os.close(key)
+    os.close(trace)
+    os.close(wrapper)
+'''
+        completed = subprocess.run(
+            [sys.executable, "-B", "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=30,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+        with mock.patch.object(
+            PROBE.resource, "getrlimit", return_value=(1024, 1024)
+        ), mock.patch.object(
+            PROBE.os, "urandom", return_value=(383).to_bytes(4, "big")
+        ):
+            self.assertEqual(895, PROBE.randomized_descriptor_floor())
+
     def test_authenticated_trace_rejects_tamper_drop_replay_and_wrong_key(self) -> None:
         target_source = "#!/usr/bin/env python3\n"
         with tempfile.TemporaryDirectory(prefix="dsh-trace-auth-test-") as raw_root:
