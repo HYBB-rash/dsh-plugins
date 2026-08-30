@@ -228,10 +228,20 @@ artifacts, leave both the mirror and fake remote body unchanged, then immediatel
 run an equivalent second pull and require `synced` with all three artifact bytes
 unchanged, then run the same silent no-op proof with the un-resolvable
 `NOTION_TOKEN_FILE` and require the task directory to contain exactly the three
-canonical artifacts with no extra residue.  Each scenario method must also assert the exact wire counts above from
-the fake server's method/path records, not only the final status: for example, a
-`conflict` `--push` is not request-free — it performs exactly one GET on top of
-the baseline.  The harness reruns every test method in its own fresh process and
+canonical artifacts with no extra residue.  The fake server's counters start
+from zero for every test method (each method owns its own fresh server) and
+that lifetime total must be asserted by exact number, never computed as a
+delta: `test_first_pull` finishes at exactly 1 GET and 0 PATCHes;
+`test_atomic_artifacts` finishes at exactly 2 GETs (first pull plus equivalent
+second pull, then the no-op proof adds none) and 0 PATCHes; `test_conflict`
+finishes at exactly 2 GETs (the baseline first pull plus the conflict
+`--push`'s one detection GET) and 0 PATCHes, and must follow exactly: establish
+the common base with a first pull, rewrite only the local mirror and the fake
+remote body to two different edits, run `--push --json` and require exit zero
+with status `conflict`, with the remote body still equal to the remote edit and
+the mirror still equal to the local edit.  The total of 2 GETs includes the
+baseline pull: a conflict operation adds exactly one GET, it never replaces the
+baseline.  The harness reruns every test method in its own fresh process and
 container, so every method must be self-contained, must establish its own
 baseline, and must pass independently of any other method.  Do not turn
 `test_atomic_artifacts` into a conflict scenario; exercise
