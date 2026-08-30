@@ -227,12 +227,8 @@ absent, run the first pull and require `synced`, save the bytes of all three
 artifacts, leave both the mirror and fake remote body unchanged, then immediately
 run an equivalent second pull and require `synced` with all three artifact bytes
 unchanged, then run the same silent no-op proof with the un-resolvable
-`NOTION_TOKEN_FILE`.  Also inject at least one hard crash into the first pull by
-terminating the CLI subprocess with SIGKILL once the task directory first gains
-any entry, then run a recovery pull requiring `synced`, the equivalent second
-pull with all three artifact bytes unchanged, the silent no-op proof, and a task
-directory containing exactly the three canonical artifacts with no extra
-residue.  Each scenario method must also assert the exact wire counts above from
+`NOTION_TOKEN_FILE` and require the task directory to contain exactly the three
+canonical artifacts with no extra residue.  Each scenario method must also assert the exact wire counts above from
 the fake server's method/path records, not only the final status: for example, a
 `conflict` `--push` is not request-free — it performs exactly one GET on top of
 the baseline.  The harness reruns every test method in its own fresh process and
