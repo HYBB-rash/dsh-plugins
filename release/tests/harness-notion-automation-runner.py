@@ -1179,9 +1179,26 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
             "Keep every staged or journal path directly inside the task directory",
             "Fsync the task directory after removing crash residue",
             "A second equivalent pull must leave all three canonical artifact bytes unchanged",
+            "The common base is the exact Notion body last confirmed by a successful sync",
+            "a pull with only the remote body changed adopts the remote body and returns `synced`",
+            "a push with only the local mirror changed PATCHes the local body and returns `synced`",
+            "a set while the remote body still equals the common base",
+            "both differ from the common base and also differ from each other",
+            "candidate local body and current remote body are already equal",
+            "Every test that needs an initialized state must establish its common base",
+            "a test that explicitly verifies a failed first pull may start without a common base",
+            "Treat the contents of `sync-state.json` and `notion-fingerprint.json` as private implementation details",
+            "must not fabricate, rewrite, or depend on any private field or schema",
+            "leave both the mirror and fake remote body unchanged",
+            "run an equivalent second pull and require `synced` with all three artifact bytes unchanged",
+            "Do not turn `test_atomic_artifacts` into a conflict scenario",
         ):
             with self.subTest(task_contract=required):
                 self.assertIn(required, normalized_task)
+        self.assertNotIn(
+            "If both local and remote differ from their common base, a normal operation is `conflict`",
+            normalized_task,
+        )
 
     def test_common_container_args_carry_full_operation_nonce(self) -> None:
         args = MODULE.common_container_args(

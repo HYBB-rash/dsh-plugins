@@ -127,11 +127,31 @@ Every non-silent JSON result has one fixed `status`, chosen only from `synced`,
 `queued`, `stale`, `conflict`, or `error`.  A GET failure with an existing mirror
 is `stale` and makes zero persistent changes; without a mirror it is `error`.
 A set or push whose remote write fails after the local replacement is safely
-saved is `queued`.  If both local and remote differ from their common base, a
-normal operation is `conflict`.  A successful or already-equivalent operation is
-`synced`.  `--force` changes conflict ownership only: `--pull --force` makes the
-Notion body win; `--push --force`, including set-and-push, makes this invocation's
-body win.
+saved is `queued`.  If the candidate local body and current remote body both
+differ from their common base and from each other, a normal operation is
+`conflict`.  A successful or already-equivalent operation is `synced`.  `--force`
+changes conflict ownership only: `--pull --force` makes the Notion body win;
+`--push --force`, including set-and-push, makes this invocation's body win.
+
+The common base is the exact Notion body last confirmed by a successful sync to
+be shared by the local mirror and the remote page.  This is a public behavioral
+concept, not a required `state` or `fingerprint` JSON schema.  Apply these exact
+state transitions consistently in both the implementation and its tests:
+
+- with no canonical artifacts, the first successful pull establishes the common
+  base, creates all three canonical artifacts, and returns `synced`;
+- after that sync, a pull with only the remote body changed adopts the remote body
+  and returns `synced`;
+- after that sync, a push with only the local mirror changed PATCHes the local
+  body and returns `synced`;
+- after that sync, a set while the remote body still equals the common base
+  PATCHes the complete input body and returns `synced`;
+- an operation is `conflict` only when its candidate local body and the current
+  remote body both differ from the common base and also differ from each other;
+  normal pull, push, and set must then leave both sides unchanged and make no
+  PATCH;
+- whenever the candidate local body and current remote body are already equal,
+  the operation returns `synced` even if both differ from the older common base.
 
 `tests/test_notion_inbox_sync.py` must use only the Python standard library and a
 loopback fake HTTP Notion server.  It must use a visibly fake token and synthetic
@@ -157,6 +177,21 @@ methods, or an all-true receipt.  The fake server must record method/path/reques
 counts needed by those assertions and must reject unexpected APIs.  Tests must
 not access external networking and must keep every temporary artifact outside the
 working directory.
+
+Every test that needs an initialized state must establish its common base by
+running a successful first pull through the public CLI against the fake server;
+a test that explicitly verifies a failed first pull may start without a common
+base.  Treat the contents of
+`sync-state.json` and `notion-fingerprint.json` as private implementation details:
+tests may verify that they are safe JSON files, but must not fabricate, rewrite,
+or depend on any private field or schema.  Use the mirror as the only directly
+editable local body and the fake server as the only directly editable remote
+body.  In `test_atomic_artifacts`, start with all three canonical artifacts
+absent, run the first pull and require `synced`, save the bytes of all three
+artifacts, leave both the mirror and fake remote body unchanged, then immediately
+run an equivalent second pull and require `synced` with all three artifact bytes
+unchanged.  Do not turn `test_atomic_artifacts` into a conflict scenario; exercise
+the two-sided divergence rule in `test_conflict`.
 
 The appended phase directive is the sole authority for the current phase's output
 paths and final response.  Never create or modify an artifact assigned to the
