@@ -838,6 +838,21 @@ finally:
         ):
             self.assertEqual(895, PROBE.randomized_descriptor_floor())
 
+    def test_child_command_failure_keeps_the_bounded_output_tail(self) -> None:
+        result = PROBE.CommandResult(
+            17,
+            b"stdout-prefix\n" + b"x" * 40000 + b"stdout-tail\n",
+            b"stderr-prefix\n" + b"y" * 40000 + b"stderr-tail\n",
+        )
+        with self.assertRaises(PROBE.ProbeFailure) as raised:
+            PROBE.fail_command_result(result)
+        message = str(raised.exception)
+        self.assertIn("returncode=17", message)
+        self.assertIn("stdout-tail", message)
+        self.assertIn("stderr-tail", message)
+        self.assertNotIn("stdout-prefix", message)
+        self.assertNotIn("stderr-prefix", message)
+
     def test_authenticated_trace_rejects_tamper_drop_replay_and_wrong_key(self) -> None:
         target_source = "#!/usr/bin/env python3\n"
         with tempfile.TemporaryDirectory(prefix="dsh-trace-auth-test-") as raw_root:

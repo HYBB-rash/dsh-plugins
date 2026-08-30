@@ -2269,6 +2269,17 @@ class CommandResult:
     stderr: bytes
 
 
+def fail_command_result(result: CommandResult) -> None:
+    stdout = result.stdout.decode("utf-8", "replace")[-32768:]
+    stderr = result.stderr.decode("utf-8", "replace")[-32768:]
+    raise ProbeFailure(
+        "Harness Notion automation child command failed "
+        f"(returncode={result.returncode})\n"
+        f"stdout tail:\n{stdout}\n"
+        f"stderr tail:\n{stderr}"
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class AtomicFileSnapshot:
     path: str
@@ -4837,7 +4848,7 @@ class ContractProbe:
                     list(INITIAL_PULL_ARGUMENTS),
                 )
                 if result.returncode != 0:
-                    fail()
+                    fail_command_result(result)
                 parse_status(result, {"synced"})
                 self.validate_token_trace(events)
                 after_values = sandbox.read_artifacts(REMOTE_INITIAL)
