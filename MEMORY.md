@@ -83,3 +83,4 @@
 - 2026-08-30：线上 Harness 首次创建 Workspace 业务 automation 不能伪装成普通镜像发布，也不能让模型直接写生产目标。应使用单独授权的一次性入口和当前 accepted 镜像，在无生产 Workspace/Notion/Cron 挂载的暂存区生成；由 release-owned 假服务黑盒门独立验证接口、脱敏、原子写和崩溃恢复后，再以目标必须不存在的目录级 `RENAME_NOREPLACE` 原子安装。仓库只保存通用隔离编排和可信验证器，不保存生成的业务源码或正确实现 fixture。
 - 2026-08-30：Docker CLI 的 `--mount type=bind` 可写挂载应依赖默认可写语义，不能附加无值的 `rw` 字段；线上 Harness one-shot 又使用 `--log-driver none` 时，任务等待器必须把 stdout 直接丢弃、只从有界 stderr 流提取固定白名单错误码，并显式约束模型输出预算和重试次数，否则 Docker 参数错误或 `max-tokens`/API 失败只会坍缩成不可诊断的统一退出码。
 - 2026-08-30：不写生产的 one-shot 状态快照仍必须同时持有本机和远端 production operation 共享锁，否则会与正常 `release`/`accept`/`rollback` 入口拼出撕裂状态；若入口从精确 Git commit 读取 helper，helper 未提交前只能做本地聚焦测试，不能把工作树字节当作真实正常入口验收。
+- 2026-08-30：正式镜像和开发 toolbox 的 `/tmp` 都是 `noexec`；测试替身即使在临时目录中 `chmod 0755` 也不能直接执行。需要动态命令行为时，应让已知的绝对解释器读取临时的非可执行脚本，或执行已提交在可执行文件系统上的固定 fixture，并在宿主与 `1000:1000` 的 noexec toolbox 中各跑一次同一测试；不能为测试放宽挂载或生产 helper 的净化环境。

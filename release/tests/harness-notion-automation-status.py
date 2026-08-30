@@ -34,6 +34,67 @@ ENGINE_IMAGE = "sha256:" + "e" * 64
 RELEASE_ID = "20260830T120000000Z-cccccccccccc"
 
 
+def fake_docker(root: Path, args: list[str]) -> int:
+    control = json.loads((root / "docker-control.json").read_text(encoding="utf-8"))
+    with (root / "docker.log").open("a", encoding="utf-8") as output:
+        output.write(json.dumps(args) + "\n")
+    if args[:3] == ["image", "inspect", "--format"] and args[-1] == ENGINE_IMAGE:
+        if control["block"]:
+            (root / "docker-blocked").touch()
+            for _ in range(500):
+                if (root / "docker-release").exists():
+                    break
+                time.sleep(0.01)
+            else:
+                return 8
+        print("|".join((
+            ENGINE_IMAGE,
+            "release",
+            HARNESS_COMMIT,
+            HARNESS_PATCH,
+            PLUGINS_COMMIT,
+            RELEASE_COMMIT,
+            json.dumps(["localhost/dsh-candidate:accepted"]),
+        )))
+    elif args[:3] == ["container", "inspect", "--format"]:
+        name = args[-1]
+        expected = {
+            "dsh-web": ("true", "running", "healthy"),
+            "dsh-telegram": ("true", "running", "none"),
+            "dsh-lan-proxy": ("true", "running", "none"),
+            "dsh-prepare": ("false", "exited", "none"),
+        }.get(name)
+        if expected is None:
+            return 9
+        running, status, health = expected
+        oom = "true" if name == "dsh-web" and control["webOom"] else "false"
+        dead = "true" if name == "dsh-web" and control["webDead"] else "false"
+        restarting = "true" if name == "dsh-web" and control["webRestarting"] else "false"
+        service = "lan-proxy" if name == "dsh-lan-proxy" else name.removeprefix("dsh-")
+        print("|".join((
+            ENGINE_IMAGE,
+            running,
+            status,
+            "0",
+            oom,
+            dead,
+            restarting,
+            "0",
+            health,
+            control["composeProject"],
+            service,
+        )))
+    elif args[:3] == ["container", "ls", "--all"]:
+        for index in range(control["containerCount"]):
+            print((str(index + 1) * 12)[:12])
+    elif args[:2] == ["network", "ls"]:
+        for index in range(control["networkCount"]):
+            print((format(index + 10, "x") * 12)[:12])
+    else:
+        return 9
+    return 0
+
+
 class StatusHelperTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -44,7 +105,7 @@ class StatusHelperTest(unittest.TestCase):
         self.locks = self.state / "locks"
         self.control = self.root / "docker-control.json"
         self.docker_log = self.root / "docker.log"
-        self.docker = self.root / "docker"
+        self.docker = Path(sys.executable).resolve()
         self.uid = os.getuid()
         self.gid = os.getgid()
 
@@ -80,7 +141,7 @@ class StatusHelperTest(unittest.TestCase):
         release_path.write_text(json.dumps(release), encoding="utf-8")
         release_path.chmod(0o600)
         self.write_control({})
-        self.write_fake_docker()
+        self.write_fake_docker_commands()
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -98,51 +159,28 @@ class StatusHelperTest(unittest.TestCase):
         }
         self.control.write_text(json.dumps(value), encoding="utf-8")
 
-    def write_fake_docker(self) -> None:
-        source = f'''#!{sys.executable}
-import json, pathlib, sys
-control = json.loads(pathlib.Path({str(self.control)!r}).read_text(encoding="utf-8"))
-with pathlib.Path({str(self.docker_log)!r}).open("a", encoding="utf-8") as output:
-    output.write(json.dumps(sys.argv[1:]) + "\\n")
-args = sys.argv[1:]
-if args[:3] == ["image", "inspect", "--format"] and args[-1] == {ENGINE_IMAGE!r}:
-    if control["block"]:
-        pathlib.Path({str(self.root / "docker-blocked")!r}).touch()
-        for _ in range(500):
-            if pathlib.Path({str(self.root / "docker-release")!r}).exists():
-                break
-            import time
-            time.sleep(0.01)
-        else:
-            raise SystemExit(8)
-    print("|".join(({ENGINE_IMAGE!r}, "release", {HARNESS_COMMIT!r}, {HARNESS_PATCH!r}, {PLUGINS_COMMIT!r}, {RELEASE_COMMIT!r}, json.dumps(["localhost/dsh-candidate:accepted"]))))
-elif args[:3] == ["container", "inspect", "--format"]:
-    name = args[-1]
-    expected = {{
-        "dsh-web": ("true", "running", "healthy"),
-        "dsh-telegram": ("true", "running", "none"),
-        "dsh-lan-proxy": ("true", "running", "none"),
-        "dsh-prepare": ("false", "exited", "none"),
-    }}.get(name)
-    if expected is None:
-        raise SystemExit(9)
-    running, status, health = expected
-    oom = "true" if name == "dsh-web" and control["webOom"] else "false"
-    dead = "true" if name == "dsh-web" and control["webDead"] else "false"
-    restarting = "true" if name == "dsh-web" and control["webRestarting"] else "false"
-    service = "lan-proxy" if name == "dsh-lan-proxy" else name.removeprefix("dsh-")
-    print("|".join(({ENGINE_IMAGE!r}, running, status, "0", oom, dead, restarting, "0", health, control["composeProject"], service)))
-elif args[:3] == ["container", "ls", "--all"]:
-    for index in range(control["containerCount"]):
-        print((str(index + 1) * 12)[:12])
-elif args[:2] == ["network", "ls"]:
-    for index in range(control["networkCount"]):
-        print((format(index + 10, "x") * 12)[:12])
-else:
+    def write_fake_docker_commands(self) -> None:
+        # The formal runtime mounts /tmp with noexec.  The fixed interpreter is
+        # executable; it reads these ordinary test scripts instead of asking
+        # the kernel to execute a temporary inode.
+        source = f'''import importlib.util
+import pathlib
+import sys
+
+sys.dont_write_bytecode = True
+test_path = pathlib.Path({str(Path(__file__).resolve())!r})
+spec = importlib.util.spec_from_file_location("harness_notion_status_test", test_path)
+if spec is None or spec.loader is None:
     raise SystemExit(9)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+arguments = [pathlib.Path(sys.argv[0]).name, *sys.argv[1:]]
+raise SystemExit(module.fake_docker(pathlib.Path.cwd(), arguments))
 '''
-        self.docker.write_text(source, encoding="utf-8")
-        self.docker.chmod(0o755)
+        for name in ("image", "container", "network"):
+            path = self.root / name
+            path.write_text(source, encoding="utf-8")
+            path.chmod(0o600)
 
     def command(self) -> list[str]:
         digest = hashlib.sha256(HELPER.read_bytes()).hexdigest()
@@ -173,6 +211,7 @@ else:
             stderr=subprocess.PIPE,
             check=False,
             timeout=10,
+            cwd=self.root,
         )
 
     def assert_fixed_failure(self, result: subprocess.CompletedProcess[bytes]) -> None:
@@ -289,6 +328,7 @@ else:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            cwd=self.root,
         )
         blocked = self.root / "docker-blocked"
         for _ in range(200):
@@ -378,6 +418,7 @@ else:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            cwd=self.root,
         )
         blocked = self.root / "docker-blocked"
         for _ in range(200):
