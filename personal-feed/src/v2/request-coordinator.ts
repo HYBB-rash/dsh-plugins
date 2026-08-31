@@ -16,20 +16,43 @@ export interface PersonalFeedV2Clock {
   readonly now: () => Date
 }
 
+export interface PersonalFeedV2R4Input {
+  readonly request: PersonalFeedV2Request
+  readonly signal: AbortSignal
+}
+
+export interface PersonalFeedV2R2Input {
+  readonly request: PersonalFeedV2Request
+  readonly signal: AbortSignal
+}
+
+export interface PersonalFeedV2R3Input {
+  readonly request: PersonalFeedV2Request
+  readonly window: unknown
+  readonly signal: AbortSignal
+}
+
+export interface PersonalFeedV2R5Input {
+  readonly request: PersonalFeedV2Request
+  readonly snapshot: unknown
+  readonly candidates: unknown
+  readonly signal: AbortSignal
+}
+
 export interface PersonalFeedV2R4Port {
-  readonly snapshot: (input: unknown) => unknown | Promise<unknown>
+  readonly snapshot: (input: PersonalFeedV2R4Input) => unknown | Promise<unknown>
 }
 
 export interface PersonalFeedV2R2Port {
-  readonly observe: (input: unknown) => unknown | Promise<unknown>
+  readonly observe: (input: PersonalFeedV2R2Input) => unknown | Promise<unknown>
 }
 
 export interface PersonalFeedV2R3Port {
-  readonly admit: (input: unknown) => unknown | Promise<unknown>
+  readonly admit: (input: PersonalFeedV2R3Input) => unknown | Promise<unknown>
 }
 
 export interface PersonalFeedV2R5Port {
-  readonly judge: (input: unknown) => unknown | Promise<unknown>
+  readonly judge: (input: PersonalFeedV2R5Input) => unknown | Promise<unknown>
 }
 
 export interface CreatePersonalFeedV2RequestCoordinatorOptions {
@@ -253,7 +276,7 @@ export function createPersonalFeedV2RequestCoordinator(
       } else {
         const r2 = input.signal.aborted
           ? undefined
-          : await callPort(() => options.r2.observe({ request: publicRequest(opened), snapshot: r4Result.snapshot, signal: input.signal }))
+          : await callPort(() => options.r2.observe({ request: publicRequest(opened), signal: input.signal }))
         if (r2 === undefined || input.signal.aborted) {
           outcome = incomplete('source_window', SOURCE_WINDOW_TEXT)
         } else {
@@ -263,7 +286,7 @@ export function createPersonalFeedV2RequestCoordinator(
           } else {
             const r3 = input.signal.aborted
               ? undefined
-              : await callPort(() => options.r3.admit({ request: publicRequest(opened), snapshot: r4Result.snapshot, window: r2Result.window, signal: input.signal }))
+              : await callPort(() => options.r3.admit({ request: publicRequest(opened), window: r2Result.window, signal: input.signal }))
             if (r3 === undefined || input.signal.aborted) {
               outcome = incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
             } else {
@@ -273,7 +296,7 @@ export function createPersonalFeedV2RequestCoordinator(
               } else {
                 const r5 = input.signal.aborted
                   ? undefined
-                  : await callPort(() => options.r5.judge({ request: publicRequest(opened), snapshot: r4Result.snapshot, window: r2Result.window, candidates: r3Result.candidates, signal: input.signal }))
+                  : await callPort(() => options.r5.judge({ request: publicRequest(opened), snapshot: r4Result.snapshot, candidates: r3Result.candidates, signal: input.signal }))
                 if (r5 === undefined || input.signal.aborted) {
                   outcome = incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
                 } else {

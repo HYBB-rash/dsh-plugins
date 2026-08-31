@@ -2,7 +2,24 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createPersonalFeedV2RequestCoordinator } from '../src/index.ts'
+import {
+  createPersonalFeedV2RequestCoordinator,
+  type PersonalFeedV2R2Input,
+  type PersonalFeedV2R3Input,
+  type PersonalFeedV2R4Input,
+  type PersonalFeedV2R5Input,
+  type PersonalFeedV2Request,
+} from '../src/index.ts'
+
+type Equal<Left, Right> = (<Value>() => Value extends Left ? 1 : 2) extends
+  (<Value>() => Value extends Right ? 1 : 2) ? true : false
+type Assert<Value extends true> = Value
+
+type _RequestKeysAreExact = Assert<Equal<keyof PersonalFeedV2Request, 'requestId' | 'cutoff' | 'shanghaiDay'>>
+type _R4InputKeysAreExact = Assert<Equal<keyof PersonalFeedV2R4Input, 'request' | 'signal'>>
+type _R2InputKeysAreExact = Assert<Equal<keyof PersonalFeedV2R2Input, 'request' | 'signal'>>
+type _R3InputKeysAreExact = Assert<Equal<keyof PersonalFeedV2R3Input, 'request' | 'window' | 'signal'>>
+type _R5InputKeysAreExact = Assert<Equal<keyof PersonalFeedV2R5Input, 'request' | 'snapshot' | 'candidates' | 'signal'>>
 
 type R4Result =
   | { readonly kind: 'sufficient'; readonly snapshot: unknown }
@@ -181,6 +198,100 @@ describe('Personal Feed v2 honest request lifecycle', () => {
     expect(otherChat.request.cutoff).toBe('2026-09-01T16:01:00.000Z')
     expect(clockReads).toBe(2)
     expect(fake.calls).toEqual({ r4: 2, r2: 2, r3: 2, r5: 2 })
+  })
+
+  it('passes each port only its narrow public input while preserving the complete-chain values', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-port-inputs-'))
+    temporaryDirectories.push(directory)
+    const requestSignal = signal()
+    const r4Snapshot = Object.freeze({
+      marker: 'R4_PRIVATE_SNAPSHOT',
+      privateContext: Object.freeze({ subject: 'user-only' }),
+    })
+    const r2Window = Object.freeze({
+      marker: 'R2_RAW_WINDOW',
+      bodies: Object.freeze([
+        Object.freeze({ state: 'processed', marker: 'R2_PROCESSED_BODY' }),
+        Object.freeze({ state: 'failed', marker: 'R2_FAILED_BODY' }),
+      ]),
+    })
+    const r3Candidates = Object.freeze([
+      Object.freeze({ marker: 'R3_ADMITTED_CANDIDATE', url: 'https://x.com/reader/status/42' }),
+    ])
+    const portCalls = { r4: 0, r2: 0, r3: 0, r5: 0 }
+    let r4Input: PersonalFeedV2R4Input | undefined
+    let r2Input: PersonalFeedV2R2Input | undefined
+    let r3Input: PersonalFeedV2R3Input | undefined
+    let r5Input: PersonalFeedV2R5Input | undefined
+
+    const coordinator = createPersonalFeedV2RequestCoordinator({
+      ledgerPath: join(directory, 'requests.jsonl'),
+      clock: { now: () => new Date('2026-08-31T15:59:59.000Z') },
+      r4: {
+        snapshot: async (input: PersonalFeedV2R4Input) => {
+          portCalls.r4 += 1
+          r4Input = input
+          return Object.freeze({ kind: 'sufficient', snapshot: r4Snapshot }) satisfies R4Result
+        },
+      },
+      r2: {
+        observe: async (input: PersonalFeedV2R2Input) => {
+          portCalls.r2 += 1
+          r2Input = input
+          return Object.freeze({ kind: 'complete', window: r2Window }) satisfies R2Result
+        },
+      },
+      r3: {
+        admit: async (input: PersonalFeedV2R3Input) => {
+          portCalls.r3 += 1
+          r3Input = input
+          return Object.freeze({ kind: 'admitted', candidates: r3Candidates }) satisfies R3Result
+        },
+      },
+      r5: {
+        judge: async (input: PersonalFeedV2R5Input) => {
+          portCalls.r5 += 1
+          r5Input = input
+          return Object.freeze({ kind: 'one_link', url: 'https://x.com/reader/status/42' }) satisfies R5Result
+        },
+      },
+    })
+
+    const prepared = await coordinator.prepare({ chatId: 42, messageId: 5, signal: requestSignal }) as PreparedResult
+    const expectedRequest = {
+      requestId: 'telegram:42:5',
+      cutoff: '2026-08-31T15:59:59.000Z',
+      shanghaiDay: '2026-08-31',
+    }
+
+    expect(prepared.outcome.kind).toBe('one_link')
+    expect(prepared.outcome.finalText).toBe('https://x.com/reader/status/42')
+    expect(portCalls).toEqual({ r4: 1, r2: 1, r3: 1, r5: 1 })
+    expect(Object.keys(r4Input!).sort()).toEqual(['request', 'signal'])
+    expect(Object.keys(r2Input!).sort()).toEqual(['request', 'signal'])
+    expect(Object.keys(r3Input!).sort()).toEqual(['request', 'signal', 'window'])
+    expect(Object.keys(r5Input!).sort()).toEqual(['candidates', 'request', 'signal', 'snapshot'])
+    expect(Object.keys(r4Input!.request).sort()).toEqual(['cutoff', 'requestId', 'shanghaiDay'])
+    expect(Object.keys(r2Input!.request).sort()).toEqual(['cutoff', 'requestId', 'shanghaiDay'])
+    expect(Object.keys(r3Input!.request).sort()).toEqual(['cutoff', 'requestId', 'shanghaiDay'])
+    expect(Object.keys(r5Input!.request).sort()).toEqual(['cutoff', 'requestId', 'shanghaiDay'])
+    expect(r4Input!.request).toEqual(expectedRequest)
+    expect(r2Input!.request).toEqual(expectedRequest)
+    expect(r3Input!.request).toEqual(expectedRequest)
+    expect(r5Input!.request).toEqual(expectedRequest)
+    expect(r4Input!.signal).toBe(requestSignal)
+    expect(r2Input!.signal).toBe(requestSignal)
+    expect(r3Input!.signal).toBe(requestSignal)
+    expect(r5Input!.signal).toBe(requestSignal)
+    expect(r3Input!.window).toBe(r2Window)
+    expect(r5Input!.snapshot).toBe(r4Snapshot)
+    expect(r5Input!.candidates).toBe(r3Candidates)
+    expect(r3Input).not.toBeUndefined()
+    expect(JSON.stringify(r2Input)).not.toContain('R4_PRIVATE_SNAPSHOT')
+    expect(JSON.stringify(r3Input)).not.toContain('R4_PRIVATE_SNAPSHOT')
+    expect(JSON.stringify(r5Input)).not.toContain('R2_RAW_WINDOW')
+    expect(JSON.stringify(r5Input)).not.toContain('R2_PROCESSED_BODY')
+    expect(JSON.stringify(r5Input)).not.toContain('R2_FAILED_BODY')
   })
 
   it('returns the strict canonical x.com link when the complete chain produces one link', async () => {
