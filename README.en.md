@@ -207,8 +207,6 @@ x-feed/                 Private X insight business runtime and Python pipeline (
 skills/x-feed/          Agent guidance for X feedback and saves
 skills/explore-opportunity/  Skill for verifying a lead and retaining explicit interest
 ui-context-compactor/   Single-session route and context projection
-tsdown.client.ts        Shared Web-client bundling configuration
-web/                    Small Web platform type entry point
 ```
 
 ## License

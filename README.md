@@ -223,8 +223,6 @@ x-feed/                 X 洞察私有业务运行时与 Python 流水线（非�
 skills/x-feed/          X 反馈与收藏的 Agent 行为说明
 skills/explore-opportunity/  用现有工具查证线索并维护显式兴趣的 Skill
 ui-context-compactor/   单 session 路线与上下文投影
-tsdown.client.ts        Web client 打包共用配置
-web/                    小型 Web 平台类型入口
 ```
 
 ## 许可证
