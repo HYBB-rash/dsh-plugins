@@ -203,6 +203,20 @@ export type PersonalContextCurrentSourceProof =
       readonly digest: string
     }
 
+type CurrentSourceProofAtFence =
+  | {
+      readonly currentSourceProof: Extract<PersonalContextCurrentSourceProof, { readonly status: 'missing' }>
+      readonly currentReason: 'current_source_missing'
+    }
+  | {
+      readonly currentSourceProof: Extract<PersonalContextCurrentSourceProof, { readonly status: 'pending' }>
+      readonly currentReason: 'current_source_pending'
+    }
+  | {
+      readonly currentSourceProof: Extract<PersonalContextCurrentSourceProof, { readonly status: 'settled_for_future_request' }>
+      readonly currentReason: undefined
+    }
+
 export interface PersonalContextSnapshotProof {
   readonly fenceDigest: string
   readonly coverage: PersonalContextCoverageProof
@@ -1353,36 +1367,9 @@ function buildCausalSnapshot(
     ...revisionsUnsigned,
     digest: digestFor(revisionsUnsigned),
   })
-  const currentSource = currentSources[0]
-  let currentSourceProof: PersonalContextCurrentSourceProof
-  let currentReason: 'current_source_missing' | 'current_source_pending' | undefined
-  if (currentSource === undefined) {
-    currentSourceProof = { status: 'missing', requestId: persistedFence.requestId }
-    currentReason = 'current_source_missing'
-  } else {
-    const coverage = coverageByKey.get(currentSource.sourceKey)
-    if (coverage === undefined) throw new PersonalFeedScopeStoreError('personal context current source lacks coverage')
-    if (coverage.status === 'pending') {
-      currentSourceProof = {
-        status: 'pending',
-        sourceKey: currentSource.sourceKey,
-        excludedRequestId: persistedFence.requestId,
-        captureSequence: currentSource.captureSequence,
-      }
-      currentReason = 'current_source_pending'
-    } else {
-      const unsigned = {
-        status: 'settled_for_future_request' as const,
-        sourceKey: currentSource.sourceKey,
-        excludedRequestId: persistedFence.requestId,
-        captureSequence: currentSource.captureSequence,
-        terminalTransactionSequence: coverage.terminalTransactionSequence,
-        dispositionDigest: coverage.dispositionDigest,
-        revisionDigest: coverage.revisionDigest,
-      }
-      currentSourceProof = { ...unsigned, digest: digestFor(unsigned) }
-    }
-  }
+  const { currentSourceProof, currentReason } = currentSourceProofAtFence(
+    currentSources[0], coverageByKey, persistedFence,
+  )
   const proof: PersonalContextSnapshotProof = deepFreeze({
     fenceDigest: persistedFence.digest,
     coverage: coverageProof,
@@ -1439,6 +1426,45 @@ function buildCausalSnapshot(
     digest: digestFor(unsignedSnapshot),
   })
   return deepFreeze({ kind: 'sufficient', snapshot })
+}
+
+function currentSourceProofAtFence(
+  currentSource: PersonalContextSource | undefined,
+  coverageByKey: ReadonlyMap<string, PersonalContextCoverage>,
+  persistedFence: PersonalContextFence,
+): CurrentSourceProofAtFence {
+  if (currentSource === undefined) {
+    return {
+      currentSourceProof: { status: 'missing', requestId: persistedFence.requestId },
+      currentReason: 'current_source_missing',
+    }
+  }
+  const coverage = coverageByKey.get(currentSource.sourceKey)
+  if (coverage === undefined) throw new PersonalFeedScopeStoreError('personal context current source lacks coverage')
+  if (coverage.status === 'pending') {
+    return {
+      currentSourceProof: {
+        status: 'pending',
+        sourceKey: currentSource.sourceKey,
+        excludedRequestId: persistedFence.requestId,
+        captureSequence: currentSource.captureSequence,
+      },
+      currentReason: 'current_source_pending',
+    }
+  }
+  const unsigned = {
+    status: 'settled_for_future_request' as const,
+    sourceKey: currentSource.sourceKey,
+    excludedRequestId: persistedFence.requestId,
+    captureSequence: currentSource.captureSequence,
+    terminalTransactionSequence: coverage.terminalTransactionSequence,
+    dispositionDigest: coverage.dispositionDigest,
+    revisionDigest: coverage.revisionDigest,
+  }
+  return {
+    currentSourceProof: { ...unsigned, digest: digestFor(unsigned) },
+    currentReason: undefined,
+  }
 }
 
 function laneSnapshot(
