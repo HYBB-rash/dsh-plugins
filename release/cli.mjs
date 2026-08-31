@@ -4240,7 +4240,7 @@ cat "$root/current/release.json"
     reanchoredAt: reanchorRequest.reanchoredAt,
   }
   const remoteReanchorStep = reanchorRequest.required
-    ? `compose run --rm --no-deps prepare ${cronReanchorArgs(reanchorRequest).map(shellQuote).join(' ')} >"$release_dir/schedule-reanchor.json"
+    ? `compose_run prepare ${cronReanchorArgs(reanchorRequest).map(shellQuote).join(' ')} >"$release_dir/schedule-reanchor.json"
 python3 - "$release_dir/schedule-reanchor.json" <<'PY'
 import json, re, sys
 value = json.load(open(sys.argv[1], encoding='utf-8'))
@@ -4253,7 +4253,7 @@ assert len(value.get('jobs', [])) == value['cronJobCount']
 PY`
     : `test -f "$release_dir/reanchor-evidence.json"
 test "$(stat -c '%a' "$release_dir/reanchor-evidence.json")" = 600
-compose run --rm --no-deps \
+compose_run \
   --volume "$release_dir/reanchor-evidence.json:/run/reanchor-evidence.json:ro" \
   prepare cron-reanchor-inspect --evidence-file /run/reanchor-evidence.json \
   >"$release_dir/schedule-reanchor.json"
@@ -4298,10 +4298,11 @@ test "$(docker image inspect "$expected_tag" --format '{{index .Config.Labels "i
 cd "$release_dir"
 export DSH_IMAGE="$expected_tag" DSH_IMAGE_ID="$expected_image"
 compose() { docker compose -p dsh -f "$release_dir/compose.production.yml" "$@"; }
+compose_run() { compose run --rm --no-deps --interactive=false --no-TTY "$@"; }
 printf '%s\n' ${shellQuote(JSON.stringify(reanchorPublicRequest))} >"$release_dir/reanchor-request.json"
 
 # State transitions run while every DSH writer remains stopped.
-compose run --rm --no-deps prepare workspace-migrate >"$release_dir/workspace-migration.json"
+compose_run prepare workspace-migrate >"$release_dir/workspace-migration.json"
 python3 - "$release_dir/workspace-migration.json" <<'PY'
 import json, re, sys
 value = json.load(open(sys.argv[1], encoding='utf-8'))
@@ -4311,7 +4312,7 @@ assert value.get('migrationVersion') == 1
 assert re.fullmatch(r'[0-9a-f]{64}', value.get('manifestSha256', ''))
 assert re.fullmatch(r'[0-9a-f]{64}', value.get('receiptSha256', ''))
 PY
-compose run --rm --no-deps \
+compose_run \
   -e DSH_EXPECTED_WORKSPACE_MIGRATION_CODE_SHA256=${shellQuote(candidate.workspaceMigration.codeSha256)} \
   -e DSH_EXPECTED_WORKSPACE_MIGRATION_MANIFEST_SHA256=${shellQuote(candidate.workspaceMigration.manifestSha256)} \
   -e DSH_EXPECTED_WORKSPACE_MIGRATION_TEMPLATE_SHA256=${shellQuote(candidate.workspaceMigration.templateSha256)} \
@@ -4322,8 +4323,8 @@ compose run --rm --no-deps \
 # This is a second read-only credential/page check through the candidate
 # environment. Business task-mirror initialization remains owned by the live
 # Harness Workspace and is deliberately not fabricated by release code.
-compose run --rm --no-deps prepare notion-page-check >"$release_dir/notion-page.json"
-compose run --rm --no-deps prepare notion-inbox-init >"$release_dir/notion-inbox-init.json"
+compose_run prepare notion-page-check >"$release_dir/notion-page.json"
+compose_run prepare notion-inbox-init >"$release_dir/notion-inbox-init.json"
 python3 - "$release_dir/notion-inbox-init.json" <<'PY'
 import json, re, sys
 value = json.load(open(sys.argv[1], encoding='utf-8'))
@@ -4391,7 +4392,7 @@ docker exec dsh-telegram node /opt/dsh/release-system/scripts/check-assistant-cr
   >"$release_dir/assistant-cron-health.json"
 docker exec dsh-web /opt/dsh/release-system/scripts/entrypoint.sh harness-only-health \
   >"$release_dir/harness-only-health.json"
-compose run --rm --no-deps prepare validate-state /home/herman/.dsh \
+compose_run prepare validate-state /home/herman/.dsh \
   >"$release_dir/state-validation.json"
 python3 - "$release_dir/state-validation.json" <<'PY'
 import json, sys

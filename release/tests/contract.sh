@@ -709,6 +709,9 @@ ordered = [
 ]
 positions = [production.index(token) for token in ordered]
 assert positions == sorted(positions), list(zip(ordered, positions))
+assert 'compose_run() { compose run --rm --no-deps --interactive=false --no-TTY "$@"; }' in source
+assert source.count('compose run --rm --no-deps') == 1
+assert source.count('compose_run ') == 7
 release_command = source[source.index('function commandRelease'):source.index('function validateWaitingReanchorRequest')]
 assert release_command.index('verifyProductionNotionAutomation(candidate)') < release_command.index("if (!options['approved-stop'])")
 PY
