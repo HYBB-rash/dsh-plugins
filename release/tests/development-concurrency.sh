@@ -85,6 +85,52 @@ chmod +x "$mock_engine"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_bin/curl"
 chmod +x "$fake_bin/curl"
 
+cat >"$fake_bin/git" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source_path=''
+if [[ "${1:-}" == -C ]]; then source_path="$2"; shift 2; fi
+case "${1:-} ${2:-}" in
+  'rev-parse --show-toplevel') printf '%s\n' "$source_path" ;;
+  'branch --show-current') printf '%s\n' codex/fixture ;;
+  'fetch origin') ;;
+  'rev-parse HEAD'|'rev-parse origin/main') printf '%s\n' "$MOCK_GIT_COMMIT" ;;
+  'merge-base --is-ancestor') ;;
+  *) printf 'unexpected git fixture call: %q\n' "$*" >&2; exit 64 ;;
+esac
+EOF
+chmod +x "$fake_bin/git"
+
+cat >"$fake_bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "$*" == *' test -f '* ]]; then exit 0; fi
+if [[ "$*" == *' cat '* ]]; then
+  printf '{"schemaVersion":1,"snapshotId":"fixture","archivePath":"%s","archiveSha256":"%s","remoteArchivePath":"%s","createdAt":"2026-08-31T00:00:00.000Z"}\n' \
+    "$MOCK_REMOTE_SNAPSHOT" "$MOCK_SNAPSHOT_SHA" "$MOCK_REMOTE_SNAPSHOT"
+  exit 0
+fi
+printf 'unexpected ssh fixture call: %q\n' "$*" >&2
+exit 64
+EOF
+chmod +x "$fake_bin/ssh"
+
+cat >"$fake_bin/scp" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+destination="${!#}"
+cp "$MOCK_SNAPSHOT_ARCHIVE" "$destination"
+EOF
+chmod +x "$fake_bin/scp"
+
+snapshot_root="$test_root/snapshot-root"
+snapshot_archive="$test_root/snapshot.tar"
+remote_snapshot='/home/herman/.local/share/dsh-container/snapshots/fixture.tar.zst'
+mkdir -p "$snapshot_root/.dsh/storages/dsh-cron" "$snapshot_root/.dsh/workspace"
+touch "$snapshot_root/.dsh/storages/dsh-cron/jobs.jsonl"
+tar -C "$snapshot_root" -cf "$snapshot_archive" .dsh
+snapshot_sha="sha256:$(sha256sum "$snapshot_archive" | awk '{print $1}')"
+
 candidate="$test_root/candidate.json"
 receipt="$test_root/image-tests.json"
 image_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -116,7 +162,22 @@ EOF
 
 source_a="$test_root/worktree-a"
 source_b="$test_root/worktree-b"
-mkdir -p "$source_a" "$source_b"
+prepare_source() {
+  local source="$1" package profile
+  for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed x-feed; do
+    mkdir -p "$source/$package"
+    printf '%s\n' '{}' >"$source/$package/package.json"
+  done
+  mkdir -p "$source/release/scripts" "$source/skills" "$source/scripts"
+  touch "$source/release/harness-automation-instructions.md" "$source/release/vitest.external.config.ts"
+  touch "$source/runtime-package-topology.json" "$source/scripts/materialize-runtime-topology.mjs"
+  for profile in web telegram telegram-test; do
+    mkdir -p "$source/release/profiles/$profile"
+    touch "$source/release/profiles/$profile/package.json" "$source/release/profiles/$profile/cordis.patch.yml"
+  done
+}
+prepare_source "$source_a"
+prepare_source "$source_b"
 
 run_dev() {
   PATH="$fake_bin:$PATH" \
@@ -124,11 +185,28 @@ run_dev() {
   DSH_CONTAINER_ENGINE="$mock_engine" \
   MOCK_ENGINE_STATE="$mock_state" \
   MOCK_ENGINE_LOG="$test_root/engine.log" \
+  MOCK_GIT_COMMIT="1111111111111111111111111111111111111111" \
+  MOCK_SNAPSHOT_ARCHIVE="$snapshot_archive" \
+  MOCK_SNAPSHOT_SHA="$snapshot_sha" \
+  MOCK_REMOTE_SNAPSHOT="$remote_snapshot" \
     "$repo_root/release/dsh" "$@"
 }
 
-run_dev dev up --source "$source_a" --snapshot synthetic --candidate "$candidate" >"$test_root/a.json"
-run_dev dev up --source "$source_b" --snapshot synthetic --candidate "$candidate" >"$test_root/b.json"
+extract_ready_receipt() {
+  awk '
+    /^\{$/ { block = $0 ORS; next }
+    { block = block $0 ORS }
+    /^\}$/ {
+      if (block ~ /"result": "dev-source-ready"/) { printf "%s", block; exit }
+      block = ""
+    }
+  ' "$1" >"$2"
+}
+
+run_dev dev prepare --source "$source_a" --candidate "$candidate" >"$test_root/a.log"
+run_dev dev prepare --source "$source_b" --candidate "$candidate" >"$test_root/b.log"
+extract_ready_receipt "$test_root/a.log" "$test_root/a.json"
+extract_ready_receipt "$test_root/b.log" "$test_root/b.json"
 
 node - <<'NODE' "$test_root/a.json" "$test_root/b.json"
 const fs = require('node:fs')
@@ -165,4 +243,4 @@ test -z "$(find "$state_root/dev/leases" -mindepth 1 -print -quit 2>/dev/null ||
 test -z "$(find "$state_root/dev/runtimes" -mindepth 1 -print -quit 2>/dev/null || true)"
 test -f "$candidate"
 
-printf 'parallel per-worktree development runtime contract passed\n'
+printf 'parallel per-worktree dev prepare contract passed\n'
