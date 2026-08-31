@@ -28,6 +28,8 @@ export interface PersonalContextInterestProposal {
   readonly focusSpan: PersonalContextSpan
   readonly protectedSpans: PersonalContextProtectedSpans
   readonly attitude: PersonalContextAttitude
+  readonly operation: PersonalContextRevisionOperation
+  readonly targetFactIds: readonly string[]
 }
 
 export interface PersonalContextKnowledgeProposal {
@@ -36,9 +38,13 @@ export interface PersonalContextKnowledgeProposal {
   readonly focusSpan: PersonalContextSpan
   readonly protectedSpans: PersonalContextProtectedSpans
   readonly attitude: PersonalContextAttitude
+  readonly operation: PersonalContextRevisionOperation
+  readonly targetFactIds: readonly string[]
 }
 
 export type PersonalContextFactProposal = PersonalContextInterestProposal | PersonalContextKnowledgeProposal
+
+export type PersonalContextRevisionOperation = 'assert' | 'confirm' | 'correct' | 'replace' | 'retract'
 
 export type PersonalContextNoFactReason =
   | 'not_personal_fact'
@@ -64,6 +70,7 @@ export interface PersonalContextClassifierInput {
   readonly sourceKey: string
   readonly rawText: string
   readonly useAuthorization: PersonalContextUseAuthorization
+  readonly activeFacts: readonly PersonalContextActiveFact[]
 }
 
 export interface PersonalContextCanonicalInterestFact {
@@ -82,6 +89,18 @@ export type PersonalContextCanonicalFact =
   | PersonalContextCanonicalInterestFact
   | PersonalContextCanonicalKnowledgeFact
 
+export interface PersonalContextActiveFact {
+  readonly factId: string
+  readonly fact: PersonalContextTerminalFact
+  readonly basisRevisionIds: readonly string[]
+}
+
+export interface PersonalContextCanonicalRevision {
+  readonly operation: PersonalContextRevisionOperation
+  readonly targetFacts: readonly PersonalContextActiveFact[]
+  readonly priorActiveFacts: readonly PersonalContextActiveFact[]
+}
+
 export interface PersonalContextEntailmentTarget {
   readonly focusSpanWithinEvidence: PersonalContextSpan
   readonly exactFocusText: string
@@ -94,6 +113,7 @@ export interface PersonalContextEntailmentInput {
   readonly exactEvidenceText: string
   readonly target: PersonalContextEntailmentTarget
   readonly canonicalFact: PersonalContextCanonicalFact
+  readonly revision: PersonalContextCanonicalRevision
 }
 
 export interface PersonalContextNoFactInput {
@@ -137,15 +157,22 @@ export type PersonalContextTerminalFact =
 
 export type PersonalContextTerminalDisposition =
   | {
-      readonly schemaVersion: 1
+      readonly schemaVersion: 2
       readonly status: 'applied'
-      readonly facts: readonly PersonalContextTerminalFact[]
+      readonly changes: readonly PersonalContextTerminalChange[]
     }
   | {
-      readonly schemaVersion: 1
+      readonly schemaVersion: 2
       readonly status: 'ignored'
       readonly reason: PersonalContextNoFactReason
     }
+
+export interface PersonalContextTerminalChange {
+  readonly operation: PersonalContextRevisionOperation
+  readonly targetFactIds: readonly string[]
+  readonly fact: PersonalContextTerminalFact
+  readonly validationInputDigest: string
+}
 
 type ParsedClassifierOutput =
   | { readonly kind: 'facts'; readonly facts: readonly PersonalContextFactProposal[] }
@@ -231,7 +258,7 @@ export function parseClassifierOutput(value: unknown, rawText: string): ParsedCl
 export function parseEntailmentApproval(value: unknown): boolean {
   return isRecord(value)
     && hasExactlyKeys(value, ['kind'])
-    && value.kind === 'target_entailed_with_minimal_evidence'
+    && value.kind === 'target_and_revision_confirmed'
 }
 
 export function parseNoFactApproval(value: unknown): boolean {
@@ -244,6 +271,7 @@ export function prepareFact(
   proposal: PersonalContextFactProposal,
   fullRawText: string,
   sourceKey: string,
+  revision: PersonalContextCanonicalRevision,
 ): PreparedPersonalContextFact | undefined {
   if (!passesMechanicalGuard(proposal, fullRawText)) return undefined
   const allSpans = [proposal.focusSpan, ...PROTECTED_KEYS.flatMap(key => proposal.protectedSpans[key])]
@@ -280,26 +308,31 @@ export function prepareFact(
     : { lane: proposal.lane, epistemic: proposal.epistemic, evidence, useAuthorization: PERSONAL_CONTEXT_USE_AUTHORIZATION }
   return {
     canonicalFact,
-    validatorInput: { fullRawText, evidenceSpan, exactEvidenceText, target, canonicalFact },
+    validatorInput: { fullRawText, evidenceSpan, exactEvidenceText, target, canonicalFact, revision },
     terminalFact,
   }
 }
 
 export function parseTerminalDisposition(value: unknown): PersonalContextTerminalDisposition | undefined {
-  if (!isRecord(value) || value.schemaVersion !== 1) return undefined
+  if (!isRecord(value) || value.schemaVersion !== 2) return undefined
   if (hasExactlyKeys(value, ['schemaVersion', 'status', 'reason']) && value.status === 'ignored' && isNoFactReason(value.reason)) {
-    return { schemaVersion: 1, status: 'ignored', reason: value.reason }
+    return { schemaVersion: 2, status: 'ignored', reason: value.reason }
   }
-  if (!hasExactlyKeys(value, ['schemaVersion', 'status', 'facts']) || value.status !== 'applied' || !Array.isArray(value.facts) || value.facts.length === 0) {
+  if (!hasExactlyKeys(value, ['schemaVersion', 'status', 'changes']) || value.status !== 'applied' || !Array.isArray(value.changes) || value.changes.length === 0) {
     return undefined
   }
-  const facts: PersonalContextTerminalFact[] = []
-  for (const fact of value.facts) {
-    const parsed = parseTerminalFact(fact)
-    if (parsed === undefined) return undefined
-    facts.push(parsed)
+  const changes: PersonalContextTerminalChange[] = []
+  for (const change of value.changes) {
+    if (!isRecord(change) || !hasExactlyKeys(change, ['operation', 'targetFactIds', 'fact', 'validationInputDigest'])) return undefined
+    const operation = parseOperation(change.operation)
+    const targetFactIds = parseTargetFactIds(change.targetFactIds, operation)
+    const fact = parseTerminalFact(change.fact)
+    if (operation === undefined || targetFactIds === undefined || fact === undefined
+      || typeof change.validationInputDigest !== 'string'
+      || !/^sha256:[0-9a-f]{64}$/.test(change.validationInputDigest)) return undefined
+    changes.push({ operation, targetFactIds, fact, validationInputDigest: change.validationInputDigest })
   }
-  return { schemaVersion: 1, status: 'applied', facts }
+  return { schemaVersion: 2, status: 'applied', changes }
 }
 
 function parseFactProposal(value: unknown, rawText: string): PersonalContextFactProposal | undefined {
@@ -307,28 +340,55 @@ function parseFactProposal(value: unknown, rawText: string): PersonalContextFact
   const common = parseFactCommon(value, rawText)
   if (common === undefined) return undefined
   if (value.lane === 'long_term_interest'
-    && hasExactlyKeys(value, ['lane', 'stance', 'focusSpan', 'protectedSpans', 'attitude'])
+    && hasExactlyKeys(value, ['lane', 'stance', 'focusSpan', 'protectedSpans', 'attitude', 'operation', 'targetFactIds'])
     && isOneOf(value.stance, ['include', 'exclude'])) {
+    const operation = parseOperation(value.operation)
+    const targetFactIds = parseTargetFactIds(value.targetFactIds, operation)
+    if (operation === undefined || targetFactIds === undefined) return undefined
     return {
       lane: value.lane,
       stance: value.stance,
       focusSpan: common.focusSpan,
       protectedSpans: common.protectedSpans,
       attitude: common.attitude,
+      operation,
+      targetFactIds,
     }
   }
   if (value.lane === 'existing_knowledge'
-    && hasExactlyKeys(value, ['lane', 'epistemic', 'focusSpan', 'protectedSpans', 'attitude'])
+    && hasExactlyKeys(value, ['lane', 'epistemic', 'focusSpan', 'protectedSpans', 'attitude', 'operation', 'targetFactIds'])
     && isOneOf(value.epistemic, ['asserted', 'uncertain'])) {
+    const operation = parseOperation(value.operation)
+    const targetFactIds = parseTargetFactIds(value.targetFactIds, operation)
+    if (operation === undefined || targetFactIds === undefined) return undefined
     return {
       lane: value.lane,
       epistemic: value.epistemic,
       focusSpan: common.focusSpan,
       protectedSpans: common.protectedSpans,
       attitude: common.attitude,
+      operation,
+      targetFactIds,
     }
   }
   return undefined
+}
+
+function parseOperation(value: unknown): PersonalContextRevisionOperation | undefined {
+  return isOneOf(value, ['assert', 'confirm', 'correct', 'replace', 'retract']) ? value : undefined
+}
+
+function parseTargetFactIds(
+  value: unknown,
+  operation: PersonalContextRevisionOperation | undefined,
+): readonly string[] | undefined {
+  if (operation === undefined || !Array.isArray(value)) return undefined
+  if (value.some(id => typeof id !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(id))) return undefined
+  const ids = value as string[]
+  if (new Set(ids).size !== ids.length) return undefined
+  if ((operation === 'assert') !== (ids.length === 0)) return undefined
+  if (operation === 'confirm' && ids.length !== 1) return undefined
+  return [...ids]
 }
 
 function parseFactCommon(value: Record<string, unknown>, rawText: string): {

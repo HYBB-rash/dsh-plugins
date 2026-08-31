@@ -15,15 +15,20 @@ import {
   parseNoFactApproval,
   parseTerminalDisposition,
   prepareFact,
+  type PersonalContextActiveFact,
+  type PersonalContextCanonicalRevision,
+  type PersonalContextRevisionOperation,
   type PersonalContextSemanticPorts,
+  type PersonalContextTerminalChange,
   type PersonalContextTerminalDisposition,
-  type PersonalContextTerminalFact,
 } from './personal-context-semantics.ts'
 
 export {
   PERSONAL_CONTEXT_USE_AUTHORIZATION,
   type PersonalContextAttitude,
+  type PersonalContextActiveFact,
   type PersonalContextCanonicalFact,
+  type PersonalContextCanonicalRevision,
   type PersonalContextClassifierInput,
   type PersonalContextEntailmentInput,
   type PersonalContextEntailmentTarget,
@@ -31,16 +36,18 @@ export {
   type PersonalContextNoFactInput,
   type PersonalContextNoFactReason,
   type PersonalContextProtectedSpans,
+  type PersonalContextRevisionOperation,
   type PersonalContextSemanticPorts,
   type PersonalContextSpan,
   type PersonalContextTerminalDisposition,
+  type PersonalContextTerminalChange,
   type PersonalContextTerminalEvidence,
   type PersonalContextTerminalFact,
   type PersonalContextUseAuthorization,
 } from './personal-context-semantics.ts'
 
 const APPLICATION_ID = 0x50435632
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 
 export interface PersonalContextTelegramLocator {
   readonly kind: 'telegram_inbound'
@@ -74,6 +81,9 @@ export interface PersonalContextTerminalCoverage {
   readonly sourceKey: string
   readonly status: 'applied' | 'ignored'
   readonly disposition: PersonalContextTerminalDisposition
+  readonly terminalTransactionSequence: number
+  readonly dispositionDigest: string
+  readonly revisionDigest: string
 }
 
 export type PersonalContextCoverage = PersonalContextPendingCoverage | PersonalContextTerminalCoverage
@@ -101,12 +111,124 @@ export interface PersonalContextOwnerSnapshot {
   readonly coverage: readonly PersonalContextCoverage[]
 }
 
+export interface PersonalContextRequestCoordinates {
+  readonly requestId: string
+  readonly cutoff: string
+  readonly shanghaiDay: string
+}
+
+export interface PersonalContextFence {
+  readonly schemaVersion: 1
+  readonly requestId: string
+  readonly cutoff: string
+  readonly shanghaiDay: string
+  readonly storeId: string
+  readonly maxCaptureSequence: number
+  readonly maxTerminalTransactionSequence: number
+  readonly digest: string
+}
+
+export interface PersonalContextSnapshotInput {
+  readonly fence: PersonalContextFence
+}
+
+export interface PersonalContextFreezeFenceInput {
+  readonly request: PersonalContextRequestCoordinates
+}
+
 export interface PersonalContextOwner {
   readonly capture: (input: PersonalContextCaptureInput) => PersonalContextCaptureResult
   readonly settle: (input: PersonalContextSettleInput) => Promise<PersonalContextSettleResult>
   readonly read: () => PersonalContextOwnerSnapshot
+  readonly freezeFence: (input: PersonalContextFreezeFenceInput) => PersonalContextFence
+  readonly snapshot: (input: PersonalContextSnapshotInput) => PersonalContextSnapshotResult
   readonly close: () => void
 }
+
+export type PersonalContextLaneSufficiency =
+  | { readonly status: 'sufficient'; readonly basisFactIds: readonly string[] }
+  | { readonly status: 'insufficient'; readonly reason: 'no_active_include' | 'no_asserted_knowledge' }
+
+export interface PersonalContextLaneSnapshot {
+  readonly lane: 'long_term_interest' | 'existing_knowledge'
+  readonly contextCutId: string
+  readonly activeFacts: readonly PersonalContextActiveFact[]
+  readonly sufficiency: PersonalContextLaneSufficiency
+  readonly digest: string
+}
+
+export interface PersonalContextRevisionEntry {
+  readonly revisionId: string
+  readonly currentFactId: string
+  readonly sourceKey: string
+  readonly factOrdinal: number
+  readonly lane: 'long_term_interest' | 'existing_knowledge'
+  readonly operation: PersonalContextRevisionOperation
+  readonly targetFactIds: readonly string[]
+  readonly terminalTransactionSequence: number
+  readonly validationInputDigest: string
+  readonly operationDigest: string
+}
+
+export interface PersonalContextIncludedTerminalSourceProof {
+  readonly sourceKey: string
+  readonly captureSequence: number
+  readonly terminalTransactionSequence: number
+  readonly dispositionDigest: string
+}
+
+export interface PersonalContextCoverageProof {
+  readonly includedTerminalSources: readonly PersonalContextIncludedTerminalSourceProof[]
+  readonly unknownAtFenceSourceKeys: readonly string[]
+  readonly digest: string
+}
+
+export interface PersonalContextRevisionsProof {
+  readonly watermark: number
+  readonly entries: readonly PersonalContextRevisionEntry[]
+  readonly digest: string
+}
+
+export type PersonalContextCurrentSourceProof =
+  | { readonly status: 'missing'; readonly requestId: string }
+  | { readonly status: 'pending'; readonly sourceKey: string; readonly excludedRequestId: string; readonly captureSequence: number }
+  | {
+      readonly status: 'settled_for_future_request'
+      readonly sourceKey: string
+      readonly excludedRequestId: string
+      readonly captureSequence: number
+      readonly terminalTransactionSequence: number
+      readonly dispositionDigest: string
+      readonly revisionDigest: string
+      readonly digest: string
+    }
+
+export interface PersonalContextSnapshotProof {
+  readonly fenceDigest: string
+  readonly coverage: PersonalContextCoverageProof
+  readonly revisions: PersonalContextRevisionsProof
+  readonly currentSource: PersonalContextCurrentSourceProof
+}
+
+export interface PersonalContextCompositeSnapshot {
+  readonly schemaVersion: 1
+  readonly fence: PersonalContextFence
+  readonly contextCutId: string
+  readonly longTermInterest: PersonalContextLaneSnapshot
+  readonly existingKnowledge: PersonalContextLaneSnapshot
+  readonly proof: PersonalContextSnapshotProof
+  readonly digest: string
+}
+
+export interface PersonalContextLaneStatus {
+  readonly longTermInterest: PersonalContextLaneSufficiency
+  readonly existingKnowledge: PersonalContextLaneSufficiency
+}
+
+export type PersonalContextSnapshotResult =
+  | { readonly kind: 'sufficient'; readonly snapshot: PersonalContextCompositeSnapshot }
+  | { readonly kind: 'insufficient'; readonly laneStatus: PersonalContextLaneStatus; readonly proof: PersonalContextSnapshotProof }
+  | { readonly kind: 'unknown'; readonly reason: 'unknown_at_fence' | 'current_source_missing' | 'current_source_pending' | 'coverage_incomplete' | 'revision_incomplete'; readonly proof: PersonalContextSnapshotProof }
 
 export interface PersonalContextClock {
   readonly now: () => Date
@@ -136,6 +258,16 @@ type CoverageRow = {
   readonly status: unknown
   readonly disposition_json: unknown
   readonly disposition_digest: unknown
+  readonly terminal_transaction_sequence: unknown
+  readonly revision_digest: unknown
+}
+
+type FenceRow = {
+  readonly request_id: unknown
+  readonly cutoff: unknown
+  readonly shanghai_day: unknown
+  readonly fence_json: unknown
+  readonly fence_digest: unknown
 }
 
 const SOURCE_COLUMNS = `
@@ -143,7 +275,12 @@ const SOURCE_COLUMNS = `
   excluded_request_id, occurred_at, capture_sequence, payload_digest
 `
 
-const EXPECTED_TABLES = new Set(['personal_context_sources', 'personal_context_coverage'])
+const EXPECTED_TABLES = new Set([
+  'personal_context_sources',
+  'personal_context_coverage',
+  'personal_context_metadata',
+  'personal_context_fences',
+])
 const EXPECTED_SOURCE_COLUMNS = [
   ['source_key', 'TEXT', 1, 1],
   ['locator_kind', 'TEXT', 1, 0],
@@ -161,9 +298,27 @@ const EXPECTED_COVERAGE_COLUMNS = [
   ['status', 'TEXT', 1, 0],
   ['disposition_json', 'TEXT', 0, 0],
   ['disposition_digest', 'TEXT', 0, 0],
+  ['terminal_transaction_sequence', 'INTEGER', 0, 0],
+  ['revision_digest', 'TEXT', 0, 0],
 ] as const
 
-const COVERAGE_COLUMNS = 'source_key, status, disposition_json, disposition_digest'
+const EXPECTED_METADATA_COLUMNS = [
+  ['singleton', 'INTEGER', 0, 1],
+  ['store_id', 'TEXT', 1, 0],
+] as const
+
+const EXPECTED_FENCE_COLUMNS = [
+  ['request_id', 'TEXT', 1, 1],
+  ['cutoff', 'TEXT', 1, 0],
+  ['shanghai_day', 'TEXT', 1, 0],
+  ['fence_json', 'TEXT', 1, 0],
+  ['fence_digest', 'TEXT', 1, 0],
+] as const
+
+const COVERAGE_COLUMNS = `
+  source_key, status, disposition_json, disposition_digest,
+  terminal_transaction_sequence, revision_digest
+`
 
 export function createPersonalContextOwner(options: CreatePersonalContextOwnerOptions): PersonalContextOwner {
   validateOptions(options)
@@ -177,6 +332,16 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
   const read = (): PersonalContextOwnerSnapshot => {
     assertOpen()
     return readSnapshot(database, options.databasePath)
+  }
+
+  const freezeFence = (input: PersonalContextFreezeFenceInput): PersonalContextFence => {
+    assertOpen()
+    return persistFence(database, options.databasePath, input)
+  }
+
+  const snapshot = (input: PersonalContextSnapshotInput): PersonalContextSnapshotResult => {
+    assertOpen()
+    return buildCausalSnapshot(database, options.databasePath, input)
   }
 
   const capture = (input: PersonalContextCaptureInput): PersonalContextCaptureResult => {
@@ -271,6 +436,14 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
     if (options.semantics === undefined) return pendingSettleResult(parsed.sourceKey, 'semantics_unavailable')
     if (initialSource.rawText === null) throw new PersonalFeedScopeStoreError('pending personal context source is missing raw text')
 
+    if (initialSource.excludedRequestId === undefined
+      && hasFrozenPriorPendingSource(database, initialSource.captureSequence)) {
+      return pendingSettleResult(parsed.sourceKey, 'semantic_validation_failed')
+    }
+    const priorFold = foldBeforeCaptureSequence(database, initialSource.captureSequence)
+    const activeFacts = deepFreeze([...priorFold.activeFacts])
+    const activeFactsDigest = digestFor(activeFacts)
+
     const rawText = initialSource.rawText
     for (let attempt = 0; attempt < 2; attempt += 1) {
       if (isAbortRequested(parsed.signal)) return pendingSettleResult(parsed.sourceKey, 'aborted')
@@ -278,6 +451,7 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
         sourceKey: parsed.sourceKey,
         rawText,
         useAuthorization: PERSONAL_CONTEXT_USE_AUTHORIZATION,
+        activeFacts,
       })
       let classifierAwaited: AwaitedSemanticPort<unknown>
       try {
@@ -310,13 +484,19 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
           database,
           options.databasePath,
           initial.source,
-          { schemaVersion: 1, status: 'ignored', reason: proposal.reason },
+          { schemaVersion: 2, status: 'ignored', reason: proposal.reason },
+          activeFactsDigest,
         )
       }
 
-      const facts: PersonalContextTerminalFact[] = []
+      const changes: PersonalContextTerminalChange[] = []
       for (const factProposal of proposal.facts) {
-        const prepared = prepareFact(factProposal, rawText, parsed.sourceKey)
+        const revision = canonicalRevisionFor(factProposal, activeFacts)
+        if (revision === undefined) {
+          if (isAbortRequested(parsed.signal)) return pendingSettleResult(parsed.sourceKey, 'aborted')
+          return pendingSettleResult(parsed.sourceKey, 'semantic_validation_failed')
+        }
+        const prepared = prepareFact(factProposal, rawText, parsed.sourceKey, revision)
         if (prepared === undefined) {
           if (isAbortRequested(parsed.signal)) return pendingSettleResult(parsed.sourceKey, 'aborted')
           return pendingSettleResult(parsed.sourceKey, 'semantic_validation_failed')
@@ -337,20 +517,26 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
           if (isAbortRequested(parsed.signal)) return pendingSettleResult(parsed.sourceKey, 'aborted')
           return pendingSettleResult(parsed.sourceKey, 'semantic_validation_failed')
         }
-        facts.push(prepared.terminalFact)
+        changes.push({
+          operation: factProposal.operation,
+          targetFactIds: [...factProposal.targetFactIds],
+          fact: prepared.terminalFact,
+          validationInputDigest: digestFor(prepared.validatorInput),
+        })
       }
       if (isAbortRequested(parsed.signal)) return pendingSettleResult(parsed.sourceKey, 'aborted')
       return persistTerminalDisposition(
         database,
         options.databasePath,
         initial.source,
-        { schemaVersion: 1, status: 'applied', facts },
+        { schemaVersion: 2, status: 'applied', changes },
+        activeFactsDigest,
       )
     }
     return pendingSettleResult(parsed.sourceKey, 'semantic_validation_failed')
   }
 
-  return Object.freeze({ capture, settle, read, close })
+  return Object.freeze({ capture, settle, read, freezeFence, snapshot, close })
 }
 
 function selectSource(database: DatabaseSync, locator: PersonalContextTelegramLocator): SourceRow | undefined {
@@ -374,11 +560,163 @@ function selectSourceAndCoverage(
   return { source, coverage }
 }
 
+function hasFrozenPriorPendingSource(database: DatabaseSync, captureSequence: number): boolean {
+  const row = database.prepare(`
+    SELECT 1 AS blocked
+    FROM personal_context_sources AS source
+    JOIN personal_context_coverage AS coverage ON coverage.source_key = source.source_key
+    WHERE source.capture_sequence < ?
+      AND coverage.status = 'pending'
+      AND EXISTS (
+        SELECT 1 FROM personal_context_fences AS fence
+        WHERE json_extract(fence.fence_json, '$.maxCaptureSequence') >= ?
+      )
+    LIMIT 1
+  `).get(captureSequence, captureSequence) as { readonly blocked: unknown } | undefined
+  return row?.blocked === 1
+}
+
+function canonicalRevisionFor(
+  proposal: { readonly lane: 'long_term_interest' | 'existing_knowledge'; readonly operation: PersonalContextRevisionOperation; readonly targetFactIds: readonly string[] },
+  activeFacts: readonly PersonalContextActiveFact[],
+): PersonalContextCanonicalRevision | undefined {
+  const priorActiveFacts = activeFacts.filter(active => active.fact.lane === proposal.lane)
+  const byId = new Map(priorActiveFacts.map(active => [active.factId, active] as const))
+  const targetFacts: PersonalContextActiveFact[] = []
+  let priorIndex = -1
+  for (const factId of proposal.targetFactIds) {
+    const target = byId.get(factId)
+    if (target === undefined) return undefined
+    const targetIndex = priorActiveFacts.indexOf(target)
+    if (targetIndex <= priorIndex) return undefined
+    priorIndex = targetIndex
+    targetFacts.push(target)
+  }
+  if (proposal.operation === 'assert' && targetFacts.length !== 0) return undefined
+  if (proposal.operation === 'confirm' && targetFacts.length !== 1) return undefined
+  if ((proposal.operation === 'correct' || proposal.operation === 'replace' || proposal.operation === 'retract')
+    && targetFacts.length === 0) return undefined
+  return deepFreeze({ operation: proposal.operation, targetFacts, priorActiveFacts })
+}
+
+type FoldResult = {
+  readonly activeFacts: readonly PersonalContextActiveFact[]
+  readonly entries: readonly PersonalContextRevisionEntry[]
+}
+
+function foldBeforeCaptureSequence(database: DatabaseSync, captureSequence: number): FoldResult {
+  const state = readSnapshot(database, 'open personal context database')
+  const coverageByKey = new Map(state.coverage.map(coverage => [coverage.sourceKey, coverage] as const))
+  const terminal = state.sources
+    .filter(source => source.captureSequence < captureSequence)
+    .flatMap(source => {
+      const coverage = coverageByKey.get(source.sourceKey)
+      if (coverage === undefined) throw new PersonalFeedScopeStoreError('personal context causal source is missing coverage')
+      return coverage.status === 'pending' ? [] : [{ source, coverage }]
+    })
+  return foldTerminalSources(terminal)
+}
+
+function foldTerminalSources(
+  values: readonly { readonly source: PersonalContextSource; readonly coverage: PersonalContextTerminalCoverage }[],
+): FoldResult {
+  const active = new Map<string, PersonalContextActiveFact>()
+  const entries: PersonalContextRevisionEntry[] = []
+  for (const { source, coverage } of [...values].sort((left, right) => left.source.captureSequence - right.source.captureSequence)) {
+    if (coverage.disposition.status === 'ignored') continue
+    const sourcePrior = new Map(active)
+    const sourceEntries = revisionEntriesForChanges(
+      source.sourceKey,
+      coverage.terminalTransactionSequence,
+      coverage.disposition.changes,
+    )
+    if (revisionDigestForEntries(sourceEntries) !== coverage.revisionDigest) {
+      throw new PersonalFeedScopeStoreError('personal context source revision digest does not match its changes')
+    }
+    for (let ordinal = 0; ordinal < coverage.disposition.changes.length; ordinal += 1) {
+      const change = coverage.disposition.changes[ordinal]
+      const entry = sourceEntries[ordinal]
+      if (change === undefined || entry === undefined) {
+        throw new PersonalFeedScopeStoreError('personal context source revision proof is incomplete')
+      }
+      const targetFacts = change.targetFactIds.map(factId => sourcePrior.get(factId))
+      if (targetFacts.some(target => target === undefined)
+        || targetFacts.some(target => target?.fact.lane !== change.fact.lane)) {
+        throw new PersonalFeedScopeStoreError('personal context revision targets are not causally active in the same lane')
+      }
+      if (change.operation === 'assert') {
+        if (change.targetFactIds.length !== 0) throw new PersonalFeedScopeStoreError('personal context assert has targets')
+        active.set(entry.currentFactId, deepFreeze({ factId: entry.currentFactId, fact: change.fact, basisRevisionIds: [entry.revisionId] }))
+      } else if (change.operation === 'confirm') {
+        const target = targetFacts[0]
+        if (target === undefined || targetFacts.length !== 1) throw new PersonalFeedScopeStoreError('personal context confirm target is invalid')
+        active.set(target.factId, deepFreeze({
+          factId: target.factId,
+          fact: target.fact,
+          basisRevisionIds: [...target.basisRevisionIds, entry.revisionId],
+        }))
+      } else {
+        if (targetFacts.length === 0) throw new PersonalFeedScopeStoreError('personal context revision has no target')
+        for (const target of targetFacts) active.delete(target!.factId)
+        if (change.operation !== 'retract') {
+          active.set(entry.currentFactId, deepFreeze({
+            factId: entry.currentFactId,
+            fact: change.fact,
+            basisRevisionIds: [entry.revisionId],
+          }))
+        }
+      }
+      entries.push(entry)
+    }
+  }
+  return deepFreeze({ activeFacts: [...active.values()], entries })
+}
+
+function revisionEntriesForChanges(
+  sourceKey: string,
+  terminalTransactionSequence: number,
+  changes: readonly PersonalContextTerminalChange[],
+): PersonalContextRevisionEntry[] {
+  return changes.map((change, factOrdinal) => {
+    const operationDigest = digestFor({
+      sourceKey,
+      factOrdinal,
+      lane: change.fact.lane,
+      operation: change.operation,
+      targetFactIds: change.targetFactIds,
+      terminalTransactionSequence,
+      validationInputDigest: change.validationInputDigest,
+      fact: change.fact,
+    })
+    const revisionId = digestFor({ kind: 'personal_context_revision', operationDigest })
+    const currentFactId = change.operation === 'confirm' || change.operation === 'retract'
+      ? change.targetFactIds[0]!
+      : digestFor({ kind: 'personal_context_fact', revisionId })
+    return deepFreeze({
+      revisionId,
+      currentFactId,
+      sourceKey,
+      factOrdinal,
+      lane: change.fact.lane,
+      operation: change.operation,
+      targetFactIds: [...change.targetFactIds],
+      terminalTransactionSequence,
+      validationInputDigest: change.validationInputDigest,
+      operationDigest,
+    })
+  })
+}
+
+function revisionDigestForEntries(entries: readonly PersonalContextRevisionEntry[]): string {
+  return digestFor({ entries })
+}
+
 function persistTerminalDisposition(
   database: DatabaseSync,
   databasePath: string,
   originalSource: SourceRow,
   disposition: PersonalContextTerminalDisposition,
+  expectedPriorActiveDigest: string,
 ): PersonalContextTerminalCoverage {
   if (!isStableSourceKey(originalSource.source_key)) {
     throw new PersonalFeedScopeStoreError('personal context source key is invalid before terminal persistence')
@@ -407,11 +745,34 @@ function persistTerminalDisposition(
       || current.source.capture_sequence !== originalSource.capture_sequence) {
       throw new PersonalFeedScopeStoreError('personal context source changed during semantic settlement')
     }
+    const currentPriorFold = foldBeforeCaptureSequence(database, currentSource.captureSequence)
+    if (digestFor(currentPriorFold.activeFacts) !== expectedPriorActiveDigest) {
+      throw new PersonalFeedScopeStoreError('personal context causal facts changed during semantic settlement')
+    }
+    const nextTerminalSequence = (database.prepare(`
+      SELECT COALESCE(MAX(terminal_transaction_sequence), 0) + 1 AS next_sequence
+      FROM personal_context_coverage
+    `).get() as { readonly next_sequence: unknown }).next_sequence
+    if (!isSafePositiveInteger(nextTerminalSequence)) {
+      throw new PersonalFeedScopeStoreError('personal context terminal transaction sequence is invalid')
+    }
+    const sourceEntries = disposition.status === 'applied'
+      ? revisionEntriesForChanges(originalSource.source_key, nextTerminalSequence, disposition.changes)
+      : []
+    const revisionDigest = revisionDigestForEntries(sourceEntries)
     const coverageUpdate = database.prepare(`
       UPDATE personal_context_coverage
-      SET status = ?, disposition_json = ?, disposition_digest = ?
+      SET status = ?, disposition_json = ?, disposition_digest = ?,
+        terminal_transaction_sequence = ?, revision_digest = ?
       WHERE source_key = ? AND status = 'pending'
-    `).run(disposition.status, dispositionJson, dispositionDigest, originalSource.source_key)
+    `).run(
+      disposition.status,
+      dispositionJson,
+      dispositionDigest,
+      nextTerminalSequence,
+      revisionDigest,
+      originalSource.source_key,
+    )
     const sourceUpdate = database.prepare(`
       UPDATE personal_context_sources
       SET raw_text = NULL
@@ -537,7 +898,7 @@ function configureDatabase(database: DatabaseSync, path: string, wasMissing: boo
       }
       assertSchema(database, path, objects)
     } else {
-      createSchema(database)
+      createSchema(database, path)
       database.exec(`PRAGMA application_id = ${APPLICATION_ID}`)
       database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
       assertSchema(database, path)
@@ -556,7 +917,7 @@ function configureDatabase(database: DatabaseSync, path: string, wasMissing: boo
   }
 }
 
-function createSchema(database: DatabaseSync): void {
+function createSchema(database: DatabaseSync, path: string): void {
   database.exec(`
     CREATE TABLE personal_context_sources (
       source_key TEXT PRIMARY KEY,
@@ -577,13 +938,34 @@ function createSchema(database: DatabaseSync): void {
       status TEXT NOT NULL CHECK (status IN ('pending', 'applied', 'ignored')),
       disposition_json TEXT,
       disposition_digest TEXT,
+      terminal_transaction_sequence INTEGER UNIQUE,
+      revision_digest TEXT,
       CHECK (
-        (status = 'pending' AND disposition_json IS NULL AND disposition_digest IS NULL)
+        (status = 'pending' AND disposition_json IS NULL AND disposition_digest IS NULL
+          AND terminal_transaction_sequence IS NULL AND revision_digest IS NULL)
         OR
-        (status IN ('applied', 'ignored') AND disposition_json IS NOT NULL AND disposition_digest IS NOT NULL)
+        (status IN ('applied', 'ignored') AND disposition_json IS NOT NULL AND disposition_digest IS NOT NULL
+          AND terminal_transaction_sequence IS NOT NULL AND terminal_transaction_sequence > 0
+          AND revision_digest IS NOT NULL)
       )
     ) STRICT;
+
+    CREATE TABLE personal_context_metadata (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      store_id TEXT NOT NULL
+    ) STRICT;
+
+    CREATE TABLE personal_context_fences (
+      request_id TEXT PRIMARY KEY,
+      cutoff TEXT NOT NULL,
+      shanghai_day TEXT NOT NULL,
+      fence_json TEXT NOT NULL,
+      fence_digest TEXT NOT NULL
+    ) STRICT;
   `)
+  database.prepare(
+    'INSERT INTO personal_context_metadata (singleton, store_id) VALUES (1, ?)',
+  ).run(digestFor({ kind: 'personal_context_store', path }))
 }
 
 function assertSchema(
@@ -599,13 +981,23 @@ function assertSchema(
   }
   assertTable(database, path, 'personal_context_sources', EXPECTED_SOURCE_COLUMNS)
   assertTable(database, path, 'personal_context_coverage', EXPECTED_COVERAGE_COLUMNS)
+  assertTable(database, path, 'personal_context_metadata', EXPECTED_METADATA_COLUMNS)
+  assertTable(database, path, 'personal_context_fences', EXPECTED_FENCE_COLUMNS)
   const sourceSql = (database.prepare(
     "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'personal_context_sources'",
   ).get() as { readonly sql: unknown } | undefined)?.sql
   const coverageSql = (database.prepare(
     "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'personal_context_coverage'",
   ).get() as { readonly sql: unknown } | undefined)?.sql
-  if (typeof sourceSql !== 'string' || typeof coverageSql !== 'string' || !/\bSTRICT\b/i.test(sourceSql) || !/\bSTRICT\b/i.test(coverageSql)) {
+  const metadataSql = (database.prepare(
+    "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'personal_context_metadata'",
+  ).get() as { readonly sql: unknown } | undefined)?.sql
+  const fenceSql = (database.prepare(
+    "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'personal_context_fences'",
+  ).get() as { readonly sql: unknown } | undefined)?.sql
+  if (typeof sourceSql !== 'string' || typeof coverageSql !== 'string'
+    || typeof metadataSql !== 'string' || typeof fenceSql !== 'string'
+    || ![sourceSql, coverageSql, metadataSql, fenceSql].every(sql => /\bSTRICT\b/i.test(sql))) {
     throw new PersonalFeedScopeStoreError(`personal context database at "${path}" has a non-strict schema`)
   }
   const normalizedSourceSql = sourceSql.replaceAll(/\s+/g, ' ').toLowerCase()
@@ -616,6 +1008,7 @@ function assertSchema(
     || !normalizedSourceSql.includes("check (reference_json = 'null')")
     || !normalizedCoverageSql.includes('references personal_context_sources(source_key)')
     || !normalizedCoverageSql.includes("status text not null check (status in ('pending', 'applied', 'ignored'))")
+    || !normalizedCoverageSql.includes('terminal_transaction_sequence integer unique')
     || !normalizedCoverageSql.includes("status = 'pending' and disposition_json is null and disposition_digest is null")
     || !normalizedCoverageSql.includes("status in ('applied', 'ignored') and disposition_json is not null and disposition_digest is not null")) {
     throw new PersonalFeedScopeStoreError(`personal context database at "${path}" has invalid schema constraints`)
@@ -677,7 +1070,7 @@ function validateSettleInput(input: PersonalContextSettleInput): PersonalContext
 }
 
 function validateCaptureInput(input: PersonalContextCaptureInput): PersonalContextCaptureInput {
-  if (!isRecord(input) || !hasExactlyKeys(input, ['locator', 'rawText', 'reference', 'excludedRequestId'], ['excludedRequestId'])) {
+  if (!isRecord(input) || !hasExactlyKeys(input, ['locator', 'rawText', 'reference'], ['excludedRequestId'])) {
     throw new PersonalFeedScopeInputError('personal context capture input has an unsupported shape')
   }
   if (!isRecord(input.locator) || !hasExactlyKeys(input.locator, ['kind', 'chatId', 'messageId'])) {
@@ -748,6 +1141,316 @@ function readSnapshot(database: DatabaseSync, path: string): PersonalContextOwne
   return deepFreeze({ sources, coverage })
 }
 
+function persistFence(
+  database: DatabaseSync,
+  databasePath: string,
+  input: PersonalContextFreezeFenceInput,
+): PersonalContextFence {
+  const request = validateFreezeFenceInput(input)
+  const replay = selectFence(database, request.requestId)
+  if (replay !== undefined) return replayFenceOrConflict(replay, request)
+  let began = false
+  try {
+    database.exec('BEGIN IMMEDIATE')
+    began = true
+    const concurrent = selectFence(database, request.requestId)
+    if (concurrent !== undefined) {
+      const result = replayFenceOrConflict(concurrent, request)
+      database.exec('ROLLBACK')
+      began = false
+      return result
+    }
+    const storeId = readStoreId(database)
+    const maxCaptureSequence = readNonNegativeSequence(database, `
+      SELECT COALESCE(MAX(capture_sequence), 0) AS value FROM personal_context_sources
+    `, 'capture fence')
+    const maxTerminalTransactionSequence = readNonNegativeSequence(database, `
+      SELECT COALESCE(MAX(terminal_transaction_sequence), 0) AS value FROM personal_context_coverage
+    `, 'terminal fence')
+    const unsigned = {
+      schemaVersion: 1 as const,
+      requestId: request.requestId,
+      cutoff: request.cutoff,
+      shanghaiDay: request.shanghaiDay,
+      storeId,
+      maxCaptureSequence,
+      maxTerminalTransactionSequence,
+    }
+    const fence: PersonalContextFence = deepFreeze({ ...unsigned, digest: digestFor(unsigned) })
+    const fenceJson = canonicalJsonFor(fence, 'personal context fence')
+    database.prepare(`
+      INSERT INTO personal_context_fences (
+        request_id, cutoff, shanghai_day, fence_json, fence_digest
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run(fence.requestId, fence.cutoff, fence.shanghaiDay, fenceJson, fence.digest)
+    const persisted = selectFence(database, fence.requestId)
+    if (persisted === undefined || canonicalJsonFor(persisted, 'persisted personal context fence') !== fenceJson) {
+      throw new PersonalFeedScopeStoreError('personal context fence did not persist exactly')
+    }
+    database.exec('COMMIT')
+    began = false
+    return persisted
+  } catch (cause) {
+    if (began) {
+      try {
+        database.exec('ROLLBACK')
+      } catch {
+        // Preserve the original fence failure.
+      }
+    }
+    if (cause instanceof PersonalFeedScopeInputError
+      || cause instanceof PersonalFeedScopeConflictError
+      || cause instanceof PersonalFeedScopeStoreError) throw cause
+    throw new PersonalFeedScopeStoreError(`personal context fence persistence failed at "${databasePath}"`, { cause })
+  }
+}
+
+function validateFreezeFenceInput(input: PersonalContextFreezeFenceInput): PersonalContextRequestCoordinates {
+  if (!isRecord(input) || !hasExactlyKeys(input, ['request'])
+    || !isRecord(input.request)
+    || !hasExactlyKeys(input.request, ['requestId', 'cutoff', 'shanghaiDay'])) {
+    throw new PersonalFeedScopeInputError('personal context fence input has an unsupported shape')
+  }
+  const request = input.request
+  if (typeof request.requestId !== 'string' || !/^telegram:-?\d+:[1-9]\d*$/.test(request.requestId)) {
+    throw new PersonalFeedScopeInputError('personal context fence request id is invalid')
+  }
+  if (typeof request.cutoff !== 'string' || !Number.isFinite(Date.parse(request.cutoff))) {
+    throw new PersonalFeedScopeInputError('personal context fence cutoff is invalid')
+  }
+  if (typeof request.shanghaiDay !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(request.shanghaiDay)) {
+    throw new PersonalFeedScopeInputError('personal context fence Shanghai day is invalid')
+  }
+  const shanghaiDayAtCutoff = new Date(Date.parse(request.cutoff) + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
+  if (request.shanghaiDay !== shanghaiDayAtCutoff) {
+    throw new PersonalFeedScopeInputError('personal context fence cutoff and Shanghai day disagree')
+  }
+  return { requestId: request.requestId, cutoff: request.cutoff, shanghaiDay: request.shanghaiDay }
+}
+
+function selectFence(database: DatabaseSync, requestId: string): PersonalContextFence | undefined {
+  const row = database.prepare(`
+    SELECT request_id, cutoff, shanghai_day, fence_json, fence_digest
+    FROM personal_context_fences WHERE request_id = ?
+  `).get(requestId) as FenceRow | undefined
+  return row === undefined ? undefined : fenceFromRow(row)
+}
+
+function fenceFromRow(row: FenceRow): PersonalContextFence {
+  if (typeof row.request_id !== 'string' || typeof row.cutoff !== 'string'
+    || typeof row.shanghai_day !== 'string' || typeof row.fence_json !== 'string'
+    || typeof row.fence_digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(row.fence_digest)) {
+    throw new PersonalFeedScopeStoreError('personal context fence row is invalid')
+  }
+  let value: unknown
+  try {
+    value = JSON.parse(row.fence_json)
+  } catch (cause) {
+    throw new PersonalFeedScopeStoreError('personal context fence is not JSON', { cause })
+  }
+  if (!isRecord(value) || !hasExactlyKeys(value, [
+    'schemaVersion', 'requestId', 'cutoff', 'shanghaiDay', 'storeId',
+    'maxCaptureSequence', 'maxTerminalTransactionSequence', 'digest',
+  ]) || value.schemaVersion !== 1 || value.requestId !== row.request_id
+    || value.cutoff !== row.cutoff || value.shanghaiDay !== row.shanghai_day
+    || typeof value.storeId !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(value.storeId)
+    || !isSafeNonNegativeInteger(value.maxCaptureSequence)
+    || !isSafeNonNegativeInteger(value.maxTerminalTransactionSequence)
+    || value.digest !== row.fence_digest) {
+    throw new PersonalFeedScopeStoreError('personal context fence payload is invalid')
+  }
+  const unsigned = {
+    schemaVersion: 1 as const,
+    requestId: value.requestId as string,
+    cutoff: value.cutoff as string,
+    shanghaiDay: value.shanghaiDay as string,
+    storeId: value.storeId,
+    maxCaptureSequence: value.maxCaptureSequence,
+    maxTerminalTransactionSequence: value.maxTerminalTransactionSequence,
+  }
+  const fence: PersonalContextFence = { ...unsigned, digest: value.digest as string }
+  if (digestFor(unsigned) !== fence.digest || canonicalJsonFor(fence, 'personal context fence') !== row.fence_json) {
+    throw new PersonalFeedScopeStoreError('personal context fence digest is invalid')
+  }
+  return deepFreeze(fence)
+}
+
+function replayFenceOrConflict(row: PersonalContextFence, request: PersonalContextRequestCoordinates): PersonalContextFence {
+  if (row.cutoff !== request.cutoff || row.shanghaiDay !== request.shanghaiDay) {
+    throw new PersonalFeedScopeConflictError('personal context request already has different fence coordinates')
+  }
+  return row
+}
+
+function readStoreId(database: DatabaseSync): string {
+  const row = database.prepare(
+    'SELECT store_id FROM personal_context_metadata WHERE singleton = 1',
+  ).get() as { readonly store_id: unknown } | undefined
+  if (row === undefined || typeof row.store_id !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(row.store_id)) {
+    throw new PersonalFeedScopeStoreError('personal context store id is invalid')
+  }
+  return row.store_id
+}
+
+function readNonNegativeSequence(database: DatabaseSync, sql: string, label: string): number {
+  const value = (database.prepare(sql).get() as { readonly value: unknown }).value
+  if (!isSafeNonNegativeInteger(value)) {
+    throw new PersonalFeedScopeStoreError(`personal context ${label} sequence is invalid`)
+  }
+  return value
+}
+
+function buildCausalSnapshot(
+  database: DatabaseSync,
+  databasePath: string,
+  input: PersonalContextSnapshotInput,
+): PersonalContextSnapshotResult {
+  if (!isRecord(input) || !hasExactlyKeys(input, ['fence']) || !isRecord(input.fence)) {
+    throw new PersonalFeedScopeInputError('personal context snapshot input has an unsupported shape')
+  }
+  const persistedFence = selectFence(database, typeof input.fence.requestId === 'string' ? input.fence.requestId : '')
+  if (persistedFence === undefined
+    || canonicalJsonFor(input.fence, 'personal context supplied fence') !== canonicalJsonFor(persistedFence, 'personal context persisted fence')) {
+    throw new PersonalFeedScopeConflictError('personal context snapshot fence is not the persisted request fence')
+  }
+  const state = readSnapshot(database, databasePath)
+  const coverageByKey = new Map(state.coverage.map(coverage => [coverage.sourceKey, coverage] as const))
+  const boundedSources = state.sources.filter(source => source.captureSequence <= persistedFence.maxCaptureSequence)
+  const currentSources = boundedSources.filter(source => source.excludedRequestId === persistedFence.requestId)
+  if (currentSources.length > 1) {
+    throw new PersonalFeedScopeStoreError('personal context fence has multiple current sources')
+  }
+  const included: Array<{ readonly source: PersonalContextSource; readonly coverage: PersonalContextTerminalCoverage }> = []
+  const unknownAtFenceSourceKeys: string[] = []
+  for (const source of boundedSources) {
+    if (source.excludedRequestId === persistedFence.requestId) continue
+    const coverage = coverageByKey.get(source.sourceKey)
+    if (coverage === undefined) throw new PersonalFeedScopeStoreError('personal context snapshot source lacks coverage')
+    if (coverage.status === 'pending'
+      || coverage.terminalTransactionSequence > persistedFence.maxTerminalTransactionSequence) {
+      unknownAtFenceSourceKeys.push(source.sourceKey)
+    } else {
+      included.push({ source, coverage })
+    }
+  }
+  const includedTerminalSources: PersonalContextIncludedTerminalSourceProof[] = included.map(({ source, coverage }) => ({
+    sourceKey: source.sourceKey,
+    captureSequence: source.captureSequence,
+    terminalTransactionSequence: coverage.terminalTransactionSequence,
+    dispositionDigest: coverage.dispositionDigest,
+  }))
+  const coverageUnsigned = { includedTerminalSources, unknownAtFenceSourceKeys }
+  const coverageProof: PersonalContextCoverageProof = deepFreeze({
+    ...coverageUnsigned,
+    digest: digestFor(coverageUnsigned),
+  })
+  const fold = foldTerminalSources(included)
+  const revisionsUnsigned = {
+    watermark: persistedFence.maxTerminalTransactionSequence,
+    entries: fold.entries,
+  }
+  const revisionsProof: PersonalContextRevisionsProof = deepFreeze({
+    ...revisionsUnsigned,
+    digest: digestFor(revisionsUnsigned),
+  })
+  const currentSource = currentSources[0]
+  let currentSourceProof: PersonalContextCurrentSourceProof
+  let currentReason: 'current_source_missing' | 'current_source_pending' | undefined
+  if (currentSource === undefined) {
+    currentSourceProof = { status: 'missing', requestId: persistedFence.requestId }
+    currentReason = 'current_source_missing'
+  } else {
+    const coverage = coverageByKey.get(currentSource.sourceKey)
+    if (coverage === undefined) throw new PersonalFeedScopeStoreError('personal context current source lacks coverage')
+    if (coverage.status === 'pending') {
+      currentSourceProof = {
+        status: 'pending',
+        sourceKey: currentSource.sourceKey,
+        excludedRequestId: persistedFence.requestId,
+        captureSequence: currentSource.captureSequence,
+      }
+      currentReason = 'current_source_pending'
+    } else {
+      const unsigned = {
+        status: 'settled_for_future_request' as const,
+        sourceKey: currentSource.sourceKey,
+        excludedRequestId: persistedFence.requestId,
+        captureSequence: currentSource.captureSequence,
+        terminalTransactionSequence: coverage.terminalTransactionSequence,
+        dispositionDigest: coverage.dispositionDigest,
+        revisionDigest: coverage.revisionDigest,
+      }
+      currentSourceProof = { ...unsigned, digest: digestFor(unsigned) }
+    }
+  }
+  const proof: PersonalContextSnapshotProof = deepFreeze({
+    fenceDigest: persistedFence.digest,
+    coverage: coverageProof,
+    revisions: revisionsProof,
+    currentSource: currentSourceProof,
+  })
+  if (unknownAtFenceSourceKeys.length > 0) {
+    return deepFreeze({ kind: 'unknown', reason: 'unknown_at_fence', proof })
+  }
+  if (currentReason !== undefined) return deepFreeze({ kind: 'unknown', reason: currentReason, proof })
+
+  const contextCutId = digestFor({
+    fenceDigest: persistedFence.digest,
+    coverageDigest: coverageProof.digest,
+    revisionsDigest: revisionsProof.digest,
+  })
+  const longTermFacts = fold.activeFacts.filter(active => active.fact.lane === 'long_term_interest')
+  const knowledgeFacts = fold.activeFacts.filter(active => active.fact.lane === 'existing_knowledge')
+  const longTermSufficientIds = longTermFacts
+    .filter(active => active.fact.lane === 'long_term_interest' && active.fact.stance === 'include')
+    .map(active => active.factId)
+  const knowledgeSufficientIds = knowledgeFacts
+    .filter(active => active.fact.lane === 'existing_knowledge' && active.fact.epistemic === 'asserted')
+    .map(active => active.factId)
+  const longTermSufficiency: PersonalContextLaneSufficiency = longTermSufficientIds.length > 0
+    ? { status: 'sufficient', basisFactIds: longTermSufficientIds }
+    : { status: 'insufficient', reason: 'no_active_include' }
+  const knowledgeSufficiency: PersonalContextLaneSufficiency = knowledgeSufficientIds.length > 0
+    ? { status: 'sufficient', basisFactIds: knowledgeSufficientIds }
+    : { status: 'insufficient', reason: 'no_asserted_knowledge' }
+  const laneStatus: PersonalContextLaneStatus = deepFreeze({
+    longTermInterest: longTermSufficiency,
+    existingKnowledge: knowledgeSufficiency,
+  })
+  if (longTermSufficiency.status !== 'sufficient' || knowledgeSufficiency.status !== 'sufficient') {
+    return deepFreeze({ kind: 'insufficient', laneStatus, proof })
+  }
+  const longTermInterest = laneSnapshot(
+    'long_term_interest', contextCutId, longTermFacts, longTermSufficiency,
+  )
+  const existingKnowledge = laneSnapshot(
+    'existing_knowledge', contextCutId, knowledgeFacts, knowledgeSufficiency,
+  )
+  const unsignedSnapshot = {
+    schemaVersion: 1 as const,
+    fence: persistedFence,
+    contextCutId,
+    longTermInterest,
+    existingKnowledge,
+    proof,
+  }
+  const snapshot: PersonalContextCompositeSnapshot = deepFreeze({
+    ...unsignedSnapshot,
+    digest: digestFor(unsignedSnapshot),
+  })
+  return deepFreeze({ kind: 'sufficient', snapshot })
+}
+
+function laneSnapshot(
+  lane: 'long_term_interest' | 'existing_knowledge',
+  contextCutId: string,
+  activeFacts: readonly PersonalContextActiveFact[],
+  sufficiency: PersonalContextLaneSufficiency,
+): PersonalContextLaneSnapshot {
+  const unsigned = { lane, contextCutId, activeFacts, sufficiency }
+  return deepFreeze({ ...unsigned, digest: digestFor(unsigned) })
+}
+
 function captureResultFromRows(sourceRow: SourceRow, coverageRow: CoverageRow): PersonalContextCaptureResult {
   if (coverageRow.source_key !== sourceRow.source_key) {
     throw new PersonalFeedScopeStoreError('personal context coverage does not belong to source')
@@ -786,13 +1489,20 @@ function coverageFromRow(row: CoverageRow): PersonalContextCoverage {
   if (typeof row.source_key !== 'string' || !isStableSourceKey(row.source_key)) {
     throw new PersonalFeedScopeStoreError('personal context coverage row is invalid')
   }
-  if (row.status === 'pending' && row.disposition_json === null && row.disposition_digest === null) {
+  if (row.status === 'pending'
+    && row.disposition_json === null
+    && row.disposition_digest === null
+    && row.terminal_transaction_sequence === null
+    && row.revision_digest === null) {
     return { sourceKey: row.source_key, status: 'pending' }
   }
   if ((row.status !== 'applied' && row.status !== 'ignored')
     || typeof row.disposition_json !== 'string'
     || typeof row.disposition_digest !== 'string'
-    || !/^[0-9a-f]{64}$/.test(row.disposition_digest)
+    || !/^sha256:[0-9a-f]{64}$/.test(row.disposition_digest)
+    || !isSafePositiveInteger(row.terminal_transaction_sequence)
+    || typeof row.revision_digest !== 'string'
+    || !/^sha256:[0-9a-f]{64}$/.test(row.revision_digest)
     || dispositionDigestForJson(row.disposition_json) !== row.disposition_digest) {
     throw new PersonalFeedScopeStoreError('personal context terminal coverage row is invalid')
   }
@@ -806,10 +1516,23 @@ function coverageFromRow(row: CoverageRow): PersonalContextCoverage {
   if (disposition === undefined || disposition.status !== row.status || dispositionJsonFor(disposition) !== row.disposition_json) {
     throw new PersonalFeedScopeStoreError('personal context terminal disposition is invalid')
   }
-  if (disposition.status === 'applied' && disposition.facts.some(fact => fact.evidence.sourceKey !== row.source_key)) {
+  if (disposition.status === 'applied' && disposition.changes.some(change => change.fact.evidence.sourceKey !== row.source_key)) {
     throw new PersonalFeedScopeStoreError('personal context terminal fact belongs to another source')
   }
-  return deepFreeze({ sourceKey: row.source_key, status: row.status, disposition })
+  const entries = disposition.status === 'applied'
+    ? revisionEntriesForChanges(row.source_key, row.terminal_transaction_sequence, disposition.changes)
+    : []
+  if (revisionDigestForEntries(entries) !== row.revision_digest) {
+    throw new PersonalFeedScopeStoreError('personal context terminal revision proof is invalid')
+  }
+  return deepFreeze({
+    sourceKey: row.source_key,
+    status: row.status,
+    disposition,
+    terminalTransactionSequence: row.terminal_transaction_sequence,
+    dispositionDigest: row.disposition_digest,
+    revisionDigest: row.revision_digest,
+  })
 }
 
 function sourceKeyFor(locator: PersonalContextTelegramLocator): string {
@@ -832,13 +1555,22 @@ function payloadDigestFor(input: PersonalContextCaptureInput): string {
 }
 
 function dispositionJsonFor(disposition: PersonalContextTerminalDisposition): string {
-  const canonical = encodeCanonicalJson(disposition)
-  if (canonical === undefined) throw new PersonalFeedScopeStoreError('personal context terminal disposition is not canonical JSON')
-  return canonical
+  return canonicalJsonFor(disposition, 'personal context terminal disposition')
 }
 
 function dispositionDigestForJson(dispositionJson: string): string {
-  return createHash('sha256').update(dispositionJson, 'utf8').digest('hex')
+  return `sha256:${createHash('sha256').update(dispositionJson, 'utf8').digest('hex')}`
+}
+
+function canonicalJsonFor(value: unknown, label: string): string {
+  const canonical = encodeCanonicalJson(value)
+  if (canonical === undefined) throw new PersonalFeedScopeStoreError(`${label} is not canonical JSON`)
+  return canonical
+}
+
+function digestFor(value: unknown): string {
+  const canonical = canonicalJsonFor(value, 'personal context digest input')
+  return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`
 }
 
 function requestIdFor(locator: PersonalContextTelegramLocator): string {
@@ -851,6 +1583,10 @@ function isSafeNonZeroInteger(value: unknown): value is number {
 
 function isSafePositiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+}
+
+function isSafeNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
 function isCanonicalIso(value: string): boolean {

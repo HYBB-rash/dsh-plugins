@@ -33,12 +33,22 @@ type Attitude = {
   readonly qualification: 'unqualified' | 'conditioned' | 'scope_limited'
 }
 
+type RevisionOperation = 'assert' | 'confirm' | 'correct' | 'replace' | 'retract'
+
+type ActiveFact = {
+  readonly factId: string
+  readonly fact: TerminalFact
+  readonly basisRevisionIds: readonly string[]
+}
+
 type InterestProposal = {
   readonly lane: 'long_term_interest'
   readonly stance: 'include' | 'exclude'
   readonly focusSpan: Span
   readonly protectedSpans: ProtectedSpans
   readonly attitude: Attitude
+  readonly operation: RevisionOperation
+  readonly targetFactIds: readonly string[]
 }
 
 type KnowledgeProposal = {
@@ -47,6 +57,8 @@ type KnowledgeProposal = {
   readonly focusSpan: Span
   readonly protectedSpans: ProtectedSpans
   readonly attitude: Attitude
+  readonly operation: RevisionOperation
+  readonly targetFactIds: readonly string[]
 }
 
 type FactProposal = InterestProposal | KnowledgeProposal
@@ -114,6 +126,13 @@ type ClassifierInput = {
   readonly sourceKey: string
   readonly rawText: string
   readonly useAuthorization: UseAuthorization
+  readonly activeFacts: readonly ActiveFact[]
+}
+
+type CanonicalRevision = {
+  readonly operation: RevisionOperation
+  readonly targetFacts: readonly ActiveFact[]
+  readonly priorActiveFacts: readonly ActiveFact[]
 }
 
 type EntailmentInput = {
@@ -122,6 +141,7 @@ type EntailmentInput = {
   readonly exactEvidenceText: string
   readonly target: EntailmentTarget
   readonly canonicalFact: CanonicalFact
+  readonly revision: CanonicalRevision
 }
 
 type NoFactInput = {
@@ -147,13 +167,25 @@ type SourceRecord = {
 }
 
 type TerminalDisposition =
-  | { readonly schemaVersion: 1; readonly status: 'applied'; readonly facts: readonly TerminalFact[] }
-  | { readonly schemaVersion: 1; readonly status: 'ignored'; readonly reason: NoFactReason }
+  | {
+      readonly schemaVersion: 2
+      readonly status: 'applied'
+      readonly changes: readonly {
+        readonly operation: RevisionOperation
+        readonly targetFactIds: readonly string[]
+        readonly fact: TerminalFact
+        readonly validationInputDigest: string
+      }[]
+    }
+  | { readonly schemaVersion: 2; readonly status: 'ignored'; readonly reason: NoFactReason }
 
 type CoverageRecord = {
   readonly sourceKey: string
   readonly status: 'pending' | 'applied' | 'ignored'
   readonly disposition?: TerminalDisposition
+  readonly terminalTransactionSequence?: number
+  readonly dispositionDigest?: string
+  readonly revisionDigest?: string
 }
 
 type CaptureResult = {
@@ -200,7 +232,7 @@ const useAuthorization: UseAuthorization = {
   purpose: 'personal_feed_context',
   sourceKind: 'telegram_inbound',
 }
-const entailed = { kind: 'target_entailed_with_minimal_evidence' } as const
+const entailed = { kind: 'target_and_revision_confirmed' } as const
 const contradicted = { kind: 'contradicted' } as const
 const unknown = { kind: 'unknown' } as const
 const confirmedNoFact = { kind: 'confirmed_no_fact' } as const
@@ -278,6 +310,8 @@ function validInterestProposal(
     focusSpan,
     protectedSpans: protectedValue,
     attitude,
+    operation: 'assert',
+    targetFactIds: [],
   }
 }
 
@@ -293,6 +327,8 @@ function validKnowledgeProposal(
     focusSpan,
     protectedSpans: protectedValue,
     attitude: { ...attitude, qualification },
+    operation: 'assert',
+    targetFactIds: [],
   }
 }
 
@@ -318,6 +354,15 @@ function terminalCoverage(owner: PersonalContextOwner): CoverageRecord {
   expect(coverage).toBeDefined()
   if (coverage === undefined) throw new Error('terminal coverage is missing')
   return coverage
+}
+
+function expectTerminalMetadata(coverage: CoverageRecord): void {
+  expect(Object.keys(coverage).sort()).toEqual([
+    'disposition', 'dispositionDigest', 'revisionDigest', 'sourceKey', 'status', 'terminalTransactionSequence',
+  ])
+  expect(coverage.terminalTransactionSequence).toBeGreaterThan(0)
+  expect(coverage.dispositionDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
+  expect(coverage.revisionDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
 }
 
 afterEach(() => {
@@ -355,14 +400,15 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
     const semantics: SemanticPorts = {
       classifier: input => {
         classifierInputs.push(input)
-        expect(Object.keys(input).sort()).toEqual(['rawText', 'sourceKey', 'useAuthorization'])
+        expect(Object.keys(input).sort()).toEqual(['activeFacts', 'rawText', 'sourceKey', 'useAuthorization'])
         expect(input.rawText).toBe(rawText)
         expect(input.useAuthorization).toEqual(useAuthorization)
+        expect(input.activeFacts).toEqual([])
         return factsProposal(interestProposal, knowledgeProposal)
       },
       entailmentValidator: input => {
         entailmentInputs.push(input)
-        expect(Object.keys(input).sort()).toEqual(['canonicalFact', 'evidenceSpan', 'exactEvidenceText', 'fullRawText', 'target'])
+        expect(Object.keys(input).sort()).toEqual(['canonicalFact', 'evidenceSpan', 'exactEvidenceText', 'fullRawText', 'revision', 'target'])
         return entailed
       },
       noFactValidator: () => {
@@ -374,7 +420,7 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
     const captured = capture(owner, rawText, 102)
 
     await expect(owner.settle({ sourceKey: captured.source.sourceKey })).resolves.toMatchObject({ status: 'applied' })
-    expect(classifierInputs).toEqual([{ sourceKey: captured.source.sourceKey, rawText, useAuthorization }])
+    expect(classifierInputs).toEqual([{ sourceKey: captured.source.sourceKey, rawText, useAuthorization, activeFacts: [] }])
     expect(entailmentInputs).toHaveLength(2)
     expect(entailmentInputs.map(input => ({
       fullRawText: input.fullRawText,
@@ -423,6 +469,10 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
       },
     ]
     expect(entailmentInputs.map(input => input.canonicalFact)).toEqual(expectedCanonicalFacts)
+    expect(entailmentInputs.map(input => input.revision)).toEqual([
+      { operation: 'assert', targetFacts: [], priorActiveFacts: [] },
+      { operation: 'assert', targetFacts: [], priorActiveFacts: [] },
+    ])
     const expectedFacts: readonly TerminalFact[] = [
       {
         lane: 'long_term_interest',
@@ -458,20 +508,35 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
       },
     ]
     expect(owner.read().sources[0]?.rawText).toBeNull()
-    expect(terminalCoverage(owner)).toEqual({
-      sourceKey: captured.source.sourceKey,
-      status: 'applied',
-      disposition: { schemaVersion: 1, status: 'applied', facts: expectedFacts },
-    })
+    const appliedCoverage = terminalCoverage(owner)
+    expectTerminalMetadata(appliedCoverage)
+    expect(appliedCoverage).toMatchObject({ sourceKey: captured.source.sourceKey, status: 'applied' })
+    expect(appliedCoverage.disposition).toMatchObject({ schemaVersion: 2, status: 'applied' })
+    if (appliedCoverage.disposition?.status !== 'applied') throw new Error('facts were not applied')
+    expect(appliedCoverage.disposition.changes.map(change => change.fact)).toEqual(expectedFacts)
+    expect(appliedCoverage.disposition.changes.map(change => ({ operation: change.operation, targetFactIds: change.targetFactIds }))).toEqual([
+      { operation: 'assert', targetFactIds: [] },
+      { operation: 'assert', targetFactIds: [] },
+    ])
+    for (const change of appliedCoverage.disposition.changes) {
+      expect(Object.keys(change).sort()).toEqual(['fact', 'operation', 'targetFactIds', 'validationInputDigest'])
+      expect(change.validationInputDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
+    }
     owner.close()
 
     const reopened = (await makeOwner({ databasePath, semantics })).owner
     expect(reopened.read().sources[0]?.rawText).toBeNull()
-    expect(terminalCoverage(reopened).disposition).toEqual({ schemaVersion: 1, status: 'applied', facts: expectedFacts })
+    const reopenedCoverage = terminalCoverage(reopened)
+    expectTerminalMetadata(reopenedCoverage)
+    expect(reopenedCoverage).toEqual(appliedCoverage)
     reopened.close()
 
     const malformed = [
       ['free-text fact key', { ...interestProposal, proposition: 'generated text must never cross the port' }],
+      ['missing operation', (({ operation: _operation, ...fact }) => fact)(interestProposal)],
+      ['missing target ids', (({ targetFactIds: _targetFactIds, ...fact }) => fact)(interestProposal)],
+      ['assert with target', { ...interestProposal, targetFactIds: ['fact:forged'] }],
+      ['generated revision text', { ...interestProposal, summary: 'generated revision text must never cross the port' }],
       ['out-of-range span', { ...interestProposal, focusSpan: { startUtf16: 5, endUtf16: rawText.length + 1 } }],
       ['missing protected category', {
         ...interestProposal,
@@ -555,8 +620,8 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
     const disposition = terminalCoverage(positiveOwner).disposition
     expect(disposition?.status).toBe('applied')
     if (disposition?.status !== 'applied') throw new Error('positive control was not applied as facts')
-    expect(disposition.facts[0]?.evidence.exactEvidenceText).toBe('我长期关注 A')
-    expect(disposition.facts[0]?.evidence.evidenceSpan).toEqual({ startUtf16: 0, endUtf16: 7 })
+    expect(disposition.changes[0]?.fact.evidence.exactEvidenceText).toBe('我长期关注 A')
+    expect(disposition.changes[0]?.fact.evidence.evidenceSpan).toEqual({ startUtf16: 0, endUtf16: 7 })
     positiveOwner.close()
   })
 
@@ -635,7 +700,7 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
           entailmentValidator: input => {
             validatorInput = input
             expect(Object.keys(input).sort()).toEqual([
-              'canonicalFact', 'evidenceSpan', 'exactEvidenceText', 'fullRawText', 'target',
+              'canonicalFact', 'evidenceSpan', 'exactEvidenceText', 'fullRawText', 'revision', 'target',
             ])
             return entailed
           },
@@ -651,12 +716,13 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
         exactEvidenceText: testCase.expectedExactEvidenceText,
         target: testCase.expectedTarget,
         canonicalFact: testCase.expectedCanonicalFact,
+        revision: { operation: 'assert', targetFacts: [], priorActiveFacts: [] },
       })
       const disposition = terminalCoverage(owner).disposition
       expect(disposition?.status).toBe('applied')
       if (disposition?.status !== 'applied') throw new Error('positive semantic control was not applied')
-      expect(disposition.facts[0]?.evidence.exactEvidenceText).toBe(testCase.expectedExactEvidenceText)
-      expect(disposition.facts[0]?.evidence.focusSpanWithinEvidence).toEqual(testCase.expectedTarget.focusSpanWithinEvidence)
+      expect(disposition.changes[0]?.fact.evidence.exactEvidenceText).toBe(testCase.expectedExactEvidenceText)
+      expect(disposition.changes[0]?.fact.evidence.focusSpanWithinEvidence).toEqual(testCase.expectedTarget.focusSpanWithinEvidence)
       owner.close()
     }
   })
@@ -685,7 +751,7 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
     expect(validatorInputs.length).toBeLessThanOrEqual(2)
     for (const input of validatorInputs) {
       expect(Object.keys(input).sort()).toEqual([
-        'canonicalFact', 'evidenceSpan', 'exactEvidenceText', 'fullRawText', 'target',
+        'canonicalFact', 'evidenceSpan', 'exactEvidenceText', 'fullRawText', 'revision', 'target',
       ])
       expect(input.fullRawText).toBe(rawText)
       expect(input.evidenceSpan).toEqual({ startUtf16: 0, endUtf16: 11 })
@@ -695,6 +761,7 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
         exactFocusText: 'Q',
         protectedSpansWithinEvidence: protectedSpans({ subject: [{ startUtf16: 0, endUtf16: 1 }] }),
       })
+      expect(input.revision).toEqual({ operation: 'assert', targetFacts: [], priorActiveFacts: [] })
     }
     expectPendingRaw(owner, captured.source.sourceKey, rawText)
     expect(owner.read().coverage[0]?.disposition).toBeUndefined()
@@ -742,27 +809,32 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
         epistemic: 'asserted',
         attitude: { ...ownCurrentAttitude, qualification: 'conditioned' },
       },
+      revision: { operation: 'assert', targetFacts: [], priorActiveFacts: [] },
     })
     const disposition = terminalCoverage(owner).disposition
     expect(disposition?.status).toBe('applied')
     if (disposition?.status !== 'applied') throw new Error('conditional fact was not applied')
-    expect(disposition.facts).toEqual([{
-      lane: 'existing_knowledge',
-      epistemic: 'asserted',
-      evidence: {
-        sourceKey: captured.source.sourceKey,
-        evidenceSpan: { startUtf16: 0, endUtf16: 10 },
-        exactEvidenceText: rawText,
-        focusSpanWithinEvidence: { startUtf16: 0, endUtf16: 1 },
-        protectedSpansWithinEvidence: protectedSpans({
-          conditions: [{ startUtf16: 2, endUtf16: 10 }],
-          applicability: [{ startUtf16: 2, endUtf16: 10 }],
-        }),
-        attitude: { ...ownCurrentAttitude, qualification: 'conditioned' },
+    expect(disposition.changes).toHaveLength(1)
+    expect(disposition.changes[0]).toMatchObject({
+      operation: 'assert',
+      targetFactIds: [],
+      fact: {
+        lane: 'existing_knowledge', epistemic: 'asserted',
+        evidence: {
+          sourceKey: captured.source.sourceKey,
+          evidenceSpan: { startUtf16: 0, endUtf16: 10 },
+          exactEvidenceText: rawText,
+          focusSpanWithinEvidence: { startUtf16: 0, endUtf16: 1 },
+          protectedSpansWithinEvidence: protectedSpans({
+            conditions: [{ startUtf16: 2, endUtf16: 10 }],
+            applicability: [{ startUtf16: 2, endUtf16: 10 }],
+          }),
+          attitude: { ...ownCurrentAttitude, qualification: 'conditioned' },
+        },
+        useAuthorization,
       },
-      useAuthorization,
-    }])
-    expect(Object.keys(disposition.facts[0] ?? {}).sort()).toEqual([
+    })
+    expect(Object.keys(disposition.changes[0]?.fact ?? {}).sort()).toEqual([
       'epistemic', 'evidence', 'lane', 'useAuthorization',
     ])
     expect(JSON.stringify(disposition)).not.toContain('"proposition":"P"')
@@ -913,19 +985,19 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
       {
         name: 'validator output with an extra key is not accepted',
         classifier: () => factsProposal(validProposal),
-        entailmentValidator: () => ({ kind: 'entailed_without_semantic_loss', explanation: 'forged' }),
+        entailmentValidator: () => ({ kind: 'target_and_revision_confirmed', explanation: 'forged' }),
         noFactValidator: () => confirmedNoFact,
       },
       {
-        name: 'legacy validator approval kind is not accepted',
+        name: 'legacy fact-only validator approval kind is not accepted',
+        classifier: () => factsProposal(validProposal),
+        entailmentValidator: () => ({ kind: 'target_entailed_with_minimal_evidence' }),
+        noFactValidator: () => confirmedNoFact,
+      },
+      {
+        name: 'another legacy validator approval kind is not accepted',
         classifier: () => factsProposal(validProposal),
         entailmentValidator: () => ({ kind: 'entailed_without_semantic_loss' }),
-        noFactValidator: () => confirmedNoFact,
-      },
-      {
-        name: 'approved validator output with an extra key is not accepted',
-        classifier: () => factsProposal(validProposal),
-        entailmentValidator: () => ({ kind: 'target_entailed_with_minimal_evidence', explanation: 'forged' }),
         noFactValidator: () => confirmedNoFact,
       },
       {
@@ -1040,9 +1112,10 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
         semantics: {
           classifier: input => {
             classifierCallsForCase += 1
-            expect(Object.keys(input).sort(), name).toEqual(['rawText', 'sourceKey', 'useAuthorization'])
+            expect(Object.keys(input).sort(), name).toEqual(['activeFacts', 'rawText', 'sourceKey', 'useAuthorization'])
             expect(input.rawText, name).toBe(telegramRawText)
             expect(input.useAuthorization, name).toEqual(useAuthorization)
+            expect(input.activeFacts, name).toEqual([])
             return noFactProposal(proposedReason)
           },
           entailmentValidator: () => {
@@ -1062,15 +1135,12 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
       })).owner
       const caseCapture = capture(caseOwner, telegramRawText, 510 + rawTelegramCases.findIndex(entry => entry[0] === name))
 
-      await expect(caseOwner.settle({ sourceKey: caseCapture.source.sourceKey }), name).resolves.toEqual({
-        sourceKey: caseCapture.source.sourceKey,
-        status: 'ignored',
-        disposition: {
-          schemaVersion: 1,
-          status: 'ignored',
-          reason: proposedReason,
-        },
+      const ignored = await caseOwner.settle({ sourceKey: caseCapture.source.sourceKey })
+      expect(ignored, name).toMatchObject({
+        sourceKey: caseCapture.source.sourceKey, status: 'ignored',
+        disposition: { schemaVersion: 2, status: 'ignored', reason: proposedReason },
       })
+      expectTerminalMetadata(ignored)
       expect(classifierCallsForCase, name).toBe(1)
       expect(noFactCallsForCase, name).toBe(1)
       expect(entailmentCallsForCase, name).toBe(0)
@@ -1090,6 +1160,7 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
             sourceKey: input.sourceKey,
             rawText,
             useAuthorization,
+            activeFacts: [],
           })
           return noFactProposal('object_feedback_without_long_term_scope')
         },
@@ -1133,15 +1204,11 @@ describe('Personal Feed v2 R4 exact personal-context semantics', () => {
     expect(entailmentCalls).toBe(0)
 
     const terminal = await owner.settle({ sourceKey })
-    expect(terminal).toEqual({
-      sourceKey,
-      status: 'ignored',
-      disposition: {
-        schemaVersion: 1,
-        status: 'ignored',
-        reason: 'object_feedback_without_long_term_scope',
-      },
+    expect(terminal).toMatchObject({
+      sourceKey, status: 'ignored',
+      disposition: { schemaVersion: 2, status: 'ignored', reason: 'object_feedback_without_long_term_scope' },
     })
+    expectTerminalMetadata(terminal)
     expect(classifierCalls).toBe(1)
     expect(noFactCalls).toBe(1)
     expect(entailmentCalls).toBe(0)
