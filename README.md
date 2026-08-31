@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-这是作者为自己使用 **DeepSeek Harness（DSH）** 编写的实验性、自用插件与 Skill 集合。它解决的是很具体的日常场景：人在外面时想用 Telegram 继续指挥家里的 Harness；看到一条链接时，想让它先查证并告诉你一个值得继续听下去的点；想把真正感兴趣的题目留到以后探索；想让 Agent 定时做事、结束后回来告诉你；想同时盯一个长期任务又不丢掉手上正在做的事；想把 X（Twitter）时间线筛成少量值得看的内容；或想让长对话和 Web 界面不那么容易迷路。
+这是作者为自己使用 **DeepSeek Harness（DSH）** 编写的实验性、自用插件与 Skill 集合。它解决的是很具体的日常场景：人在外面时想用 Telegram 继续指挥家里的 Harness；看到一条链接时，想让它先查证并告诉你一个值得继续听下去的点；想把真正感兴趣的题目留到以后探索；想让 Agent 定时做事、结束后回来告诉你；想同时盯一个长期任务又不丢掉手上正在做的事；或想把 X（Twitter）时间线筛成少量值得看的内容。
 
 项目按作者自己的实际需要演进：**不承诺兼容性、长期维护、及时答疑，也不承诺适合他人的生产环境。** 欢迎阅读和参考；在作者明确发布许可证前，如需复制、修改或分发，请先取得作者授权。使用、部署及其后果由使用者自行承担。
 
@@ -27,7 +27,6 @@
 | **定时 Agent / Scheduled Agent** | [`dsh-cron`](dsh-cron) / `@deepseek-ai/dsh-cron` | 想让 Agent 每小时看一次信息、每天做一次整理，而不必一直开网页等着。 | 到点会唤醒独立会话完成工作，并可把结果送到 Telegram。 | 会启动无人值守 Agent；副作用、成本和重复执行边界要自行承担。 |
 | **X 洞察筛选器 / X Insight Filter** | [`x-feed`](x-feed) 私有业务运行时 + [`skills/x-feed`](skills/x-feed) Skill | 想从 X/Twitter 时间线挑几条值得看，而不是整条信息流搬进 Telegram。 | `dsh-cron` 定时运行 Python 筛选并可靠投递；Skill 与 Telegram 业务扩展处理反馈和收藏。 | 它不是插件；依赖宿主的通用扩展口、`dsh-cron` 与 Python，不提供账号、cookie 或通用爬虫。 |
 | **探索机会 / Exploration Opportunity** | [`skills/explore-opportunity`](skills/explore-opportunity) / Skill | 你丢来一句话或链接，想先听懂背后最有意思的机制；真的感兴趣时再留到以后。 | Agent 用宿主已有的搜索、网页、文件或 Shell 能力做初步查证，先给一个“还想再听一点”的钩子；只有你明确表态才更新 `EXPLORE.md`。 | 不自带浏览器、网络隔离或后台任务；普通追问次数不会自动入池。 |
-| **会话路线提示 / Conversation Route Map** | [`ui-context-compactor`](ui-context-compactor) / `@deepseek-ai/dsh-client-ui-context-compactor` | 长对话过后，想让 Harness 还知道目标、当前做法和该复查什么。 | 它为一个会话整理简短路线摘要，压缩后也能重新接上上下文。 | 只服务单个 session；摘要仍可能错，模型和费用由宿主决定。 |
 
 ```mermaid
 flowchart LR
@@ -39,10 +38,9 @@ flowchart LR
   A --> DSH[DeepSeek Harness / Cordis host]
   C --> DSH
   X --> DSH
-  R[Session Route] --> DSH
 ```
 
-图只表示代码中存在的协作关系，不表示必须一次安装全部组件。探索机会由宿主的 Skill 机制按语义发现，再协调这个 Agent 原本就有的搜索、网页、文件或 Shell 工具；它不依赖另一个探索插件，也不让其他插件因为发现它存在就偷偷改变行为。`x-feed` 不是 Cordis 插件：`dsh-cron` 通过通用任务环境口加载它的定时业务，`telegram-gateway` 通过通用 Telegram 扩展口加载反馈业务；UI 插件是宿主 Web/会话扩展。
+图只表示代码中存在的协作关系，不表示必须一次安装全部组件。探索机会由宿主的 Skill 机制按语义发现，再协调这个 Agent 原本就有的搜索、网页、文件或 Shell 工具；它不依赖另一个探索插件，也不让其他插件因为发现它存在就偷偷改变行为。`x-feed` 不是 Cordis 插件：`dsh-cron` 通过通用任务环境口加载它的定时业务，`telegram-gateway` 通过通用 Telegram 扩展口加载反馈业务。
 
 ## 公开范围与前置条件
 
@@ -83,12 +81,9 @@ flowchart LR
 // Telegram Bridge 可加载同一业务包的反馈适配器；x-feed 本身没有 apply()。
 { extensions: [{ modulePath: '<x-feed>/lib/index.js', configJson: '{}' }] }
 
-// Session Route: provider 与 model 要同时提供，或同时省略。
-{ maxInputChars: 32_000, maxOutputTokens: 2_400 }
-
 ```
 
-`Telegram Bridge`、`Responsibility Ledger` 和 `Agent Clock` 都会从 credential provider 查找 Telegram 凭据；不要把 token 或 chat ID 直接填到源码控制中的对象里。`Exploration Opportunity` 和 `X Feed` Skill 都没有 `apply()`；后者只指导现有 X 工具的使用。`x-feed` 的默认数据目录仍是宿主 `DSH_HOME/storages/dsh-x-feed`，因此重构不迁移或删除旧数据。`Session Route` 的 reducer 只有 provider/model 成对设置时才使用显式模型。
+`Telegram Bridge`、`Responsibility Ledger` 和 `Agent Clock` 都会从 credential provider 查找 Telegram 凭据；不要把 token 或 chat ID 直接填到源码控制中的对象里。`Exploration Opportunity` 和 `X Feed` Skill 都没有 `apply()`；后者只指导现有 X 工具的使用。`x-feed` 的默认数据目录仍是宿主 `DSH_HOME/storages/dsh-x-feed`，因此重构不迁移或删除旧数据。
 
 ## 各组件的功能与限制
 
@@ -147,20 +142,6 @@ flowchart LR
 - 用户要从候选里挑一个时最多问三个二选一问题；只有用户明确要求时才做深度调查并写入 `research/`。
 - 它不是任务、长期 MEMORY、X 收藏夹或定时系统，也不额外提供图片入口、浏览器控制、网络隔离或后台研究。
 
-### 会话路线提示 / Conversation Route Map
-
-一段长对话过去后，最烦的是 Harness 忘了目标、当前方案和什么条件下该推倒重来。装上 `ui-context-compactor` 后，它会为一个 root session 留下一份简短路线提示，压缩或恢复上下文后仍能接上。
-
-- 整理目标、当前路线、决策、证据指针和重审条件。
-- 在长度上限内调用辅助 reducer，并在失败时保留最后一份有效路线。
-- 检测秘密样式内容，避免把明显敏感的材料扩散进路线状态。
-- 可成对指定 reducer 的 `provider` 和 `model`，或使用默认宿主选择。
-- 只服务单个 session；摘要仍可能错，不能替代原始会话记录或跨会话知识库。
-- 对已有当前主事 A 的受管 Telegram direct（包括已 finalized 并经 C34→C35 冷恢复的 canonical A），相关续接和一次性无关插问都保留 A；一次性插问只处理本轮，礼貌感谢正常回复但不作为收口依据。只有用户保守而明确地接受结果、结束或取消当前事项时，才沿既有 C07 事务进入 `no_focus`。持久无关工作或真正开始 B、非当前 identity、非 direct/owner 输入，以及含糊近似、关系 `unknown`/`multiple` 或 provider 失败都不会猜测、改焦点或误触发 C01/C07；A→B 与可见选择仍分别留给后续裁决。
-- 对受管 Telegram canary，已有唯一背景后的同 chat、同 generation C14/C15 事实更新会重新走同一份确定性候选、双 reviewer 与 C28；只有候选正文和机器投影逐字节相同，才保留 identical-qualified 证明而不换入背景。assistant 文本、普通 direct 和任意触发都不能取得这条资格链。
-- Telegram 冷启动只按结构化来源区分真正新聊天、已保全的 pre-canonical 焦点、待迁移旧 route 与缺失应有 state；已完整保全的 canonical state 继续由既有 owner 恢复，不进入这四分；旧 route 正文不成为候选或规范状态，日志已有 context-manager state 而 owner material 缺失时走既有受管错误面，不冒充新聊天。
-- 受管输入若已经从 inbox 被 claim、但 append-only 日志能证明同 id 尚未进入 `user/message` 或任何 request/provider 开始点，会按原 id、target、顺序和正文重插；只有 flush 后的 detached readback 精确核对成功才允许后续一次执行。持久证明失败时只保留 live inbox，不启动模型或伪造回复；冷启动不会凭空主动发 Telegram，只有同一进程的下一次合法受管 turn 再次 claim 并独立保全该输入后，才最多一次复用既有失败呈现。已有 `user/message` 或请求开始证据属于执行结果不确定事故，本恢复不会自动重放。
-
 ## 构建、测试与本地开发
 
 当前没有统一的 install/build/test 命令，而且 `@deepseek-ai/*` 依赖没有作为可直接获取的 npm 依赖发布。不要在独立克隆中直接运行 `pnpm install` 或 `pnpm run bundle`：包管理器会尝试从 npm 补齐这些私有/源码依赖而失败。下面是以兼容 Harness 源码检出作为工具链和依赖来源的命令；它们不是发布流程，也不会部署服务。
@@ -174,7 +155,6 @@ export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
 (cd dsh-assistant && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd dsh-cron && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd x-feed && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
-(cd ui-context-compactor && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 ```
 
 测试同样逐包执行：
@@ -187,7 +167,6 @@ export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
 (cd dsh-cron && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd x-feed && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd telegram-gateway && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
-(cd ui-context-compactor && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 
 # Skill 没有构建产物；可用兼容的 Skill Creator 校验目录结构和 frontmatter。
 python '<path-to-skill-creator>/scripts/quick_validate.py' skills/explore-opportunity
@@ -222,7 +201,6 @@ dsh-cron/               定时 Agent manager/scheduler
 x-feed/                 X 洞察私有业务运行时与 Python 流水线（非插件）
 skills/x-feed/          X 反馈与收藏的 Agent 行为说明
 skills/explore-opportunity/  用现有工具查证线索并维护显式兴趣的 Skill
-ui-context-compactor/   单 session 路线与上下文投影
 ```
 
 ## 许可证

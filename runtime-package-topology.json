@@ -5,25 +5,10 @@
       "name": "@deepseek-ai/dsh-agent",
       "kind": "harness",
       "requiredBy": [
-        "@deepseek-ai/dsh-client-ui-context-compactor",
         "@deepseek-ai/dsh-cron",
         "@deepseek-ai/dsh-telegram-gateway",
         "@herman/personal-feed-selector",
         "@herman/x-feed"
-      ]
-    },
-    {
-      "name": "@deepseek-ai/dsh-compaction",
-      "kind": "harness",
-      "requiredBy": [
-        "@deepseek-ai/dsh-client-ui-context-compactor"
-      ]
-    },
-    {
-      "name": "@deepseek-ai/dsh-compaction-basic",
-      "kind": "harness",
-      "requiredBy": [
-        "@deepseek-ai/dsh-client-ui-context-compactor"
       ]
     },
     {
@@ -49,7 +34,6 @@
       "name": "@deepseek-ai/dsh-llm",
       "kind": "harness",
       "requiredBy": [
-        "@deepseek-ai/dsh-client-ui-context-compactor",
         "@deepseek-ai/dsh-cron",
         "@deepseek-ai/dsh-telegram-gateway",
         "@herman/personal-feed-selector",
@@ -61,25 +45,10 @@
       "kind": "harness",
       "requiredBy": [
         "@deepseek-ai/dsh-assistant",
-        "@deepseek-ai/dsh-client-ui-context-compactor",
         "@deepseek-ai/dsh-cron",
         "@deepseek-ai/dsh-telegram-gateway",
         "@herman/personal-feed-selector",
         "@herman/x-feed"
-      ]
-    },
-    {
-      "name": "@deepseek-ai/dsh-storage-domain",
-      "kind": "harness",
-      "requiredBy": [
-        "@deepseek-ai/dsh-client-ui-context-compactor"
-      ]
-    },
-    {
-      "name": "@deepseek-ai/dsh-system-prompt",
-      "kind": "harness",
-      "requiredBy": [
-        "@deepseek-ai/dsh-client-ui-context-compactor"
       ]
     },
     {
@@ -97,17 +66,9 @@
       "kind": "harness",
       "requiredBy": [
         "@deepseek-ai/dsh-assistant",
-        "@deepseek-ai/dsh-client-ui-context-compactor",
         "@deepseek-ai/dsh-cron",
         "@herman/personal-feed-selector",
         "@deepseek-ai/dsh-telegram-gateway"
-      ]
-    },
-    {
-      "name": "zod",
-      "kind": "harness",
-      "requiredBy": [
-        "@deepseek-ai/dsh-client-ui-context-compactor"
       ]
     },
     {

@@ -2,7 +2,7 @@
 
 [中文](README.md)
 
-This is an experimental, personal collection of plugins and one Skill the author built for their own use of **DeepSeek Harness (DSH)**. They address ordinary situations: continuing a conversation with a home Harness from Telegram while away; sending a link and wanting one verified reason it may be worth a closer look; keeping a genuinely interesting topic for later exploration; having an agent do something every hour and report back; tracking a long-running responsibility without losing today's work; reducing an X (Twitter) timeline to a few useful items; and keeping a long Web conversation from losing its way.
+This is an experimental, personal collection of plugins and one Skill the author built for their own use of **DeepSeek Harness (DSH)**. They address ordinary situations: continuing a conversation with a home Harness from Telegram while away; sending a link and wanting one verified reason it may be worth a closer look; keeping a genuinely interesting topic for later exploration; having an agent do something every hour and report back; tracking a long-running responsibility without losing today's work; and reducing an X (Twitter) timeline to a few useful items.
 
 The repository evolves around the author's own needs. It makes **no promise of compatibility, long-term maintenance, timely support, or suitability for anyone else's production environment.** You are welcome to read and study the source; until the author explicitly publishes a license, obtain authorization before copying, modifying, or distributing it. Users are responsible for their own use, deployments, and consequences.
 
@@ -17,7 +17,6 @@ The repository evolves around the author's own needs. It makes **no promise of c
 | **Scheduled Agent / 定时 Agent** | [`dsh-cron`](dsh-cron) / `@deepseek-ai/dsh-cron` | You want an agent to check something hourly or prepare something daily without leaving a Web page open. | A separate session wakes on schedule, does the work, and can deliver the result to Telegram. | Starts unattended agents; you own side effects, cost, and duplicate-run boundaries. |
 | **X Insight Filter / X 洞察筛选器** | [`x-feed`](x-feed) private business runtime + [`skills/x-feed`](skills/x-feed) Skill | You want a few worthwhile X/Twitter items, not an entire timeline pasted into Telegram. | `dsh-cron` schedules and reliably delivers Python-selected items; the Skill and Telegram adapter handle feedback and saves. | It is not a plugin; it needs the host extension ports, `dsh-cron`, and Python, and provides no account, cookie, or general crawler. |
 | **Exploration Opportunity / 探索机会** | [`skills/explore-opportunity`](skills/explore-opportunity) / Skill | You drop a sentence or link and want the most interesting mechanism first, then retain it only if it truly catches your interest. | The agent uses the host's existing search, Web, file, or Shell capabilities for a quick check and gives one hook; only an explicit reaction updates `EXPLORE.md`. | Adds no browser, network isolation, or background task; follow-up count alone never retains an item. |
-| **Conversation Route Map / 会话路线提示** | [`ui-context-compactor`](ui-context-compactor) / `@deepseek-ai/dsh-client-ui-context-compactor` | A long conversation has happened and you need Harness to retain the goal, current approach, and review triggers. | It keeps a short route note for one session so compaction or context recovery can resume the thread. | One session only; summaries can be wrong, and the host chooses model/cost. |
 
 ```mermaid
 flowchart LR
@@ -29,10 +28,9 @@ flowchart LR
   A --> DSH[DeepSeek Harness / Cordis host]
   C --> DSH
   X --> DSH
-  R[Session Route] --> DSH
 ```
 
-The diagram shows code-level collaboration, not a requirement to install everything together. The host discovers the Exploration Opportunity Skill semantically, and the Skill coordinates search, Web, file, or Shell tools the agent already has. `x-feed` is not a Cordis plugin: `dsh-cron` loads its scheduled business logic through a generic run-environment port, while `telegram-gateway` loads its feedback adapter through a generic Telegram extension port. The UI packages remain Web/session extensions.
+The diagram shows code-level collaboration, not a requirement to install everything together. The host discovers the Exploration Opportunity Skill semantically, and the Skill coordinates search, Web, file, or Shell tools the agent already has. `x-feed` is not a Cordis plugin: `dsh-cron` loads its scheduled business logic through a generic run-environment port, while `telegram-gateway` loads its feedback adapter through a generic Telegram extension port.
 
 ## Public scope and prerequisites
 
@@ -71,12 +69,9 @@ The following are **object shapes passed to `apply()`**, not a specific DSH prof
 // Telegram Bridge loads the same package's feedback adapter; x-feed has no apply().
 { extensions: [{ modulePath: '<x-feed>/lib/index.js', configJson: '{}' }] }
 
-// Session Route: provider and model must be supplied together, or both omitted.
-{ maxInputChars: 32_000, maxOutputTokens: 2_400 }
-
 ```
 
-Telegram Bridge, Responsibility Ledger, and Agent Clock ask the credential provider for Telegram credentials; do not put a token or chat ID directly into a source-controlled object. Exploration Opportunity and X Feed Skills have no `apply()` configuration; the latter only guides use of the already-mounted X tools. `x-feed` keeps the old default data location at `DSH_HOME/storages/dsh-x-feed`, so this refactor neither migrates nor deletes existing data. Session Route uses an explicit reducer only when `provider` and `model` are set together.
+Telegram Bridge, Responsibility Ledger, and Agent Clock ask the credential provider for Telegram credentials; do not put a token or chat ID directly into a source-controlled object. Exploration Opportunity and X Feed Skills have no `apply()` configuration; the latter only guides use of the already-mounted X tools. `x-feed` keeps the old default data location at `DSH_HOME/storages/dsh-x-feed`, so this refactor neither migrates nor deletes existing data.
 
 ## Component behavior and limits
 
@@ -135,16 +130,6 @@ When a new concept appears, you may want one concrete reason it matters before d
 - Choosing from the pool takes at most three binary questions. Deep research and a report under `research/` happen only on explicit request.
 - It is not a task list, long-term MEMORY, X bookmark store, or scheduler, and it adds no image input, browser control, network isolation, or autonomous research.
 
-### Conversation Route Map / 会话路线提示
-
-After a long conversation, the annoying failure is that Harness loses the goal, the current approach, and the condition that should make it reconsider. With `ui-context-compactor`, one root session keeps a short route note that can reconnect the thread after compaction or context recovery.
-
-- Collects goals, current route, decisions, evidence pointers, and review conditions.
-- Calls an auxiliary reducer within explicit size limits and keeps the last valid route on failure.
-- Detects secret-like material to avoid spreading obviously sensitive text into route state.
-- Can use an explicit reducer `provider` and `model` as a pair, or the host's default selection.
-- Handles one session only; summaries can still be wrong and do not replace the original log or a cross-session knowledge base.
-
 ## Build, test, and local development
 
 There is no unified install/build/test command, and the `@deepseek-ai/*` dependencies are not published as directly retrievable npm dependencies. Do not run `pnpm install` or `pnpm run bundle` in an isolated clone: the package manager will try, and fail, to fetch those source/private dependencies from npm. The commands below use a compatible Harness source checkout as the toolchain and dependency source. They are not a release process and do not deploy services.
@@ -158,7 +143,6 @@ export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
 (cd dsh-assistant && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd dsh-cron && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd x-feed && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
-(cd ui-context-compactor && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 ```
 
 Tests also run per package:
@@ -171,7 +155,6 @@ export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
 (cd dsh-cron && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd x-feed && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd telegram-gateway && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
-(cd ui-context-compactor && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 
 # The Skill has no build artifact; validate its structure and frontmatter with a compatible Skill Creator.
 python '<path-to-skill-creator>/scripts/quick_validate.py' skills/explore-opportunity
@@ -206,7 +189,6 @@ dsh-cron/               Scheduled agent manager/scheduler
 x-feed/                 Private X insight business runtime and Python pipeline (not a plugin)
 skills/x-feed/          Agent guidance for X feedback and saves
 skills/explore-opportunity/  Skill for verifying a lead and retaining explicit interest
-ui-context-compactor/   Single-session route and context projection
 ```
 
 ## License
