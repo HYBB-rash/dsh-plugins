@@ -64,8 +64,12 @@ is the only conflict override.  A failed write must leave a retryable pending
 operation; `--retry-pending` must replay exactly that operation.  A pull failure
 must not create pending work.  When there is no pending work, retry must perform
 no API request.  JSON stdout must be bounded, machine-readable, and free of
-tokens, Authorization headers, response bodies, and private inbox text.
-Diagnostics must be fixed and similarly redacted.  Never refer to `.openclaw`,
+tokens, Authorization headers, response bodies, and private inbox text.  Every
+non-silent JSON result must be exactly `json.dumps` of its status object with
+default separators, followed by a single trailing newline: for example
+`{"status": "synced"}\n`.  Tests must construct the expected bytes with
+`json.dumps` (or a semantically equivalent fixed literal) and must not expect
+any other whitespace.  Diagnostics must be fixed and similarly redacted.  Never refer to `.openclaw`,
 old task-inbox workflow paths, Telegram, cron, or a real Notion endpoint/page/token.
 
 At the start of every invocation that performs an operation, use non-following
