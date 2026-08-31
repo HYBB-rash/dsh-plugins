@@ -131,6 +131,8 @@ RUN set -eu; \
     PYTHONDONTWRITEBYTECODE=1 \
       python3 /opt/dsh/release-system/tests/notion-inbox-init.py; \
     PYTHONDONTWRITEBYTECODE=1 \
+      python3 /opt/dsh/release-system/tests/notion-https-compat.py; \
+    PYTHONDONTWRITEBYTECODE=1 \
       python3 /opt/dsh/release-system/tests/test_scrub_preflight_state.py; \
     PYTHONDONTWRITEBYTECODE=1 \
       python3 /opt/dsh/release-system/tests/test_workspace_migration_content.py; \

@@ -47,7 +47,11 @@ Bearer <token>` and `Notion-Version: 2026-03-11`.  A full replacement PATCH body
 is exactly `{"type":"replace_content","replace_content":{"new_str":<full
 body>}}`.  A successful GET or PATCH response is accepted only when it contains
 `markdown` as a string, `truncated` as false, and `unknown_block_ids` as an empty
-list.  Do not follow redirects or use any other method/path.
+list.  Do not follow redirects or use any other method/path.  The transport must
+match the configured scheme: `https://` uses a TLS HTTPS connection (including
+the default port 443), while `http://` is reserved for the isolated fake service
+and uses a plain HTTP connection.  Tests must exercise both constructor choices;
+a fake HTTP-only server cannot prove production HTTPS support.
 
 Every individual artifact replacement must use create-only temporary files
 whose mode is 0600 from the instant they are created, fsync, close every

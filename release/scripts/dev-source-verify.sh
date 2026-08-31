@@ -125,6 +125,9 @@ if [[ "$requested_package" == all ]]; then
     python3 /opt/dsh/release-system/tests/notion-inbox-init.py
   setpriv --reuid=1000 --regid=1000 --init-groups \
     env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \
+    python3 /opt/dsh/release-system/tests/notion-https-compat.py
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \
     python3 /opt/dsh/release-system/tests/test_scrub_preflight_state.py
   setpriv --reuid=1000 --regid=1000 --init-groups \
     env HOME="$verify_root/home" PYTHONPYCACHEPREFIX="$verify_root/python-pycache" \

@@ -16,6 +16,7 @@ x-dsh-common: &dsh-common
     NOTION_INBOX_FILE: /home/herman/.dsh/storages/task-inbox/inbox.md
     NOTION_API_BASE: https://api.notion.com/v1
     NOTION_PAGE_ID: 3b059c119f80803cb8ace3ead7eefc81
+    PYTHONPATH: /opt/dsh/release-system/scripts/notion-https-compat
     TINI_SUBREAPER: "1"
   volumes:
     - /home/herman:/home/herman:rw

@@ -8,6 +8,8 @@ directory; the harness reruns each method in its own fresh process.
 
 from __future__ import annotations
 
+import http.server
+import importlib.util
 import json
 import os
 import shutil
@@ -16,7 +18,7 @@ import sys
 import tempfile
 import threading
 import unittest
-import http.server
+from unittest import mock
 
 FAKE_TOKEN = b"dsh-contract-probe-fake-token-never-production"
 PAGE_ID = "f00df00df00df00df00df00df00df00d"
@@ -29,6 +31,10 @@ FORCE_SET_EDIT = "# Synthetic inbox\n\n- [ ] probe item force set replacement\n"
 ENTRYPOINT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "notion_inbox_sync.py")
 )
+ENTRYPOINT_SPEC = importlib.util.spec_from_file_location("notion_inbox_sync", ENTRYPOINT)
+assert ENTRYPOINT_SPEC is not None and ENTRYPOINT_SPEC.loader is not None
+ENTRYPOINT_MODULE = importlib.util.module_from_spec(ENTRYPOINT_SPEC)
+ENTRYPOINT_SPEC.loader.exec_module(ENTRYPOINT_MODULE)
 
 
 class FakeRecord:
@@ -204,6 +210,55 @@ class NotionInboxSyncContractTests(unittest.TestCase):
             return handle.read()
 
     def test_first_pull(self) -> None:
+        calls: list[tuple[str, int]] = []
+
+        class FakeResponse:
+            status = 200
+
+            @staticmethod
+            def read(_limit: int) -> bytes:
+                return b"{}"
+
+        class FakeHTTPSConnection:
+            def __init__(self, host: str, port: int, timeout: int) -> None:
+                self.host = host
+                self.port = port
+                self.timeout = timeout
+
+            def request(
+                self,
+                _method: str,
+                _path: str,
+                body: bytes | None,
+                headers: dict[str, str],
+            ) -> None:
+                self.body = body
+                self.headers = headers
+                calls.append((self.host, self.port))
+
+            @staticmethod
+            def getresponse() -> FakeResponse:
+                return FakeResponse()
+
+            @staticmethod
+            def close() -> None:
+                return
+
+        with mock.patch.object(
+            ENTRYPOINT_MODULE.http.client,
+            "HTTPSConnection",
+            FakeHTTPSConnection,
+        ), mock.patch.object(
+            ENTRYPOINT_MODULE.http.client,
+            "HTTPConnection",
+            side_effect=AssertionError("https must not use HTTPConnection"),
+        ):
+            client = ENTRYPOINT_MODULE.NotionClient(
+                "https://api.notion.com/v1", PAGE_ID, FAKE_TOKEN,
+            )
+            self.assertEqual(b"{}", client.request("GET"))
+        self.assertEqual([("api.notion.com", 443)], calls)
+
         result = self.first_pull()
         self.assertEqual(0, result.returncode)
         self.assertEqual((1, 0), self.notion.counts())

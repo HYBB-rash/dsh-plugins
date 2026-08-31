@@ -32,12 +32,15 @@ class ResponseError(Exception):
 class NotionClient:
     def __init__(self, api_base: str, page_id: str, token: bytes) -> None:
         self.parsed = parse_http_url(api_base)
-        self.path = self.parsed[2] + "/pages/" + page_id + "/markdown"
+        self.path = self.parsed[3] + "/pages/" + page_id + "/markdown"
         self.authorization = b"Bearer " + token
 
     def request(self, method: str, body: bytes | None = None) -> bytes:
-        host, port, _base_path = self.parsed
-        connection = http.client.HTTPConnection(host, port, timeout=3)
+        scheme, host, port, _base_path = self.parsed
+        connection_type = (
+            http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+        )
+        connection = connection_type(host, port, timeout=3)
         headers = {
             "Authorization": self.authorization.decode("ascii"),
             "Notion-Version": "2026-03-11",
@@ -59,10 +62,11 @@ class NotionClient:
         return raw
 
 
-def parse_http_url(value: str) -> tuple[str, int, str]:
+def parse_http_url(value: str) -> tuple[str, str, int, str]:
     parts = value.split("://", 1)
     if len(parts) != 2 or parts[0] not in ("http", "https") or "/" in parts[0]:
         raise Failure("bad api base")
+    scheme = parts[0]
     authority_and_path = parts[1]
     slash = authority_and_path.find("/")
     if slash == -1:
@@ -83,7 +87,7 @@ def parse_http_url(value: str) -> tuple[str, int, str]:
         port = 443 if parts[0] == "https" else 80
     if not host or not 1 <= port <= 65535:
         raise Failure("bad api base")
-    return host, port, base_path
+    return scheme, host, port, base_path
 
 
 class Artifacts:

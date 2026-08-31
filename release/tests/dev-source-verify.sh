@@ -80,9 +80,9 @@ MOCK_VERIFY_LOG="$log" \
 
 test "$(grep -Fc 'build tool=tsc setpriv_marker=' "$log")" = 12
 test "$(grep -Fc 'build tool=tsdown setpriv_marker=' "$log")" = 6
-test "$(grep -Fc 'setpriv args=--reuid=1000 --regid=1000 --init-groups' "$log")" = 26
+test "$(grep -Fc 'setpriv args=--reuid=1000 --regid=1000 --init-groups' "$log")" = 27
 test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 11
-test "$(grep -Fc 'python setpriv_marker=1000' "$log")" = 13
+test "$(grep -Fc 'python setpriv_marker=1000' "$log")" = 14
 test "$(grep -Fc 'chown args=-R 1000:1000' "$log")" = 3
 grep -q 'build tool=tsc setpriv_marker= node_path=unset' "$log"
 grep -q 'build tool=tsdown setpriv_marker= node_path=unset' "$log"
@@ -101,6 +101,7 @@ grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/harness-notion
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/harness-notion-automation-bridge.py' "$log"
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/harness-notion-automation-status.py' "$log"
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/notion-inbox-init.py' "$log"
+grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/notion-https-compat.py' "$log"
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/test_scrub_preflight_state.py' "$log"
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/test_workspace_migration_content.py' "$log"
 test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 11

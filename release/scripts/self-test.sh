@@ -31,6 +31,7 @@ for script in \
   verify-workspace-migration-content.py; do
   test -f "/opt/dsh/release-system/scripts/$script"
 done
+test -f /opt/dsh/release-system/scripts/notion-https-compat/sitecustomize.py
 test -f /opt/dsh/release-system/scripts/harness-notion-automation-task.md
 test -f /opt/dsh/release-system/scripts/harness-notion-automation.patch.yml
 test -f /opt/dsh/release-system/workspace-migrations/harness-only-v1/manifest.json
@@ -96,6 +97,8 @@ bash /opt/dsh/release-system/tests/engine-lock.sh
 bash /opt/dsh/release-system/tests/production-operation-lock.sh
 PYTHONDONTWRITEBYTECODE=1 \
   python3 /opt/dsh/release-system/tests/notion-inbox-init.py
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 /opt/dsh/release-system/tests/notion-https-compat.py
 PYTHONDONTWRITEBYTECODE=1 \
   python3 /opt/dsh/release-system/tests/test_scrub_preflight_state.py
 PYTHONDONTWRITEBYTECODE=1 \
