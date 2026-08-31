@@ -1,3 +1,5 @@
+import { canonicalizeXStatusIdentity } from '@herman/personal-feed'
+
 /** The one canonical X status identity used by current-run state. */
 export interface XStatusIdentity {
   readonly statusId: string
@@ -13,10 +15,9 @@ export interface XStatusIdentity {
  */
 export function parseXStatusIdentity(value: unknown): XStatusIdentity | undefined {
   if (typeof value !== 'string') return undefined
-  const match = /^https:\/\/(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})\/status\/([1-9]\d*)$/u.exec(value.trim())
-  if (match === null) return undefined
-  const statusId = match[2]!
-  const canonicalUrl = `https://x.com/${match[1]!.toLowerCase()}/status/${statusId}`
+  const canonicalUrl = canonicalizeXStatusIdentity(value.trim())
+  if (canonicalUrl === undefined) return undefined
+  const statusId = canonicalUrl.slice(canonicalUrl.lastIndexOf('/') + 1)
   return Object.freeze({ statusId, canonicalUrl, itemId: `item:x-status:${statusId}` })
 }
 

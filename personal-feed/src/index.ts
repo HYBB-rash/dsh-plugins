@@ -17,3 +17,5 @@ export {
   type PersonalFeedV2RequestCoordinator,
   type PersonalFeedV2RequestSnapshot,
 } from './v2/request-coordinator.ts'
+
+export { canonicalizeXStatusIdentity } from './v2/x-status-identity.ts'
