@@ -274,6 +274,7 @@ export function prepareFact(
   revision: PersonalContextCanonicalRevision,
 ): PreparedPersonalContextFact | undefined {
   if (!passesMechanicalGuard(proposal, fullRawText)) return undefined
+  if (!passesClauseLocalBehaviorExclusion(proposal, fullRawText)) return undefined
   const allSpans = [proposal.focusSpan, ...PROTECTED_KEYS.flatMap(key => proposal.protectedSpans[key])]
   const hullStart = Math.min(...allSpans.map(span => span.startUtf16))
   const hullEnd = Math.max(...allSpans.map(span => span.endUtf16))
@@ -535,6 +536,120 @@ function semanticSegment(rawText: string, focus: PersonalContextSpan): PersonalC
     }
   }
   return { startUtf16, endUtf16 }
+}
+
+function passesClauseLocalBehaviorExclusion(
+  proposal: PersonalContextFactProposal,
+  rawText: string,
+): boolean {
+  const xFeedbackCarrier = exactXFeedbackCarrierSpan(rawText)
+  if (xFeedbackCarrier !== undefined && spansIntersect(xFeedbackCarrier, proposal.focusSpan)) return false
+  const clause = atomicClauseContainingFocus(rawText, proposal.focusSpan)
+  if (clause === undefined) return false
+  return !behaviorEventSpans(rawText, clause).some(event => spansIntersect(event, proposal.focusSpan))
+}
+
+function exactXFeedbackCarrierSpan(rawText: string): PersonalContextSpan | undefined {
+  const statusUrl = /(?<![A-Za-z0-9_])(?:https?:\/\/)?(?:(?:www|mobile)\.)?(?:x\.com|twitter\.com)\/[A-Za-z0-9_]+\/status\/[0-9]+\/?(?:[?#][^\s]*)?/giu
+  if (Array.from(rawText.matchAll(statusUrl)).length === 0) return undefined
+  const withoutUrls = rawText.replace(statusUrl, ' ')
+  const save = /^\s*(?:请\s*)?(?:取消收藏|收藏|保存)(?:一下|这条)?/u.exec(withoutUrls)
+  if (save !== null && /^[\s\p{P}]*$/u.test(withoutUrls.slice(save[0].length))) {
+    return { startUtf16: 0, endUtf16: rawText.length }
+  }
+  const like = /^\s*(?:我\s*)?(?:不喜欢|喜欢)(?:\s*这条)?/u.exec(withoutUrls)
+  if (like === null) return undefined
+  const tail = withoutUrls.slice(like[0].length)
+  return /^\s*$/u.test(tail) || /^\s*\p{P}/u.test(tail)
+    ? { startUtf16: 0, endUtf16: rawText.length }
+    : undefined
+}
+
+function atomicClauseContainingFocus(
+  rawText: string,
+  focus: PersonalContextSpan,
+): PersonalContextSpan | undefined {
+  const separators = /[。！？!?；;\n]+|(?:，|,)?(?:但是|因为|但)|(?:，|,)(?:而且|并且|同时)/gu
+  let startUtf16 = 0
+  for (const match of rawText.matchAll(separators)) {
+    const separatorStart = match.index
+    const separatorEnd = separatorStart + match[0].length
+    if (separatorStart < focus.endUtf16 && separatorEnd > focus.startUtf16) return undefined
+    if (separatorEnd <= focus.startUtf16) {
+      startUtf16 = separatorEnd
+      continue
+    }
+    if (separatorStart >= focus.endUtf16) {
+      return { startUtf16, endUtf16: separatorStart }
+    }
+  }
+  return { startUtf16, endUtf16: rawText.length }
+}
+
+function behaviorEventSpans(
+  rawText: string,
+  clause: PersonalContextSpan,
+): readonly PersonalContextSpan[] {
+  const clauseText = rawText.slice(clause.startUtf16, clause.endUtf16)
+  const chineseObject = '(?:[这此该](?:条|篇|个|则|项)?(?:内容|对象|帖子|推文|消息|链接)?|对象(?:[-_A-Za-z0-9]+|[\\p{Script=Han}]{1,12})?)'
+  const currentItem = '(?:[这此该那](?:条|篇|个|则|项)(?:内容|对象|帖子|推文|消息|链接)?)'
+  const actor = '(?:我|用户|系统|助手|平台|服务)'
+  const completion = '(?:已经|已|曾经|曾|刚刚)'
+  const operationalAction = '(?:点击|点开|点赞|收藏|保存|曝光|投递|交付|展示|显示|推送|处理)'
+  const directObject = '([^，,。！？!?；;\\n]+?)'
+  const englishObject = '(?:(?:object|item|post|message|tweet|link)(?:[-_][A-Za-z0-9][A-Za-z0-9_-]*|\\s+[A-Za-z0-9][A-Za-z0-9_-]*)?)'
+  const englishAction = '(?:exposed|exposure|delivered|delivery|clicked|click|shown|processed|liked|like|saved|save)'
+  const structuredPatterns = [
+    new RegExp(`${actor}\\s*${completion}\\s*${operationalAction}(?:了|过)?\\s*${directObject}$`, 'gu'),
+    new RegExp(`${actor}\\s*${operationalAction}(?:了|过)\\s*${directObject}$`, 'gu'),
+    new RegExp(`${actor}\\s*(?:${completion}\\s*)?把\\s*${directObject}\\s*(?:${operationalAction}|喜欢)(?:了|过)$`, 'gu'),
+    new RegExp(`^${directObject}\\s*${actor}\\s*(?:${completion}\\s*)?${operationalAction}(?:了|过)$`, 'gu'),
+    new RegExp(`^${directObject}\\s*被\\s*${actor}\\s*(?:${completion}\\s*${operationalAction}(?:了|过)?|${operationalAction}(?:了|过))$`, 'gu'),
+    new RegExp(`^${directObject}\\s*是\\s*${actor}\\s*${operationalAction}(?:过)?的$`, 'gu'),
+    new RegExp(`${actor}\\s*${operationalAction}(?:过|的)?是\\s*${directObject}$`, 'gu'),
+    new RegExp(`${actor}\\s*喜欢(?:了|过)\\s*${directObject}$`, 'gu'),
+    new RegExp(`^${directObject}\\s*是\\s*${actor}\\s*喜欢过的$`, 'gu'),
+    new RegExp(`${actor}\\s*喜欢过(?:的)?是\\s*${directObject}$`, 'gu'),
+  ] as const
+  const fixedPatterns = [
+    new RegExp(`${actor}\\s*喜欢(?:的)?\\s*${currentItem}`, 'gu'),
+    new RegExp(`${currentItem}\\s*是\\s*${actor}\\s*喜欢(?:过)?的`, 'gu'),
+    new RegExp(`${actor}\\s*喜欢(?:过|的)?是\\s*${currentItem}`, 'gu'),
+    new RegExp(`${chineseObject}\\s*(?:是|被)\\s*${englishAction}`, 'gu'),
+    new RegExp(`${englishAction}(?:\\s+(?:signal|event|record|status))?(?:\\s+(?:for|of|on))?\\s+${englishObject}`, 'gu'),
+    new RegExp(`object\\s+(?:like|save)\\s+(?:signal|event|record|status)(?:\\s+(?:for|of|on))?\\s+${englishObject}`, 'gu'),
+    new RegExp(`${englishObject}\\s+(?:(?:is|was)\\s+)?(?:exposed|delivered|clicked|shown|processed|liked|saved)`, 'gu'),
+  ] as const
+  const spans: PersonalContextSpan[] = []
+  for (const pattern of structuredPatterns) {
+    for (const match of clauseText.matchAll(pattern)) {
+      if (!isDirectBehaviorObject(match[1])) continue
+      spans.push(absoluteMatchSpan(match, clause.startUtf16))
+    }
+  }
+  for (const pattern of fixedPatterns) {
+    for (const match of clauseText.matchAll(pattern)) {
+      spans.push(absoluteMatchSpan(match, clause.startUtf16))
+    }
+  }
+  return spans
+}
+
+function isDirectBehaviorObject(value: string | undefined): boolean {
+  return value !== undefined && value.trim() !== '' && !isOnlyPunctuation(value)
+}
+
+function absoluteMatchSpan(match: RegExpMatchArray, offset: number): PersonalContextSpan {
+  const index = match.index
+  if (index === undefined) throw new Error('behavior event regex match is missing its source index')
+  return {
+    startUtf16: offset + index,
+    endUtf16: offset + index + match[0].length,
+  }
+}
+
+function spansIntersect(left: PersonalContextSpan, right: PersonalContextSpan): boolean {
+  return left.startUtf16 < right.endUtf16 && right.startUtf16 < left.endUtf16
 }
 
 function parseTerminalFact(value: unknown): PersonalContextTerminalFact | undefined {

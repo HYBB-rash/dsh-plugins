@@ -325,6 +325,46 @@ afterEach(() => {
 })
 
 describe('Personal Context semantic LLM adapter (RED)', () => {
+  it('states the conservative behavior-signal eligibility contract in both classifier and entailment system prompts', async () => {
+    const factory = await loadFactory()
+    const { ctx: semanticContext, requests } = makeContext(request => request.tools?.[0]?.name === 'submit-personal-context-classification'
+      ? toolCallChunks(request, [{ kind: 'no_fact', reason: 'not_personal_fact' }])
+      : toolCallChunks(request, [{ decision: 'confirmed' }]))
+    const ports = factory({ ctx: semanticContext, provider: 'wire-test', model: 'wire-model' })
+
+    await expect(ports.classifier(classifierInput)).resolves.toEqual({ kind: 'no_fact', reason: 'not_personal_fact' })
+    await expect(ports.entailmentValidator(entailmentInput)).resolves.toEqual({ kind: 'target_and_revision_confirmed' })
+    expect(requests).toHaveLength(2)
+    const classifierSystem = requests.find(request => request.tools?.[0]?.name === 'submit-personal-context-classification')?.system
+    const entailmentSystem = requests.find(request => request.tools?.[0]?.name === 'submit-personal-context-entailment')?.system
+    expect(typeof classifierSystem).toBe('string')
+    expect(typeof entailmentSystem).toBe('string')
+
+    for (const [name, system] of [
+      ['classifier', classifierSystem],
+      ['entailment', entailmentSystem],
+    ] as const) {
+      expect(system, `${name}: behavior signals do not establish either lane`).toMatch(
+        /behavior signals?.*(?:do not|must not|never).*(?:long_term_interest|long-term interest).*(?:existing_knowledge|existing knowledge)/is,
+      )
+      expect(system, `${name}: object like/save stay object-level`).toMatch(
+        /object[- ]level.*like.*save.*(?:do not|must not|never).*(?:generalize|generalise|infer)/is,
+      )
+      expect(system, `${name}: delivery pipeline events do not prove user knowledge`).toMatch(
+        /exposure.*delivery.*click.*shown.*processed.*(?:do not|must not|never).*(?:prove|establish).*(?:user.*know|user knowledge)/is,
+      )
+      expect(system, `${name}: mixed messages use only an independent atomic fact clause`).toMatch(
+        /mixed.*(?:extract|confirm).*(?:only).*(?:independent|atomic).*(?:durable|proposition).*(?:clause)/is,
+      )
+      expect(system, `${name}: owner independently recomputes and widened focus cannot bypass`).toMatch(
+        /owner.*independent(?:ly)?.*(?:recompute|verify).*(?:focus).*(?:expand|widen).*(?:cannot|must not|never).*(?:bypass|qualify)/is,
+      )
+      expect(system, `${name}: system words may be proposition operands`).toMatch(
+        /(?:behavior|system).*(?:term|word).*(?:proposition).*(?:operand).*(?:do not|must not|never).*(?:reject).*(?:whole|entire).*(?:message|text)/is,
+      )
+    }
+  })
+
   it('uses one direct stream per classifier call with one system, one user, and one strict submission tool', async () => {
     const factory = await loadFactory()
     const { ctx, requests } = makeContext(request => toolCallChunks(request, [{ kind: 'no_fact', reason: 'not_personal_fact' }]))

@@ -349,6 +349,36 @@ function expectPendingRaw(owner: PersonalContextOwner, sourceKey: string, rawTex
   expect(state.coverage).toEqual([{ sourceKey, status: 'pending' }])
 }
 
+function spanOf(rawText: string, exactText: string, from = 0): Span {
+  const startUtf16 = rawText.indexOf(exactText, from)
+  if (startUtf16 < 0) throw new Error(`test span text is missing: ${exactText}`)
+  return { startUtf16, endUtf16: startUtf16 + exactText.length }
+}
+
+function spansOf(rawText: string, exactText: string): readonly Span[] {
+  const result: Span[] = []
+  let from = 0
+  while (from < rawText.length) {
+    const span = spanOf(rawText, exactText, from)
+    result.push(span)
+    from = span.endUtf16
+    if (rawText.indexOf(exactText, from) < 0) break
+  }
+  return result
+}
+
+function activeChangesAndTerminalRevisions(snapshot: OwnerSnapshot): {
+  readonly activeChanges: readonly unknown[]
+  readonly terminalRevisions: readonly CoverageRecord[]
+} {
+  return {
+    activeChanges: snapshot.coverage.flatMap(coverage => (
+      coverage.disposition?.status === 'applied' ? coverage.disposition.changes : []
+    )),
+    terminalRevisions: snapshot.coverage.filter(coverage => coverage.revisionDigest !== undefined),
+  }
+}
+
 function terminalCoverage(owner: PersonalContextOwner): CoverageRecord {
   const coverage = owner.read().coverage[0]
   expect(coverage).toBeDefined()
@@ -370,6 +400,565 @@ afterEach(() => {
 })
 
 describe('Personal Feed v2 R4 exact personal-context semantics', () => {
+  it('rejects every behavior-only signal in both fact lanes before entailment and preserves the pending raw source', async () => {
+    const behaviorSignals = [
+      ['exposure', 'exposure signal for object-alpha', protectedSpans()],
+      ['delivery', 'delivery signal for object-bravo', protectedSpans()],
+      ['click', 'click signal for object-charlie', protectedSpans()],
+      ['shown', 'shown signal for object-delta', protectedSpans()],
+      ['processed', 'processed signal for object-echo', protectedSpans()],
+      ['object like', 'object like signal for object-foxtrot', protectedSpans()],
+      ['object save', 'object save signal for object-golf', protectedSpans()],
+      ['Chinese click with a described object', '我点击了虚构对象己', protectedSpans({
+        subject: [spanOf('我点击了虚构对象己', '我')],
+      })],
+      ['Chinese save with a domain object', '我收藏了数据库论文', protectedSpans({
+        subject: [spanOf('我收藏了数据库论文', '我')],
+      })],
+      ['Chinese processed with a system subject', '系统已处理虚构消息戊', protectedSpans()],
+      ['Chinese save with a demonstrative outside the narrow object set', '我保存了那篇研究报告', protectedSpans({
+        subject: [spanOf('我保存了那篇研究报告', '我')],
+      })],
+    ] as const
+    const lanes = ['long_term_interest', 'existing_knowledge'] as const
+    let messageId = 50
+
+    for (const [signal, rawText, protectedValue] of behaviorSignals) {
+      for (const lane of lanes) {
+        const label = `${signal} -> ${lane}`
+        const focusSpan = { startUtf16: 0, endUtf16: rawText.length }
+        const proposal = lane === 'long_term_interest'
+          ? validInterestProposal(focusSpan, protectedValue)
+          : validKnowledgeProposal(focusSpan, protectedValue)
+        let entailmentCalls = 0
+        const owner = (await makeOwner({
+          semantics: {
+            classifier: () => factsProposal(proposal),
+            entailmentValidator: () => {
+              entailmentCalls += 1
+              return entailed
+            },
+            noFactValidator: () => confirmedNoFact,
+          },
+        })).owner
+        const captured = capture(owner, rawText, messageId++)
+
+        const settled = await owner.settle({ sourceKey: captured.source.sourceKey })
+        const snapshot = owner.read()
+        const revisionState = activeChangesAndTerminalRevisions(snapshot)
+        expect.soft(settled.status, `${label}: settle must remain non-applied`).toBe('pending')
+        expect.soft(entailmentCalls, `${label}: owner eligibility must precede entailment`).toBe(0)
+        expect.soft(revisionState.activeChanges, `${label}: active facts`).toHaveLength(0)
+        expect.soft(revisionState.terminalRevisions, `${label}: terminal revisions`).toHaveLength(0)
+        expect.soft(snapshot.sources, `${label}: source raw text`).toMatchObject([{
+          sourceKey: captured.source.sourceKey,
+          rawText,
+        }])
+        expect.soft(snapshot.coverage, `${label}: pending coverage`).toEqual([{
+          sourceKey: captured.source.sourceKey,
+          status: 'pending',
+        }])
+        owner.close()
+      }
+    }
+  })
+
+  it('rejects behavior signals wrapped in knowledge or interest relations before entailment', async () => {
+    const relationWrappedCases: readonly {
+      readonly rawText: string
+      readonly proposal: FactProposal
+    }[] = [
+      {
+        rawText: '我已经知道我收藏了这条。',
+        proposal: validKnowledgeProposal(
+          spanOf('我已经知道我收藏了这条。', '我收藏了这条'),
+          protectedSpans({ subject: spansOf('我已经知道我收藏了这条。', '我') }),
+        ),
+      },
+      {
+        rawText: '我长期关注我喜欢的这条。',
+        proposal: validInterestProposal(
+          spanOf('我长期关注我喜欢的这条。', '我喜欢的这条'),
+          protectedSpans({
+            subject: spansOf('我长期关注我喜欢的这条。', '我'),
+            temporal: [spanOf('我长期关注我喜欢的这条。', '长期')],
+          }),
+        ),
+      },
+      {
+        rawText: '这条是我点击过的',
+        proposal: validKnowledgeProposal(
+          spanOf('这条是我点击过的', '这条是我点击过的'),
+          protectedSpans({ subject: [spanOf('这条是我点击过的', '我')] }),
+        ),
+      },
+      {
+        rawText: '我收藏的是这条',
+        proposal: validKnowledgeProposal(
+          spanOf('我收藏的是这条', '我收藏的是这条'),
+          protectedSpans({ subject: [spanOf('我收藏的是这条', '我')] }),
+        ),
+      },
+      {
+        rawText: '这条消息是 processed',
+        proposal: validKnowledgeProposal(
+          spanOf('这条消息是 processed', '这条消息是 processed'),
+          protectedSpans(),
+        ),
+      },
+      {
+        rawText: '我已经知道我把这条收藏了。',
+        proposal: validKnowledgeProposal(
+          spanOf('我已经知道我把这条收藏了。', '我把这条收藏了'),
+          protectedSpans({ subject: spansOf('我已经知道我把这条收藏了。', '我') }),
+        ),
+      },
+      {
+        rawText: '我长期关注我把这条保存了。',
+        proposal: validInterestProposal(
+          spanOf('我长期关注我把这条保存了。', '我把这条保存了'),
+          protectedSpans({
+            subject: spansOf('我长期关注我把这条保存了。', '我'),
+            temporal: [spanOf('我长期关注我把这条保存了。', '长期')],
+          }),
+        ),
+      },
+      {
+        rawText: '数据库论文我已经收藏了',
+        proposal: validKnowledgeProposal(
+          spanOf('数据库论文我已经收藏了', '数据库论文我已经收藏了'),
+          protectedSpans({ subject: [spanOf('数据库论文我已经收藏了', '我')] }),
+        ),
+      },
+    ]
+
+    for (const [index, testCase] of relationWrappedCases.entries()) {
+      let entailmentCalls = 0
+      const owner = (await makeOwner({
+        semantics: {
+          classifier: () => factsProposal(testCase.proposal),
+          entailmentValidator: () => {
+            entailmentCalls += 1
+            return entailed
+          },
+          noFactValidator: () => confirmedNoFact,
+        },
+      })).owner
+      const captured = capture(owner, testCase.rawText, 900 + index)
+
+      const settled = await owner.settle({ sourceKey: captured.source.sourceKey })
+      const snapshot = owner.read()
+      const revisionState = activeChangesAndTerminalRevisions(snapshot)
+      expect.soft(settled.status, `${testCase.rawText}: settle`).toBe('pending')
+      expect.soft(entailmentCalls, `${testCase.rawText}: entailment`).toBe(0)
+      expect.soft(revisionState.activeChanges, `${testCase.rawText}: active changes`).toHaveLength(0)
+      expect.soft(revisionState.terminalRevisions, `${testCase.rawText}: terminal revisions`).toHaveLength(0)
+      expect.soft(snapshot.sources, `${testCase.rawText}: raw source`).toMatchObject([{
+        sourceKey: captured.source.sourceKey,
+        rawText: testCase.rawText,
+      }])
+      expect.soft(snapshot.coverage, `${testCase.rawText}: coverage`).toEqual([{
+        sourceKey: captured.source.sourceKey,
+        status: 'pending',
+      }])
+      owner.close()
+    }
+  })
+
+  it('rejects a complete real-X feedback carrier in both lanes regardless of classifier focus', async () => {
+    const xFeedbackCases: readonly {
+      readonly rawText: string
+      readonly focusSpan: Span
+      readonly protectedValue: ProtectedSpans
+      readonly attitude: Attitude
+      readonly interestStance: InterestProposal['stance']
+    }[] = [
+      {
+        rawText: '收藏 https://x.com/a/status/123',
+        focusSpan: spanOf('收藏 https://x.com/a/status/123', 'https://x.com/a/status/123'),
+        protectedValue: protectedSpans(),
+        attitude: ownCurrentAttitude,
+        interestStance: 'include',
+      },
+      {
+        rawText: '取消收藏 https://x.com/a/status/123',
+        focusSpan: spanOf('取消收藏 https://x.com/a/status/123', 'https://x.com/a/status/123'),
+        protectedValue: protectedSpans(),
+        attitude: ownCurrentAttitude,
+        interestStance: 'include',
+      },
+      {
+        rawText: '请收藏 https://x.com/OpenAI/status/123',
+        focusSpan: spanOf('请收藏 https://x.com/OpenAI/status/123', 'OpenAI'),
+        protectedValue: protectedSpans(),
+        attitude: ownCurrentAttitude,
+        interestStance: 'include',
+      },
+      {
+        rawText: '不喜欢 https://x.com/a/status/123',
+        focusSpan: spanOf('不喜欢 https://x.com/a/status/123', 'https://x.com/a/status/123'),
+        protectedValue: protectedSpans({ polarity: [spanOf('不喜欢 https://x.com/a/status/123', '不')] }),
+        attitude: { ...ownCurrentAttitude, polarity: 'denied' },
+        interestStance: 'exclude',
+      },
+      {
+        rawText: '喜欢，因为直接理由。 https://x.com/a/status/123',
+        focusSpan: spanOf('喜欢，因为直接理由。 https://x.com/a/status/123', '直接理由'),
+        protectedValue: protectedSpans(),
+        attitude: ownCurrentAttitude,
+        interestStance: 'include',
+      },
+    ]
+    const lanes = ['long_term_interest', 'existing_knowledge'] as const
+    let messageId = 960
+
+    for (const testCase of xFeedbackCases) {
+      for (const lane of lanes) {
+        const label = `${testCase.rawText} -> ${lane}`
+        const proposal: FactProposal = lane === 'long_term_interest'
+          ? {
+              ...validInterestProposal(testCase.focusSpan, testCase.protectedValue, testCase.attitude),
+              stance: testCase.interestStance,
+            }
+          : validKnowledgeProposal(
+              testCase.focusSpan,
+              testCase.protectedValue,
+              'unqualified',
+              testCase.attitude,
+            )
+        let entailmentCalls = 0
+        const owner = (await makeOwner({
+          semantics: {
+            classifier: () => factsProposal(proposal),
+            entailmentValidator: () => {
+              entailmentCalls += 1
+              return entailed
+            },
+            noFactValidator: () => confirmedNoFact,
+          },
+        })).owner
+        const captured = capture(owner, testCase.rawText, messageId++)
+
+        const settled = await owner.settle({ sourceKey: captured.source.sourceKey })
+        const snapshot = owner.read()
+        const revisionState = activeChangesAndTerminalRevisions(snapshot)
+        expect.soft(settled.status, `${label}: settle`).toBe('pending')
+        expect.soft(entailmentCalls, `${label}: entailment`).toBe(0)
+        expect.soft(revisionState.activeChanges, `${label}: active changes`).toHaveLength(0)
+        expect.soft(revisionState.terminalRevisions, `${label}: terminal revisions`).toHaveLength(0)
+        expect.soft(snapshot.sources, `${label}: raw source`).toMatchObject([{
+          sourceKey: captured.source.sourceKey,
+          rawText: testCase.rawText,
+        }])
+        expect.soft(snapshot.coverage, `${label}: coverage`).toEqual([{
+          sourceKey: captured.source.sourceKey,
+          status: 'pending',
+        }])
+        owner.close()
+      }
+    }
+  })
+
+  it('accepts ordinary durable-interest and existing-knowledge synonyms without a positive relation allowlist', async () => {
+    const ordinaryPositiveCases: readonly {
+      readonly rawText: string
+      readonly proposal: FactProposal
+      readonly expectedLane: FactProposal['lane']
+      readonly exactFocusText: string
+    }[] = [
+      {
+        rawText: '我一直对编译器很有兴趣',
+        proposal: validInterestProposal(
+          spanOf('我一直对编译器很有兴趣', '编译器'),
+          protectedSpans({ subject: [spanOf('我一直对编译器很有兴趣', '我')] }),
+        ),
+        expectedLane: 'long_term_interest',
+        exactFocusText: '编译器',
+      },
+      {
+        rawText: '机器学习是我长期关心的方向',
+        proposal: validInterestProposal(
+          spanOf('机器学习是我长期关心的方向', '机器学习'),
+          protectedSpans({
+            subject: [spanOf('机器学习是我长期关心的方向', '我')],
+            temporal: [spanOf('机器学习是我长期关心的方向', '长期')],
+          }),
+        ),
+        expectedLane: 'long_term_interest',
+        exactFocusText: '机器学习',
+      },
+      {
+        rawText: '请以后多给我看数据库内容',
+        proposal: validInterestProposal(
+          spanOf('请以后多给我看数据库内容', '数据库内容'),
+          protectedSpans({
+            subject: [spanOf('请以后多给我看数据库内容', '我')],
+            temporal: [spanOf('请以后多给我看数据库内容', '以后')],
+          }),
+          { ...ownCurrentAttitude, temporal: 'future' },
+        ),
+        expectedLane: 'long_term_interest',
+        exactFocusText: '数据库内容',
+      },
+      {
+        rawText: '我熟悉 SQLite 事务',
+        proposal: validKnowledgeProposal(
+          spanOf('我熟悉 SQLite 事务', 'SQLite 事务'),
+          protectedSpans({ subject: [spanOf('我熟悉 SQLite 事务', '我')] }),
+        ),
+        expectedLane: 'existing_knowledge',
+        exactFocusText: 'SQLite 事务',
+      },
+      {
+        rawText: '我掌握 TypeScript',
+        proposal: validKnowledgeProposal(
+          spanOf('我掌握 TypeScript', 'TypeScript'),
+          protectedSpans({ subject: [spanOf('我掌握 TypeScript', '我')] }),
+        ),
+        expectedLane: 'existing_knowledge',
+        exactFocusText: 'TypeScript',
+      },
+      {
+        rawText: '我会使用 Nix',
+        proposal: validKnowledgeProposal(
+          spanOf('我会使用 Nix', 'Nix'),
+          protectedSpans({ subject: [spanOf('我会使用 Nix', '我')] }),
+        ),
+        expectedLane: 'existing_knowledge',
+        exactFocusText: 'Nix',
+      },
+    ]
+
+    for (const [index, testCase] of ordinaryPositiveCases.entries()) {
+      const entailmentInputs: EntailmentInput[] = []
+      const owner = (await makeOwner({
+        semantics: {
+          classifier: () => factsProposal(testCase.proposal),
+          entailmentValidator: input => {
+            entailmentInputs.push(input)
+            return entailed
+          },
+          noFactValidator: () => confirmedNoFact,
+        },
+      })).owner
+      const captured = capture(owner, testCase.rawText, 920 + index)
+
+      const settled = await owner.settle({ sourceKey: captured.source.sourceKey })
+      const snapshot = owner.read()
+      const coverage = snapshot.coverage[0]
+      expect.soft(settled.status, `${testCase.rawText}: settle`).toBe('applied')
+      expect.soft(entailmentInputs, `${testCase.rawText}: entailment`).toHaveLength(1)
+      expect.soft(entailmentInputs[0]?.target.exactFocusText, `${testCase.rawText}: focus`).toBe(testCase.exactFocusText)
+      expect.soft(coverage?.disposition?.status, `${testCase.rawText}: disposition`).toBe('applied')
+      expect.soft(
+        coverage?.disposition?.status === 'applied' ? coverage.disposition.changes : [],
+        `${testCase.rawText}: one fact`,
+      ).toHaveLength(1)
+      expect.soft(
+        coverage?.disposition?.status === 'applied' ? coverage.disposition.changes[0]?.fact.lane : undefined,
+        `${testCase.rawText}: lane`,
+      ).toBe(testCase.expectedLane)
+      expect.soft(snapshot.sources[0]?.rawText, `${testCase.rawText}: scrubbed raw source`).toBeNull()
+      owner.close()
+    }
+  })
+
+  it('applies only the independent durable or proposition clause when behavior words are mixed or used as operands', async () => {
+    const firstRawText = '我收藏了这条，因为以后想长期关注整个领域。'
+    const secondRawText = '我点击过这条，但我已经知道 processed 不等于用户已知。'
+    const cases: readonly {
+      readonly rawText: string
+      readonly proposal: FactProposal
+      readonly expectedLane: FactProposal['lane']
+      readonly exactFocusText: string
+      readonly behaviorClauseOutsideFocus?: string
+    }[] = [
+      {
+        rawText: firstRawText,
+        proposal: validInterestProposal(
+          spanOf(firstRawText, '整个领域'),
+          protectedSpans({
+            subject: spansOf(firstRawText, '我'),
+            temporal: [spanOf(firstRawText, '以后'), spanOf(firstRawText, '长期')],
+          }),
+          { ...ownCurrentAttitude, temporal: 'future' },
+        ),
+        expectedLane: 'long_term_interest',
+        exactFocusText: '整个领域',
+        behaviorClauseOutsideFocus: '我收藏了这条',
+      },
+      {
+        rawText: secondRawText,
+        proposal: validKnowledgeProposal(
+          spanOf(secondRawText, 'processed 不等于用户已知'),
+          protectedSpans({
+            subject: spansOf(secondRawText, '我'),
+            polarity: [spanOf(secondRawText, '但'), spanOf(secondRawText, '不')],
+          }),
+          'unqualified',
+          { ...ownCurrentAttitude, polarity: 'denied' },
+        ),
+        expectedLane: 'existing_knowledge',
+        exactFocusText: 'processed 不等于用户已知',
+        behaviorClauseOutsideFocus: '我点击过这条',
+      },
+      {
+        rawText: '收藏夹的 save 字段是布尔值。',
+        proposal: validKnowledgeProposal(
+          spanOf('收藏夹的 save 字段是布尔值。', '收藏夹的 save 字段是布尔值'),
+          protectedSpans(),
+        ),
+        expectedLane: 'existing_knowledge',
+        exactFocusText: '收藏夹的 save 字段是布尔值',
+      },
+      {
+        rawText: '我已经知道 SQL 的 LIKE 是模式匹配运算符。',
+        proposal: validKnowledgeProposal(
+          spanOf('我已经知道 SQL 的 LIKE 是模式匹配运算符。', 'SQL 的 LIKE 是模式匹配运算符'),
+          protectedSpans({ subject: [spanOf('我已经知道 SQL 的 LIKE 是模式匹配运算符。', '我')] }),
+        ),
+        expectedLane: 'existing_knowledge',
+        exactFocusText: 'SQL 的 LIKE 是模式匹配运算符',
+      },
+      {
+        rawText: 'save字段是布尔值',
+        proposal: validKnowledgeProposal(
+          spanOf('save字段是布尔值', 'save字段是布尔值'),
+          protectedSpans(),
+        ),
+        expectedLane: 'existing_knowledge',
+        exactFocusText: 'save字段是布尔值',
+      },
+      {
+        rawText: '点击率等于20%',
+        proposal: validKnowledgeProposal(
+          spanOf('点击率等于20%', '点击率等于20%'),
+          protectedSpans(),
+        ),
+        expectedLane: 'existing_knowledge',
+        exactFocusText: '点击率等于20%',
+      },
+    ]
+
+    for (const [index, testCase] of cases.entries()) {
+      const entailmentInputs: EntailmentInput[] = []
+      const owner = (await makeOwner({
+        semantics: {
+          classifier: () => factsProposal(testCase.proposal),
+          entailmentValidator: input => {
+            entailmentInputs.push(input)
+            return entailed
+          },
+          noFactValidator: () => confirmedNoFact,
+        },
+      })).owner
+      const captured = capture(owner, testCase.rawText, 700 + index)
+
+      await expect(owner.settle({ sourceKey: captured.source.sourceKey }), testCase.rawText).resolves.toMatchObject({ status: 'applied' })
+      expect(entailmentInputs, testCase.rawText).toHaveLength(1)
+      expect(entailmentInputs[0]?.target.exactFocusText, testCase.rawText).toBe(testCase.exactFocusText)
+      expect(entailmentInputs[0]?.target.protectedSpansWithinEvidence.applicability, testCase.rawText).toEqual([])
+      if (testCase.behaviorClauseOutsideFocus !== undefined) {
+        expect(entailmentInputs[0]?.target.exactFocusText, testCase.rawText).not.toContain(testCase.behaviorClauseOutsideFocus)
+      }
+      const disposition = terminalCoverage(owner).disposition
+      expect(disposition?.status, testCase.rawText).toBe('applied')
+      if (disposition?.status !== 'applied') throw new Error('mixed durable fact was not applied')
+      expect(disposition.changes, testCase.rawText).toHaveLength(1)
+      expect(disposition.changes[0]?.fact.lane, testCase.rawText).toBe(testCase.expectedLane)
+      expect(disposition.changes[0]?.fact.evidence.exactEvidenceText.slice(
+        disposition.changes[0]?.fact.evidence.focusSpanWithinEvidence.startUtf16,
+        disposition.changes[0]?.fact.evidence.focusSpanWithinEvidence.endUtf16,
+      ), testCase.rawText).toBe(testCase.exactFocusText)
+      owner.close()
+    }
+  })
+
+  it('rejects behavior-clause and cross-clause focus before entailment while allowing the complete durable clause', async () => {
+    const rawText = '我点击了这条；我长期关注整个领域。'
+    const firstSubject = spanOf(rawText, '我')
+    const secondSubject = spanOf(rawText, '我', firstSubject.endUtf16)
+    const durableFocus = spanOf(rawText, '整个领域')
+    const focusCases: readonly {
+      readonly name: string
+      readonly proposal: InterestProposal
+      readonly expectedStatus: 'pending' | 'applied'
+      readonly expectedEntailmentCalls: number
+    }[] = [
+      {
+        name: 'focus inside behavior clause',
+        proposal: validInterestProposal(
+          spanOf(rawText, '这条'),
+          protectedSpans({ subject: [firstSubject] }),
+        ),
+        expectedStatus: 'pending',
+        expectedEntailmentCalls: 0,
+      },
+      {
+        name: 'focus crosses two atomic clauses',
+        proposal: validInterestProposal(
+          { startUtf16: spanOf(rawText, '这条').startUtf16, endUtf16: durableFocus.endUtf16 },
+          protectedSpans({
+            subject: [firstSubject, secondSubject],
+            temporal: [spanOf(rawText, '长期')],
+          }),
+        ),
+        expectedStatus: 'pending',
+        expectedEntailmentCalls: 0,
+      },
+      {
+        name: 'focus covers complete durable clause operand',
+        proposal: validInterestProposal(
+          durableFocus,
+          protectedSpans({
+            subject: [secondSubject],
+            temporal: [spanOf(rawText, '长期')],
+          }),
+        ),
+        expectedStatus: 'applied',
+        expectedEntailmentCalls: 1,
+      },
+    ]
+
+    for (const [index, testCase] of focusCases.entries()) {
+      let entailmentCalls = 0
+      const owner = (await makeOwner({
+        semantics: {
+          classifier: () => factsProposal(testCase.proposal),
+          entailmentValidator: input => {
+            entailmentCalls += 1
+            expect(input.target.exactFocusText, testCase.name).toBe(rawText.slice(
+              testCase.proposal.focusSpan.startUtf16,
+              testCase.proposal.focusSpan.endUtf16,
+            ))
+            return entailed
+          },
+          noFactValidator: () => confirmedNoFact,
+        },
+      })).owner
+      const captured = capture(owner, rawText, 800 + index)
+
+      const settled = await owner.settle({ sourceKey: captured.source.sourceKey })
+      expect.soft(settled.status, testCase.name).toBe(testCase.expectedStatus)
+      expect.soft(entailmentCalls, testCase.name).toBe(testCase.expectedEntailmentCalls)
+      const snapshot = owner.read()
+      if (testCase.expectedStatus === 'pending') {
+        const revisionState = activeChangesAndTerminalRevisions(snapshot)
+        expect.soft(snapshot.sources[0]?.rawText, testCase.name).toBe(rawText)
+        expect.soft(snapshot.coverage, testCase.name).toEqual([{
+          sourceKey: captured.source.sourceKey,
+          status: 'pending',
+        }])
+        expect.soft(revisionState.activeChanges, testCase.name).toHaveLength(0)
+        expect.soft(revisionState.terminalRevisions, testCase.name).toHaveLength(0)
+      } else {
+        expect.soft(snapshot.sources[0]?.rawText, testCase.name).toBeNull()
+        expect.soft(snapshot.coverage[0]?.disposition?.status, testCase.name).toBe('applied')
+      }
+      owner.close()
+    }
+  })
+
   it('applies both fact lanes from owner-sliced exact evidence, scrubs raw text, and rejects malformed span-only proposals', async () => {
     const rawText = '我长期关注虚构主题 A，而且我已经知道虚构命题 P'
     const unavailable = await makeOwner()
