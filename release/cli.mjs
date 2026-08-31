@@ -3965,7 +3965,7 @@ if pgrep -u "$(id -u)" -af '(/opt/dsh/harness/|deepseek-harness/.*/apps/cli/|app
   exit 44
 fi
 if command -v systemctl >/dev/null; then
-  running_units="$(systemctl --user --no-legend --plain --state=running --type=service 'dsh*')" || {
+  running_units="$(systemctl --user list-units --no-legend --plain --state=running --type=service 'dsh*')" || {
     echo 'cannot enumerate DSH user services' >&2
     exit 44
   }
