@@ -139,6 +139,7 @@ type JsonSchema = {
   readonly oneOf?: readonly JsonSchema[]
   readonly items?: JsonSchema
   readonly minItems?: number
+  readonly maxItems?: number
   readonly uniqueItems?: boolean
   readonly const?: string
   readonly enum?: readonly string[]
@@ -206,6 +207,61 @@ function expectFactBranch(
   expect(properties.targetFactIds?.type).toBe('array')
   expect(properties.targetFactIds?.uniqueItems).toBe(true)
   expectStringEnum(properties.targetFactIds?.items, [activeFactId])
+}
+
+function classifierFactBranches(request: GenerateOptions): {
+  readonly interest: JsonSchema
+  readonly knowledge: JsonSchema
+} {
+  const parameters = request.tools?.[0]?.parameters as JsonSchema
+  const factsBranch = parameters.oneOf?.find(schema => schema.properties?.kind?.const === 'facts')
+  const factsProperties = factsBranch?.properties
+  const factBranches = factsProperties?.facts?.items?.oneOf ?? []
+  const interest = factBranches.find(schema => schema.properties?.lane?.const === 'long_term_interest')
+  const knowledge = factBranches.find(schema => schema.properties?.lane?.const === 'existing_knowledge')
+  if (interest === undefined || knowledge === undefined) throw new Error('classifier fact lane schemas are unavailable')
+  return { interest, knowledge }
+}
+
+function expectEmptyTargetFactIdsSchema(schema: JsonSchema | undefined): void {
+  expect(schema?.type).toBe('array')
+  expect(schema?.uniqueItems).toBe(true)
+  expect(schema?.maxItems).toBe(0)
+  expect(schema?.items?.type).toBe('string')
+  expect(schema?.items).not.toHaveProperty('enum')
+}
+
+function expectPopulatedTargetFactIdsSchema(schema: JsonSchema | undefined, activeFactIds: readonly string[]): void {
+  expect(schema?.type).toBe('array')
+  expect(schema?.uniqueItems).toBe(true)
+  expect(schema?.items?.type).toBe('string')
+  expectStringEnum(schema?.items, activeFactIds)
+}
+
+function proposalForLane(
+  lane: 'long_term_interest' | 'existing_knowledge',
+  operation: 'assert' | 'confirm',
+  targetFactIds: readonly string[],
+): PersonalContextFactProposal {
+  return lane === 'long_term_interest'
+    ? {
+        lane,
+        stance: 'include',
+        focusSpan: { startUtf16: 5, endUtf16: 12 },
+        protectedSpans: spans,
+        attitude,
+        operation,
+        targetFactIds,
+      }
+    : {
+        lane,
+        epistemic: 'asserted',
+        focusSpan: { startUtf16: 5, endUtf16: 12 },
+        protectedSpans: spans,
+        attitude,
+        operation,
+        targetFactIds,
+      }
 }
 
 function expectStrictClassifierTool(request: GenerateOptions): void {
@@ -286,6 +342,83 @@ describe('Personal Context semantic LLM adapter (RED)', () => {
     const userText = expectSingleUserText(request)
     expect(userText).toBe(JSON.stringify(classifierInput))
     expect(JSON.parse(userText)).toEqual(classifierInput)
+  })
+
+  it('omits empty target enums and accepts assert/empty-target proposals for both lanes when no facts are active', async () => {
+    const factory = await loadFactory()
+    const input: PersonalContextClassifierInput = Object.freeze({ ...classifierInput, activeFacts: [] })
+    const outputs: readonly PersonalContextFactProposal[] = [
+      proposalForLane('long_term_interest', 'assert', []),
+      proposalForLane('existing_knowledge', 'assert', []),
+    ]
+
+    for (const output of outputs) {
+      const { ctx, requests } = makeContext(request => toolCallChunks(request, [{ kind: 'facts', facts: [output] }]))
+      const ports = factory({ ctx, provider: 'wire-test', model: 'wire-model' })
+
+      await expect(ports.classifier(input)).resolves.toEqual({ kind: 'facts', facts: [output] })
+      expect(requests).toHaveLength(1)
+      const branches = classifierFactBranches(requests[0]!)
+      expectEmptyTargetFactIdsSchema(branches.interest.properties?.targetFactIds)
+      expectEmptyTargetFactIdsSchema(branches.knowledge.properties?.targetFactIds)
+    }
+  })
+
+  it('bounds target enums to the active lane in both single-lane directions and fail-closes cross-lane/unknown targets', async () => {
+    const factory = await loadFactory()
+    const cases: readonly {
+      readonly activeFacts: readonly PersonalContextActiveFact[]
+      readonly populatedLane: 'long_term_interest' | 'existing_knowledge'
+      readonly populatedFactId: string
+      readonly emptyLane: 'long_term_interest' | 'existing_knowledge'
+    }[] = [
+      {
+        activeFacts: [activeFacts[0]!],
+        populatedLane: 'long_term_interest',
+        populatedFactId: 'interest-1',
+        emptyLane: 'existing_knowledge',
+      },
+      {
+        activeFacts: [activeFacts[1]!],
+        populatedLane: 'existing_knowledge',
+        populatedFactId: 'knowledge-1',
+        emptyLane: 'long_term_interest',
+      },
+    ]
+
+    for (const testCase of cases) {
+      const input: PersonalContextClassifierInput = Object.freeze({ ...classifierInput, activeFacts: testCase.activeFacts })
+      const acceptedOutputs: readonly PersonalContextFactProposal[] = [
+        proposalForLane(testCase.emptyLane, 'assert', []),
+        proposalForLane(testCase.populatedLane, 'confirm', [testCase.populatedFactId]),
+      ]
+      let schemaRequest: GenerateOptions | undefined
+
+      for (const output of acceptedOutputs) {
+        const { ctx, requests } = makeContext(request => toolCallChunks(request, [{ kind: 'facts', facts: [output] }]))
+        const ports = factory({ ctx, provider: 'wire-test', model: 'wire-model' })
+
+        await expect(ports.classifier(input)).resolves.toEqual({ kind: 'facts', facts: [output] })
+        expect(requests).toHaveLength(1)
+        schemaRequest ??= requests[0]
+      }
+
+      const branches = classifierFactBranches(schemaRequest)
+      const emptyBranch = testCase.emptyLane === 'long_term_interest' ? branches.interest : branches.knowledge
+      const populatedBranch = testCase.populatedLane === 'long_term_interest' ? branches.interest : branches.knowledge
+      expectEmptyTargetFactIdsSchema(emptyBranch.properties?.targetFactIds)
+      expectPopulatedTargetFactIdsSchema(populatedBranch.properties?.targetFactIds, [testCase.populatedFactId])
+
+      const rejectedOutputs: readonly PersonalContextFactProposal[] = [
+        proposalForLane(testCase.emptyLane, 'confirm', [testCase.populatedFactId]),
+        proposalForLane(testCase.populatedLane, 'confirm', ['unknown-target']),
+      ]
+      for (const output of rejectedOutputs) {
+        const { ctx } = makeContext(request => toolCallChunks(request, [{ kind: 'facts', facts: [output] }]))
+        const ports = factory({ ctx, provider: 'wire-test', model: 'wire-model' })
+        await expect(ports.classifier(input)).rejects.toThrow()
+      }
+    }
   })
 
   it('returns exact facts/no_fact DTOs and rejects extra keys, generated fact strings, bad spans, and non-active or cross-lane targets', async () => {

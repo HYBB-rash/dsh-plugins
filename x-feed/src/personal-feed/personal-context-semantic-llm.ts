@@ -195,11 +195,9 @@ function factSchema(
     protectedSpans: protectedSpansSchema(),
     attitude: attitudeSchema(),
     operation: { type: 'string', enum: ['assert', 'confirm', 'correct', 'replace', 'retract'] },
-    targetFactIds: {
-      type: 'array',
-      uniqueItems: true,
-      items: { type: 'string', enum: [...targetFactIds] },
-    },
+    targetFactIds: targetFactIds.length === 0
+      ? { type: 'array', uniqueItems: true, maxItems: 0, items: { type: 'string' } }
+      : { type: 'array', uniqueItems: true, items: { type: 'string', enum: [...targetFactIds] } },
   })
 }
 
