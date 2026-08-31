@@ -1008,7 +1008,7 @@ function parseOptions(tokens) {
     if (token.includes('=')) fail('参数格式无效；不接受 --name=value', exitCodes.usage)
     const key = token.slice(2)
     if (!key || Object.hasOwn(options, key)) fail('参数重复或无效', exitCodes.usage)
-    if (['approved-stop', 'approved-release', 'approved', 'status', 'synthetic', 'reset', 'stdin', 'replace'].includes(key)) { options[key] = true; continue }
+    if (['approved-stop', 'approved-release', 'approved', 'status', 'stdin', 'replace'].includes(key)) { options[key] = true; continue }
     const value = tokens[index + 1]
     if (value === undefined || value.startsWith('--')) fail('参数缺少值', exitCodes.usage)
     options[key] = value
@@ -2534,29 +2534,9 @@ function writeTestCredentials(path) {
   ].join('\n'), { mode: 0o600 })
 }
 
-function writeTestNotionCredential(dshHome) {
-  const secrets = join(dshHome, 'secrets')
-  rmSync(secrets, { recursive: true, force: true })
-  mkdirSync(secrets, { recursive: true, mode: 0o700 })
-  chmodSync(secrets, 0o700)
-  writeFileSync(join(secrets, 'notion.token'), 'dsh-fake-notion-token-v1', { mode: 0o600 })
-}
-
-function makeSyntheticHome(homePath) {
-  ensureDir(join(homePath, '.dsh/storages/dsh-cron'))
-  ensureDir(join(homePath, '.dsh/storages/personal-feed'))
-  ensureDir(join(homePath, '.dsh/sessions'))
-  ensureDir(join(homePath, '.dsh/workspace'))
-  writeFileSync(join(homePath, '.dsh/storages/dsh-cron/jobs.jsonl'), '')
-  writeTestCredentials(join(homePath, '.dsh/.credentials.yaml'))
-  writeTestNotionCredential(join(homePath, '.dsh'))
-  writeFileSync(join(homePath, '.dsh/settings.yaml'), '{}\n', { mode: 0o600 })
-}
-
 function materializeSnapshot(snapshot, homePath) {
   rmSync(homePath, { recursive: true, force: true })
   ensureDir(homePath)
-  if (snapshot === 'synthetic') return makeSyntheticHome(homePath)
   const metaPath = snapshot === 'latest' ? join(stateRoot, 'snapshots/latest.json') : resolve(snapshot)
   const meta = readJson(metaPath, 'snapshot metadata')
   if (!existsSync(meta.archivePath)) fail(`快照归档不存在: ${meta.archivePath}`, exitCodes.safety)
@@ -3313,60 +3293,18 @@ function commandDev(options) {
     return
   }
   if (['prepare', 'verify'].includes(action) && !options.source) fail(`dev ${action} 必须提供 --source <独立任务 worktree>`, exitCodes.usage)
+  if (!['prepare', 'verify', 'shell'].includes(action)) {
+    fail('用法: dsh dev prepare --source <worktree> [--candidate <candidate.json>]；dsh dev verify --source <worktree> [--package <包名>]；dsh dev shell；dsh dev down [--source <worktree>]；dsh dev retire --source <worktree>', exitCodes.usage)
+  }
   const sourcePath = resolve(options.source ?? repoRoot)
   const defaultDevelopmentCandidate = developmentCandidatePointerPath()
   const candidateValue = options.candidate
     ?? (['prepare', 'verify', 'shell'].includes(action) && existsSync(defaultDevelopmentCandidate) ? defaultDevelopmentCandidate : undefined)
   const { candidate, path: candidatePath } = candidateFrom(candidateValue, { verifyDevelopmentImage: action !== 'prepare' })
-  const runtime = developmentRuntime(sourcePath, { create: ['prepare', 'up'].includes(action) })
+  const runtime = developmentRuntime(sourcePath, { create: action === 'prepare' })
   const devRoot = join(stateRoot, 'dev/environments', developmentKey(sourcePath))
   const homePath = join(devRoot, 'home/herman')
   const devMetaPath = join(devRoot, 'dev.json')
-  if (action === 'up') {
-    stopDev(runtime)
-    const snapshot = options.snapshot ?? 'latest'
-    const prior = existsSync(devMetaPath) ? readJson(devMetaPath, 'development metadata') : null
-    const reuseData = !options.reset && prior?.snapshot === snapshot && existsSync(join(homePath, '.dsh'))
-    if (!reuseData) {
-      materializeSnapshot(snapshot, homePath)
-      writeJson(devMetaPath, { schemaVersion: 1, candidateId: candidate.candidateId, snapshot, createdAt: new Date().toISOString() })
-    }
-    run(engine, ['run', '--rm', '--network', 'none', ...containerBaseArgs(homePath),
-      candidate.imageTag, 'workspace-migrate'], { code: exitCodes.test })
-    run(engine, ['run', '--rm', '--network', 'none', ...containerBaseArgs(homePath),
-      '--env', `DSH_IMAGE_ID=${candidate.imageId}`, candidate.imageTag, 'prepare'], { code: exitCodes.test })
-    run(engine, ['run', '--rm', '--network', 'none', ...containerBaseArgs(homePath),
-      candidate.imageTag, 'harness-only-health'], { code: exitCodes.test })
-    run(engine, ['network', 'create', '--internal', runtime.network], { code: exitCodes.test })
-    startFakeNotion(candidate, runtime)
-    startDevelopmentToolbox(candidate, runtime, homePath, [])
-    run(engine, ['run', '--detach', '--name', runtime.fakeTelegram, '--network', runtime.network, '--network-alias', 'fake-telegram',
-      ...developmentContainerLabels(runtime, 'fake-telegram'), '--read-only', '--tmpfs', emptyTmpfsSpec('/tmp'), candidate.imageTag, 'fake-telegram'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', runtime.telegram, '--network', runtime.network,
-      ...developmentContainerLabels(runtime, 'telegram'), ...containerBaseArgs(homePath),
-      '--env', 'TELEGRAM_BOT_TOKEN=test-token', '--env', 'TELEGRAM_ALLOWED_CHAT_ID=1', '--env', 'DEEPSEEK_API_KEY=test-key',
-      candidate.imageTag, 'telegram-test'], { code: exitCodes.test })
-    run(engine, ['run', '--detach', '--name', runtime.web, '--network', runtime.network,
-      ...developmentContainerLabels(runtime, 'web'), ...containerBaseArgs(homePath),
-      '--env', `DSH_WEB_PORT=${runtime.webPort}`, '--env', 'DEEPSEEK_API_KEY=test-key', candidate.imageTag, 'web'], { code: exitCodes.test })
-    const verification = verifyDev(candidate, homePath, runtime)
-    const metadata = {
-      schemaVersion: 2,
-      mode: 'immutable-candidate',
-      candidateId: candidate.candidateId,
-      imageId: candidate.imageId,
-      snapshot,
-      sourcePath,
-      runtime,
-      createdAt: new Date().toISOString(),
-      verification,
-    }
-    writeJson(devMetaPath, metadata)
-    const lease = replaceDevelopmentLease({ sourcePath, runtime }, candidate, candidatePath, devRoot)
-    const result = { result: 'dev-started', web: 'container-exec/internal-no-external-route', homePath, data: reuseData ? 'reused' : 'materialized', network: runtime.network, runtime, leasePath: lease.leasePath, ...verification }
-    out(result)
-    return result
-  }
   if (action === 'prepare') {
     if (candidatePurpose(candidate) !== 'development') {
       fail('dev prepare 只接受 --purpose development 构建的开发底座，不能占用正式发版候选', exitCodes.safety)
@@ -3502,7 +3440,7 @@ function commandDev(options) {
     return result
   }
   if (action === 'shell') {
-    if (!existsSync(homePath)) fail('开发数据副本不存在；请先执行 dev up', exitCodes.usage)
+    if (!existsSync(homePath)) fail('开发数据副本不存在；请先执行 dev prepare', exitCodes.usage)
     const prior = existsSync(devMetaPath) ? readJson(devMetaPath, 'development metadata') : null
     const shellRuntime = normalizeDevelopmentRuntime(prior?.runtime) ?? runtime
     if (!shellRuntime) fail('开发 runtime 不存在；请先执行 dev prepare', exitCodes.usage)
@@ -3517,7 +3455,7 @@ function commandDev(options) {
     run(engine, ['exec', '--interactive', '--tty', '--workdir', workdir, shellRuntime.toolbox, 'bash'], { code: exitCodes.test })
     return
   }
-  fail('用法: dsh dev prepare --source <worktree> [--candidate <candidate.json>]；dsh dev verify --source <worktree> [--package <包名>]；dsh dev up --snapshot latest|synthetic；dsh dev shell；dsh dev down [--source <worktree>]；dsh dev retire --source <worktree>', exitCodes.usage)
+  fail('用法: dsh dev prepare --source <worktree> [--candidate <candidate.json>]；dsh dev verify --source <worktree> [--package <包名>]；dsh dev shell；dsh dev down [--source <worktree>]；dsh dev retire --source <worktree>', exitCodes.usage)
 }
 
 function commandSnapshot(options) {
@@ -3526,7 +3464,7 @@ function commandSnapshot(options) {
   ensureDir(join(stateRoot, 'snapshots'))
   const remoteMeta = `${homedir()}/.local/share/dsh-container/snapshots/latest.json`
   const result = runStatus('ssh', ['-o', 'BatchMode=yes', target, 'test', '-f', remoteMeta])
-  if (result.status !== 0) fail('线上还没有 Docker 新格式快照；首次开发请用 --snapshot synthetic', exitCodes.safety)
+  if (result.status !== 0) fail('线上还没有 Docker 新格式快照；dev prepare 需要一份已经存在的一致生产快照', exitCodes.safety)
   const metaText = run('ssh', ['-o', 'BatchMode=yes', target, 'cat', remoteMeta], { capture: true, code: exitCodes.production })
   const remote = JSON.parse(metaText)
   const localArchive = join(stateRoot, 'snapshots', `${remote.snapshotId}.tar.zst`)
@@ -5192,7 +5130,6 @@ function usage() {
   ./release/dsh snapshot latest
   ./release/dsh dev prepare --source <独立任务worktree> [--candidate <latest-main-candidate.json>]
   ./release/dsh dev verify --source <独立任务worktree> [--package <已挂载包>]
-  ./release/dsh dev up --snapshot latest|synthetic [--candidate candidate.json] [--reset]
   ./release/dsh dev shell [--candidate candidate.json]
   ./release/dsh dev down [--source <独立任务worktree>]
   ./release/dsh dev retire --source <独立任务worktree>
