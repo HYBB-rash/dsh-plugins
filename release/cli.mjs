@@ -596,6 +596,8 @@ const harnessNotionAssets = Object.freeze({
   prompt: 'release/scripts/harness-notion-automation-task.md',
   checker: 'release/scripts/check-notion-automation-entrypoint.py',
   probe: 'release/scripts/verify-harness-notion-automation.py',
+  'local-impl': 'release/scripts/harness-notion-automation-local/notion_inbox_sync.py',
+  'local-tests': 'release/scripts/harness-notion-automation-local/tests/test_notion_inbox_sync.py',
 })
 
 const remoteHarnessNotionLoader = `
@@ -639,6 +641,22 @@ for name, item in items.items():
         reject()
     assets[name] = content
     hashes[name] = expected_sha256
+local_bytes = {}
+for name in ('localImpl', 'localTests'):
+    item = payload.get(name)
+    if item is None:
+        local_bytes[name] = None
+        continue
+    if not isinstance(item, dict) or set(item) != {'content', 'sha256'}:
+        reject()
+    try:
+        content = base64.b64decode(item.get('content'), validate=True)
+    except Exception:
+        reject()
+    expected_sha256 = item.get('sha256')
+    if not isinstance(expected_sha256, str) or hashlib.sha256(content).hexdigest() != expected_sha256:
+        reject()
+    local_bytes[name] = content
 scope = {
     '__name__': '__main__',
     '__file__': 'harness-notion-automation-remote.py',
@@ -646,6 +664,8 @@ scope = {
     'EMBEDDED_ASSET_HASHES': hashes,
     'ORCHESTRATION_COMMIT': payload.get('orchestrationCommit'),
     'RUNNER_SHA256': runner_sha256,
+    'LOCAL_IMPL_BYTES': local_bytes.get('localImpl'),
+    'LOCAL_TESTS_BYTES': local_bytes.get('localTests'),
 }
 exec(compile(runner, 'harness-notion-automation-remote.py', 'exec'), scope)
 `
@@ -803,7 +823,7 @@ function parseHarnessNotionReceipt(text, expected) {
     || receipt.siblingInspection !== 'not-performed-private-boundary'
     || receipt.executedNow !== true
     || receipt.evidenceSource !== 'this-invocation-trusted-probe'
-    || receipt.network !== 'task-internal-relay-api.deepseek.com-chat-completions-only') {
+    || receipt.network !== 'none-local-authoring') {
     fail('Harness Notion automation 回执不符合 create-only 生产合同', exitCodes.production)
   }
   return receipt
@@ -827,8 +847,8 @@ function commandHarness(options, tokens) {
       status: 'waiting-for-harness-notion-automation-authorization',
       target: `${target}:/home/herman/.dsh/workspace/automations/notion`,
       preimage: 'must-be-absent-create-only',
-      execution: 'accepted-immutable-image-one-shot-headless',
-      network: 'task-internal-relay-api.deepseek.com:443-only',
+      execution: 'accepted-immutable-image-one-shot-local-authoring',
+      network: 'none-local-authoring',
       productionWrite: false,
       next: './release/dsh harness notion-automation --approved',
     })
@@ -885,11 +905,23 @@ function commandHarness(options, tokens) {
       sha256: createHash('sha256').update(content).digest('hex'),
     }]
   }))
+  const localPayload = {}
+  for (const name of ['localImpl', 'localTests']) {
+    const path = harnessNotionAssets[
+      name === 'localImpl' ? 'local-impl' : 'local-tests'
+    ]
+    const content = readGitBlob(releaseCommit, path, `Harness Notion automation ${name}`)
+    localPayload[name] = {
+      content: content.toString('base64'),
+      sha256: createHash('sha256').update(content).digest('hex'),
+    }
+  }
   const payload = {
     runner: runner.toString('base64'),
     runnerSha256: createHash('sha256').update(runner).digest('hex'),
     orchestrationCommit: releaseCommit,
     assets,
+    ...localPayload,
   }
   const output = runRemoteCommand('python3', ['-c', remoteHarnessNotionLoader], {
     input: `${JSON.stringify(payload)}\n`,

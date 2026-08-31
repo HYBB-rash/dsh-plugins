@@ -2494,6 +2494,7 @@ def result_receipt(
     asset_hashes: dict[str, str],
     *,
     executed_now: bool,
+    network: str,
 ) -> dict[str, object]:
     return {
         "status": operation,
@@ -2527,8 +2528,29 @@ def result_receipt(
         "siblingInspection": "not-performed-private-boundary",
         "executedNow": executed_now,
         "evidenceSource": "this-invocation-trusted-probe" if executed_now else "previous-trusted-receipt",
-        "network": "task-internal-relay-api.deepseek.com-chat-completions-only",
+        "network": network,
     }
+
+
+def local_authoring_output() -> tuple[bytes, bytes] | None:
+    """Repository-owned implementation and tests, or None for model authoring."""
+    impl = globals().get("LOCAL_IMPL_BYTES")
+    tests = globals().get("LOCAL_TESTS_BYTES")
+    if impl is None and tests is None:
+        return None
+    if not isinstance(impl, bytes) or not isinstance(tests, bytes):
+        fail()
+    if not (1 <= len(impl) <= MAX_SOURCE_BYTES and 1 <= len(tests) <= MAX_TEST_BYTES):
+        fail()
+    return impl, tests
+
+
+def load_local_assets(notion: Path, output: tuple[bytes, bytes]) -> None:
+    """Place the repository-owned implementation and tests into the staging tree."""
+    impl, tests = output
+    write_create_only(notion / ENTRYPOINT, impl)
+    write_create_only(notion / TEST_INIT, b"")
+    write_create_only(notion / TEST_SUITE, tests)
 
 
 def validate_assets(assets: dict[str, bytes], asset_hashes: dict[str, str]) -> None:
@@ -2602,54 +2624,68 @@ def execute(
             fail()
         paths = write_control_assets(task_root, assets)
         nonce = task_root.name
-        run_dump_config(image["imageId"], paths["patch"], nonce)
-        task_network = create_network(
-            f"dsh-harness-notion-{nonce[:12]}-internal", nonce,
-            internal=True, role="harness-notion-task",
-        )
-        egress_network = create_network(
-            f"dsh-harness-notion-{nonce[:12]}-egress", nonce,
-            internal=False, role="harness-notion-relay",
-        )
-        relay_container, relay_process, relay_sentinel_fd = start_secret_bridge(
-            image["imageId"], paths["bridge"], nonce, task_network, egress_network,
-        )
-        wait_relay(image["imageId"], task_network, nonce)
+        local_output = local_authoring_output()
+        if local_output is not None:
+            load_local_assets(notion, local_output)
+            source_snapshot = fixed_gate(
+                "implementation-artifact",
+                lambda: validate_implementation_stage(notion),
+            )
+            fixed_gate("tests-tree", lambda: validate_tests_tree(notion))
+            fixed_gate(
+                "tests-source-identity",
+                lambda: validate_tests_source_identity(notion, source_snapshot),
+            )
+        else:
+            run_dump_config(image["imageId"], paths["patch"], nonce)
+            task_network = create_network(
+                f"dsh-harness-notion-{nonce[:12]}-internal", nonce,
+                internal=True, role="harness-notion-task",
+            )
+            egress_network = create_network(
+                f"dsh-harness-notion-{nonce[:12]}-egress", nonce,
+                internal=False, role="harness-notion-relay",
+            )
+            relay_container, relay_process, relay_sentinel_fd = start_secret_bridge(
+                image["imageId"], paths["bridge"], nonce, task_network, egress_network,
+            )
+            wait_relay(image["imageId"], task_network, nonce)
+            revalidate_image(image)
+            run_agent(
+                image["imageId"], notion, paths["patch"], assets["prompt"],
+                task_network, nonce, "implementation",
+            )
+            source_snapshot = fixed_gate(
+                "implementation-artifact",
+                lambda: validate_implementation_stage(notion),
+            )
+            revalidate_image(image)
+            run_agent(
+                image["imageId"], notion, paths["patch"], assets["prompt"],
+                task_network, nonce, "tests",
+            )
+            fixed_gate("tests-tree", lambda: validate_tests_tree(notion))
+            fixed_gate(
+                "tests-source-identity",
+                lambda: validate_tests_source_identity(notion, source_snapshot),
+            )
+            teardown_sentinel_fd = relay_sentinel_fd
+            relay_sentinel_fd = None
+            fixed_gate(
+                "authoring-teardown",
+                lambda: teardown_authoring(
+                    relay_container,
+                    relay_process,
+                    teardown_sentinel_fd,
+                    task_network,
+                    egress_network,
+                ),
+            )
+            relay_process = None
+            relay_container = None
+            task_network = None
+            egress_network = None
         revalidate_image(image)
-        run_agent(
-            image["imageId"], notion, paths["patch"], assets["prompt"],
-            task_network, nonce, "implementation",
-        )
-        source_snapshot = fixed_gate(
-            "implementation-artifact",
-            lambda: validate_implementation_stage(notion),
-        )
-        revalidate_image(image)
-        run_agent(
-            image["imageId"], notion, paths["patch"], assets["prompt"],
-            task_network, nonce, "tests",
-        )
-        fixed_gate("tests-tree", lambda: validate_tests_tree(notion))
-        fixed_gate(
-            "tests-source-identity",
-            lambda: validate_tests_source_identity(notion, source_snapshot),
-        )
-        teardown_sentinel_fd = relay_sentinel_fd
-        relay_sentinel_fd = None
-        fixed_gate(
-            "authoring-teardown",
-            lambda: teardown_authoring(
-                relay_container,
-                relay_process,
-                teardown_sentinel_fd,
-                task_network,
-                egress_network,
-            ),
-        )
-        relay_process = None
-        relay_container = None
-        task_network = None
-        egress_network = None
 
         fixed_gate("tests-modes", lambda: normalize_generated_modes(notion))
         generated_baseline = fixed_gate(
@@ -2688,6 +2724,8 @@ def execute(
         pending_result = result_receipt(
             "installed", image, checked, destination_parent_identity, assets["prompt"],
             orchestration_commit, runner_sha256, asset_hashes, executed_now=True,
+            network=("none-local-authoring" if local_output is not None
+                     else "task-internal-relay-api.deepseek.com-chat-completions-only"),
         )
         installed_identity = install_noreplace(
             source_parent_fd, source_parent_identity, destination_parent_fd, destination_parent_identity,
