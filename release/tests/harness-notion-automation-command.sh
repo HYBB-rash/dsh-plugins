@@ -71,8 +71,8 @@ assert value == {
     "status": "waiting-for-harness-notion-automation-authorization",
     "target": "herman.hermes:/home/herman/.dsh/workspace/automations/notion",
     "preimage": "must-be-absent-create-only",
-    "execution": "accepted-immutable-image-one-shot-headless",
-    "network": "task-internal-relay-api.deepseek.com:443-only",
+    "execution": "accepted-immutable-image-one-shot-local-authoring",
+    "network": "none-local-authoring",
     "productionWrite": False,
     "next": "./release/dsh harness notion-automation --approved",
 }
