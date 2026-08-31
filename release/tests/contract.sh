@@ -116,6 +116,9 @@ grep -q '40 位 Git commit' "$test_root/stderr"
 run_expect 2 dev prepare --candidate "$development_candidate"
 grep -q -- '--source' "$test_root/stderr"
 
+run_expect 2 dev up
+grep -q 'dsh dev prepare' "$test_root/stderr"
+
 # A development base must be built from the freshly fetched origin/main.  The
 # fixture candidate is intentionally pinned elsewhere, so this stops before
 # snapshot download or any container mutation.
@@ -136,6 +139,11 @@ test -x "$repo_root/release/scripts/dev-source-verify.sh"
 test -x "$repo_root/release/tests/dev-source-verify.sh"
 grep -q "dev verify" "$repo_root/release/cli.mjs"
 grep -q "dev-source-verify.sh" "$repo_root/release/cli.mjs"
+grep -q 'startReleasePreflightRuntime' "$repo_root/release/cli.mjs"
+! grep -Fq "action === 'up'" "$repo_root/release/cli.mjs"
+! grep -Fq 'immutable-candidate' "$repo_root/release/cli.mjs"
+! grep -Fq 'makeSyntheticHome' "$repo_root/release/cli.mjs"
+! grep -Fq 'dev up' "$repo_root/release/README.md"
 grep -q 'unset NODE_PATH' "$repo_root/release/scripts/dev-source-verify.sh"
 grep -q 'mktemp -d /tmp/dsh-editable-verify' "$repo_root/release/scripts/dev-source-verify.sh"
 grep -q 'setpriv --reuid=1000 --regid=1000 --init-groups' "$repo_root/release/scripts/dev-source-verify.sh"

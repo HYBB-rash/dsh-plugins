@@ -38,12 +38,6 @@
 ./release/dsh dev down
 ./release/dsh dev retire --source "$(git rev-parse --show-toplevel)"
 
-# 只验证一个已经存在的不可变候选时，仍可使用原来的 dev up
-./release/dsh dev up --snapshot synthetic --candidate /path/to/candidate.json
-
-# 同一候选再次 up 会复用开发数据；确实要从快照重建时才加 --reset
-./release/dsh dev up --snapshot synthetic --candidate /path/to/candidate.json --reset
-
 # 从两个精确提交构建唯一候选镜像
 ./release/dsh build \
   --purpose release \
