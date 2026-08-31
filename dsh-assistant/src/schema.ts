@@ -1,8 +1,5 @@
-/** Stable SQLite identity shared by the online store and offline migration. */
+/** Stable SQLite identity for the current online store. */
 export const ASSISTANT_APPLICATION_ID = 0x44534841
-
-/** The last schema before the manager-owned Cron binding projection existed. */
-export const ASSISTANT_V3_SCHEMA_VERSION = 3
 
 /** Current on-disk schema accepted by the running assistant. */
 export const ASSISTANT_SCHEMA_VERSION = 4

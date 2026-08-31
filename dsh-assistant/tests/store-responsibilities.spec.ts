@@ -1,5 +1,4 @@
-import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -9,7 +8,6 @@ import {
   ASSISTANT_SCHEMA_VERSION,
   AssistantStore,
 } from '../src/store.ts'
-import { migrateDatabaseToV3, migrateDatabaseToV4 } from '../src/migration.ts'
 
 const dirs: string[] = []
 const NOW = '2026-08-16T02:00:00.000Z'
@@ -24,44 +22,7 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-function sha(path: string): string {
-  return createHash('sha256').update(readFileSync(path)).digest('hex')
-}
-
-function createV1(path: string): void {
-  const db = new DatabaseSync(path)
-  db.exec(`
-    PRAGMA application_id = ${ASSISTANT_APPLICATION_ID};
-    PRAGMA user_version = 1;
-    CREATE TABLE commitments (
-      id TEXT PRIMARY KEY, slot INTEGER NOT NULL DEFAULT 1, title TEXT NOT NULL,
-      work_owner TEXT NOT NULL, status TEXT NOT NULL, next_action TEXT,
-      accepted_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-      started_at TEXT, completed_at TEXT, result TEXT, blocked_reason TEXT,
-      check_in_minutes INTEGER, reminder_due_at TEXT, reminder_state TEXT NOT NULL,
-      last_delivery_state TEXT, last_delivery_error TEXT, worker_session_id TEXT,
-      worker_parent_session_id TEXT, worker_run_id TEXT, worker_control_state TEXT NOT NULL,
-      source_surface TEXT NOT NULL, source_session_id TEXT, revision INTEGER NOT NULL
-    ) STRICT;
-    CREATE TABLE outbox (
-      id TEXT PRIMARY KEY, commitment_id TEXT NOT NULL REFERENCES commitments(id),
-      kind TEXT NOT NULL, text TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL,
-      claimed_at TEXT, claim_token TEXT, delivered_at TEXT, error TEXT
-    ) STRICT;
-  `)
-  const insert = db.prepare(`INSERT INTO commitments VALUES
-    (?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-  insert.run('u1', 'focus legacy', 'user', 'active', null, NOW, NOW, NOW, NOW, null, null, null, 15,
-    '2026-08-16T02:15:00.000Z', 'scheduled', null, null, null, null, null, 'none', 'web', 'web-1', 1)
-  insert.run('a1', 'agent legacy', 'agent', 'paused', null, NOW, NOW, NOW, NOW, null, null, null, null,
-    null, 'none', null, null, 'child-1', 'session-telegram', 'run-1', 'none', 'telegram', null, 2)
-  db.prepare(`INSERT INTO outbox VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
-    'o1', 'a1', 'blocked', 'legacy outbox', 'failed', NOW, null, null, null, 'x',
-  )
-  db.close()
-}
-
-describe('current schema v4 and explicit legacy migration', () => {
+describe('current schema v4', () => {
   it('creates schema v4 with the Cron binding projection for an empty database', () => {
     const path = tempPath()
     const store = new AssistantStore(path)
@@ -75,84 +36,23 @@ describe('current schema v4 and explicit legacy migration', () => {
     db.close()
   })
 
-  it('normal open rejects v1 without changing its bytes', () => {
+  it('rejects an old schema without mutating it', () => {
     const path = tempPath()
-    createV1(path)
-    const before = sha(path)
-    expect(() => new AssistantStore(path)).toThrow(/schema version 1.*offline migration/i)
-    expect(sha(path)).toBe(before)
-  })
+    const old = new DatabaseSync(path)
+    old.exec(`
+      PRAGMA application_id = ${ASSISTANT_APPLICATION_ID};
+      PRAGMA user_version = 3;
+      CREATE TABLE legacy_marker (value TEXT PRIMARY KEY) STRICT;
+      INSERT INTO legacy_marker VALUES ('unchanged');
+    `)
+    old.close()
 
-  it('migrates v1 losslessly and maps owners without guessing monitor', () => {
-    const path = tempPath()
-    createV1(path)
-    const result = migrateDatabaseToV3(path)
-    expect(result).toMatchObject({ from: 1, to: 3, commitments: 2, outbox: 1 })
-    const v4 = migrateDatabaseToV4(path)
-    expect(v4).toMatchObject({ from: 3, to: 4, bindings: 0 })
-    const store = new AssistantStore(path)
-    expect(store.getById('u1')).toMatchObject({ kind: 'focus', workOwner: 'user', sourceSessionId: 'web-1' })
-    expect(store.getById('a1')).toMatchObject({ kind: 'delegated', workOwner: 'agent', sourceSessionId: null })
-    expect(store.getOutbox('o1')).toMatchObject({ text: 'legacy outbox', state: 'failed' })
-    store.close()
-  })
+    expect(() => new AssistantStore(path)).toThrow(/unsupported schema version 3.*accepts only schema 4/i)
 
-  it('reclassifies only one explicitly identified legacy Agent row as a desired-running monitor', () => {
-    const path = tempPath()
-    createV1(path)
-    const db = new DatabaseSync(path)
-    db.prepare(`INSERT INTO commitments VALUES
-      (?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-      'a2', 'ordinary delegated work', 'agent', 'paused', null, NOW, NOW, NOW, NOW, null, null, null, null,
-      null, 'none', null, null, 'child-2', 'session-telegram', 'run-2', 'none', 'telegram', null, 1,
-    )
-    db.close()
-    expect(migrateDatabaseToV3(path, { monitorId: 'a1' })).toMatchObject({ from: 1, to: 3, commitments: 3, outbox: 1 })
-    expect(migrateDatabaseToV4(path)).toMatchObject({ from: 3, to: 4, bindings: 0 })
-    const store = new AssistantStore(path)
-    expect(store.getById('a1')).toMatchObject({
-      kind: 'monitor', workOwner: 'agent', monitorDesiredState: 'running', monitorResumeState: 'needed',
-      workerSessionId: 'child-1', status: 'paused',
-    })
-    expect(store.getById('a2')).toMatchObject({
-      kind: 'delegated', monitorDesiredState: 'none', monitorResumeState: 'none',
-    })
-    store.close()
-  })
-
-  for (const invalid of [
-    { name: 'missing id', monitorId: 'missing', message: /does not exist/ },
-    { name: 'user-owned id', monitorId: 'u1', message: /not Agent-owned/ },
-  ]) {
-    it(`rejects a ${invalid.name} monitor override and rolls the whole migration back`, () => {
-      const path = tempPath()
-      createV1(path)
-      expect(() => migrateDatabaseToV3(path, { monitorId: invalid.monitorId })).toThrow(invalid.message)
-      const after = new DatabaseSync(path)
-      expect((after.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(1)
-      expect((after.prepare('SELECT COUNT(*) AS n FROM commitments').get() as { n: number }).n).toBe(2)
-      expect((after.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('commitments') WHERE name='slot'").get() as { n: number }).n).toBe(1)
-      expect((after.prepare("SELECT COUNT(*) AS n FROM sqlite_schema WHERE name IN ('commitments_v2','outbox_v2','web_observations')").get() as { n: number }).n).toBe(0)
-      after.close()
-    })
-  }
-
-  it('rolls a failed migration fully back to the original v1 schema and rows', () => {
-    const path = tempPath()
-    createV1(path)
-    const db = new DatabaseSync(path)
-    db.prepare(`INSERT INTO commitments VALUES
-      (?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-      'a2', 'duplicate child', 'agent', 'active', null, NOW, NOW, NOW, NOW, null, null, null, null,
-      null, 'none', null, null, 'child-1', 'session-telegram', 'run-2', 'none', 'telegram', null, 1,
-    )
-    db.close()
-    expect(() => migrateDatabaseToV3(path)).toThrow(/UNIQUE constraint failed: commitments.worker_session_id/)
-    const after = new DatabaseSync(path)
-    expect((after.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(1)
-    expect((after.prepare('SELECT COUNT(*) AS n FROM commitments').get() as { n: number }).n).toBe(3)
-    expect((after.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('commitments') WHERE name = 'slot'").get() as { n: number }).n).toBe(1)
-    expect((after.prepare("SELECT COUNT(*) AS n FROM sqlite_schema WHERE name IN ('commitments_v2','outbox_v2','web_observations')").get() as { n: number }).n).toBe(0)
+    const after = new DatabaseSync(path, { readOnly: true })
+    expect((after.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(3)
+    expect((after.prepare('PRAGMA application_id').get() as { application_id: number }).application_id).toBe(ASSISTANT_APPLICATION_ID)
+    expect(after.prepare('SELECT value FROM legacy_marker').get()).toMatchObject({ value: 'unchanged' })
     after.close()
   })
 })

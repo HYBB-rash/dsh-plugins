@@ -74,3 +74,4 @@
 - 2026-08-29：Compose 的 Web 健康只证明 Web 容器就绪，不能证明随后才启动的 LAN 代理已经监听。生产启动必须对本机 Web 和 LAN 地址分别做有界等待；LAN 第一次连接拒绝若随后自然恢复，属于发布时序缺陷，不能手工补写 selector 或把失败 release 冒充成功。
 - 2026-08-29：自动选择运行后端时，镜像测试不能只导入公共依赖；必须覆盖生产环境会被实际选中的后端及其条件依赖。BZP 镜像同时提供 `gatttool` 后会自动选择该后端，因此 `pexpect` 必须进入锁定依赖并由镜像 self-test 直接导入，否则单元测试和假 BLE 都可能通过、真实读表却在连接前失败。
 - 2026-08-29：个人业务自动化源码归持久化 DSH Workspace，任务定义归 dsh-cron 账本；产品仓库只保留通用执行环境和 Workspace 编写指导，不保存业务脚本、重复 manifest 或 reconciler。发版只验证 DSH 产品，不安装、迁移、验收或回退 Rita、BZP、OOM 等 Workspace 业务设施；本条取代 2026-08-28 的“仓库自管 automations”路线。
+- 2026-08-31：退休数据库旧 schema 兼容前，先同时证明当前 accepted image 只接受目标 schema、正在运行的数据和 latest 一致快照都已处于该版本，并确认回退边界已退休。`accepted-cleanup-incomplete` 留下的历史归档不等于当前支持的恢复输入；应保留残留而不读取或删除，也不应让它阻塞 current-only 兼容退休。
