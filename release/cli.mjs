@@ -611,7 +611,8 @@ try:
 except Exception:
     reject()
 if not isinstance(payload, dict) or set(payload) != {
-    'runner', 'runnerSha256', 'orchestrationCommit', 'assets'
+    'runner', 'runnerSha256', 'orchestrationCommit', 'assets',
+    'localImpl', 'localTests'
 }:
     reject()
 runner_sha256 = payload.get('runnerSha256')
