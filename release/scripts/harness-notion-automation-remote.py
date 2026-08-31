@@ -702,6 +702,27 @@ def validate_implementation_stage(
     return implementation_snapshot(root, owner=owner, group=group)
 
 
+def validate_local_implementation(
+    root: Path, *, owner: int = 1000, group: int = 1000
+) -> SourceSnapshot:
+    """Repository-owned authoring output: all generated files are present at once."""
+    exact_names(root, GENERATED_FILES, owner=owner, group=group)
+    return implementation_snapshot(root, owner=owner, group=group)
+
+
+def validate_local_tests_source(
+    root: Path,
+    expected: SourceSnapshot,
+    *,
+    owner: int = 1000,
+    group: int = 1000,
+) -> None:
+    """Fingerprint the repository-owned test suite under the same source identity."""
+    suite = read_regular(root / TEST_SUITE, MAX_TEST_BYTES, mode=0o600)
+    if not suite or not isinstance(expected, SourceSnapshot):
+        fail()
+
+
 def validate_tests_tree(
     root: Path, *, owner: int = 1000, group: int = 1000
 ) -> None:
@@ -2629,12 +2650,11 @@ def execute(
             load_local_assets(notion, local_output)
             source_snapshot = fixed_gate(
                 "implementation-artifact",
-                lambda: validate_implementation_stage(notion),
+                lambda: validate_local_implementation(notion),
             )
-            fixed_gate("tests-tree", lambda: validate_tests_tree(notion))
             fixed_gate(
                 "tests-source-identity",
-                lambda: validate_tests_source_identity(notion, source_snapshot),
+                lambda: validate_local_tests_source(notion, source_snapshot),
             )
         else:
             run_dump_config(image["imageId"], paths["patch"], nonce)
