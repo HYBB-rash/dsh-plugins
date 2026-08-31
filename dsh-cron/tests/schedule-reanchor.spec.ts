@@ -154,6 +154,56 @@ describe('offline schedule reanchor maintenance', () => {
     expect(readdirSync(dir).sort()).toEqual(['jobs.jsonl', 'runs.jsonl'])
   })
 
+  it('recovers missing accepted evidence only from a complete migration matching current jobs', () => {
+    const dir = tempDir()
+    seed(dir)
+    const control = createMaintenanceControl({ storeDir: dir })
+    const applied = control.reanchorCronSchedules(request)
+    expect(applied).toMatchObject({ ok: true })
+    if (!applied.ok) return
+    const ledgerPath = join(dir, 'runs.jsonl')
+    const before = readFileSync(ledgerPath)
+
+    expect(control.recoverScheduleReanchorMigration(request.migrationId)).toEqual({
+      ok: true,
+      ...inspectionEvidence(applied),
+      ledgerRecordCount: 2,
+    })
+    expect(readFileSync(ledgerPath)).toEqual(before)
+
+    const absentDir = tempDir()
+    seed(absentDir)
+    expect(createMaintenanceControl({ storeDir: absentDir })
+      .recoverScheduleReanchorMigration(request.migrationId))
+      .toMatchObject({ ok: false, errorCode: 'migration_not_found' })
+
+    const partialDir = tempDir()
+    seed(partialDir)
+    const firstRow = before.toString('utf8').split('\n').filter(Boolean)[0]!
+    appendFileSync(join(partialDir, 'runs.jsonl'), `${firstRow}\n`)
+    expect(createMaintenanceControl({ storeDir: partialDir })
+      .recoverScheduleReanchorMigration(request.migrationId))
+      .toMatchObject({ ok: false, errorCode: 'migration_conflict' })
+
+    const duplicateDir = tempDir()
+    seed(duplicateDir)
+    appendFileSync(join(duplicateDir, 'runs.jsonl'), `${before.toString('utf8')}${firstRow}\n`)
+    expect(createMaintenanceControl({ storeDir: duplicateDir })
+      .recoverScheduleReanchorMigration(request.migrationId))
+      .toMatchObject({ ok: false, errorCode: 'migration_conflict' })
+
+    const driftDir = tempDir()
+    const driftJobs = seed(driftDir)
+    appendFileSync(join(driftDir, 'runs.jsonl'), before)
+    driftJobs.append({
+      op: 'create', id: 'daily-0805', schedule: { kind: 'cron', expr: '6 8 * * *' },
+      prompt: 'daily one', deliver: 'silent', createdAt: '2026-08-01T00:00:00.000Z',
+    })
+    expect(createMaintenanceControl({ storeDir: driftDir })
+      .recoverScheduleReanchorMigration(request.migrationId))
+      .toMatchObject({ ok: false, errorCode: 'migration_conflict' })
+  })
+
   it('fails closed and stays byte-stable for absent, drifted, duplicate, or extra evidence', () => {
     const appliedDir = tempDir()
     seed(appliedDir)

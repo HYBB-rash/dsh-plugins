@@ -3647,6 +3647,10 @@ function reanchorRequestFromPrevious(currentRelease) {
       evidence,
     }
   }
+  return null
+}
+
+function newReanchorRequest() {
   const cutoverAt = new Date().toISOString()
   return {
     required: true,
@@ -3656,6 +3660,89 @@ function reanchorRequestFromPrevious(currentRelease) {
     toTimeZone: 'Asia/Shanghai',
     cutoverAt,
     reanchoredAt: cutoverAt,
+  }
+}
+
+function validateReanchorRecoveryReceipt(receipt) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) {
+    fail('schedule reanchor recovery 没有返回对象回执', exitCodes.safety)
+  }
+  if (receipt.status === 'absent') {
+    if (Object.keys(receipt).sort().join('\0') !== ['migrationId', 'status'].sort().join('\0')
+      || receipt.migrationId !== 'dsh-cron-shanghai-reanchor-v1') {
+      fail('schedule reanchor absent recovery 回执不符合精确合同', exitCodes.safety)
+    }
+    return receipt
+  }
+  if (Object.keys(receipt).sort().join('\0') !== ['evidence', 'ledgerRecordCount', 'status'].sort().join('\0')
+    || receipt.status !== 'recovered'
+    || !Number.isSafeInteger(receipt.ledgerRecordCount)) {
+    fail('schedule reanchor recovered 回执不符合精确合同', exitCodes.safety)
+  }
+  const evidence = validateReanchorEvidence(receipt.evidence, 'recovered schedule reanchor evidence')
+  if (receipt.ledgerRecordCount !== evidence.cronJobCount) {
+    fail('schedule reanchor recovered ledger count 不一致', exitCodes.safety)
+  }
+  return { ...receipt, evidence }
+}
+
+function recoverReanchorRequestFromSnapshot(candidate, localSnapshot, localReleaseDir, currentRelease) {
+  const inherited = reanchorRequestFromPrevious(currentRelease)
+  if (inherited !== null) return inherited
+
+  const recoveryRoot = join(localReleaseDir, 'reanchor-recovery')
+  const recoveryHome = join(recoveryRoot, 'home/herman')
+  const cronStore = join(recoveryHome, '.dsh/storages/dsh-cron')
+  const members = [
+    '.dsh/storages/dsh-cron/jobs.jsonl',
+    '.dsh/storages/dsh-cron/runs.jsonl',
+  ]
+  try {
+    rmSync(recoveryRoot, { recursive: true, force: true })
+    ensureDir(cronStore)
+    const listing = run('tar', ['--zstd', '-tf', localSnapshot], {
+      capture: true,
+      announce: false,
+      code: exitCodes.safety,
+    }).split('\n').filter(Boolean)
+    const selected = members.filter(member => listing.filter(entry => entry === member).length === 1)
+    if (!selected.includes(members[0])
+      || members.some(member => listing.filter(entry => entry === member).length > 1)) {
+      fail('停机快照的 cron recovery ledger 路径缺失或重复', exitCodes.safety)
+    }
+    run('tar', ['--zstd', '-xf', localSnapshot, '-C', recoveryHome, ...selected], {
+      announce: false,
+      code: exitCodes.safety,
+    })
+    if (!selected.includes(members[1])) writeFileSync(join(cronStore, 'runs.jsonl'), '')
+    for (const member of members) {
+      const path = join(recoveryHome, member)
+      const entry = lstatSync(path)
+      if (!entry.isFile() || entry.isSymbolicLink() || entry.size > 256 * 1024 * 1024) {
+        fail('停机快照的 cron recovery ledger 不是受限普通文件', exitCodes.safety)
+      }
+    }
+    const receipt = validateReanchorRecoveryReceipt(parsePrivateFreeJson(run(engine, [
+      'run', '--rm', '--network', 'none', ...containerBaseArgs(recoveryHome),
+      candidate.imageTag,
+      'cron-reanchor-inspect',
+      '--recover-migration-id', 'dsh-cron-shanghai-reanchor-v1',
+    ], { capture: true, code: exitCodes.test }), 'schedule reanchor snapshot recovery'))
+    if (receipt.status === 'absent') return newReanchorRequest()
+    const evidence = receipt.evidence
+    return {
+      required: false,
+      inheritedFrom: currentRelease.releaseId,
+      migrationVersion: evidence.migrationVersion,
+      migrationId: evidence.migrationId,
+      fromTimeZone: evidence.fromTimeZone,
+      toTimeZone: evidence.toTimeZone,
+      cutoverAt: evidence.cutoverAt,
+      reanchoredAt: evidence.reanchoredAt,
+      evidence,
+    }
+  } finally {
+    rmSync(recoveryRoot, { recursive: true, force: true })
   }
 }
 
@@ -3967,13 +4054,8 @@ cat "$root/releases/$release_id/stop.json"
   `)
     let stopMeta
     try { stopMeta = JSON.parse(stopOutput.split('\n').at(-1)) } catch { fail(`无法解析停机快照回执: ${stopOutput}`, exitCodes.production) }
-    // The cutover anchor is created only after every writer is stopped and the
-    // consistent snapshot is closed.  Creating it before `compose down` would
-    // leave a race in which a final production claim could occur after cutover.
-    reanchorRequest = reanchorRequestFromPrevious(currentRelease)
-
     stage('verify-snapshot', {
-      preflight: { remote: preflight, notionCredential, notionAutomation, reanchorRequest },
+      preflight: { remote: preflight, notionCredential, notionAutomation },
     })
     localSnapshot = join(localSnapshotDir, 'home.tar.zst')
     run('scp', ['-p', `${target}:${remoteSnapshot}`, localSnapshot], { code: exitCodes.production })
@@ -3982,6 +4064,13 @@ cat "$root/releases/$release_id/stop.json"
     snapshotMetaPath = join(localSnapshotDir, 'snapshot.json')
     writeJson(snapshotMetaPath, snapshotMeta)
     copyFileSync(snapshotMetaPath, join(stateRoot, 'snapshots/latest.json'))
+
+    // Recover any complete historical migration before minting a new request.
+    // This runs only after all writers are stopped and the copied snapshot has
+    // passed its digest gate, so the waiting receipt binds one immutable fact.
+    reanchorRequest = recoverReanchorRequestFromSnapshot(
+      candidate, localSnapshot, localReleaseDir, currentRelease,
+    )
 
     const remoteSnapshotMetaPath = join(localReleaseDir, 'remote-snapshot.json')
     writeJson(remoteSnapshotMetaPath, { ...snapshotMeta, archivePath: remoteSnapshot })
@@ -3994,6 +4083,7 @@ mv -Tf "$root/snapshots/latest.json.next" "$root/snapshots/latest.json"
     stage('waiting-for-release-authorization', {
       status: 'waiting-for-release-authorization',
       snapshot: snapshotMeta,
+      preflight: { remote: preflight, notionCredential, notionAutomation, reanchorRequest },
       rollbackBoundary: {
         status: 'production-stopped-snapshot-available',
         previousReleaseId: previous.releaseId,

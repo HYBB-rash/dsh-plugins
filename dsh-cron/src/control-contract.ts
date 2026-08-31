@@ -136,6 +136,13 @@ export type InspectScheduleReanchorMigrationResult =
   | InspectScheduleReanchorMigrationSuccess
   | MaintenanceControlError
 
+export type RecoverScheduleReanchorMigrationSuccess =
+  InspectScheduleReanchorMigrationSuccess
+
+export type RecoverScheduleReanchorMigrationResult =
+  | RecoverScheduleReanchorMigrationSuccess
+  | MaintenanceControlError
+
 /**
  * Narrow in-process maintenance port. It is intentionally not part of the
  * Unix-socket RPC client: deployment code imports this from the built package
@@ -152,6 +159,9 @@ export interface DshCronMaintenanceControl {
   inspectScheduleReanchorMigration(
     request: InspectScheduleReanchorMigrationRequest,
   ): InspectScheduleReanchorMigrationResult
+  recoverScheduleReanchorMigration(
+    migrationId: string,
+  ): RecoverScheduleReanchorMigrationResult
 }
 
 /** The only control protocol version understood by this package. */

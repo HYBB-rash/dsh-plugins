@@ -37,6 +37,7 @@ import type {
   ReanchorCronSchedulesResult,
   InspectScheduleReanchorMigrationRequest,
   InspectScheduleReanchorMigrationResult,
+  RecoverScheduleReanchorMigrationResult,
 } from './control-contract.ts'
 import {
   MAX_COMMAND_OUTPUT_BYTES,
@@ -1066,11 +1067,92 @@ export function createMaintenanceControl(config: MaintenanceControlConfig): DshC
     }
   }
 
+  function recoverScheduleReanchorMigration(
+    migrationId: string,
+  ): RecoverScheduleReanchorMigrationResult {
+    if (typeof migrationId !== 'string'
+      || !/^[a-z0-9][a-z0-9:._-]{2,127}$/u.test(migrationId)) {
+      return maintenanceError('invalid_request', 'The schedule reanchor recovery migration id is invalid.')
+    }
+
+    let existing: readonly RunScheduleReanchorRecord[]
+    try {
+      existing = runs.inspectScheduleReanchorMigration(migrationId)
+    } catch {
+      return maintenanceError('migration_conflict', 'The schedule reanchor ledger contains malformed evidence.')
+    }
+    if (existing.length === 0) {
+      return maintenanceError('migration_not_found', 'The schedule reanchor migration is absent from the ledger.')
+    }
+
+    const first = existing[0]!
+    const request: ReanchorCronSchedulesRequest = {
+      migrationVersion: first.migrationVersion,
+      migrationId: first.migrationId,
+      fromTimeZone: first.fromTimeZone,
+      toTimeZone: first.toTimeZone,
+      cutoverAt: first.cutoverAt,
+      reanchoredAt: first.reanchoredAt,
+    }
+    const foldedJobs = jobs.fold()
+    if ((foldedJobs.invalid?.length ?? 0) > 0) {
+      return maintenanceError('invalid_job_log', 'The active job log contains invalid create rows.')
+    }
+    const cronJobs = foldedJobs.active
+      .filter(job => job.schedule.kind === 'cron')
+      .sort((left, right) => left.id.localeCompare(right.id))
+    if (cronJobs.length === 0) {
+      return maintenanceError('migration_conflict', 'The migration cannot be recovered without active cron jobs.')
+    }
+    const input = {
+      ...request,
+      jobs: cronJobs.map(job => ({ jobId: job.id, expr: job.schedule.kind === 'cron' ? job.schedule.expr : '' })),
+    }
+    const inputSha256 = canonicalSha256(input)
+    const expected = cronJobs.map((job): RunScheduleReanchorRecord => {
+      if (job.schedule.kind !== 'cron') throw new Error('unreachable non-cron schedule')
+      return {
+        schemaVersion: 2,
+        event: 'schedule-reanchor',
+        migrationVersion: request.migrationVersion,
+        jobId: job.id,
+        migrationId: request.migrationId,
+        fromTimeZone: request.fromTimeZone,
+        toTimeZone: request.toTimeZone,
+        cutoverAt: request.cutoverAt,
+        reanchoredAt: request.reanchoredAt,
+        inputSha256,
+        scheduleSha256: canonicalSha256({ jobId: job.id, schedule: job.schedule }),
+        nextRunAt: new Date(nextRunAfter(job.schedule, Date.parse(request.cutoverAt))).toISOString(),
+      }
+    })
+    if (existing.length !== expected.length
+      || existing.some((record, index) => JSON.stringify(record) !== JSON.stringify(expected[index]))) {
+      return maintenanceError(
+        'migration_conflict',
+        'The schedule reanchor ledger is incomplete or differs from the current cron definitions.',
+      )
+    }
+    return {
+      ok: true,
+      ...request,
+      inputSha256,
+      cronJobCount: expected.length,
+      jobs: expected.map(record => ({
+        jobId: record.jobId,
+        scheduleSha256: record.scheduleSha256,
+        nextRunAt: record.nextRunAt,
+      })),
+      ledgerRecordCount: existing.length,
+    }
+  }
+
   return {
     inspectAgentBindingById,
     transitionAgentBindingById,
     reanchorCronSchedules,
     inspectScheduleReanchorMigration,
+    recoverScheduleReanchorMigration,
   }
 }
 

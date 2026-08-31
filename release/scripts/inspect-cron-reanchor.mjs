@@ -180,12 +180,49 @@ export function runScheduleReanchorInspection(cron, evidence, storeDir) {
   }
 }
 
+/** Recover evidence only when dsh-cron can prove the complete ledger against current jobs. */
+export function runScheduleReanchorRecovery(cron, migrationId, storeDir) {
+  if (!isObject(cron) || typeof cron.createMaintenanceControl !== 'function') {
+    throw new Error('dsh-cron schedule reanchor recovery API is unavailable')
+  }
+  const control = cron.createMaintenanceControl({ storeDir })
+  if (!isObject(control) || typeof control.recoverScheduleReanchorMigration !== 'function') {
+    throw new Error('dsh-cron schedule reanchor recovery API is unavailable')
+  }
+  const result = control.recoverScheduleReanchorMigration(migrationId)
+  if (result?.ok !== true) {
+    const code = typeof result?.errorCode === 'string' && /^[a-z_]{2,64}$/u.test(result.errorCode)
+      ? result.errorCode
+      : 'unknown_error'
+    if (code === 'migration_not_found') return { status: 'absent', migrationId }
+    throw new Error(`schedule reanchor recovery blocked: ${code}`)
+  }
+  if (!hasExactKeys(result, RESULT_KEYS)
+    || !Number.isSafeInteger(result.ledgerRecordCount)
+    || result.ledgerRecordCount !== result.cronJobCount) {
+    throw new Error('schedule reanchor recovery returned an invalid ledger count')
+  }
+  const evidence = parseScheduleReanchorEvidence(JSON.stringify({
+    schemaVersion: 1,
+    migrationVersion: result.migrationVersion,
+    migrationId: result.migrationId,
+    fromTimeZone: result.fromTimeZone,
+    toTimeZone: result.toTimeZone,
+    cutoverAt: result.cutoverAt,
+    reanchoredAt: result.reanchoredAt,
+    inputSha256: result.inputSha256,
+    cronJobCount: result.cronJobCount,
+    jobs: result.jobs,
+  }))
+  return { status: 'recovered', evidence, ledgerRecordCount: result.ledgerRecordCount }
+}
+
 function parseArgs(tokens) {
   const values = {}
   for (let index = 0; index < tokens.length; index += 2) {
     const name = tokens[index]
     const value = tokens[index + 1]
-    if (!['--evidence-file', '--store-dir'].includes(name)
+    if (!['--evidence-file', '--recover-migration-id', '--store-dir'].includes(name)
       || value === undefined
       || value.startsWith('--')
       || values[name] !== undefined) {
@@ -193,7 +230,9 @@ function parseArgs(tokens) {
     }
     values[name] = value
   }
-  if (values['--evidence-file'] === undefined) throw new Error('missing --evidence-file')
+  if ((values['--evidence-file'] === undefined) === (values['--recover-migration-id'] === undefined)) {
+    throw new Error('select exactly one schedule reanchor inspection mode')
+  }
   return values
 }
 
@@ -201,9 +240,10 @@ async function main() {
   const values = parseArgs(process.argv.slice(2))
   const dshHome = process.env.DSH_HOME ?? '/home/herman/.dsh'
   const storeDir = values['--store-dir'] ?? path.join(dshHome, 'storages/dsh-cron')
-  const evidence = readScheduleReanchorEvidence(values['--evidence-file'])
   const cron = await import(pathToFileURL(cronPublicEntry).href)
-  const receipt = runScheduleReanchorInspection(cron, evidence, storeDir)
+  const receipt = values['--recover-migration-id'] === undefined
+    ? runScheduleReanchorInspection(cron, readScheduleReanchorEvidence(values['--evidence-file']), storeDir)
+    : runScheduleReanchorRecovery(cron, values['--recover-migration-id'], storeDir)
   process.stdout.write(`${JSON.stringify(receipt)}\n`)
 }
 

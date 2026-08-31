@@ -8,6 +8,7 @@ import {
   parseScheduleReanchorEvidence,
   readScheduleReanchorEvidence,
   runScheduleReanchorInspection,
+  runScheduleReanchorRecovery,
 } from '../scripts/inspect-cron-reanchor.mjs'
 
 const evidence = {
@@ -138,4 +139,39 @@ test('fails closed on an inspection error or a result that differs from accepted
     }, normalized, '/fixture'),
     /differs from accepted evidence/,
   )
+})
+
+test('recovers only private-free exact evidence and distinguishes an absent migration', () => {
+  let requested
+  const { schemaVersion: _schemaVersion, ...recoveredResult } = normalized
+  const recovered = runScheduleReanchorRecovery({
+    createMaintenanceControl: ({ storeDir }) => ({
+      recoverScheduleReanchorMigration: (migrationId) => {
+        requested = { storeDir, migrationId }
+        return { ok: true, ...recoveredResult, ledgerRecordCount: 2 }
+      },
+    }),
+  }, evidence.migrationId, '/fixture')
+  assert.deepEqual(requested, { storeDir: '/fixture', migrationId: evidence.migrationId })
+  assert.deepEqual(recovered, { status: 'recovered', evidence: normalized, ledgerRecordCount: 2 })
+
+  assert.deepEqual(runScheduleReanchorRecovery({
+    createMaintenanceControl: () => ({
+      recoverScheduleReanchorMigration: () => ({ ok: false, errorCode: 'migration_not_found' }),
+    }),
+  }, evidence.migrationId, '/fixture'), { status: 'absent', migrationId: evidence.migrationId })
+
+  assert.throws(() => runScheduleReanchorRecovery({
+    createMaintenanceControl: () => ({
+      recoverScheduleReanchorMigration: () => ({
+        ok: false,
+        errorCode: 'migration_conflict',
+        message: 'PRIVATE-LEDGER-BODY',
+      }),
+    }),
+  }, evidence.migrationId, '/fixture'), (error) => {
+    assert.match(String(error), /migration_conflict/)
+    assert.equal(String(error).includes('PRIVATE-LEDGER-BODY'), false)
+    return true
+  })
 })

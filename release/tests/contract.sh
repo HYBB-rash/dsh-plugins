@@ -796,6 +796,20 @@ assert guard in build
 assert build.index(guard) < build.index('const buildId =')
 snapshot = source[source.index("stage('snapshot-copy-tests'"):source.index("stage('transfer-and-start')")]
 assert 'runPreflightRuntime(candidate, testHome, preflightSourcePath, notionAutomation)' in snapshot
+stop_start = source.index('if (resumeEvidence === null) {', source.index('function performProductionReleaseUnsafe'))
+first_stop_preflight = source.index("preflight = ssh(`set -Eeuo pipefail", stop_start)
+stop = source[stop_start:source.index("preflight = ssh(`set -Eeuo pipefail", first_stop_preflight + 1)]
+assert stop.index("sha256File(localSnapshot) !== stopMeta.archiveSha256") < stop.index('recoverReanchorRequestFromSnapshot(')
+assert stop.index('recoverReanchorRequestFromSnapshot(') < stop.index("stage('waiting-for-release-authorization'")
+recovery = source[source.index('function recoverReanchorRequestFromSnapshot'):
+                  source.index('function cronReanchorArgs')]
+assert "'.dsh/storages/dsh-cron/jobs.jsonl'" in recovery
+assert "'.dsh/storages/dsh-cron/runs.jsonl'" in recovery
+assert "'run', '--rm', '--network', 'none'" in recovery
+assert "'--recover-migration-id', 'dsh-cron-shanghai-reanchor-v1'" in recovery
+assert "rmSync(recoveryRoot, { recursive: true, force: true })" in recovery
+assert 'if (receipt.status === \'absent\') return newReanchorRequest()' in recovery
+assert 'migration_conflict' not in recovery
 first = preflight.index("'notion-inbox-init'")
 second = preflight.index("'notion-inbox-init'", first + 1)
 assert first < second
