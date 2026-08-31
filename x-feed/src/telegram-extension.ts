@@ -89,27 +89,42 @@ export async function installTelegramExtension(
     sessionId: config.telegramSessionId,
     sessionQuery: service,
   })
-  const semantics = createPersonalContextSemanticLlmPorts({
+  const semanticLifecycle = createPersonalContextSemanticLlmPorts({
     ctx,
     provider: selection.provider,
     model: selection.model,
   })
+  const semantics = {
+    classifier: semanticLifecycle.classifier,
+    entailmentValidator: semanticLifecycle.entailmentValidator,
+    noFactValidator: semanticLifecycle.noFactValidator,
+  }
   const owner = createPersonalContextOwner({
     databasePath: join(config.personalFeedDataDir, 'v2', 'personal-context.sqlite'),
     clock: { now: () => new Date() },
     semantics,
   })
-  const personalContextRuntime = createPersonalContextTelegramRuntime({ owner })
+  const personalContextRuntime = createPersonalContextTelegramRuntime({
+    owner,
+    semanticLifecycle,
+  })
   let bootstrap: Awaited<ReturnType<typeof owner.bootstrap>>
   try {
     bootstrap = await owner.bootstrap({ history })
   } catch (error) {
-    owner.close()
+    const cleanupErrors: unknown[] = []
+    try { await personalContextRuntime.shutdown() } catch (shutdownError) { cleanupErrors.push(shutdownError) }
+    try { owner.close() } catch (closeError) { cleanupErrors.push(closeError) }
+    if (cleanupErrors.length > 0) throw new AggregateError([error, ...cleanupErrors])
     throw error
   }
   if (bootstrap.status !== 'complete') {
-    owner.close()
-    throw new Error(`x-feed: personal context bootstrap incomplete (${bootstrap.reason})`)
+    const primary = new Error(`x-feed: personal context bootstrap incomplete (${bootstrap.reason})`)
+    const cleanupErrors: unknown[] = []
+    try { await personalContextRuntime.shutdown() } catch (shutdownError) { cleanupErrors.push(shutdownError) }
+    try { owner.close() } catch (closeError) { cleanupErrors.push(closeError) }
+    if (cleanupErrors.length > 0) throw new AggregateError([primary, ...cleanupErrors])
+    throw primary
   }
 
   const personalFeedCoordinator = createPersonalFeedV2RequestCoordinator({
@@ -124,6 +139,13 @@ export async function installTelegramExtension(
   let stopSource: (() => void) | undefined
   let stopFeedback: (() => void) | undefined
   let stopPersonalFeed: (() => void) | undefined
+  const cleanupErrors = (actions: readonly (() => void)[]): unknown[] => {
+    const errors: unknown[] = []
+    for (const action of actions) {
+      try { action() } catch (error) { errors.push(error) }
+    }
+    return errors
+  }
   try {
     stopSource = personalContextRuntime.registerSourceFirst(ctx, {
       personalFeedHandler,
@@ -144,10 +166,14 @@ export async function installTelegramExtension(
       coordinator: personalFeedCoordinator,
     })
   } catch (error) {
-    stopPersonalFeed?.()
-    stopFeedback?.()
-    stopSource?.()
-    owner.close()
+    const cleanup = cleanupErrors([
+      ...(stopPersonalFeed === undefined ? [] : [stopPersonalFeed]),
+      ...(stopFeedback === undefined ? [] : [stopFeedback]),
+      ...(stopSource === undefined ? [] : [stopSource]),
+    ])
+    try { await personalContextRuntime.shutdown() } catch (shutdownError) { cleanup.push(shutdownError) }
+    try { owner.close() } catch (closeError) { cleanup.push(closeError) }
+    if (cleanup.length > 0) throw new AggregateError([error, ...cleanup])
     throw error
   }
 
@@ -155,37 +181,80 @@ export async function installTelegramExtension(
   let stopping = false
   const installForRoot = (agent: Agent): void => {
     if (runtimes.has(agent) || agent.session.id !== config.telegramSessionId) return
-    const cleanup = agent.ctx.effect(() => {
-      const disposeTools = registerXFeedTools(agent.ctx, { store, logger: ctx.logger })
-      const disposeSection = agent.ctx.systemPrompt.section({
-        name: 'x-feed:contract',
-        order: 96,
-        text: X_FEED_CONTRACT,
-      })
-      return () => {
-        disposeTools()
-        disposeSection()
-      }
-    }, 'x-feed.telegram-root()')
-    runtimes.set(agent, cleanup)
+    let disposeTools: (() => void) | undefined
+    let disposeSection: (() => void) | undefined
+    try {
+      const cleanup = agent.ctx.effect(() => {
+        disposeTools = registerXFeedTools(agent.ctx, { store, logger: ctx.logger })
+        disposeSection = agent.ctx.systemPrompt.section({
+          name: 'x-feed:contract',
+          order: 96,
+          text: X_FEED_CONTRACT,
+        })
+        return () => {
+          const errors: unknown[] = []
+          try { disposeSection?.() } catch (error) { errors.push(error) }
+          try { disposeTools?.() } catch (error) { errors.push(error) }
+          if (errors.length === 1) throw errors[0]
+          if (errors.length > 1) throw new AggregateError(errors)
+        }
+      }, 'x-feed.telegram-root()')
+      runtimes.set(agent, cleanup as () => void)
+    } catch (error) {
+      // registerXFeedTools is itself transactional.  If the effect host
+      // throws after it returned a cleanup, finish this root rollback here.
+      const rollbackErrors: unknown[] = []
+      try { disposeSection?.() } catch (cleanupError) { rollbackErrors.push(cleanupError) }
+      try { disposeTools?.() } catch (cleanupError) { rollbackErrors.push(cleanupError) }
+      if (rollbackErrors.length > 0) throw new AggregateError([error, ...rollbackErrors])
+      throw error
+    }
   }
 
-  for (const agent of ctx.agents.roots()) installForRoot(agent)
-  const stopCreated = ctx.on('agent/created', ({ agent }) => {
-    if (stopping || runtimes.has(agent) || !ctx.agents.roots().includes(agent)) return
-    installForRoot(agent)
-  })
-
-  return async () => {
-    stopping = true
-    stopCreated()
-    stopPersonalFeed?.()
-    stopFeedback?.()
-    stopSource?.()
-    const cleanups = [...runtimes.values()]
+  let stopCreated: (() => void) | undefined
+  try {
+    for (const agent of ctx.agents.roots()) installForRoot(agent)
+    stopCreated = ctx.on('agent/created', ({ agent }) => {
+      if (stopping || runtimes.has(agent) || !ctx.agents.roots().includes(agent)) return
+      installForRoot(agent)
+    })
+  } catch (error) {
+    const rootCleanups = [...runtimes.values()].reverse()
     runtimes.clear()
-    await Promise.allSettled(cleanups.map(cleanup => Promise.resolve(cleanup())))
-    owner.close()
+    const cleanup = cleanupErrors(rootCleanups)
+    cleanup.push(...cleanupErrors([
+      ...(stopCreated === undefined ? [] : [stopCreated]),
+      ...(stopPersonalFeed === undefined ? [] : [stopPersonalFeed]),
+      ...(stopFeedback === undefined ? [] : [stopFeedback]),
+      ...(stopSource === undefined ? [] : [stopSource]),
+    ]))
+    try { await personalContextRuntime.shutdown() } catch (shutdownError) { cleanup.push(shutdownError) }
+    try { owner.close() } catch (closeError) { cleanup.push(closeError) }
+    if (cleanup.length > 0) throw new AggregateError([error, ...cleanup])
+    throw error
+  }
+
+  let disposePromise: Promise<void> | undefined
+  return (): Promise<void> => {
+    if (disposePromise !== undefined) return disposePromise
+    stopping = true
+    const cleanups = [...runtimes.values()].reverse()
+    runtimes.clear()
+    disposePromise = (async () => {
+      const errors: unknown[] = []
+      try { stopCreated?.() } catch (error) { errors.push(error) }
+      for (const cleanup of cleanups) {
+        try { cleanup() } catch (error) { errors.push(error) }
+      }
+      try { stopPersonalFeed?.() } catch (error) { errors.push(error) }
+      try { stopFeedback?.() } catch (error) { errors.push(error) }
+      try { stopSource?.() } catch (error) { errors.push(error) }
+      try { await personalContextRuntime.shutdown() } catch (error) { errors.push(error) }
+      try { owner.close() } catch (error) { errors.push(error) }
+      if (errors.length > 0) throw new AggregateError(errors)
+    })()
+    void disposePromise.then(undefined, () => undefined)
+    return disposePromise
   }
 }
 

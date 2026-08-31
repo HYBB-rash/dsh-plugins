@@ -129,6 +129,70 @@ describe('root isolation (§10.3)', () => {
     }
   })
 
+  it('tool2 注册失败时回滚 tool1 并保留原始错误', () => {
+    const firstStop = vi.fn()
+    const registrationError = new Error('tool2 registration failed')
+    let calls = 0
+    const toolCtx = {
+      tools: {
+        register: vi.fn(() => {
+          calls += 1
+          if (calls === 2) throw registrationError
+          return firstStop
+        }),
+      },
+    }
+
+    expect(() => registerXFeedTools(toolCtx, { store: {} as XFeedbackStore, logger: { warn: vi.fn() } }))
+      .toThrow(registrationError)
+    expect(firstStop).toHaveBeenCalledOnce()
+    expect(toolCtx.tools.register).toHaveBeenCalledTimes(2)
+  })
+
+  it('正常工具 disposer 严格按 tool2→tool1 执行且重复调用不重复', () => {
+    const order: string[] = []
+    let registrations = 0
+    const toolCtx = {
+      tools: {
+        register: vi.fn(() => {
+          registrations += 1
+          const name = registrations === 1 ? 'tool1' : 'tool2'
+          return vi.fn(() => { order.push(name) })
+        }),
+      },
+    }
+
+    const dispose = registerXFeedTools(toolCtx, { store: {} as XFeedbackStore, logger: { warn: vi.fn() } })
+    dispose()
+    dispose()
+
+    expect(order).toEqual(['tool2', 'tool1'])
+  })
+
+  it('tool2 disposer 抛错时仍清理 tool1、显式失败，并在重复调用时重抛同一错误', () => {
+    const disposerError = new Error('tool2 cleanup failed')
+    const order: string[] = []
+    let calls = 0
+    const toolCtx = {
+      tools: {
+        register: vi.fn(() => {
+          calls += 1
+          if (calls === 1) return vi.fn(() => { order.push('tool1') })
+          return vi.fn(() => {
+            order.push('tool2')
+            throw disposerError
+          })
+        }),
+      },
+    }
+
+    const dispose = registerXFeedTools(toolCtx, { store: {} as XFeedbackStore, logger: { warn: vi.fn() } })
+    expect(() => dispose()).toThrow(disposerError)
+    expect(order).toEqual(['tool2', 'tool1'])
+    expect(() => dispose()).toThrow(disposerError)
+    expect(order).toEqual(['tool2', 'tool1'])
+  })
+
   it('session-telegram 看得到两项 x_feed_* 工具和合同', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'x-feed-isolation-a-'))
     const telegram = makeAgent('session-telegram', [], [])

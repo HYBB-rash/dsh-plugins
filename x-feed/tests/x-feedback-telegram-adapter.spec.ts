@@ -123,6 +123,64 @@ describe('Telegram X feedback adapter', () => {
     expect(dependencies.pendingStore.unload).toHaveBeenCalledOnce()
   })
 
+  it('rolls back the first ready listener and unloads pending state when the second registration fails', () => {
+    const readyStop = vi.fn()
+    const registrationError = new Error('waterfall registration failed')
+    const { dependencies } = makeDependencies()
+    const ctx = {
+      on: vi.fn((name: string) => {
+        if (name === 'telegram/inbound/ready') return readyStop
+        throw registrationError
+      }),
+    } as TelegramFeedbackAdapterContext
+
+    expect(() => registerTelegramFeedbackAdapter(ctx, dependencies)).toThrow(registrationError)
+    expect(readyStop).toHaveBeenCalledOnce()
+    expect(dependencies.pendingStore.unload).toHaveBeenCalledOnce()
+    expect(ctx.on).toHaveBeenCalledTimes(2)
+  })
+
+  it('disposes waterfall then ready then pending, and repeated disposal is idempotent', () => {
+    const order: string[] = []
+    const { dependencies } = makeDependencies()
+    const ctx = {
+      on: vi.fn((name: string) => vi.fn(() => order.push(name))),
+    } as TelegramFeedbackAdapterContext
+    dependencies.pendingStore.unload.mockImplementation(() => { order.push('pending') })
+
+    const dispose = registerTelegramFeedbackAdapter(ctx, dependencies)
+    dispose()
+    dispose()
+
+    expect(order).toEqual(['telegram/inbound', 'telegram/inbound/ready', 'pending'])
+    expect(dependencies.pendingStore.unload).toHaveBeenCalledOnce()
+  })
+
+  it.each(['telegram/inbound', 'telegram/inbound/ready'] as const)('continues cleanup after a %s disposer failure, reports and caches that failure, and does not repeat cleanup', cleanupPoint => {
+    const cleanupError = new Error(`${cleanupPoint} cleanup failed`)
+    const order: string[] = []
+    const { dependencies } = makeDependencies()
+    const ctx = {
+      on: vi.fn((name: string) => vi.fn(() => {
+        order.push(name)
+        if (name === cleanupPoint) throw cleanupError
+      })),
+    } as TelegramFeedbackAdapterContext
+    dependencies.pendingStore.unload.mockImplementation(() => { order.push('pending') })
+
+    const dispose = registerTelegramFeedbackAdapter(ctx, dependencies)
+    let firstError: unknown
+    try { dispose() } catch (error) { firstError = error }
+
+    expect(firstError).toBe(cleanupError)
+    expect(order).toEqual(['telegram/inbound', 'telegram/inbound/ready', 'pending'])
+    expect(dependencies.pendingStore.unload).toHaveBeenCalledOnce()
+
+    expect(() => dispose()).toThrow(cleanupError)
+    expect(order).toEqual(['telegram/inbound', 'telegram/inbound/ready', 'pending'])
+    expect(dependencies.pendingStore.unload).toHaveBeenCalledOnce()
+  })
+
   it('passes an ordinary message once without creating a clean Agent, reading facts, or effects', async () => {
     const { ctx, registered } = context()
     const { dependencies, calls } = makeDependencies()

@@ -58,19 +58,40 @@ export function registerTelegramFeedbackAdapter(
   dependencies: TelegramFeedbackAdapterDependencies,
 ): () => void {
   let disposed = false
+  let cleanupError: unknown
   const stopReady = ctx.on('telegram/inbound/ready', () => true)
-  const stopWaterfall = ctx.on('telegram/inbound', async (envelope, next) => {
-    if (disposed) return failed(disposedError)
-    return handleInbound(envelope, next, dependencies)
-  })
+  let stopWaterfall: (() => void) | undefined
+  try {
+    stopWaterfall = ctx.on('telegram/inbound', async (envelope, next) => {
+      if (disposed) return failed(disposedError)
+      return handleInbound(envelope, next, dependencies)
+    })
+  } catch (error) {
+    // Registration is a local transaction.  The acquisition error remains the
+    // error observed by the caller even if one of the rollback hooks fails.
+    const rollbackErrors: unknown[] = []
+    try { stopReady() } catch (cleanupError) { rollbackErrors.push(cleanupError) }
+    try { dependencies.pendingStore.unload() } catch (cleanupError) { rollbackErrors.push(cleanupError) }
+    throw combinePrimaryAndCleanup(error, rollbackErrors)
+  }
 
   return () => {
-    if (disposed) return
+    if (disposed) {
+      if (cleanupError !== undefined) throw cleanupError
+      return
+    }
     disposed = true
-    stopReady()
-    stopWaterfall()
-    dependencies.pendingStore.unload()
+    const errors: unknown[] = []
+    try { stopWaterfall?.() } catch (error) { errors.push(error) }
+    try { stopReady() } catch (error) { errors.push(error) }
+    try { dependencies.pendingStore.unload() } catch (error) { errors.push(error) }
+    cleanupError = errors.length === 1 ? errors[0] : errors.length > 1 ? new AggregateError(errors) : undefined
+    if (cleanupError !== undefined) throw cleanupError
   }
+}
+
+function combinePrimaryAndCleanup(primary: unknown, cleanupErrors: readonly unknown[]): unknown {
+  return cleanupErrors.length === 0 ? primary : new AggregateError([primary, ...cleanupErrors])
 }
 
 async function handleInbound(

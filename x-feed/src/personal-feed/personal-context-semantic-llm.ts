@@ -38,6 +38,36 @@ type SemanticPortsWithAbort = PersonalContextSemanticPorts & {
   readonly classifier: (input: PersonalContextClassifierInput, signal?: AbortSignal) => Promise<unknown>
   readonly entailmentValidator: (input: PersonalContextEntailmentInput, signal?: AbortSignal) => Promise<unknown>
   readonly noFactValidator: (input: PersonalContextNoFactInput, signal?: AbortSignal) => Promise<unknown>
+  readonly shutdown: () => Promise<void>
+}
+
+type Settled<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly error: unknown }
+
+function observe<T>(promise: Promise<T>): Promise<Settled<T>> {
+  // This child always fulfills.  It is the sole settlement observer used for
+  // promises retained by a lifecycle Set; no rejection-bearing finally child
+  // is created or abandoned.
+  return promise.then(
+    value => ({ ok: true as const, value }),
+    error => ({ ok: false as const, error }),
+  )
+}
+
+function rejected<T>(error: unknown): Promise<T> {
+  const promise = Promise.reject(error)
+  void promise.then(undefined, () => undefined)
+  return promise
+}
+
+function appendExternalErrors(error: unknown, internal: unknown, output: unknown[]): void {
+  if (error === internal) return
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) appendExternalErrors(nested, internal, output)
+    return
+  }
+  if (!output.includes(error)) output.push(error)
 }
 
 export function createPersonalContextSemanticLlmPorts(options: {
@@ -49,13 +79,20 @@ export function createPersonalContextSemanticLlmPorts(options: {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new TypeError('semantic LLM timeout must be positive')
 
-  const run = async (input: unknown, kind: 'classifier' | 'entailment' | 'noFact', callerSignal?: AbortSignal): Promise<unknown> => {
+  const lifetime = new AbortController()
+  let accepting = true
+  const internalShutdownReason = new Error('personal context semantic LLM shutdown')
+  const actualRuns = new Map<Promise<unknown>, Promise<Settled<unknown>>>()
+  let shutdownPromise: Promise<void> | undefined
+
+  const execute = async (input: unknown, kind: 'classifier' | 'entailment' | 'noFact', callerSignal?: AbortSignal): Promise<unknown> => {
     if (callerSignal !== undefined && !(callerSignal instanceof AbortSignal)) throw new TypeError('semantic LLM caller signal is invalid')
+    if (!accepting) throw internalShutdownReason
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(new Error('personal context semantic LLM timeout')), timeoutMs)
-    const signal = callerSignal === undefined
-      ? controller.signal
-      : AbortSignal.any([callerSignal, controller.signal])
+    const signals = [lifetime.signal, controller.signal]
+    if (callerSignal !== undefined) signals.push(callerSignal)
+    const signal = AbortSignal.any(signals)
     let rejectAbort: (reason: unknown) => void = () => {}
     const interrupted = new Promise<never>((_resolve, reject) => { rejectAbort = reject })
     const abort = (): void => rejectAbort(signal.reason ?? new Error('personal context semantic LLM aborted'))
@@ -72,28 +109,107 @@ export function createPersonalContextSemanticLlmPorts(options: {
     })
     const assembler = new BlockAssembler()
     let iterator: AsyncIterator<StreamChunk> | undefined
+    let currentNext: Promise<Settled<IteratorResult<StreamChunk>>> | undefined
+    let currentNextError: unknown
+    let returnSettlement: Promise<Settled<IteratorResult<StreamChunk>>> | undefined
+    let returnError: unknown
+    let primaryError: unknown
+    let abortWon = false
+    let decoded: unknown
     try {
       const stream = options.ctx.llm.stream(request)
       iterator = stream[Symbol.asyncIterator]()
       while (true) {
-        const next = await Promise.race([Promise.resolve(iterator.next()), interrupted])
+        let nextTask: Promise<IteratorResult<StreamChunk>>
+        try {
+          // Start next synchronously, then immediately retain both the actual
+          // task and its non-rejecting settlement observer before racing it.
+          nextTask = Promise.resolve(iterator.next())
+        } catch (error) {
+          nextTask = Promise.reject(error)
+          void nextTask.then(undefined, () => undefined)
+        }
+        currentNext = observe(nextTask)
+        const next = await Promise.race([nextTask, interrupted])
         if (next.done === true) break
         assembler.push(next.value)
       }
+    } catch (error) {
+      primaryError = error
+      abortWon = signal.aborted && error === signal.reason
     } finally {
       clearTimeout(timer)
       signal.removeEventListener('abort', abort)
       if (iterator !== undefined) {
-        try { void iterator.return?.() } catch { /* preserve the stream result */ }
+        try {
+          const returned = iterator.return?.()
+          if (returned !== undefined) {
+            const returnTask = Promise.resolve(returned)
+            returnSettlement = observe(returnTask)
+          }
+        } catch (error) {
+          returnError = error
+        }
+      }
+      if (currentNext !== undefined) {
+        const settled = await currentNext
+        if (!settled.ok) currentNextError = settled.error
+      }
+      if (returnSettlement !== undefined) {
+        const settled = await returnSettlement
+        if (!settled.ok) returnError = settled.error
       }
     }
-    return decodeSubmission(assembler, tool.name, kind, input)
+
+    if (primaryError === undefined) {
+      try {
+        decoded = decodeSubmission(assembler, tool.name, kind, input)
+      } catch (error) {
+        primaryError = error
+      }
+    }
+    const errors: unknown[] = []
+    if (primaryError !== undefined) errors.push(primaryError)
+    if (abortWon && currentNextError !== undefined && currentNextError !== primaryError) errors.push(currentNextError)
+    if (returnError !== undefined && !errors.includes(returnError)) errors.push(returnError)
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1) throw new AggregateError(errors)
+    return decoded
+  }
+
+  const invoke = (input: unknown, kind: 'classifier' | 'entailment' | 'noFact', callerSignal?: AbortSignal): Promise<unknown> => {
+    if (!accepting) return rejected(internalShutdownReason)
+    const actual = execute(input, kind, callerSignal)
+    const settled = observe(actual)
+    actualRuns.set(actual, settled)
+    void settled.then(() => { actualRuns.delete(actual) })
+    return actual
+  }
+
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise !== undefined) return shutdownPromise
+    accepting = false
+    lifetime.abort(internalShutdownReason)
+    shutdownPromise = (async () => {
+      const errors: unknown[] = []
+      while (actualRuns.size > 0) {
+        const current = [...actualRuns.values()]
+        const settled = await Promise.all(current)
+        for (const outcome of settled) {
+          if (!outcome.ok) appendExternalErrors(outcome.error, internalShutdownReason, errors)
+        }
+      }
+      if (errors.length > 0) throw new AggregateError(errors)
+    })()
+    void shutdownPromise.then(undefined, () => undefined)
+    return shutdownPromise
   }
 
   return {
-    classifier: (input, signal) => run(input, 'classifier', signal),
-    entailmentValidator: (input, signal) => run(input, 'entailment', signal),
-    noFactValidator: (input, signal) => run(input, 'noFact', signal),
+    classifier: (input, signal) => invoke(input, 'classifier', signal),
+    entailmentValidator: (input, signal) => invoke(input, 'entailment', signal),
+    noFactValidator: (input, signal) => invoke(input, 'noFact', signal),
+    shutdown,
   }
 }
 

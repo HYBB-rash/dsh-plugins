@@ -130,7 +130,8 @@ export function registerXFeedTools(
     }),
   })))
 
-  disposers.push(toolCtx.tools.register(defineTool({
+  try {
+    disposers.push(toolCtx.tools.register(defineTool({
     name: 'x_feed_list_saved',
     description:
       '查询 Harness 本地收藏（稍后阅读）列表：fold 全部 save/unsave，默认返回最近 20 条仍处于 saved 的项目。'
@@ -169,9 +170,26 @@ export function registerXFeedTools(
       }
     },
     presentCall: () => ({ card: 'generic', title: 'X feed: list saved', kind: 'read' }),
-  })))
+    })))
+  } catch (error) {
+    const rollbackErrors: unknown[] = []
+    try { disposers[0]?.() } catch (cleanupError) { rollbackErrors.push(cleanupError) }
+    throw rollbackErrors.length === 0 ? error : new AggregateError([error, ...rollbackErrors])
+  }
 
+  let disposed = false
+  let cleanupError: unknown
   return () => {
-    for (const dispose of disposers) dispose()
+    if (disposed) {
+      if (cleanupError !== undefined) throw cleanupError
+      return
+    }
+    disposed = true
+    const errors: unknown[] = []
+    for (const dispose of [...disposers].reverse()) {
+      try { dispose() } catch (error) { errors.push(error) }
+    }
+    cleanupError = errors.length === 1 ? errors[0] : errors.length > 1 ? new AggregateError(errors) : undefined
+    if (cleanupError !== undefined) throw cleanupError
   }
 }

@@ -6,6 +6,39 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { TelegramInboundEnvelope, TelegramInboundResult } from '@deepseek-ai/dsh-telegram-gateway'
 import { installTelegramExtension } from '../src/index.ts'
 
+const ownerObserver = vi.hoisted(() => ({ closeCount: 0, events: [] as string[] }))
+
+vi.mock('@herman/personal-feed', async importOriginal => {
+  const actual = await importOriginal<typeof import('@herman/personal-feed')>()
+  return {
+    ...actual,
+    createPersonalContextOwner: (...args: Parameters<typeof actual.createPersonalContextOwner>) => {
+      const owner = actual.createPersonalContextOwner(...args)
+      return Object.freeze({
+        ...owner,
+        close: (): void => {
+          ownerObserver.closeCount += 1
+          ownerObserver.events.push('owner.close')
+          owner.close()
+        },
+      })
+    },
+  }
+})
+
+vi.mock('../src/x-feedback/pending-store.ts', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/x-feedback/pending-store.ts')>()
+  return {
+    ...actual,
+    InMemoryPendingStore: class extends actual.InMemoryPendingStore {
+      override unload(): void {
+        ownerObserver.events.push('pending.unload')
+        super.unload()
+      }
+    },
+  }
+})
+
 type Listener = (value: TelegramInboundEnvelope, next: () => TelegramInboundResult | Promise<TelegramInboundResult>) => TelegramInboundResult | Promise<TelegramInboundResult>
 
 type RuntimeHarness = {
@@ -54,6 +87,7 @@ function emptyHistoryHarness(options: { readonly historyFailure?: Error; readonl
     on: vi.fn((name: string, listener: Listener) => {
       registration.push(name)
       timeline.push(`register:${name}`)
+      ownerObserver.events.push(`listener.register:${name}`)
       const inboundOrdinal = name === 'telegram/inbound'
         ? inboundRegistration.push(inboundRegistration.length) - 1
         : undefined
@@ -62,6 +96,7 @@ function emptyHistoryHarness(options: { readonly historyFailure?: Error; readonl
       listeners.set(name, current)
       return () => {
         disposal.push(name)
+        ownerObserver.events.push(`listener.dispose:${name}`)
         if (inboundOrdinal !== undefined) inboundDisposal.push(inboundOrdinal)
         const values = listeners.get(name) ?? []
         listeners.set(name, values.filter(value => value !== listener))
@@ -70,6 +105,64 @@ function emptyHistoryHarness(options: { readonly historyFailure?: Error; readonl
     agents: { roots: () => [] },
   }
   return { ctx, listeners, registration, disposal, inboundRegistration, inboundDisposal, historyCalls, timeline, llmRequests }
+}
+
+type RootFailure = 'tool1' | 'tool2' | 'section'
+
+type RootFixture = {
+  readonly agent: Record<string, unknown>
+  readonly tools: string[]
+  readonly sections: string[]
+  readonly timeline: string[]
+  readonly disposal: string[]
+}
+
+function rootFixture(sessionId: string, failure?: RootFailure, label = 'root'): RootFixture {
+  const tools: string[] = []
+  const sections: string[] = []
+  const timeline: string[] = []
+  const disposal: string[] = []
+  let registeredTools = 0
+  const agent = {
+    session: { id: sessionId },
+    ctx: {
+      tools: {
+        register: (definition: { readonly name?: string }) => {
+          registeredTools += 1
+          if (failure === `tool${registeredTools}`) throw new Error(`${failure} registration failed`)
+          const name = definition.name ?? 'unknown'
+          tools.push(name)
+          timeline.push(`register:${name}`)
+          ownerObserver.events.push(`${label}.register:${name}`)
+          return () => {
+            const index = tools.indexOf(name)
+            if (index >= 0) tools.splice(index, 1)
+            disposal.push(name)
+            timeline.push(`dispose:${name}`)
+            ownerObserver.events.push(`${label}.dispose:${name}`)
+          }
+        },
+      },
+      systemPrompt: {
+        section: (section: { readonly name?: string }) => {
+          if (failure === 'section') throw new Error('section registration failed')
+          const name = section.name ?? 'unknown'
+          sections.push(name)
+          timeline.push(`register:${name}`)
+          ownerObserver.events.push(`${label}.register:${name}`)
+          return () => {
+            const index = sections.indexOf(name)
+            if (index >= 0) sections.splice(index, 1)
+            disposal.push(name)
+            timeline.push(`dispose:${name}`)
+            ownerObserver.events.push(`${label}.dispose:${name}`)
+          }
+        },
+      },
+      effect: (callback: () => unknown) => callback(),
+    },
+  }
+  return { agent, tools, sections, timeline, disposal }
 }
 
 function config(dataDir: string, personalFeedDataDir: string): Record<string, unknown> {
@@ -115,6 +208,8 @@ function digest(value: unknown): string {
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true })
+  ownerObserver.closeCount = 0
+  ownerObserver.events.length = 0
   vi.restoreAllMocks()
 })
 
@@ -165,6 +260,164 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
       .rejects.toThrow()
     expect(harness.listeners.get('telegram/inbound') ?? []).toEqual([])
     expect(harness.registration).not.toContain('telegram/inbound')
+  })
+
+  it.each([
+    ['source', 'telegram/inbound', 1, []],
+    ['feedback ready', 'telegram/inbound/ready', 1, [0]],
+    ['feedback waterfall', 'telegram/inbound', 2, [0]],
+    ['Personal Feed', 'telegram/inbound', 3, [1, 0]],
+  ] as const)('post-bootstrap acquisition failure at %s rolls back every acquired listener exactly once', async (label, failedName, failedOrdinal, expectedInboundDisposal) => {
+    const root = mkdtempSync(join(tmpdir(), `x-feed-runtime-acquisition-${label.replace(/\s+/gu, '-')}-`))
+    temporaryDirectories.push(root)
+    const harness = emptyHistoryHarness()
+    let inboundRegistrations = 0
+    const originalOn = harness.ctx.on as unknown as (name: string, listener: Listener, options?: { readonly prepend?: boolean }) => () => void
+    harness.ctx.on = vi.fn((name: string, listener: Listener, options?: { readonly prepend?: boolean }) => {
+      const ordinal = name === 'telegram/inbound' ? ++inboundRegistrations : 1
+      if (name === failedName && ordinal === failedOrdinal) throw new Error(`${label} acquisition failed`)
+      return originalOn(name, listener, options)
+    }) as never
+
+    await expect(installTelegramExtension(harness.ctx as never, config(root, join(root, 'personal-feed')))).rejects.toThrow(`${label} acquisition failed`)
+    expect(harness.listeners.get('telegram/inbound') ?? []).toEqual([])
+    expect(harness.listeners.get('telegram/inbound/ready') ?? []).toEqual([])
+    expect(harness.inboundDisposal).toEqual(expectedInboundDisposal)
+    expect(ownerObserver.closeCount).toBe(1)
+    expect(ownerObserver.events.at(-1)).toBe('owner.close')
+  })
+
+  it.each([
+    ['root tool1', 'tool1', []],
+    ['root tool2', 'tool2', ['x_feed_record_feedback']],
+    ['root section', 'section', ['x_feed_list_saved', 'x_feed_record_feedback']],
+  ] as const)('post-bootstrap %s failure leaves no root registration or listener residue', async (label, failure, expectedDisposal) => {
+    const root = mkdtempSync(join(tmpdir(), `x-feed-runtime-${failure}-`))
+    temporaryDirectories.push(root)
+    const fixture = rootFixture('session-telegram', failure)
+    const harness = emptyHistoryHarness()
+    ;(harness.ctx as { agents: { roots: () => unknown[] } }).agents.roots = () => [fixture.agent]
+
+    await expect(installTelegramExtension(harness.ctx as never, config(root, join(root, 'personal-feed')))).rejects.toThrow()
+    expect(harness.listeners.get('telegram/inbound') ?? []).toEqual([])
+    expect(harness.listeners.get('telegram/inbound/ready') ?? []).toEqual([])
+    expect(fixture.tools).toEqual([])
+    expect(fixture.sections).toEqual([])
+    expect(fixture.disposal).toEqual(expectedDisposal)
+    expect(ownerObserver.closeCount).toBe(1)
+    expect(ownerObserver.events.at(-1)).toBe('owner.close')
+  })
+
+  it('post-bootstrap second existing root failure rolls back the first root and all shared listeners', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'x-feed-runtime-second-root-'))
+    temporaryDirectories.push(root)
+    const first = rootFixture('session-telegram')
+    const second = rootFixture('session-telegram', 'section')
+    const harness = emptyHistoryHarness()
+    ;(harness.ctx as { agents: { roots: () => unknown[] } }).agents.roots = () => [first.agent, second.agent]
+
+    await expect(installTelegramExtension(harness.ctx as never, config(root, join(root, 'personal-feed')))).rejects.toThrow()
+    expect(first.timeline).toEqual([
+      'register:x_feed_record_feedback', 'register:x_feed_list_saved', 'register:x-feed:contract',
+      'dispose:x-feed:contract', 'dispose:x_feed_list_saved', 'dispose:x_feed_record_feedback',
+    ])
+    expect(first.disposal).toEqual(['x-feed:contract', 'x_feed_list_saved', 'x_feed_record_feedback'])
+    expect(first.tools).toEqual([])
+    expect(first.sections).toEqual([])
+    expect(second.tools).toEqual([])
+    expect(second.sections).toEqual([])
+    expect(harness.listeners.get('telegram/inbound') ?? []).toEqual([])
+    expect(ownerObserver.closeCount).toBe(1)
+    expect(ownerObserver.events.at(-1)).toBe('owner.close')
+  })
+
+  it('agent/created registration failure rolls back post-bootstrap listeners', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'x-feed-runtime-created-registration-'))
+    temporaryDirectories.push(root)
+    const harness = emptyHistoryHarness()
+    const originalOn = harness.ctx.on as unknown as (name: string, listener: Listener, options?: { readonly prepend?: boolean }) => () => void
+    harness.ctx.on = vi.fn((name: string, listener: Listener, options?: { readonly prepend?: boolean }) => {
+      if (name === 'agent/created') throw new Error('agent/created registration failed')
+      return originalOn(name, listener, options)
+    }) as never
+
+    await expect(installTelegramExtension(harness.ctx as never, config(root, join(root, 'personal-feed')))).rejects.toThrow('agent/created registration failed')
+    expect(harness.listeners.get('telegram/inbound') ?? []).toEqual([])
+    expect(harness.listeners.get('telegram/inbound/ready') ?? []).toEqual([])
+    expect(ownerObserver.closeCount).toBe(1)
+    expect(ownerObserver.events.at(-1)).toBe('owner.close')
+  })
+
+  it('future agent/created root failure rolls back only that root and preserves an already-installed root', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'x-feed-runtime-future-root-failure-'))
+    temporaryDirectories.push(root)
+    const existing = rootFixture('session-telegram')
+    const future = rootFixture('session-telegram', 'section')
+    const harness = emptyHistoryHarness()
+    const roots: unknown[] = [existing.agent]
+    ;(harness.ctx as { agents: { roots: () => unknown[] } }).agents.roots = () => roots
+    const createdHandlers: Array<(value: { readonly agent: unknown }) => void> = []
+    const originalOn = harness.ctx.on as unknown as (name: string, listener: Listener, options?: { readonly prepend?: boolean }) => () => void
+    harness.ctx.on = vi.fn((name: string, listener: Listener, options?: { readonly prepend?: boolean }) => {
+      if (name === 'agent/created') {
+        createdHandlers.push(listener as unknown as (value: { readonly agent: unknown }) => void)
+        return () => undefined
+      }
+      return originalOn(name, listener, options)
+    }) as never
+
+    const dispose = await installTelegramExtension(harness.ctx as never, config(root, join(root, 'personal-feed')))
+    expect(existing.tools).toHaveLength(2)
+    expect(createdHandlers).toHaveLength(1)
+    roots.push(future.agent)
+    expect(() => createdHandlers[0]!({ agent: future.agent })).toThrow()
+    expect(future.tools).toEqual([])
+    expect(future.sections).toEqual([])
+    expect(future.disposal).toEqual(['x_feed_list_saved', 'x_feed_record_feedback'])
+    expect(existing.tools).toHaveLength(2)
+    await dispose()
+    expect(existing.disposal).toEqual(['x-feed:contract', 'x_feed_list_saved', 'x_feed_record_feedback'])
+    expect(existing.tools).toEqual([])
+    expect(existing.sections).toEqual([])
+  })
+
+  it('normal extension disposal is a single reverse transaction: root sections, tools, listeners, then owner', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'x-feed-runtime-dispose-transaction-'))
+    temporaryDirectories.push(root)
+    const first = rootFixture('session-telegram', undefined, 'root1')
+    const second = rootFixture('session-telegram', undefined, 'root2')
+    const harness = emptyHistoryHarness()
+    ;(harness.ctx as { agents: { roots: () => unknown[] } }).agents.roots = () => [first.agent, second.agent]
+
+    const dispose = await installTelegramExtension(harness.ctx as never, config(root, join(root, 'personal-feed')))
+    const firstDispose = dispose()
+    expect(dispose()).toBe(firstDispose)
+    await firstDispose
+    expect(second.timeline).toEqual([
+      'register:x_feed_record_feedback', 'register:x_feed_list_saved', 'register:x-feed:contract',
+      'dispose:x-feed:contract', 'dispose:x_feed_list_saved', 'dispose:x_feed_record_feedback',
+    ])
+    expect(first.timeline).toEqual([
+      'register:x_feed_record_feedback', 'register:x_feed_list_saved', 'register:x-feed:contract',
+      'dispose:x-feed:contract', 'dispose:x_feed_list_saved', 'dispose:x_feed_record_feedback',
+    ])
+    expect(second.disposal).toEqual(['x-feed:contract', 'x_feed_list_saved', 'x_feed_record_feedback'])
+    expect(first.disposal).toEqual(['x-feed:contract', 'x_feed_list_saved', 'x_feed_record_feedback'])
+    expect(second.tools).toEqual([])
+    expect(second.sections).toEqual([])
+    expect(first.tools).toEqual([])
+    expect(first.sections).toEqual([])
+    expect(harness.inboundDisposal).toEqual([2, 1, 0])
+    expect(harness.listeners.get('telegram/inbound') ?? []).toEqual([])
+    expect(ownerObserver.events.slice(-13)).toEqual([
+      'listener.dispose:agent/created',
+      'root2.dispose:x-feed:contract', 'root2.dispose:x_feed_list_saved', 'root2.dispose:x_feed_record_feedback',
+      'root1.dispose:x-feed:contract', 'root1.dispose:x_feed_list_saved', 'root1.dispose:x_feed_record_feedback',
+      'listener.dispose:telegram/inbound', 'listener.dispose:telegram/inbound',
+      'listener.dispose:telegram/inbound/ready', 'pending.unload',
+      'listener.dispose:telegram/inbound', 'owner.close',
+    ])
+    expect(ownerObserver.closeCount).toBe(1)
   })
 
   it('guards blank/whitespace at the first real waterfall layer with zero source, ledger, semantic, X, and root effects', async () => {
@@ -368,6 +621,7 @@ type SeamOwner = {
 
 type RuntimeSeam = {
   readonly r4: { readonly snapshot: (input: unknown) => unknown | Promise<unknown> }
+  readonly shutdown: () => Promise<void>
   readonly registerSourceFirst: (
     ctx: { readonly on: (name: string, listener: Listener, options?: { readonly prepend?: boolean }) => () => void },
     options: { readonly personalFeedHandler: (envelope: TelegramInboundEnvelope) => Promise<TelegramInboundResult> },
@@ -376,6 +630,7 @@ type RuntimeSeam = {
 
 type RuntimeSeamFactory = (options: {
   readonly owner: unknown
+  readonly semanticLifecycle: { readonly shutdown: () => Promise<void> }
 }) => RuntimeSeam
 
 async function loadRuntimeSeam(): Promise<RuntimeSeamFactory> {
@@ -448,6 +703,80 @@ function runWaterfall(listeners: readonly Listener[], value: TelegramInboundEnve
 }
 
 describe('Personal Context Telegram package-private runtime seam (RED)', () => {
+  it('joins source and R4 owner operations behind one shutdown Promise while semantic cleanup may reject first', async () => {
+    const factory = await loadRuntimeSeam()
+    const semanticError = new Error('semantic cleanup failed')
+    const settleError = new Error('owner settle failed')
+    const snapshotError = new Error('owner snapshot failed')
+    let releaseSettle: (() => void) | undefined
+    let releaseSnapshot: (() => void) | undefined
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    const owner = ownerFixture({
+      sources: [source(7, 11, 1)],
+      coverage: [pending('telegram:7:11')],
+      capture: input => ({ source: { ...source(7, 11, 1), rawText: input.rawText }, coverage: pending('telegram:7:11') }),
+      settle: () => new Promise<never>((_resolve, reject) => {
+        releaseSettle = () => { reject(settleError) }
+      }),
+      snapshot: () => new Promise<never>((_resolve, reject) => {
+        releaseSnapshot = () => { reject(snapshotError) }
+      }),
+    })
+    const semanticShutdown = vi.fn(async () => { throw semanticError })
+    try {
+      const runtime = factory({ owner, semanticLifecycle: { shutdown: semanticShutdown } })
+      const harness = seamContext()
+      const sourceDispose = runtime.registerSourceFirst(harness.ctx, { personalFeedHandler: noopPersonalFeedHandler })
+      const sourceRun = runWaterfall(harness.listeners, envelope('普通消息'))
+      const r4Run = runtime.r4.snapshot({
+        request: { requestId: 'r4-pending', cutoff: '2026-08-31T16:00:00.000Z', shanghaiDay: '2026-09-01' },
+        signal: new AbortController().signal,
+      })
+      void sourceRun.catch(() => undefined)
+      void (r4Run as Promise<unknown>).catch(() => undefined)
+      await Promise.resolve()
+      expect(owner.capture).toHaveBeenCalledOnce()
+      expect(owner.read).toHaveBeenCalledOnce()
+      expect(owner.settle).toHaveBeenCalledOnce()
+      expect(owner.freezeFence).toHaveBeenCalledOnce()
+      expect(owner.snapshot).toHaveBeenCalledOnce()
+
+      const shutdown = runtime.shutdown()
+      expect(runtime.shutdown()).toBe(shutdown)
+      expect(semanticShutdown).toHaveBeenCalledOnce()
+      sourceDispose()
+      expect(harness.listeners).toEqual([])
+      await Promise.resolve()
+      expect(owner.close).not.toHaveBeenCalled()
+
+      const captureCalls = owner.capture.mock.calls.length
+      const freezeCalls = owner.freezeFence.mock.calls.length
+      const afterShutdown = await runtime.r4.snapshot({
+        request: { requestId: 'after-shutdown', cutoff: '2026-08-31T16:00:00.000Z', shanghaiDay: '2026-09-01' },
+        signal: new AbortController().signal,
+      })
+      expect(afterShutdown).toMatchObject({ kind: 'unknown' })
+      expect(owner.capture).toHaveBeenCalledTimes(captureCalls)
+      expect(owner.freezeFence).toHaveBeenCalledTimes(freezeCalls)
+      expect(releaseSettle).toBeDefined()
+      expect(releaseSnapshot).toBeDefined()
+      releaseSnapshot?.()
+      releaseSettle?.()
+      await sourceRun
+      await expect(r4Run).rejects.toBe(snapshotError)
+      await expect(shutdown).rejects.toThrow()
+      expect(semanticError).toBeInstanceOf(Error)
+      expect(settleError).toBeInstanceOf(Error)
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      releaseSettle?.()
+      releaseSnapshot?.()
+    }
+  })
+
   it('A drains each pending source exactly once in capture order through current and never touches terminal/later sources', async () => {
     const factory = await loadRuntimeSeam()
     const sourceA = source(7, 10, 1)

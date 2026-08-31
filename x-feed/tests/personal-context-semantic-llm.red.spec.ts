@@ -589,15 +589,189 @@ describe('Personal Context semantic LLM adapter (RED)', () => {
     expect(timeoutSignal?.aborted).toBe(true)
   }, 2_000)
 
+  it('keeps an aborted actual run pending until the saved next task settles, even when return is immediately fulfilled', async () => {
+    const factory = await loadFactory()
+    let resolveNext: ((result: IteratorResult<StreamChunk>) => void) | undefined
+    let returnCalls = 0
+    let wireSignal: AbortSignal | undefined
+    const nextPromise = new Promise<IteratorResult<StreamChunk>>(resolve => { resolveNext = resolve })
+    const ctx = {
+      llm: {
+        stream: vi.fn((request: GenerateOptions): AsyncIterable<StreamChunk> => {
+          wireSignal = request.signal
+          const iterator: AsyncIterator<StreamChunk> = {
+            next: () => nextPromise,
+            return: () => {
+              returnCalls += 1
+              return Promise.resolve({ done: true, value: undefined } as IteratorResult<StreamChunk>)
+            },
+          }
+          return { [Symbol.asyncIterator]: () => iterator }
+        }),
+      },
+    }
+    const caller = new AbortController()
+    const ports = factory({ ctx, provider: 'wire-test', model: 'wire-model', timeoutMs: 10_000 })
+    const run = ports.classifier(classifierInput, caller.signal)
+    let settled = false
+    void run.then(() => { settled = true }, () => { settled = true })
+    await Promise.resolve()
+    caller.abort(new Error('caller abort primary'))
+    await Promise.resolve()
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+
+    expect(wireSignal?.aborted).toBe(true)
+    expect(returnCalls).toBe(1)
+    expect(settled).toBe(false)
+
+    resolveNext?.({ done: true, value: undefined })
+    await expect(run).rejects.toThrow()
+    expect(settled).toBe(true)
+  }, 2_000)
+
+  it('also waits for the pending next task when an actual iterator has no return method', async () => {
+    const factory = await loadFactory()
+    let resolveNext: ((result: IteratorResult<StreamChunk>) => void) | undefined
+    const nextPromise = new Promise<IteratorResult<StreamChunk>>(resolve => { resolveNext = resolve })
+    const ctx = {
+      llm: {
+        stream: vi.fn((_request: GenerateOptions): AsyncIterable<StreamChunk> => ({
+          [Symbol.asyncIterator]: () => ({ next: () => nextPromise }),
+        })),
+      },
+    }
+    const caller = new AbortController()
+    const ports = factory({ ctx, provider: 'wire-test', model: 'wire-model', timeoutMs: 10_000 })
+    const run = ports.classifier(classifierInput, caller.signal)
+    let settled = false
+    void run.then(() => { settled = true }, () => { settled = true })
+    await Promise.resolve()
+    caller.abort(new Error('caller abort without return'))
+    await Promise.resolve()
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+    expect(settled).toBe(false)
+    resolveNext?.({ done: true, value: undefined })
+    await expect(run).rejects.toThrow()
+    expect(settled).toBe(true)
+  }, 2_000)
+
+  it('joins two actual runs on shutdown, preserving one Promise and waiting for the still-pending run', async () => {
+    const factory = await loadFactory()
+    const firstError = new Error('actual run A failed')
+    const lateNextError = new Error('actual run B late next failed')
+    const lateReturnError = new Error('actual run B late return failed')
+    let runNumber = 0
+    let abortCount = 0
+    let returnCount = 0
+    let releaseSecondNext: (() => void) | undefined
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    const ctx = {
+      llm: {
+        stream: vi.fn((request: GenerateOptions): AsyncIterable<StreamChunk> => {
+          runNumber += 1
+          const current = runNumber
+          request.signal?.addEventListener('abort', () => { abortCount += 1 }, { once: true })
+          if (current === 1) {
+            const iterator: AsyncIterator<StreamChunk> = {
+              next: () => { throw firstError },
+              return: () => {
+                returnCount += 1
+                return Promise.resolve({ done: true, value: undefined } as IteratorResult<StreamChunk>)
+              },
+            }
+            return { [Symbol.asyncIterator]: () => iterator }
+          }
+          const next = new Promise<IteratorResult<StreamChunk>>((_resolve, reject) => {
+            releaseSecondNext = () => { reject(lateNextError) }
+          })
+          const iterator: AsyncIterator<StreamChunk> = {
+            next: () => next,
+            return: () => {
+              returnCount += 1
+              return Promise.reject(lateReturnError)
+            },
+          }
+          return { [Symbol.asyncIterator]: () => iterator }
+        }),
+      },
+    }
+    const ports = factory({ ctx, provider: 'wire-test', model: 'wire-model', timeoutMs: 10_000 }) as SemanticPortsWithAbort & {
+      readonly shutdown: () => Promise<void>
+    }
+    const first = ports.classifier(classifierInput)
+    const second = ports.classifier(classifierInput)
+    void second.then(() => undefined, () => undefined)
+    try {
+      await expect(first).rejects.toBe(firstError)
+      const shutdown = ports.shutdown()
+      expect(ports.shutdown()).toBe(shutdown)
+      let shutdownSettled = false
+      void shutdown.then(() => { shutdownSettled = true }, () => { shutdownSettled = true })
+      await Promise.resolve()
+      expect(shutdownSettled).toBe(false)
+      expect(abortCount).toBeGreaterThanOrEqual(1)
+
+      // The pending actual run must remain part of the join after return rejects;
+      // releasing its saved next task is the final event that permits shutdown.
+      expect(releaseSecondNext).toBeDefined()
+      expect(second).toBeInstanceOf(Promise)
+      expect(returnCount).toBeGreaterThanOrEqual(1)
+      expect(shutdownSettled).toBe(false)
+
+      releaseSecondNext?.()
+      let secondError: unknown
+      try { await second } catch (error) { secondError = error }
+      expect(secondError).toBeInstanceOf(AggregateError)
+      const secondErrors = secondError instanceof AggregateError ? secondError.errors : []
+      expect(secondErrors).toHaveLength(3)
+      expect(secondErrors[0]).toBeInstanceOf(Error)
+      expect(secondErrors[0]).not.toBe(firstError)
+      expect(secondErrors[0]).not.toBe(lateNextError)
+      expect(secondErrors[0]).not.toBe(lateReturnError)
+      expect(secondErrors[1]).toBe(lateNextError)
+      expect(secondErrors[2]).toBe(lateReturnError)
+      expect(new Set(secondErrors).size).toBe(3)
+      let shutdownError: unknown
+      try { await shutdown } catch (error) { shutdownError = error }
+      expect(shutdownError).toBeInstanceOf(AggregateError)
+      const errors = shutdownError instanceof AggregateError ? shutdownError.errors : []
+      expect(errors).toEqual([lateNextError, lateReturnError])
+      expect(errors).not.toContain(firstError)
+      expect(new Set(errors).size).toBe(2)
+      expect(shutdownSettled).toBe(true)
+
+      const streamCalls = ctx.llm.stream.mock.calls.length
+      const aborts = abortCount
+      const returns = returnCount
+      await expect(ports.classifier(classifierInput)).rejects.toThrow()
+      expect(ctx.llm.stream).toHaveBeenCalledTimes(streamCalls)
+      expect(ports.shutdown()).toBe(shutdown)
+      expect(abortCount).toBe(aborts)
+      expect(returnCount).toBe(returns)
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      releaseSecondNext?.()
+    }
+  }, 2_000)
+
   it('keeps a real owner source pending with raw text intact when the semantic wire rejects, without partial terminal or revision state', async () => {
     const factory = await loadFactory()
     const { ctx } = makeContext(request => toolCallChunks(request, [{ kind: 'no_fact', reason: 'not_personal_fact', extra: 'reject' }]))
     const ports = factory({ ctx, provider: 'wire-test', model: 'wire-model' })
+    const businessPorts: PersonalContextSemanticPorts = {
+      classifier: ports.classifier,
+      entailmentValidator: ports.entailmentValidator,
+      noFactValidator: ports.noFactValidator,
+    }
     const directory = mkdtempSync(join(tmpdir(), 'personal-context-semantic-owner-'))
     const owner = createPersonalContextOwner({
       databasePath: join(directory, 'personal-context.sqlite'),
       clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
-      semantics: ports,
+      semantics: businessPorts,
     })
     try {
       const captured = owner.capture({
