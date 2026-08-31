@@ -23,22 +23,16 @@ const pluginDirectories = [
   'personal-feed',
   'personal-feed-selector',
   'telegram-gateway',
-  'ui-context-compactor',
   'x-feed',
 ] as const
 const harnessPackages = [
   '@deepseek-ai/dsh-agent',
-  '@deepseek-ai/dsh-compaction',
-  '@deepseek-ai/dsh-compaction-basic',
   '@deepseek-ai/dsh-credentials',
   '@deepseek-ai/dsh-home-paths',
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-session',
-  '@deepseek-ai/dsh-storage-domain',
-  '@deepseek-ai/dsh-system-prompt',
   '@deepseek-ai/dsh-tools',
   '@deepseek-ai/schemastery',
-  'zod',
 ] as const
 const temporaryDirectories: string[] = []
 
@@ -127,9 +121,6 @@ describe('release runtime package topology', () => {
     )
     expect(resolveFromPlugin(release, 'dsh-assistant', '@deepseek-ai/dsh-cron')).toBe(
       join(release, 'plugins/dsh-cron/lib/index.js'),
-    )
-    expect(resolveFromPlugin(release, 'ui-context-compactor', 'zod')).toBe(
-      join(release, 'harness/node_modules/.pnpm/node_modules/zod/index.js'),
     )
   })
 
