@@ -23,3 +23,16 @@ export {
 } from './v2/request-coordinator.ts'
 
 export { canonicalizeXStatusIdentity } from './v2/x-status-identity.ts'
+
+export {
+  createPersonalContextOwner,
+  type CreatePersonalContextOwnerOptions,
+  type PersonalContextCaptureInput,
+  type PersonalContextCaptureResult,
+  type PersonalContextClock,
+  type PersonalContextCoverage,
+  type PersonalContextOwner,
+  type PersonalContextOwnerSnapshot,
+  type PersonalContextSource,
+  type PersonalContextTelegramLocator,
+} from './v2/personal-context-owner.ts'
