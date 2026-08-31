@@ -450,8 +450,7 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
     if (options.semantics === undefined) return pendingSettleResult(parsed.sourceKey, 'semantics_unavailable')
     if (initialSource.rawText === null) throw new PersonalFeedScopeStoreError('pending personal context source is missing raw text')
 
-    if (initialSource.excludedRequestId === undefined
-      && hasFrozenPriorPendingSource(database, initialSource.captureSequence)) {
+    if (hasPriorPendingSource(database, initialSource.captureSequence)) {
       return pendingSettleResult(parsed.sourceKey, 'semantic_validation_failed')
     }
     const priorFold = foldBeforeCaptureSequence(database, initialSource.captureSequence)
@@ -501,6 +500,16 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
           { schemaVersion: 2, status: 'ignored', reason: proposal.reason },
           activeFactsDigest,
         )
+      }
+
+      const claimedTargetFactIds = new Set<string>()
+      for (const factProposal of proposal.facts) {
+        if (factProposal.operation === 'assert') continue
+        const changeTargetFactIds = new Set(factProposal.targetFactIds)
+        if ([...changeTargetFactIds].some(factId => claimedTargetFactIds.has(factId))) {
+          return pendingSettleResult(parsed.sourceKey, 'semantic_validation_failed')
+        }
+        for (const factId of changeTargetFactIds) claimedTargetFactIds.add(factId)
       }
 
       const changes: PersonalContextTerminalChange[] = []
@@ -574,19 +583,15 @@ function selectSourceAndCoverage(
   return { source, coverage }
 }
 
-function hasFrozenPriorPendingSource(database: DatabaseSync, captureSequence: number): boolean {
+function hasPriorPendingSource(database: DatabaseSync, captureSequence: number): boolean {
   const row = database.prepare(`
     SELECT 1 AS blocked
     FROM personal_context_sources AS source
     JOIN personal_context_coverage AS coverage ON coverage.source_key = source.source_key
     WHERE source.capture_sequence < ?
       AND coverage.status = 'pending'
-      AND EXISTS (
-        SELECT 1 FROM personal_context_fences AS fence
-        WHERE json_extract(fence.fence_json, '$.maxCaptureSequence') >= ?
-      )
     LIMIT 1
-  `).get(captureSequence, captureSequence) as { readonly blocked: unknown } | undefined
+  `).get(captureSequence) as { readonly blocked: unknown } | undefined
   return row?.blocked === 1
 }
 

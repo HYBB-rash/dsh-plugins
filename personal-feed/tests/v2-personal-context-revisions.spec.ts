@@ -169,7 +169,12 @@ function databasePath(): string {
 
 async function ownerWith(
   classifier: SemanticPorts['classifier'],
-  options: { readonly path?: string; readonly clock?: () => Date; readonly validator?: SemanticPorts['entailmentValidator'] } = {},
+  options: {
+    readonly path?: string
+    readonly clock?: () => Date
+    readonly validator?: SemanticPorts['entailmentValidator']
+    readonly noFactValidator?: SemanticPorts['noFactValidator']
+  } = {},
 ): Promise<{ readonly owner: Owner; readonly path: string }> {
   const module = await production()
   expect(typeof module.createPersonalContextOwner).toBe('function')
@@ -183,7 +188,7 @@ async function ownerWith(
       semantics: {
         classifier,
         entailmentValidator: options.validator ?? (() => approved),
-        noFactValidator: () => confirmedNoFact,
+        noFactValidator: options.noFactValidator ?? (() => confirmedNoFact),
       },
     }),
   }
@@ -399,10 +404,9 @@ describe('Personal Feed v2 group 3 revision fold and causal snapshot', () => {
   it('rejects invalid target relations, generated text, and unresolved prior coverage atomically with raw input and zero partial terminal transaction', async () => {
     const cases = ['bad', 'unknown', 'future', 'inactive', 'cross-lane', 'duplicate', 'incomplete', 'extra-text', 'prior-pending'] as const
     for (const [caseIndex, name] of cases.entries()) {
-      let phase: 'seed' | 'retire' | 'future-seed' | 'probe' | 'bad' = 'seed'
+      let phase: 'seed' | 'retire' | 'bad' = 'seed'
       let retiredFactId: string | undefined
-      let futureFactId: string | undefined
-      let futureSourceKey: string | undefined
+      let auxiliaryFutureFactId: string | undefined
       let badClassifierCalls = 0
       let incompleteRevisionValidated = false
       const fixture = await ownerWith(input => {
@@ -417,18 +421,10 @@ describe('Personal Feed v2 group 3 revision fold and causal snapshot', () => {
           retiredFactId = interestFacts[0]!.factId
           return facts(interest(input.rawText, 'C', 'correct', [retiredFactId]))
         }
-        if (phase === 'future-seed') {
-          return facts(interest(input.rawText, 'F'))
-        }
-        if (phase === 'probe') {
-          futureFactId = interestFacts.find(value => value.fact.evidence.sourceKey === futureSourceKey)?.factId
-          expect(futureFactId).toMatch(digestPattern)
-          return noFact()
-        }
         badClassifierCalls += 1
         if (name === 'prior-pending') return facts(interest(input.rawText, 'Z'))
         if (name === 'future') {
-          expect(futureFactId).toMatch(digestPattern)
+          expect(auxiliaryFutureFactId).toMatch(digestPattern)
         }
         const base = interest(input.rawText, 'Z', 'replace', interestFacts.map(value => value.factId))
         const bad = name === 'bad'
@@ -436,7 +432,7 @@ describe('Personal Feed v2 group 3 revision fold and causal snapshot', () => {
           : name === 'unknown'
           ? { ...base, targetFactIds: [`sha256:${'f'.repeat(64)}`] }
           : name === 'future'
-            ? { ...base, operation: 'confirm' as const, targetFactIds: [futureFactId!] }
+            ? { ...base, operation: 'confirm' as const, targetFactIds: [auxiliaryFutureFactId!] }
             : name === 'inactive'
               ? { ...base, operation: 'confirm' as const, targetFactIds: [retiredFactId!] }
               : name === 'cross-lane'
@@ -473,17 +469,22 @@ describe('Personal Feed v2 group 3 revision fold and causal snapshot', () => {
       }
       let badSource: { readonly sourceKey: string; readonly captureSequence: number }
       if (name === 'future') {
+        const laterRaw = '我关注 F'
+        const auxiliary = await ownerWith(input => input.rawText === laterRaw
+          ? facts(interest(input.rawText, 'F'))
+          : noFact())
+        const auxiliaryLater = capture(auxiliary.owner, laterRaw, baseId + 5)
+        await auxiliary.owner.settle({ sourceKey: auxiliaryLater.sourceKey })
+        const auxiliaryFence = freeze(auxiliary.owner, baseId + 6)
+        auxiliaryFutureFactId = revisionEntries(auxiliary.owner.snapshot({ fence: auxiliaryFence }))[0]?.currentFactId
+        expect(auxiliaryFutureFactId).toMatch(digestPattern)
+        auxiliary.owner.close()
+
         badSource = capture(fixture.owner, '我仍关注 Z；我知道 R', baseId + 4)
-        phase = 'future-seed'
-        const later = capture(fixture.owner, '我关注 F', baseId + 5)
-        futureSourceKey = later.sourceKey
-        await fixture.owner.settle({ sourceKey: later.sourceKey })
-        phase = 'probe'
-        const probe = capture(fixture.owner, '仅探测 owner active facts', baseId + 6)
-        await fixture.owner.settle({ sourceKey: probe.sourceKey })
-        expect(futureFactId).toMatch(digestPattern)
+        const later = capture(fixture.owner, laterRaw, baseId + 5)
         phase = 'bad'
-        // The later fact is owner-provided and active, but is causally in the bad source's future.
+        // The later source has the same locator and raw text as the auxiliary owner-minted fact,
+        // but remains pending and therefore cannot enter this source's canonical prior set.
         expect(later.captureSequence).toBeGreaterThan(badSource.captureSequence)
       } else {
         if (name === 'prior-pending') capture(fixture.owner, '更早普通来源仍待分类', baseId + 4)
@@ -528,13 +529,15 @@ describe('Personal Feed v2 group 3 revision fold and causal snapshot', () => {
     const ordinary = capture(fixture.owner, 'ordinary 我关注 A 且知道 P', 401)
     const oldCurrent = capture(fixture.owner, '旧请求无事实', 402, requestId(402))
     const oldFence = freeze(fixture.owner, 402, '2026-08-31T13:00:00.000+08:00')
-    await fixture.owner.settle({ sourceKey: oldCurrent.sourceKey })
-    expect(asRecord(fixture.owner.snapshot({ fence: oldFence })).kind).toBe('unknown')
-    expect(asRecord(fixture.owner.snapshot({ fence: oldFence })).reason).toBe('unknown_at_fence')
     await fixture.owner.settle({ sourceKey: ordinary.sourceKey })
-    const oldAfterSettlement = fixture.owner.snapshot({ fence: oldFence })
-    expect(asRecord(oldAfterSettlement)).toMatchObject({ kind: 'unknown', reason: 'unknown_at_fence' })
-    expect(asRecord(asRecord(proofOf(oldAfterSettlement).coverage)).unknownAtFenceSourceKeys).toContain(ordinary.sourceKey)
+    const oldAfterOrdinarySettlement = fixture.owner.snapshot({ fence: oldFence })
+    expect(asRecord(oldAfterOrdinarySettlement)).toMatchObject({ kind: 'unknown', reason: 'unknown_at_fence' })
+    expect(asRecord(asRecord(proofOf(oldAfterOrdinarySettlement).coverage)).unknownAtFenceSourceKeys).toContain(ordinary.sourceKey)
+
+    await fixture.owner.settle({ sourceKey: oldCurrent.sourceKey })
+    const oldAfterCurrentSettlement = fixture.owner.snapshot({ fence: oldFence })
+    expect(asRecord(oldAfterCurrentSettlement)).toMatchObject({ kind: 'unknown', reason: 'unknown_at_fence' })
+    expect(asRecord(asRecord(proofOf(oldAfterCurrentSettlement).coverage)).unknownAtFenceSourceKeys).toContain(ordinary.sourceKey)
 
     const laterCurrent = capture(fixture.owner, '后续请求无事实', 403, requestId(403))
     const laterFence = freeze(fixture.owner, 403)
@@ -613,6 +616,221 @@ describe('Personal Feed v2 group 3 revision fold and causal snapshot', () => {
     expect(asRecord(interestLane.sufficiency).status).toBe('sufficient')
     expect(asRecord(knowledgeLane.sufficiency).status).toBe('sufficient')
     fixture.owner.close()
+  })
+
+  it('never lets any later source cross an earlier pending ordinary source, regardless of fence or current-source exclusion', async () => {
+    const cases = [
+      { name: 'ordinary_without_fence', excludedRequestId: undefined },
+      { name: 'excluded_current_with_fence', excludedRequestId: requestId(812) },
+    ] as const
+    const outcomes: Array<{
+      readonly name: string
+      readonly earlier: { readonly sourceKey: string }
+      readonly later: { readonly sourceKey: string }
+      readonly laterResult: Coverage
+      readonly state: ReturnType<Owner['read']>
+      readonly actionFence: Fence | undefined
+      readonly afterFence: Fence
+      readonly snapshot: unknown
+      readonly counts: { readonly classifier: number; readonly entailment: number; readonly noFact: number }
+    }> = []
+
+    for (const [caseIndex, testCase] of cases.entries()) {
+      const earlierRaw = `${testCase.name} earlier ordinary pending`
+      const laterRaw = `${testCase.name} later ordinary fact`
+      let classifierCalls = 0
+      let entailmentCalls = 0
+      let noFactCalls = 0
+      const fixture = await ownerWith(input => {
+        classifierCalls += 1
+        return input.rawText === laterRaw ? facts(interest(input.rawText, 'fact')) : noFact()
+      }, {
+        validator: () => {
+          entailmentCalls += 1
+          return approved
+        },
+        noFactValidator: () => {
+          noFactCalls += 1
+          return confirmedNoFact
+        },
+      })
+      const earlier = capture(fixture.owner, earlierRaw, 801 + caseIndex * 10)
+      const later = testCase.excludedRequestId === undefined
+        ? capture(fixture.owner, laterRaw, 802 + caseIndex * 10)
+        : capture(fixture.owner, laterRaw, 802 + caseIndex * 10, testCase.excludedRequestId)
+      const actionFence = testCase.excludedRequestId === undefined
+        ? undefined
+        : freeze(fixture.owner, 802 + caseIndex * 10)
+      const laterResult = await fixture.owner.settle({ sourceKey: later.sourceKey })
+      const afterFence = freeze(fixture.owner, 902 + caseIndex * 10)
+      const snapshot = fixture.owner.snapshot({ fence: afterFence })
+      outcomes.push({
+        name: testCase.name,
+        earlier,
+        later,
+        laterResult,
+        state: fixture.owner.read(),
+        actionFence,
+        afterFence,
+        snapshot,
+        counts: { classifier: classifierCalls, entailment: entailmentCalls, noFact: noFactCalls },
+      })
+      fixture.owner.close()
+    }
+
+    expect(outcomes).toHaveLength(2)
+    for (const outcome of outcomes) {
+      expect(outcome.laterResult).toEqual({
+        sourceKey: outcome.later.sourceKey,
+        status: 'pending',
+        reason: 'semantic_validation_failed',
+      })
+      expect(outcome.counts).toEqual({ classifier: 0, entailment: 0, noFact: 0 })
+      expect(outcome.state.coverage).toEqual([
+        { sourceKey: outcome.earlier.sourceKey, status: 'pending' },
+        { sourceKey: outcome.later.sourceKey, status: 'pending' },
+      ])
+      expect(outcome.state.sources.map(source => ({ sourceKey: source.sourceKey, rawText: source.rawText, captureSequence: source.captureSequence }))).toEqual([
+        { sourceKey: outcome.earlier.sourceKey, rawText: `${outcome.name} earlier ordinary pending`, captureSequence: outcome.earlier.captureSequence },
+        { sourceKey: outcome.later.sourceKey, rawText: `${outcome.name} later ordinary fact`, captureSequence: outcome.later.captureSequence },
+      ])
+      expect(outcome.afterFence.maxTerminalTransactionSequence).toBe(0)
+      expect(asRecord(proofOf(outcome.snapshot).revisions).watermark).toBe(0)
+      expect(revisionEntries(outcome.snapshot)).toHaveLength(0)
+      if (outcome.actionFence !== undefined) {
+        expect(outcome.actionFence.requestId).toBe(requestId(802 + outcomes.indexOf(outcome) * 10))
+        expect(outcome.actionFence.maxCaptureSequence).toBe(outcome.later.captureSequence)
+        expect(outcome.actionFence.maxTerminalTransactionSequence).toBe(0)
+      }
+    }
+  })
+
+  it('rejects overlapping sibling corrections as one atomic source while applying disjoint sibling corrections independently', async () => {
+    const modes = ['overlap', 'disjoint'] as const
+    const outcomes: Array<{
+      readonly mode: typeof modes[number]
+      readonly seedSourceKey: string
+      readonly sibling: { readonly sourceKey: string }
+      readonly seedFactIds: readonly string[]
+      readonly siblingActiveFactIds: readonly string[]
+      readonly settleResult: Coverage
+      readonly state: ReturnType<Owner['read']>
+      readonly fence: Fence
+      readonly snapshot: unknown
+      readonly counts: { readonly classifier: number; readonly entailment: number; readonly noFact: number }
+    }> = []
+
+    for (const [modeIndex, mode] of modes.entries()) {
+      const seedRaw = `${mode} seed 我关注 A；我关注 B`
+      const siblingRaw = `${mode} sibling 我改为关注 C；我改为关注 D`
+      let classifierCalls = 0
+      let entailmentCalls = 0
+      let noFactCalls = 0
+      let targetA: string | undefined
+      let targetB: string | undefined
+      let siblingActiveFacts: readonly ActiveFact[] = []
+      const fixture = await ownerWith(input => {
+        classifierCalls += 1
+        if (input.rawText === seedRaw) return facts(interest(seedRaw, 'A'), interest(seedRaw, 'B'))
+        if (input.rawText === siblingRaw) {
+          siblingActiveFacts = input.activeFacts
+          if (targetA === undefined || targetB === undefined) throw new Error('seed fact IDs are unavailable')
+          return mode === 'overlap'
+            ? facts(
+              interest(siblingRaw, 'C', 'correct', [targetA]),
+              interest(siblingRaw, 'D', 'correct', [targetA]),
+            )
+            : facts(
+              interest(siblingRaw, 'C', 'correct', [targetA]),
+              interest(siblingRaw, 'D', 'correct', [targetB]),
+            )
+        }
+        return noFact()
+      }, {
+        validator: () => {
+          entailmentCalls += 1
+          return approved
+        },
+        noFactValidator: () => {
+          noFactCalls += 1
+          return confirmedNoFact
+        },
+      })
+      const seed = capture(fixture.owner, seedRaw, 1001 + modeIndex * 10)
+      await fixture.owner.settle({ sourceKey: seed.sourceKey })
+      const seedFence = freeze(fixture.owner, 1002 + modeIndex * 10)
+      const seedEntries = revisionEntries(fixture.owner.snapshot({ fence: seedFence }))
+      targetA = seedEntries[0]?.currentFactId
+      targetB = seedEntries[1]?.currentFactId
+      expect(seedEntries).toHaveLength(2)
+      expect(seedEntries.map(entry => entry.operation)).toEqual(['assert', 'assert'])
+      expect(targetA).toMatch(digestPattern)
+      expect(targetB).toMatch(digestPattern)
+
+      classifierCalls = 0
+      entailmentCalls = 0
+      noFactCalls = 0
+      const sibling = capture(fixture.owner, siblingRaw, 1003 + modeIndex * 10)
+      const settleResult = await fixture.owner.settle({ sourceKey: sibling.sourceKey })
+      const fence = freeze(fixture.owner, 1103 + modeIndex * 10)
+      const snapshot = fixture.owner.snapshot({ fence })
+      outcomes.push({
+        mode,
+        seedSourceKey: seed.sourceKey,
+        sibling,
+        seedFactIds: [targetA!, targetB!],
+        siblingActiveFactIds: siblingActiveFacts.map(active => active.factId),
+        settleResult,
+        state: fixture.owner.read(),
+        fence,
+        snapshot,
+        counts: { classifier: classifierCalls, entailment: entailmentCalls, noFact: noFactCalls },
+      })
+      fixture.owner.close()
+    }
+
+    expect(outcomes).toHaveLength(2)
+    const overlap = outcomes.find(outcome => outcome.mode === 'overlap')
+    const disjoint = outcomes.find(outcome => outcome.mode === 'disjoint')
+    expect(overlap).toBeDefined()
+    expect(disjoint).toBeDefined()
+    if (overlap === undefined || disjoint === undefined) throw new Error('both sibling correction cases must execute')
+
+    for (const outcome of outcomes) {
+      expect(outcome.siblingActiveFactIds).toEqual(outcome.seedFactIds)
+      expect(outcome.fence.maxCaptureSequence).toBe(2)
+      expect(outcome.state.sources.find(source => source.sourceKey === outcome.seedSourceKey)?.rawText).toBeNull()
+      expect(outcome.state.coverage.find(coverage => coverage.sourceKey === outcome.seedSourceKey)?.status).toBe('applied')
+    }
+
+    expect(overlap.settleResult).toEqual({ sourceKey: overlap.sibling.sourceKey, status: 'pending', reason: 'semantic_validation_failed' })
+    expect(overlap.counts).toEqual({ classifier: 1, entailment: 0, noFact: 0 })
+    expect(overlap.state.sources.find(source => source.sourceKey === overlap.sibling.sourceKey)?.rawText).toBe('overlap sibling 我改为关注 C；我改为关注 D')
+    expect(overlap.state.coverage.find(coverage => coverage.sourceKey === overlap.sibling.sourceKey)).toEqual({ sourceKey: overlap.sibling.sourceKey, status: 'pending' })
+    expect(overlap.fence.maxTerminalTransactionSequence).toBe(1)
+    expect(asRecord(proofOf(overlap.snapshot).revisions).watermark).toBe(1)
+    const overlapEntries = revisionEntries(overlap.snapshot)
+    expect(overlapEntries).toHaveLength(2)
+    expect(overlapEntries.map(entry => entry.sourceKey)).toEqual([overlap.seedSourceKey, overlap.seedSourceKey])
+
+    expect(disjoint.settleResult).toMatchObject({ sourceKey: disjoint.sibling.sourceKey, status: 'applied', terminalTransactionSequence: 2 })
+    expect(disjoint.counts).toEqual({ classifier: 1, entailment: 2, noFact: 0 })
+    expect(disjoint.state.sources.find(source => source.sourceKey === disjoint.sibling.sourceKey)?.rawText).toBeNull()
+    const disjointCoverage = disjoint.state.coverage.find(coverage => coverage.sourceKey === disjoint.sibling.sourceKey)
+    expect(disjointCoverage).toMatchObject({ sourceKey: disjoint.sibling.sourceKey, status: 'applied', terminalTransactionSequence: 2 })
+    const disjointDisposition = asRecord(disjointCoverage?.disposition)
+    expect(disjointDisposition.status).toBe('applied')
+    const disjointChanges = disjointDisposition.changes as readonly Record<string, unknown>[]
+    expect(disjointChanges.map(change => ({ operation: change.operation, targetFactIds: change.targetFactIds }))).toEqual([
+      { operation: 'correct', targetFactIds: [disjoint.seedFactIds[0]] },
+      { operation: 'correct', targetFactIds: [disjoint.seedFactIds[1]] },
+    ])
+    expect(disjoint.fence.maxTerminalTransactionSequence).toBe(2)
+    expect(asRecord(proofOf(disjoint.snapshot).revisions).watermark).toBe(2)
+    const disjointEntries = revisionEntries(disjoint.snapshot)
+    expect(disjointEntries).toHaveLength(4)
+    expect(disjointEntries.slice(2).map(entry => entry.sourceKey)).toEqual([disjoint.sibling.sourceKey, disjoint.sibling.sourceKey])
+    expect(disjointEntries.slice(2).map(entry => entry.terminalTransactionSequence)).toEqual([2, 2])
   })
 
   it('replays deterministic proof bytes across reopen and fails closed on terminal proof digest or operation-target tampering', async () => {
