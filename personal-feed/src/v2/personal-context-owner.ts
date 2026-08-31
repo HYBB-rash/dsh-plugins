@@ -3,6 +3,10 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { dirname } from 'node:path'
 import { encodeCanonicalJson } from '../canonical-json.ts'
+import type {
+  SessionUserHistoryAdapter,
+  SessionUserHistoryObservation,
+} from './session-user-history-adapter.ts'
 import {
   PersonalFeedScopeConflictError,
   PersonalFeedScopeInputError,
@@ -47,13 +51,21 @@ export {
 } from './personal-context-semantics.ts'
 
 const APPLICATION_ID = 0x50435632
-const SCHEMA_VERSION = 3
+const SCHEMA_VERSION = 4
 
 export interface PersonalContextTelegramLocator {
   readonly kind: 'telegram_inbound'
   readonly chatId: number
   readonly messageId: number
 }
+
+export interface PersonalContextHistoryLocator {
+  readonly kind: 'telegram_session_history'
+  readonly sessionId: string
+  readonly eventSeq: number
+}
+
+export type PersonalContextSourceLocator = PersonalContextTelegramLocator | PersonalContextHistoryLocator
 
 export interface PersonalContextCaptureInput {
   readonly locator: PersonalContextTelegramLocator
@@ -63,7 +75,7 @@ export interface PersonalContextCaptureInput {
 }
 
 export interface PersonalContextSource {
-  readonly locator: PersonalContextTelegramLocator
+  readonly locator: PersonalContextSourceLocator
   readonly rawText: string | null
   readonly reference: null
   readonly excludedRequestId?: string
@@ -142,8 +154,13 @@ export interface PersonalContextOwner {
   readonly read: () => PersonalContextOwnerSnapshot
   readonly freezeFence: (input: PersonalContextFreezeFenceInput) => PersonalContextFence
   readonly snapshot: (input: PersonalContextSnapshotInput) => PersonalContextSnapshotResult
+  readonly bootstrap: (input: { readonly history: SessionUserHistoryAdapter; readonly signal?: AbortSignal }) => Promise<PersonalContextBootstrapResult>
   readonly close: () => void
 }
+
+export type PersonalContextBootstrapResult =
+  | { readonly status: 'complete'; readonly sessionId: string; readonly observedThroughSeq: number; readonly importedSourceCount: number; readonly excludedEventCount: number; readonly digest: string }
+  | { readonly status: 'incomplete'; readonly reason: 'history_unavailable' | 'history_changed' | 'history_corrupt' | 'unsupported_user_content' | 'aborted' | 'semantics_pending' }
 
 export type PersonalContextLaneSufficiency =
   | { readonly status: 'sufficient'; readonly basisFactIds: readonly string[] }
@@ -265,6 +282,9 @@ type SourceRow = {
   readonly occurred_at: unknown
   readonly capture_sequence: unknown
   readonly payload_digest: unknown
+  readonly session_id: unknown
+  readonly event_seq: unknown
+  readonly source_row_digest: unknown
 }
 
 type CoverageRow = {
@@ -286,7 +306,8 @@ type FenceRow = {
 
 const SOURCE_COLUMNS = `
   source_key, locator_kind, chat_id, message_id, raw_text, reference_json,
-  excluded_request_id, occurred_at, capture_sequence, payload_digest
+  excluded_request_id, occurred_at, capture_sequence, payload_digest,
+  session_id, event_seq, source_row_digest
 `
 
 const EXPECTED_TABLES = new Set([
@@ -294,18 +315,22 @@ const EXPECTED_TABLES = new Set([
   'personal_context_coverage',
   'personal_context_metadata',
   'personal_context_fences',
+  'personal_context_bootstrap',
 ])
 const EXPECTED_SOURCE_COLUMNS = [
   ['source_key', 'TEXT', 1, 1],
   ['locator_kind', 'TEXT', 1, 0],
-  ['chat_id', 'INTEGER', 1, 0],
-  ['message_id', 'INTEGER', 1, 0],
+  ['chat_id', 'INTEGER', 0, 0],
+  ['message_id', 'INTEGER', 0, 0],
   ['raw_text', 'TEXT', 0, 0],
   ['reference_json', 'TEXT', 1, 0],
   ['excluded_request_id', 'TEXT', 0, 0],
   ['occurred_at', 'TEXT', 1, 0],
   ['capture_sequence', 'INTEGER', 1, 0],
   ['payload_digest', 'TEXT', 1, 0],
+  ['session_id', 'TEXT', 0, 0],
+  ['event_seq', 'INTEGER', 0, 0],
+  ['source_row_digest', 'TEXT', 1, 0],
 ] as const
 const EXPECTED_COVERAGE_COLUMNS = [
   ['source_key', 'TEXT', 1, 1],
@@ -328,6 +353,14 @@ const EXPECTED_FENCE_COLUMNS = [
   ['fence_json', 'TEXT', 1, 0],
   ['fence_digest', 'TEXT', 1, 0],
 ] as const
+const EXPECTED_BOOTSTRAP_COLUMNS = [
+  ['singleton', 'INTEGER', 0, 1],
+  ['status', 'TEXT', 1, 0],
+  ['session_id', 'TEXT', 1, 0],
+  ['observed_through_seq', 'INTEGER', 1, 0],
+  ['checkpoint_json', 'TEXT', 1, 0],
+  ['checkpoint_digest', 'TEXT', 1, 0],
+] as const
 
 const COVERAGE_COLUMNS = `
   source_key, status, disposition_json, disposition_digest,
@@ -337,6 +370,12 @@ const COVERAGE_COLUMNS = `
 export function createPersonalContextOwner(options: CreatePersonalContextOwnerOptions): PersonalContextOwner {
   validateOptions(options)
   const database = openDatabase(options.databasePath)
+  try {
+    assertStoreIntegrity(database, options.databasePath)
+  } catch (error) {
+    database.close()
+    throw error
+  }
   let closed = false
 
   const assertOpen = (): void => {
@@ -345,21 +384,24 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
 
   const read = (): PersonalContextOwnerSnapshot => {
     assertOpen()
-    return readSnapshot(database, options.databasePath)
+    return assertStoreIntegrity(database, options.databasePath).state
   }
 
   const freezeFence = (input: PersonalContextFreezeFenceInput): PersonalContextFence => {
     assertOpen()
+    assertStoreIntegrity(database, options.databasePath)
     return persistFence(database, options.databasePath, input)
   }
 
   const snapshot = (input: PersonalContextSnapshotInput): PersonalContextSnapshotResult => {
     assertOpen()
+    assertStoreIntegrity(database, options.databasePath)
     return buildCausalSnapshot(database, options.databasePath, input)
   }
 
   const capture = (input: PersonalContextCaptureInput): PersonalContextCaptureResult => {
     assertOpen()
+    assertStoreIntegrity(database, options.databasePath)
     const parsed = validateCaptureInput(input)
     const sourceKey = sourceKeyFor(parsed.locator)
     const payloadDigest = payloadDigestFor(parsed)
@@ -371,6 +413,7 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
     try {
       database.exec('BEGIN IMMEDIATE')
       began = true
+      assertStoreIntegrity(database, options.databasePath)
       // Recheck after acquiring the write lock for a concurrent first capture.
       // The ordinary replay/conflict path above remains a pure read.
       const existing = selectSource(database, parsed.locator)
@@ -391,8 +434,9 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
       database.prepare(`
         INSERT INTO personal_context_sources (
           source_key, locator_kind, chat_id, message_id, raw_text, reference_json,
-          excluded_request_id, occurred_at, capture_sequence, payload_digest
-        ) VALUES (?, ?, ?, ?, ?, 'null', ?, ?, ?, ?)
+          excluded_request_id, occurred_at, capture_sequence, payload_digest,
+          session_id, event_seq, source_row_digest
+        ) VALUES (?, ?, ?, ?, ?, 'null', ?, ?, ?, ?, NULL, NULL, ?)
       `).run(
         sourceKey,
         parsed.locator.kind,
@@ -403,6 +447,15 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
         occurredAt,
         nextSequence,
         payloadDigest,
+        sourceRowDigestFor({
+          sourceKey,
+          locator: parsed.locator,
+          rawText: parsed.rawText,
+          occurredAt,
+          captureSequence: nextSequence,
+          payloadDigest,
+          ...(parsed.excludedRequestId === undefined ? {} : { excludedRequestId: parsed.excludedRequestId }),
+        }),
       )
       database.prepare(
         "INSERT INTO personal_context_coverage (source_key, status) VALUES (?, 'pending')",
@@ -440,6 +493,7 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
 
   const settle = async (input: PersonalContextSettleInput): Promise<PersonalContextSettleResult> => {
     assertOpen()
+    assertStoreIntegrity(database, options.databasePath)
     const parsed = validateSettleInput(input)
     const initial = selectSourceAndCoverage(database, parsed.sourceKey)
     if (initial === undefined) throw new PersonalFeedScopeInputError('personal context settle source does not exist')
@@ -559,7 +613,332 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
     return pendingSettleResult(parsed.sourceKey, 'semantic_validation_failed')
   }
 
-  return Object.freeze({ capture, settle, read, freezeFence, snapshot, close })
+  const bootstrap = async (input: { readonly history: SessionUserHistoryAdapter; readonly signal?: AbortSignal }): Promise<PersonalContextBootstrapResult> => {
+    assertOpen()
+    assertStoreIntegrity(database, options.databasePath)
+    if (!isRecord(input) || !hasExactlyKeys(input, ['history'], ['signal']) || !isRecord(input.history)
+      || !isRecord(input.history.contract) || typeof input.history.observe !== 'function') {
+      throw new PersonalFeedScopeInputError('personal context bootstrap input is invalid')
+    }
+    if (Object.prototype.hasOwnProperty.call(input, 'signal') && !(input.signal instanceof AbortSignal)) {
+      throw new PersonalFeedScopeInputError('personal context bootstrap abort signal is invalid')
+    }
+    const checkpoint = readBootstrap(database)
+    const state = readSnapshot(database, options.databasePath)
+    const contract = input.history.contract
+    if (!isRecord(contract) || !hasExactlyKeys(contract, ['schemaVersion', 'sourceKind', 'sessionId'])
+      || contract.schemaVersion !== 1 || contract.sourceKind !== 'telegram_session_history'
+      || typeof contract.sessionId !== 'string' || contract.sessionId.trim() === '') {
+      throw new PersonalFeedScopeInputError('personal context bootstrap history contract is invalid')
+    }
+    if (checkpoint !== undefined) {
+      if (checkpoint.sessionId !== contract.sessionId || checkpoint.contractDigest !== digestFor(contract)) {
+        throw new PersonalFeedScopeConflictError('personal context bootstrap contract has changed')
+      }
+      if (checkpoint.status === 'complete') return checkpoint.result
+      await settlePendingSources(database, options.databasePath, settle)
+      const final = readBootstrap(database)
+      if (final?.status === 'complete') return final.result
+      return { status: 'incomplete', reason: 'semantics_pending' }
+    }
+    if (state.sources.length !== 0) throw new PersonalFeedScopeConflictError('personal context bootstrap requires an empty store')
+    const signal = input.signal as AbortSignal | undefined
+    if (isAborted(signal)) return { status: 'incomplete', reason: 'aborted' }
+    let observed: Awaited<ReturnType<SessionUserHistoryAdapter['observe']>>
+    try {
+      observed = await input.history.observe(signal === undefined ? undefined : { signal })
+    } catch {
+      if (isAborted(signal)) return { status: 'incomplete', reason: 'aborted' }
+      return { status: 'incomplete', reason: 'history_unavailable' }
+    }
+    if (observed.kind !== 'complete') return { status: 'incomplete', reason: observed.reason }
+    assertStoreIntegrity(database, options.databasePath)
+    const imported = importBootstrapObservation(database, options.databasePath, contract, observed.observation)
+    await settlePendingSources(database, options.databasePath, settle)
+    const final = readBootstrap(database)
+    if (final?.status === 'complete') return final.result
+    return {
+      status: 'incomplete',
+      reason: imported.importedSourceCount === 0 ? 'semantics_pending' : 'semantics_pending',
+    }
+  }
+
+  return Object.freeze({ capture, settle, read, freezeFence, snapshot, bootstrap, close })
+}
+
+type BootstrapCheckpoint = {
+  readonly status: 'settling' | 'complete'
+  readonly sessionId: string
+  readonly contractDigest: string
+  readonly observationDigest: string
+  readonly observedThroughSeq: number
+  readonly excludedEventCount: number
+  readonly importedSourceCount: number
+  readonly cohortDigest: string
+  readonly resultDigest: string
+  readonly result: PersonalContextBootstrapResult
+}
+
+function readBootstrap(database: DatabaseSync): BootstrapCheckpoint | undefined {
+  const row = database.prepare(`
+    SELECT status, session_id, observed_through_seq, checkpoint_json, checkpoint_digest
+    FROM personal_context_bootstrap WHERE singleton = 1
+  `).get() as {
+    readonly status: unknown
+    readonly session_id: unknown
+    readonly observed_through_seq: unknown
+    readonly checkpoint_json: unknown
+    readonly checkpoint_digest: unknown
+  } | undefined
+  if (row === undefined) return undefined
+  if ((row.status !== 'settling' && row.status !== 'complete') || typeof row.session_id !== 'string'
+    || !isSafeNonNegativeOrMinusOne(row.observed_through_seq) || typeof row.checkpoint_json !== 'string'
+    || typeof row.checkpoint_digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(row.checkpoint_digest)) {
+    throw new PersonalFeedScopeStoreError('personal context bootstrap checkpoint row is invalid')
+  }
+  let decoded: unknown
+  try {
+    decoded = JSON.parse(row.checkpoint_json)
+  } catch (cause) {
+    throw new PersonalFeedScopeStoreError('personal context bootstrap checkpoint is not JSON', { cause })
+  }
+  if (!isRecord(decoded) || !hasExactlyKeys(decoded, [
+    'schemaVersion', 'contract', 'sessionId', 'observationDigest', 'observedThroughSeq',
+    'excludedEventCount', 'importedSourceCount', 'cohortDigest', 'resultDigest',
+  ]) || decoded.schemaVersion !== 2 || decoded.sessionId !== row.session_id
+    || decoded.observedThroughSeq !== row.observed_through_seq
+    || !isRecord(decoded.contract) || !hasExactlyKeys(decoded.contract, ['schemaVersion', 'sourceKind', 'sessionId'])
+    || decoded.contract.schemaVersion !== 1 || decoded.contract.sourceKind !== 'telegram_session_history'
+    || decoded.contract.sessionId !== row.session_id || typeof decoded.observationDigest !== 'string'
+    || !/^sha256:[0-9a-f]{64}$/.test(decoded.observationDigest)
+    || !isSafeNonNegativeInteger(decoded.excludedEventCount) || !isSafeNonNegativeInteger(decoded.importedSourceCount)
+    || typeof decoded.cohortDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(decoded.cohortDigest)
+    || typeof decoded.resultDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(decoded.resultDigest)) {
+    throw new PersonalFeedScopeStoreError('personal context bootstrap checkpoint payload is invalid')
+  }
+  const unsigned = {
+    schemaVersion: 2 as const,
+    contract: decoded.contract,
+    sessionId: row.session_id,
+    observationDigest: decoded.observationDigest,
+    observedThroughSeq: row.observed_through_seq,
+    excludedEventCount: decoded.excludedEventCount,
+    importedSourceCount: decoded.importedSourceCount,
+    cohortDigest: decoded.cohortDigest,
+    resultDigest: decoded.resultDigest,
+  }
+  if (digestFor(unsigned) !== row.checkpoint_digest || canonicalJsonFor(unsigned, 'bootstrap checkpoint') !== row.checkpoint_json) {
+    throw new PersonalFeedScopeStoreError('personal context bootstrap checkpoint digest is invalid')
+  }
+  const result: PersonalContextBootstrapResult = row.status === 'complete'
+    ? { status: 'complete', sessionId: row.session_id, observedThroughSeq: row.observed_through_seq, importedSourceCount: decoded.importedSourceCount, excludedEventCount: decoded.excludedEventCount, digest: decoded.resultDigest }
+    : { status: 'incomplete', reason: 'semantics_pending' }
+  return { status: row.status, sessionId: row.session_id, contractDigest: digestFor(decoded.contract), observationDigest: decoded.observationDigest, observedThroughSeq: row.observed_through_seq, excludedEventCount: decoded.excludedEventCount, importedSourceCount: decoded.importedSourceCount, cohortDigest: decoded.cohortDigest, resultDigest: decoded.resultDigest, result }
+}
+
+function importBootstrapObservation(
+  database: DatabaseSync,
+  databasePath: string,
+  contract: SessionUserHistoryAdapter['contract'],
+  observation: SessionUserHistoryObservation,
+): { readonly importedSourceCount: number } {
+  if (observation.schemaVersion !== 1 || observation.sessionId !== contract.sessionId
+    || typeof observation.observedThroughSeq !== 'number' || !isSafeNonNegativeOrMinusOne(observation.observedThroughSeq)
+    || typeof observation.manifestDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(observation.manifestDigest)
+    || typeof observation.digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(observation.digest)
+    || !Array.isArray(observation.messages) || !isSafeNonNegativeInteger(observation.excludedEventCount)) {
+    throw new PersonalFeedScopeStoreError('personal context bootstrap observation is invalid')
+  }
+  const seen = new Set<number>()
+  const prepared = observation.messages.map(message => {
+    if (!isRecord(message) || !isRecord(message.locator)
+      || !hasExactlyKeys(message.locator, ['kind', 'sessionId', 'eventSeq'])
+      || message.locator.kind !== 'telegram_session_history' || message.locator.sessionId !== contract.sessionId
+      || !isSafeNonNegativeInteger(message.locator.eventSeq) || seen.has(message.locator.eventSeq)
+      || typeof message.rawText !== 'string' || message.rawText.trim() === ''
+      || typeof message.occurredAt !== 'string' || !isCanonicalIso(message.occurredAt)) {
+      throw new PersonalFeedScopeStoreError('personal context bootstrap observation contains an invalid message')
+    }
+    seen.add(message.locator.eventSeq)
+    const locator = message.locator as unknown as PersonalContextHistoryLocator
+    const sourceKey = historySourceKeyFor(locator)
+    const payloadDigest = historyPayloadDigestFor(message.rawText as string, message.occurredAt as string)
+    const verifiedMessage = message as unknown as SessionUserHistoryObservation['messages'][number]
+    return { message: verifiedMessage, locator, sourceKey, payloadDigest }
+  }).sort((left, right) => left.locator.eventSeq - right.locator.eventSeq)
+  const expectedManifest = digestFor(observation.messages.map(message => ({ ...message.locator, occurredAt: message.occurredAt })))
+  if (expectedManifest !== observation.manifestDigest) throw new PersonalFeedScopeStoreError('personal context bootstrap manifest digest is invalid')
+  const observationUnsigned = {
+    schemaVersion: 1 as const,
+    sessionId: observation.sessionId,
+    observedThroughSeq: observation.observedThroughSeq,
+    manifestDigest: observation.manifestDigest,
+    messages: observation.messages,
+    excludedEventCount: observation.excludedEventCount,
+  }
+  if (digestFor(observationUnsigned) !== observation.digest) throw new PersonalFeedScopeStoreError('personal context bootstrap observation digest is invalid')
+  const unsignedResult = { sessionId: contract.sessionId, observedThroughSeq: observation.observedThroughSeq, importedSourceCount: prepared.length, excludedEventCount: observation.excludedEventCount }
+  const resultDigest = digestFor(unsignedResult)
+  let began = false
+  try {
+    database.exec('BEGIN IMMEDIATE')
+    began = true
+    const current = assertStoreIntegrity(database, databasePath).state
+    if (current.sources.length !== 0) throw new PersonalFeedScopeConflictError('personal context bootstrap store changed before import')
+    const sequenceRow = database.prepare('SELECT COALESCE(MAX(capture_sequence), 0) AS value FROM personal_context_sources').get() as { readonly value: unknown }
+    const startSequence = sequenceRow.value
+    if (!isSafeNonNegativeInteger(startSequence)) throw new PersonalFeedScopeStoreError('personal context bootstrap sequence is invalid')
+    const cohort = prepared.map((item, index) => ({
+      sourceKey: item.sourceKey,
+      sessionId: item.locator.sessionId,
+      eventSeq: item.locator.eventSeq,
+      occurredAt: item.message.occurredAt,
+      captureSequence: startSequence + index + 1,
+      payloadDigest: item.payloadDigest,
+    }))
+    const checkpointUnsigned = {
+      schemaVersion: 2 as const,
+      contract,
+      sessionId: contract.sessionId,
+      observationDigest: observation.digest,
+      observedThroughSeq: observation.observedThroughSeq,
+      excludedEventCount: observation.excludedEventCount,
+      importedSourceCount: prepared.length,
+      cohortDigest: digestFor(cohort),
+      resultDigest,
+    }
+    for (let index = 0; index < prepared.length; index += 1) {
+      const item = prepared[index]!
+      const captureSequence = startSequence + index + 1
+      const sourceRowDigest = sourceRowDigestFor({
+        sourceKey: item.sourceKey,
+        locator: item.locator,
+        rawText: item.message.rawText,
+        occurredAt: item.message.occurredAt,
+        captureSequence,
+        payloadDigest: item.payloadDigest,
+      })
+      database.prepare(`INSERT INTO personal_context_sources (
+        source_key, locator_kind, chat_id, message_id, raw_text, reference_json,
+        excluded_request_id, occurred_at, capture_sequence, payload_digest,
+        session_id, event_seq, source_row_digest
+      ) VALUES (?, 'telegram_session_history', NULL, NULL, ?, 'null', NULL, ?, ?, ?, ?, ?, ?)`)
+        .run(item.sourceKey as string, item.message.rawText as string, item.message.occurredAt as string, captureSequence, item.payloadDigest as string,
+          item.locator.sessionId as string, item.locator.eventSeq as number, sourceRowDigest as string)
+      database.prepare("INSERT INTO personal_context_coverage (source_key, status) VALUES (?, 'pending')").run(item.sourceKey)
+    }
+    const checkpointJson = canonicalJsonFor(checkpointUnsigned, 'bootstrap checkpoint')
+    database.prepare(`INSERT INTO personal_context_bootstrap (
+      singleton, status, session_id, observed_through_seq, checkpoint_json, checkpoint_digest
+    ) VALUES (1, 'settling', ?, ?, ?, ?)`)
+      .run(contract.sessionId as string, observation.observedThroughSeq as number, checkpointJson as string, digestFor(checkpointUnsigned) as string)
+    assertStoreIntegrity(database, databasePath)
+    database.exec('COMMIT')
+    began = false
+    return { importedSourceCount: prepared.length }
+  } catch (cause) {
+    if (began) {
+      try { database.exec('ROLLBACK') } catch { /* preserve original failure */ }
+    }
+    if (cause instanceof PersonalFeedScopeConflictError || cause instanceof PersonalFeedScopeStoreError) throw cause
+    throw new PersonalFeedScopeStoreError(`personal context bootstrap import failed at "${databasePath}"`, { cause })
+  }
+}
+
+async function settlePendingSources(
+  database: DatabaseSync,
+  databasePath: string,
+  settle: (input: PersonalContextSettleInput) => Promise<PersonalContextSettleResult>,
+): Promise<void> {
+  assertStoreIntegrity(database, databasePath)
+  const rows = database.prepare(`SELECT coverage.source_key FROM personal_context_coverage AS coverage JOIN personal_context_sources AS source ON source.source_key = coverage.source_key WHERE coverage.status = 'pending' ORDER BY source.capture_sequence`).all() as Array<{ readonly source_key: unknown }>
+  for (const row of rows) {
+    if (typeof row.source_key !== 'string') throw new PersonalFeedScopeStoreError('personal context bootstrap pending source key is invalid')
+    await settle({ sourceKey: row.source_key })
+  }
+  const remaining = database.prepare("SELECT COUNT(*) AS count FROM personal_context_coverage WHERE status = 'pending'").get() as { readonly count: unknown }
+  if (remaining.count === 0) {
+    const checkpoint = assertStoreIntegrity(database, databasePath).checkpoint
+    if (checkpoint === undefined) throw new PersonalFeedScopeStoreError('personal context bootstrap checkpoint disappeared')
+    const result = checkpoint.result.status === 'complete' ? checkpoint.result : {
+      status: 'complete' as const,
+      sessionId: checkpoint.sessionId,
+      observedThroughSeq: checkpoint.observedThroughSeq,
+      importedSourceCount: readImportedSourceCount(database),
+      excludedEventCount: readExcludedEventCount(database),
+      digest: checkpoint.result.status === 'incomplete' ? digestFor({ sessionId: checkpoint.sessionId, observedThroughSeq: checkpoint.observedThroughSeq, importedSourceCount: readImportedSourceCount(database), excludedEventCount: readExcludedEventCount(database) }) : digestFor(checkpoint.result),
+    }
+    updateBootstrapComplete(database, databasePath, result)
+  }
+}
+
+function updateBootstrapComplete(database: DatabaseSync, databasePath: string, result: Extract<PersonalContextBootstrapResult, { readonly status: 'complete' }>): void {
+  const checkpoint = assertStoreIntegrity(database, databasePath).checkpoint
+  if (checkpoint === undefined) throw new PersonalFeedScopeStoreError('personal context bootstrap checkpoint is missing')
+  const contract = { schemaVersion: 1 as const, sourceKind: 'telegram_session_history' as const, sessionId: checkpoint.sessionId }
+  const cohort = historyCohort(database, 'bootstrap completion')
+  if (cohort.count !== checkpoint.importedSourceCount || cohort.digest !== checkpoint.cohortDigest) {
+    throw new PersonalFeedScopeStoreError('personal context bootstrap history cohort changed before completion')
+  }
+  const checkpointUnsigned = {
+    schemaVersion: 2 as const,
+    contract,
+    sessionId: checkpoint.sessionId,
+    observationDigest: checkpoint.observationDigest,
+    observedThroughSeq: result.observedThroughSeq,
+    excludedEventCount: result.excludedEventCount,
+    importedSourceCount: result.importedSourceCount,
+    cohortDigest: cohort.digest,
+    resultDigest: result.digest,
+  }
+  let began = false
+  try {
+    database.exec('BEGIN IMMEDIATE'); began = true
+    const locked = assertStoreIntegrity(database, databasePath).checkpoint
+    if (locked === undefined || locked.status !== 'settling' || locked.cohortDigest !== checkpoint.cohortDigest) {
+      throw new PersonalFeedScopeStoreError('personal context bootstrap checkpoint changed before completion')
+    }
+    database.prepare(`UPDATE personal_context_bootstrap SET status = 'complete', checkpoint_json = ?, checkpoint_digest = ? WHERE singleton = 1`)
+      .run(canonicalJsonFor(checkpointUnsigned, 'bootstrap checkpoint'), digestFor(checkpointUnsigned))
+    assertStoreIntegrity(database, databasePath)
+    database.exec('COMMIT'); began = false
+  } catch (cause) {
+    if (began) { try { database.exec('ROLLBACK') } catch { /* preserve */ } }
+    throw cause
+  }
+}
+
+function readImportedSourceCount(database: DatabaseSync): number {
+  const row = database.prepare("SELECT COUNT(*) AS count FROM personal_context_sources WHERE locator_kind = 'telegram_session_history'").get() as { readonly count: unknown }
+  if (!isSafeNonNegativeInteger(row.count)) throw new PersonalFeedScopeStoreError('personal context bootstrap source count is invalid')
+  return row.count
+}
+
+function historyCohort(database: DatabaseSync, label: string): { readonly count: number; readonly digest: string } {
+  const rows = database.prepare(`SELECT ${SOURCE_COLUMNS} FROM personal_context_sources WHERE locator_kind = 'telegram_session_history' ORDER BY capture_sequence`).all() as SourceRow[]
+  const values = rows.map(row => {
+    if (row.locator_kind !== 'telegram_session_history' || typeof row.source_key !== 'string'
+      || typeof row.session_id !== 'string' || !isSafeNonNegativeInteger(row.event_seq)
+      || typeof row.occurred_at !== 'string' || !isCanonicalIso(row.occurred_at)
+      || !isSafePositiveInteger(row.capture_sequence) || typeof row.payload_digest !== 'string'
+      || !/^[0-9a-f]{64}$/.test(row.payload_digest)) {
+      throw new PersonalFeedScopeStoreError(`personal context ${label} history cohort row is invalid`)
+    }
+    return {
+      sourceKey: row.source_key,
+      sessionId: row.session_id,
+      eventSeq: row.event_seq,
+      occurredAt: row.occurred_at,
+      captureSequence: row.capture_sequence,
+      payloadDigest: row.payload_digest,
+    }
+  })
+  return { count: values.length, digest: digestFor(values) }
+}
+
+function readExcludedEventCount(database: DatabaseSync): number {
+  const checkpoint = readBootstrap(database)
+  return checkpoint?.excludedEventCount ?? 0
 }
 
 function selectSource(database: DatabaseSync, locator: PersonalContextTelegramLocator): SourceRow | undefined {
@@ -746,6 +1125,7 @@ function persistTerminalDisposition(
   try {
     database.exec('BEGIN IMMEDIATE')
     began = true
+    assertStoreIntegrity(database, databasePath)
     const current = selectSourceAndCoverage(database, originalSource.source_key)
     if (current === undefined) throw new PersonalFeedScopeStoreError('personal context source disappeared before terminal persistence')
     const currentCoverage = coverageFromRow(current.coverage)
@@ -862,6 +1242,10 @@ function isAbortRequested(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true
 }
 
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true
+}
+
 function readExistingCapture(database: DatabaseSync, existing: SourceRow, payloadDigest: string): PersonalContextCaptureResult {
   if (existing.payload_digest !== payloadDigest) {
     throw new PersonalFeedScopeConflictError('personal context source locator has a conflicting payload')
@@ -912,10 +1296,14 @@ function configureDatabase(database: DatabaseSync, path: string, wasMissing: boo
       "SELECT name, type FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY name",
     ).all() as Array<{ readonly name: unknown; readonly type: unknown }>
     if (!wasMissing || userVersion !== 0 || applicationId !== 0 || objects.length !== 0) {
-      if (userVersion !== SCHEMA_VERSION || applicationId !== APPLICATION_ID) {
+      if (applicationId === APPLICATION_ID && (userVersion === 2 || userVersion === 3)) {
+        preflightLegacyState(database, path, userVersion)
+        migrateLegacySchema(database, path, userVersion)
+        database.exec(`PRAGMA application_id = ${APPLICATION_ID}; PRAGMA user_version = ${SCHEMA_VERSION}`)
+        assertSchema(database, path)
+      } else if (userVersion !== SCHEMA_VERSION || applicationId !== APPLICATION_ID) {
         throw new PersonalFeedScopeStoreError(`personal context database at "${path}" has an unsupported identity or schema version`)
-      }
-      assertSchema(database, path, objects)
+      } else assertSchema(database, path, objects)
     } else {
       createSchema(database, path)
       database.exec(`PRAGMA application_id = ${APPLICATION_ID}`)
@@ -940,16 +1328,22 @@ function createSchema(database: DatabaseSync, path: string): void {
   database.exec(`
     CREATE TABLE personal_context_sources (
       source_key TEXT PRIMARY KEY,
-      locator_kind TEXT NOT NULL CHECK (locator_kind = 'telegram_inbound'),
-      chat_id INTEGER NOT NULL CHECK (chat_id <> 0),
-      message_id INTEGER NOT NULL CHECK (message_id > 0),
+      locator_kind TEXT NOT NULL CHECK (locator_kind IN ('telegram_inbound', 'telegram_session_history')),
+      chat_id INTEGER,
+      message_id INTEGER,
       raw_text TEXT,
       reference_json TEXT NOT NULL CHECK (reference_json = 'null'),
       excluded_request_id TEXT,
       occurred_at TEXT NOT NULL,
       capture_sequence INTEGER NOT NULL UNIQUE,
       payload_digest TEXT NOT NULL,
-      UNIQUE (locator_kind, chat_id, message_id)
+      session_id TEXT,
+      event_seq INTEGER,
+      source_row_digest TEXT NOT NULL,
+      CHECK ((locator_kind = 'telegram_inbound' AND chat_id <> 0 AND message_id > 0 AND session_id IS NULL AND event_seq IS NULL)
+        OR (locator_kind = 'telegram_session_history' AND chat_id IS NULL AND message_id IS NULL AND session_id IS NOT NULL AND session_id <> '' AND event_seq IS NOT NULL AND event_seq >= 0 AND excluded_request_id IS NULL)),
+      UNIQUE (locator_kind, chat_id, message_id),
+      UNIQUE (locator_kind, session_id, event_seq)
     ) STRICT;
 
     CREATE TABLE personal_context_coverage (
@@ -981,10 +1375,218 @@ function createSchema(database: DatabaseSync, path: string): void {
       fence_json TEXT NOT NULL,
       fence_digest TEXT NOT NULL
     ) STRICT;
+
+    CREATE TABLE personal_context_bootstrap (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      status TEXT NOT NULL CHECK (status IN ('settling', 'complete')),
+      session_id TEXT NOT NULL,
+      observed_through_seq INTEGER NOT NULL CHECK (observed_through_seq >= -1),
+      checkpoint_json TEXT NOT NULL,
+      checkpoint_digest TEXT NOT NULL
+    ) STRICT;
   `)
   database.prepare(
     'INSERT INTO personal_context_metadata (singleton, store_id) VALUES (1, ?)',
   ).run(digestFor({ kind: 'personal_context_store', path }))
+}
+
+function migrateLegacySchema(database: DatabaseSync, path: string, version: number): void {
+  const sources = database.prepare(`SELECT source_key, locator_kind, chat_id, message_id, raw_text, reference_json, excluded_request_id, occurred_at, capture_sequence, payload_digest FROM personal_context_sources ORDER BY capture_sequence`).all() as Array<Record<string, unknown>>
+  const coverages = database.prepare(`SELECT source_key, status, disposition_json, disposition_digest${version === 3 ? ', terminal_transaction_sequence, revision_digest' : ''} FROM personal_context_coverage ORDER BY source_key`).all() as Array<Record<string, unknown>>
+  const metadata = version === 3
+    ? database.prepare('SELECT store_id FROM personal_context_metadata WHERE singleton = 1').get() as { readonly store_id: unknown } | undefined
+    : undefined
+  const fences = version === 3
+    ? database.prepare('SELECT request_id, cutoff, shanghai_day, fence_json, fence_digest FROM personal_context_fences').all() as Array<Record<string, unknown>>
+    : []
+  database.exec(`ALTER TABLE personal_context_sources RENAME TO personal_context_sources_legacy; ALTER TABLE personal_context_coverage RENAME TO personal_context_coverage_legacy;`)
+  if (version === 3) database.exec('ALTER TABLE personal_context_metadata RENAME TO personal_context_metadata_legacy; ALTER TABLE personal_context_fences RENAME TO personal_context_fences_legacy;')
+  createSchema(database, path)
+  if (metadata !== undefined && typeof metadata.store_id === 'string') {
+    database.prepare('UPDATE personal_context_metadata SET store_id = ? WHERE singleton = 1').run(metadata.store_id)
+  }
+  const dispositionByKey = new Map<string, PersonalContextTerminalDisposition | undefined>()
+  for (const row of coverages) {
+    if (typeof row.source_key !== 'string') throw new PersonalFeedScopeStoreError('legacy coverage source key is invalid')
+    const dispositionJson = row.disposition_json
+    if (dispositionJson === null) { dispositionByKey.set(row.source_key, undefined); continue }
+    if (typeof dispositionJson !== 'string') throw new PersonalFeedScopeStoreError('legacy disposition is invalid')
+    let parsed: unknown
+    try { parsed = JSON.parse(dispositionJson) } catch (cause) { throw new PersonalFeedScopeStoreError('legacy disposition is not JSON', { cause }) }
+    if (version === 2 && isRecord(parsed) && parsed.schemaVersion === 1 && parsed.status === 'applied' && Array.isArray(parsed.facts)) {
+      parsed = { schemaVersion: 2, status: 'applied', changes: parsed.facts.map(fact => ({ operation: 'assert', targetFactIds: [], fact, validationInputDigest: `sha256:${'0'.repeat(64)}` })) }
+    } else if (version === 2 && isRecord(parsed) && parsed.schemaVersion === 1 && parsed.status === 'ignored') {
+      parsed = { schemaVersion: 2, status: 'ignored', reason: parsed.reason }
+    }
+    const disposition = parseTerminalDisposition(parsed)
+    if (disposition === undefined) throw new PersonalFeedScopeStoreError('legacy disposition is invalid')
+    dispositionByKey.set(row.source_key, disposition)
+  }
+  for (const row of sources) {
+    if (row.locator_kind !== 'telegram_inbound' || typeof row.source_key !== 'string' || !isSafeNonZeroInteger(row.chat_id)
+      || !isSafePositiveInteger(row.message_id) || typeof row.occurred_at !== 'string' || !isSafePositiveInteger(row.capture_sequence)
+      || typeof row.payload_digest !== 'string') throw new PersonalFeedScopeStoreError('legacy source row is invalid')
+    const locator: PersonalContextTelegramLocator = { kind: 'telegram_inbound', chatId: row.chat_id, messageId: row.message_id }
+    const sourceRowDigest = sourceRowDigestFor({
+      sourceKey: row.source_key, locator, rawText: typeof row.raw_text === 'string' ? row.raw_text : null,
+      occurredAt: row.occurred_at, captureSequence: row.capture_sequence, payloadDigest: row.payload_digest,
+      ...(typeof row.excluded_request_id === 'string' ? { excludedRequestId: row.excluded_request_id } : {}),
+    })
+    database.prepare(`INSERT INTO personal_context_sources (
+      source_key, locator_kind, chat_id, message_id, raw_text, reference_json, excluded_request_id,
+      occurred_at, capture_sequence, payload_digest, session_id, event_seq, source_row_digest
+    ) VALUES (?, 'telegram_inbound', ?, ?, ?, 'null', ?, ?, ?, ?, NULL, NULL, ?)`)
+      .run(row.source_key as string, row.chat_id as number, row.message_id as number, row.raw_text as string | null, row.excluded_request_id as string | null, row.occurred_at as string,
+        row.capture_sequence as number, row.payload_digest as string, sourceRowDigest)
+  }
+  const terminalSequenceBySource = new Map<string, number>()
+  let terminal = 0
+  for (const row of [...sources].sort((a, b) => Number(a.capture_sequence) - Number(b.capture_sequence))) {
+    const disposition = typeof row.source_key === 'string' ? dispositionByKey.get(row.source_key) : undefined
+    if (disposition !== undefined) terminalSequenceBySource.set(row.source_key as string, ++terminal)
+  }
+  for (const row of coverages) {
+    if (typeof row.source_key !== 'string') throw new PersonalFeedScopeStoreError('legacy coverage source key is invalid')
+    const disposition = dispositionByKey.get(row.source_key)
+    const dispositionJson = disposition === undefined ? null : dispositionJsonFor(disposition)
+    const dispositionDigest = dispositionJson === null ? null : dispositionDigestForJson(dispositionJson)
+    const sequence = disposition === undefined ? null : (version === 3 && isSafePositiveInteger(row.terminal_transaction_sequence) ? row.terminal_transaction_sequence : terminalSequenceBySource.get(row.source_key)!)
+    const entries = disposition?.status === 'applied' ? revisionEntriesForChanges(row.source_key, sequence!, disposition.changes) : []
+    const revisionDigest = disposition === undefined ? null : (version === 3 && typeof row.revision_digest === 'string' ? row.revision_digest : revisionDigestForEntries(entries))
+    database.prepare(`INSERT INTO personal_context_coverage (
+      source_key, status, disposition_json, disposition_digest, terminal_transaction_sequence, revision_digest
+    ) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(row.source_key as string, disposition === undefined ? 'pending' : disposition.status, dispositionJson, dispositionDigest, sequence, revisionDigest)
+  }
+  for (const fence of fences) {
+    if (typeof fence.request_id !== 'string' || typeof fence.cutoff !== 'string'
+      || typeof fence.shanghai_day !== 'string' || typeof fence.fence_json !== 'string'
+      || typeof fence.fence_digest !== 'string') {
+      throw new PersonalFeedScopeStoreError('legacy fence row is invalid')
+    }
+    database.prepare(`INSERT INTO personal_context_fences (request_id, cutoff, shanghai_day, fence_json, fence_digest) VALUES (?, ?, ?, ?, ?)`)
+      .run(fence.request_id, fence.cutoff, fence.shanghai_day, fence.fence_json, fence.fence_digest)
+  }
+  database.exec('DROP TABLE personal_context_coverage_legacy; DROP TABLE personal_context_sources_legacy;')
+  if (version === 3) database.exec('DROP TABLE personal_context_metadata_legacy; DROP TABLE personal_context_fences_legacy;')
+}
+
+/** Pure read gate for legacy files.  Migration is deliberately not allowed to
+ * rename a table until every old row has passed its semantic checks. */
+function preflightLegacyState(database: DatabaseSync, path: string, version: 2 | 3): void {
+  const expectedTables = version === 2
+    ? new Set(['personal_context_sources', 'personal_context_coverage'])
+    : new Set(['personal_context_sources', 'personal_context_coverage', 'personal_context_metadata', 'personal_context_fences'])
+  const objects = database.prepare("SELECT name, type FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY name").all() as Array<{ readonly name: unknown; readonly type: unknown }>
+  if (objects.length !== expectedTables.size || objects.some(object => object.type !== 'table' || typeof object.name !== 'string' || !expectedTables.has(object.name))) {
+    throw new PersonalFeedScopeStoreError(`legacy personal context database at "${path}" has an unsupported object set`)
+  }
+  assertLegacyTable(database, path, 'personal_context_sources', [
+    ['source_key', 'TEXT', 1, 1], ['locator_kind', 'TEXT', 1, 0], ['chat_id', 'INTEGER', 1, 0],
+    ['message_id', 'INTEGER', 1, 0], ['raw_text', 'TEXT', 0, 0], ['reference_json', 'TEXT', 1, 0],
+    ['excluded_request_id', 'TEXT', 0, 0], ['occurred_at', 'TEXT', 1, 0], ['capture_sequence', 'INTEGER', 1, 0],
+    ['payload_digest', 'TEXT', 1, 0],
+  ])
+  assertLegacyTable(database, path, 'personal_context_coverage', version === 2
+    ? [['source_key', 'TEXT', 1, 1], ['status', 'TEXT', 1, 0], ['disposition_json', 'TEXT', 0, 0], ['disposition_digest', 'TEXT', 0, 0]]
+    : [['source_key', 'TEXT', 1, 1], ['status', 'TEXT', 1, 0], ['disposition_json', 'TEXT', 0, 0], ['disposition_digest', 'TEXT', 0, 0], ['terminal_transaction_sequence', 'INTEGER', 0, 0], ['revision_digest', 'TEXT', 0, 0]])
+  if (version === 3) {
+    assertLegacyTable(database, path, 'personal_context_metadata', [['singleton', 'INTEGER', 0, 1], ['store_id', 'TEXT', 1, 0]])
+    assertLegacyTable(database, path, 'personal_context_fences', [['request_id', 'TEXT', 1, 1], ['cutoff', 'TEXT', 1, 0], ['shanghai_day', 'TEXT', 1, 0], ['fence_json', 'TEXT', 1, 0], ['fence_digest', 'TEXT', 1, 0]])
+    const metadata = database.prepare('SELECT singleton, store_id FROM personal_context_metadata').all() as Array<{ readonly singleton: unknown; readonly store_id: unknown }>
+    if (metadata.length !== 1 || metadata[0]?.singleton !== 1 || metadata[0]?.store_id !== digestFor({ kind: 'personal_context_store', path })) {
+      throw new PersonalFeedScopeStoreError('legacy personal context store identity is invalid')
+    }
+  }
+  const sources = database.prepare('SELECT source_key, locator_kind, chat_id, message_id, raw_text, reference_json, excluded_request_id, occurred_at, capture_sequence, payload_digest FROM personal_context_sources ORDER BY capture_sequence').all() as Array<Record<string, unknown>>
+  const coverages = database.prepare('SELECT source_key, status, disposition_json, disposition_digest' + (version === 3 ? ', terminal_transaction_sequence, revision_digest' : '') + ' FROM personal_context_coverage ORDER BY source_key').all() as Array<Record<string, unknown>>
+  if (sources.length !== coverages.length) throw new PersonalFeedScopeStoreError('legacy personal context source and coverage counts differ')
+  const sourceKeys = new Set<string>()
+  let previousSequence = 0
+  for (const row of sources) {
+    if (typeof row.source_key !== 'string' || !isStableSourceKey(row.source_key) || sourceKeys.has(row.source_key)
+      || row.locator_kind !== 'telegram_inbound' || !isSafeNonZeroInteger(row.chat_id)
+      || !isSafePositiveInteger(row.message_id) || row.reference_json !== 'null'
+      || (row.raw_text !== null && (typeof row.raw_text !== 'string' || row.raw_text.trim() === ''))
+      || typeof row.occurred_at !== 'string' || !isCanonicalIso(row.occurred_at)
+      || !isSafePositiveInteger(row.capture_sequence) || row.capture_sequence <= previousSequence
+      || typeof row.payload_digest !== 'string' || !/^[0-9a-f]{64}$/.test(row.payload_digest)) {
+      throw new PersonalFeedScopeStoreError('legacy personal context source row is invalid')
+    }
+    const locator: PersonalContextTelegramLocator = { kind: 'telegram_inbound', chatId: row.chat_id, messageId: row.message_id }
+    if (row.source_key !== sourceKeyFor(locator)) throw new PersonalFeedScopeStoreError('legacy personal context source key does not match locator')
+    const excludedRequestId = row.excluded_request_id
+    if (excludedRequestId !== null && (typeof excludedRequestId !== 'string' || excludedRequestId !== requestIdFor(locator))) {
+      throw new PersonalFeedScopeStoreError('legacy personal context excluded request id is invalid')
+    }
+    const excluded = typeof excludedRequestId === 'string' ? excludedRequestId : undefined
+    const rawText = row.raw_text
+    if (rawText !== null && row.payload_digest !== payloadDigestFor({ locator, rawText, reference: null, ...(excluded === undefined ? {} : { excludedRequestId: excluded }) })) {
+      throw new PersonalFeedScopeStoreError('legacy personal context payload digest is invalid')
+    }
+    previousSequence = row.capture_sequence
+    sourceKeys.add(row.source_key)
+  }
+  const coverageKeys = new Set<string>()
+  const terminalSequences = new Set<number>()
+  for (const row of coverages) {
+    if (typeof row.source_key !== 'string' || !sourceKeys.has(row.source_key) || coverageKeys.has(row.source_key)) {
+      throw new PersonalFeedScopeStoreError('legacy personal context coverage key set is invalid')
+    }
+    coverageKeys.add(row.source_key)
+    if (row.status === 'pending') {
+      if (row.disposition_json !== null || row.disposition_digest !== null || (version === 3 && (row.terminal_transaction_sequence !== null || row.revision_digest !== null))) {
+        throw new PersonalFeedScopeStoreError('legacy pending coverage has terminal fields')
+      }
+      continue
+    }
+    if (row.status !== 'applied' && row.status !== 'ignored' || typeof row.disposition_json !== 'string' || typeof row.disposition_digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(row.disposition_digest) || dispositionDigestForJson(row.disposition_json) !== row.disposition_digest) {
+      throw new PersonalFeedScopeStoreError('legacy terminal coverage is invalid')
+    }
+    let decoded: unknown
+    try { decoded = JSON.parse(row.disposition_json) } catch { throw new PersonalFeedScopeStoreError('legacy disposition is not JSON') }
+    if (version === 2 && (!isRecord(decoded) || decoded.schemaVersion !== 1)) {
+      throw new PersonalFeedScopeStoreError('legacy v2 disposition schema version is invalid')
+    }
+    if (version === 2 && isRecord(decoded) && decoded.schemaVersion === 1 && decoded.status === 'applied' && Array.isArray(decoded.facts)) {
+      decoded = { schemaVersion: 2, status: 'applied', changes: decoded.facts.map(fact => ({ operation: 'assert', targetFactIds: [], fact, validationInputDigest: `sha256:${'0'.repeat(64)}` })) }
+    } else if (version === 2 && isRecord(decoded) && decoded.schemaVersion === 1 && decoded.status === 'ignored') {
+      decoded = { schemaVersion: 2, status: 'ignored', reason: decoded.reason }
+    }
+    const disposition = parseTerminalDisposition(decoded)
+    if (disposition === undefined || disposition.status !== row.status || (disposition.status === 'applied' && disposition.changes.some(change => change.fact.evidence.sourceKey !== row.source_key))) {
+      throw new PersonalFeedScopeStoreError('legacy terminal disposition semantics are invalid')
+    }
+    if (version === 3) {
+      if (!isSafePositiveInteger(row.terminal_transaction_sequence) || terminalSequences.has(row.terminal_transaction_sequence)
+        || typeof row.revision_digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(row.revision_digest)) {
+        throw new PersonalFeedScopeStoreError('legacy terminal sequence or revision digest is invalid')
+      }
+      terminalSequences.add(row.terminal_transaction_sequence)
+      const entries = disposition.status === 'applied' ? revisionEntriesForChanges(row.source_key, row.terminal_transaction_sequence, disposition.changes) : []
+      if (revisionDigestForEntries(entries) !== row.revision_digest) throw new PersonalFeedScopeStoreError('legacy revision digest is invalid')
+    }
+  }
+  if (coverageKeys.size !== sourceKeys.size) throw new PersonalFeedScopeStoreError('legacy source and coverage key sets differ')
+  if (version === 3) {
+    const fences = database.prepare('SELECT request_id, cutoff, shanghai_day, fence_json, fence_digest FROM personal_context_fences').all() as FenceRow[]
+    const maxCapture = sources.reduce((max, row) => Math.max(max, Number(row.capture_sequence)), 0)
+    const maxTerminal = coverages.reduce((max, row) => Math.max(max, row.status === 'pending' ? 0 : Number(row.terminal_transaction_sequence)), 0)
+    for (const row of fences) {
+      const fence = fenceFromRow(row)
+      if (fence.storeId !== digestFor({ kind: 'personal_context_store', path })) throw new PersonalFeedScopeStoreError('legacy fence store identity is invalid')
+      validateFreezeFenceInput({ request: { requestId: fence.requestId, cutoff: fence.cutoff, shanghaiDay: fence.shanghaiDay } })
+      if (fence.maxCaptureSequence > maxCapture || fence.maxTerminalTransactionSequence > maxTerminal) throw new PersonalFeedScopeStoreError('legacy fence watermark exceeds legacy state')
+    }
+  }
+}
+
+function assertLegacyTable(database: DatabaseSync, path: string, table: string, expected: readonly (readonly [string, string, number, number])[]): void {
+  const rows = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ readonly name: unknown; readonly type: unknown; readonly notnull: unknown; readonly pk: unknown }>
+  if (rows.length !== expected.length || rows.some((row, index) => {
+    const wanted = expected[index]
+    return wanted === undefined || row.name !== wanted[0] || row.type !== wanted[1] || row.notnull !== wanted[2] || row.pk !== wanted[3]
+  })) throw new PersonalFeedScopeStoreError(`legacy personal context database at "${path}" has an invalid ${table} definition`)
 }
 
 function assertSchema(
@@ -1002,6 +1604,7 @@ function assertSchema(
   assertTable(database, path, 'personal_context_coverage', EXPECTED_COVERAGE_COLUMNS)
   assertTable(database, path, 'personal_context_metadata', EXPECTED_METADATA_COLUMNS)
   assertTable(database, path, 'personal_context_fences', EXPECTED_FENCE_COLUMNS)
+  assertTable(database, path, 'personal_context_bootstrap', EXPECTED_BOOTSTRAP_COLUMNS)
   const sourceSql = (database.prepare(
     "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'personal_context_sources'",
   ).get() as { readonly sql: unknown } | undefined)?.sql
@@ -1021,7 +1624,7 @@ function assertSchema(
   }
   const normalizedSourceSql = sourceSql.replaceAll(/\s+/g, ' ').toLowerCase()
   const normalizedCoverageSql = coverageSql.replaceAll(/\s+/g, ' ').toLowerCase()
-  if (!normalizedSourceSql.includes("check (locator_kind = 'telegram_inbound')")
+  if (!normalizedSourceSql.includes("check (locator_kind in ('telegram_inbound', 'telegram_session_history'))")
     || !normalizedSourceSql.includes('capture_sequence integer not null unique')
     || !normalizedSourceSql.includes('unique (locator_kind, chat_id, message_id)')
     || !normalizedSourceSql.includes("check (reference_json = 'null')")
@@ -1160,18 +1763,69 @@ function readSnapshot(database: DatabaseSync, path: string): PersonalContextOwne
   return deepFreeze({ sources, coverage })
 }
 
+function assertStoreIntegrity(database: DatabaseSync, path: string): {
+  readonly storeId: string
+  readonly checkpoint: BootstrapCheckpoint | undefined
+  readonly state: PersonalContextOwnerSnapshot
+} {
+  const storeId = readStoreId(database, path)
+  const state = readSnapshot(database, path)
+  const checkpoint = readBootstrap(database)
+  const fenceRows = database.prepare(`
+    SELECT request_id, cutoff, shanghai_day, fence_json, fence_digest
+    FROM personal_context_fences ORDER BY request_id
+  `).all() as FenceRow[]
+  for (const row of fenceRows) {
+    const fence = fenceFromRow(row)
+    if (fence.storeId !== storeId) throw new PersonalFeedScopeStoreError('personal context fence store identity is invalid')
+  }
+  if (checkpoint !== undefined) {
+    const cohort = historyCohort(database, 'store integrity')
+    if (cohort.count !== checkpoint.importedSourceCount || cohort.digest !== checkpoint.cohortDigest) {
+      throw new PersonalFeedScopeStoreError('personal context bootstrap history cohort is incomplete or changed')
+    }
+    const historySources = state.sources.filter(source => source.locator.kind === 'telegram_session_history')
+    for (const source of historySources) {
+      if (source.locator.kind === 'telegram_session_history' && source.locator.sessionId !== checkpoint.sessionId) {
+        throw new PersonalFeedScopeStoreError('personal context bootstrap history session is inconsistent')
+      }
+    }
+    const historyCoverage = new Map(state.coverage.map(coverage => [coverage.sourceKey, coverage] as const))
+    if (checkpoint.status === 'complete') {
+      if (checkpoint.result.status !== 'complete') throw new PersonalFeedScopeStoreError('personal context complete checkpoint result is incomplete')
+      if (historySources.some(source => historyCoverage.get(source.sourceKey)?.status === 'pending')) {
+        throw new PersonalFeedScopeStoreError('personal context complete checkpoint has pending history coverage')
+      }
+      const expectedResultDigest = digestFor({
+        sessionId: checkpoint.sessionId,
+        observedThroughSeq: checkpoint.observedThroughSeq,
+        importedSourceCount: checkpoint.importedSourceCount,
+        excludedEventCount: checkpoint.excludedEventCount,
+      })
+      if (checkpoint.resultDigest !== expectedResultDigest || checkpoint.result.digest !== expectedResultDigest) {
+        throw new PersonalFeedScopeStoreError('personal context bootstrap result digest is invalid')
+      }
+    } else if (checkpoint.result.status !== 'incomplete' || checkpoint.result.reason !== 'semantics_pending') {
+      throw new PersonalFeedScopeStoreError('personal context settling checkpoint result is invalid')
+    }
+  }
+  return { storeId, checkpoint, state }
+}
+
 function persistFence(
   database: DatabaseSync,
   databasePath: string,
   input: PersonalContextFreezeFenceInput,
 ): PersonalContextFence {
   const request = validateFreezeFenceInput(input)
+  assertStoreIntegrity(database, databasePath)
   const replay = selectFence(database, request.requestId)
   if (replay !== undefined) return replayFenceOrConflict(replay, request)
   let began = false
   try {
     database.exec('BEGIN IMMEDIATE')
     began = true
+    assertStoreIntegrity(database, databasePath)
     const concurrent = selectFence(database, request.requestId)
     if (concurrent !== undefined) {
       const result = replayFenceOrConflict(concurrent, request)
@@ -1179,7 +1833,7 @@ function persistFence(
       began = false
       return result
     }
-    const storeId = readStoreId(database)
+    const storeId = readStoreId(database, databasePath)
     const maxCaptureSequence = readNonNegativeSequence(database, `
       SELECT COALESCE(MAX(capture_sequence), 0) AS value FROM personal_context_sources
     `, 'capture fence')
@@ -1301,12 +1955,15 @@ function replayFenceOrConflict(row: PersonalContextFence, request: PersonalConte
   return row
 }
 
-function readStoreId(database: DatabaseSync): string {
+function readStoreId(database: DatabaseSync, databasePath: string): string {
   const row = database.prepare(
     'SELECT store_id FROM personal_context_metadata WHERE singleton = 1',
   ).get() as { readonly store_id: unknown } | undefined
   if (row === undefined || typeof row.store_id !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(row.store_id)) {
     throw new PersonalFeedScopeStoreError('personal context store id is invalid')
+  }
+  if (row.store_id !== digestFor({ kind: 'personal_context_store', path: databasePath })) {
+    throw new PersonalFeedScopeStoreError('personal context store id does not match its database path')
   }
   return row.store_id
 }
@@ -1381,6 +2038,10 @@ function buildCausalSnapshot(
     revisions: revisionsProof,
     currentSource: currentSourceProof,
   })
+  const checkpoint = readBootstrap(database)
+  if (checkpoint?.status === 'settling') {
+    return deepFreeze({ kind: 'unknown', reason: 'coverage_incomplete', proof })
+  }
   if (unknownAtFenceSourceKeys.length > 0) {
     return deepFreeze({ kind: 'unknown', reason: 'unknown_at_fence', proof })
   }
@@ -1491,7 +2152,10 @@ function captureResultFromRows(sourceRow: SourceRow, coverageRow: CoverageRow): 
 }
 
 function sourceFromRow(row: SourceRow, coverage: PersonalContextCoverage): PersonalContextSource {
-  if (row.locator_kind !== 'telegram_inbound' || !isSafeNonZeroInteger(row.chat_id) || !isSafePositiveInteger(row.message_id) || (row.raw_text !== null && (typeof row.raw_text !== 'string' || row.raw_text.trim() === '')) || row.reference_json !== 'null' || typeof row.occurred_at !== 'string' || !isCanonicalIso(row.occurred_at) || typeof row.source_key !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(row.source_key) || !isSafePositiveInteger(row.capture_sequence) || typeof row.payload_digest !== 'string' || !/^[0-9a-f]{64}$/.test(row.payload_digest)) {
+  if ((row.locator_kind !== 'telegram_inbound' && row.locator_kind !== 'telegram_session_history')
+    || (row.locator_kind === 'telegram_inbound' && (!isSafeNonZeroInteger(row.chat_id) || !isSafePositiveInteger(row.message_id) || row.session_id !== null || row.event_seq !== null))
+    || (row.locator_kind === 'telegram_session_history' && (row.chat_id !== null || row.message_id !== null || typeof row.session_id !== 'string' || row.session_id === '' || !isSafeNonNegativeInteger(row.event_seq) || row.excluded_request_id !== null))
+    || (row.raw_text !== null && (typeof row.raw_text !== 'string' || row.raw_text.trim() === '')) || row.reference_json !== 'null' || typeof row.occurred_at !== 'string' || !isCanonicalIso(row.occurred_at) || typeof row.source_key !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(row.source_key) || !isSafePositiveInteger(row.capture_sequence) || typeof row.payload_digest !== 'string' || !/^[0-9a-f]{64}$/.test(row.payload_digest) || typeof row.source_row_digest !== 'string' || !/^[0-9a-f]{64}$/.test(row.source_row_digest)) {
     throw new PersonalFeedScopeStoreError('personal context source row is invalid')
   }
   if (coverage.sourceKey !== row.source_key
@@ -1499,17 +2163,36 @@ function sourceFromRow(row: SourceRow, coverage: PersonalContextCoverage): Perso
     || (coverage.status !== 'pending' && row.raw_text !== null)) {
     throw new PersonalFeedScopeStoreError('personal context source and coverage lifecycle is invalid')
   }
-  const locator: PersonalContextTelegramLocator = { kind: 'telegram_inbound', chatId: row.chat_id, messageId: row.message_id }
+  const locator: PersonalContextSourceLocator = row.locator_kind === 'telegram_inbound'
+    ? { kind: 'telegram_inbound', chatId: row.chat_id as number, messageId: row.message_id as number }
+    : { kind: 'telegram_session_history', sessionId: row.session_id as string, eventSeq: row.event_seq as number }
   if (row.source_key !== sourceKeyFor(locator)) throw new PersonalFeedScopeStoreError('personal context source key is invalid')
   const excludedRequestId = row.excluded_request_id
-  if (excludedRequestId !== null && (typeof excludedRequestId !== 'string' || excludedRequestId !== requestIdFor(locator))) {
+  if (excludedRequestId !== null && (locator.kind !== 'telegram_inbound' || typeof excludedRequestId !== 'string' || excludedRequestId !== requestIdFor(locator))) {
     throw new PersonalFeedScopeStoreError('personal context excluded request id is invalid')
   }
   if (row.raw_text !== null) {
-    const payload: PersonalContextCaptureInput = excludedRequestId === null
-      ? { locator, rawText: row.raw_text, reference: null }
-      : { locator, rawText: row.raw_text, reference: null, excludedRequestId }
-    if (row.payload_digest !== payloadDigestFor(payload)) throw new PersonalFeedScopeStoreError('personal context payload digest is invalid')
+    if (locator.kind === 'telegram_inbound') {
+      const payload: PersonalContextCaptureInput = excludedRequestId === null
+        ? { locator, rawText: row.raw_text, reference: null }
+        : { locator, rawText: row.raw_text, reference: null, excludedRequestId }
+      if (row.payload_digest !== payloadDigestFor(payload)) throw new PersonalFeedScopeStoreError('personal context payload digest is invalid')
+    } else if (row.payload_digest !== historyPayloadDigestFor(row.raw_text as string, row.occurred_at)) {
+      throw new PersonalFeedScopeStoreError('personal context historical payload digest is invalid')
+    }
+  }
+  const expectedRowDigest = sourceRowDigestFor({
+    sourceKey: row.source_key,
+    locator,
+    rawText: row.raw_text,
+    occurredAt: row.occurred_at,
+    captureSequence: row.capture_sequence,
+    payloadDigest: row.payload_digest,
+    ...(typeof excludedRequestId === 'string' ? { excludedRequestId } : {}),
+  })
+  if (expectedRowDigest !== row.source_row_digest) throw new PersonalFeedScopeStoreError('personal context source row digest is invalid')
+  if (locator.kind === 'telegram_session_history') {
+    return { locator, rawText: row.raw_text, reference: null, occurredAt: row.occurred_at, sourceKey: row.source_key, captureSequence: row.capture_sequence }
   }
   return excludedRequestId === null
     ? { locator, rawText: row.raw_text, reference: null, occurredAt: row.occurred_at, sourceKey: row.source_key, captureSequence: row.capture_sequence }
@@ -1566,10 +2249,38 @@ function coverageFromRow(row: CoverageRow): PersonalContextCoverage {
   })
 }
 
-function sourceKeyFor(locator: PersonalContextTelegramLocator): string {
+function sourceKeyFor(locator: PersonalContextSourceLocator): string {
   const canonical = encodeCanonicalJson(locator)
   if (canonical === undefined) throw new PersonalFeedScopeInputError('personal context locator is not canonical JSON')
   return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`
+}
+
+function historySourceKeyFor(locator: PersonalContextHistoryLocator): string {
+  return sourceKeyFor(locator)
+}
+
+function historyPayloadDigestFor(rawText: string, occurredAt: string): string {
+  return createHash('sha256').update(canonicalJsonFor({ rawText, occurredAt }, 'historical payload'), 'utf8').digest('hex')
+}
+
+function sourceRowDigestFor(input: {
+  readonly sourceKey: string
+  readonly locator: PersonalContextSourceLocator
+  readonly rawText: string | null
+  readonly occurredAt: string
+  readonly captureSequence: number
+  readonly payloadDigest: string
+  readonly excludedRequestId?: string
+}): string {
+  const base = {
+    sourceKey: input.sourceKey,
+    locator: input.locator,
+    occurredAt: input.occurredAt,
+    captureSequence: input.captureSequence,
+    payloadDigest: input.payloadDigest,
+  }
+  const stable = input.excludedRequestId === undefined ? base : { ...base, excludedRequestId: input.excludedRequestId }
+  return createHash('sha256').update(canonicalJsonFor(stable, 'personal context source row'), 'utf8').digest('hex')
 }
 
 function isStableSourceKey(value: unknown): value is string {
@@ -1618,6 +2329,10 @@ function isSafePositiveInteger(value: unknown): value is number {
 
 function isSafeNonNegativeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function isSafeNonNegativeOrMinusOne(value: unknown): value is number {
+  return value === -1 || isSafeNonNegativeInteger(value)
 }
 
 function isCanonicalIso(value: string): boolean {

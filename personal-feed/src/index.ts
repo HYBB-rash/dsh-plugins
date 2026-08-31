@@ -25,8 +25,18 @@ export {
 export { canonicalizeXStatusIdentity } from './v2/x-status-identity.ts'
 
 export {
+  createSessionUserHistoryAdapter,
+  type SessionUserHistoryAdapter,
+  type SessionUserHistoryMessage,
+  type SessionUserHistoryObservation,
+  type SessionUserHistoryQuery,
+  type SessionUserHistoryResult,
+} from './v2/session-user-history-adapter.ts'
+
+export {
   PERSONAL_CONTEXT_USE_AUTHORIZATION,
   createPersonalContextOwner,
+  type PersonalContextBootstrapResult,
   type CreatePersonalContextOwnerOptions,
   type PersonalContextActiveFact,
   type PersonalContextAttitude,
@@ -68,6 +78,8 @@ export {
   type PersonalContextSnapshotProof,
   type PersonalContextSnapshotResult,
   type PersonalContextTelegramLocator,
+  type PersonalContextHistoryLocator,
+  type PersonalContextSourceLocator,
   type PersonalContextTerminalCoverage,
   type PersonalContextTerminalChange,
   type PersonalContextTerminalDisposition,
