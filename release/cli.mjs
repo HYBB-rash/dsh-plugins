@@ -590,14 +590,17 @@ function verifyProductionNotionAutomation(candidate) {
   return parseNotionAutomationReceipt(output, '生产 Harness-owned Notion automation 只读验证')
 }
 
-const harnessNotionAssets = Object.freeze({
+const harnessNotionOrchestrationAssets = Object.freeze({
   bridge: 'release/scripts/harness-notion-automation-bridge.mjs',
   patch: 'release/scripts/harness-notion-automation.patch.yml',
   prompt: 'release/scripts/harness-notion-automation-task.md',
   checker: 'release/scripts/check-notion-automation-entrypoint.py',
   probe: 'release/scripts/verify-harness-notion-automation.py',
-  'local-impl': 'release/scripts/harness-notion-automation-local/notion_inbox_sync.py',
-  'local-tests': 'release/scripts/harness-notion-automation-local/tests/test_notion_inbox_sync.py',
+})
+
+const harnessNotionLocalAssets = Object.freeze({
+  localImpl: 'release/scripts/harness-notion-automation-local/notion_inbox_sync.py',
+  localTests: 'release/scripts/harness-notion-automation-local/tests/test_notion_inbox_sync.py',
 })
 
 const remoteHarnessNotionLoader = `
@@ -899,7 +902,7 @@ function commandHarness(options, tokens) {
     'release/scripts/harness-notion-automation-remote.py',
     'Harness Notion automation remote helper',
   )
-  const assets = Object.fromEntries(Object.entries(harnessNotionAssets).map(([name, path]) => {
+  const assets = Object.fromEntries(Object.entries(harnessNotionOrchestrationAssets).map(([name, path]) => {
     const content = readGitBlob(releaseCommit, path, `Harness Notion automation ${name}`)
     return [name, {
       content: content.toString('base64'),
@@ -907,10 +910,7 @@ function commandHarness(options, tokens) {
     }]
   }))
   const localPayload = {}
-  for (const name of ['localImpl', 'localTests']) {
-    const path = harnessNotionAssets[
-      name === 'localImpl' ? 'local-impl' : 'local-tests'
-    ]
+  for (const [name, path] of Object.entries(harnessNotionLocalAssets)) {
     const content = readGitBlob(releaseCommit, path, `Harness Notion automation ${name}`)
     localPayload[name] = {
       content: content.toString('base64'),

@@ -331,6 +331,19 @@ import subprocess
 import sys
 
 source = open(sys.argv[1], encoding="utf-8").read()
+asset_sets = {}
+for constant in ("harnessNotionOrchestrationAssets", "harnessNotionLocalAssets"):
+    asset_match = re.search(
+        rf"const {constant} = Object\.freeze\(\{{(?P<body>.*?)\n\}}\)",
+        source,
+        re.DOTALL,
+    )
+    assert asset_match is not None
+    asset_sets[constant] = set(re.findall(r"^\s*(\w+):", asset_match.group("body"), re.MULTILINE))
+assert asset_sets == {
+    "harnessNotionOrchestrationAssets": {"bridge", "patch", "prompt", "checker", "probe"},
+    "harnessNotionLocalAssets": {"localImpl", "localTests"},
+}
 match = re.search(
     r"const remoteHarnessNotionLoader = `\n(?P<loader>.*?)\n`\n\nconst remoteHarnessNotionStatusLoader",
     source,
@@ -366,6 +379,25 @@ payload = {
     "orchestrationCommit": "a" * 40,
     "assets": assets,
 }
+for name in ("localImpl", "localTests"):
+    content = ("synthetic-" + name).encode()
+    payload[name] = {
+        "content": base64.b64encode(content).decode(),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+extra_asset_payload = json.loads(json.dumps(payload))
+extra_asset_payload["assets"]["localImpl"] = extra_asset_payload["localImpl"]
+extra_asset = subprocess.run(
+    [sys.executable, "-c", loader],
+    input=(json.dumps(extra_asset_payload) + "\n").encode(),
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    check=False,
+)
+assert extra_asset.returncode == 4
+assert extra_asset.stdout == b""
+assert extra_asset.stderr == b""
+
 valid = subprocess.run(
     [sys.executable, "-c", loader],
     input=(json.dumps(payload) + "\n").encode(),
