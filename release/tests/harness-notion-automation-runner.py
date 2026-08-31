@@ -1160,6 +1160,7 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
             "`fdopen`, `open(fd)`, `io.open`, or `io.FileIO`",
             "The first successful pull must create all three canonical artifacts",
             "rewrite only the canonical artifacts whose content or durable state actually changes",
+            "must not be rewritten at all — its inode must remain identical, including in a",
             "Persist any retryable pending operation inside the three canonical artifacts",
             "at most one GET, at most one PATCH, and at most 32 total rename calls",
             "including canonical, staged, and journal paths",

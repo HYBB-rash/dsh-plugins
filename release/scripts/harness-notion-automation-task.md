@@ -88,7 +88,9 @@ stdout nor stderr may contain any byte sequence read from a symlink target.
 
 The first successful pull must create all three canonical artifacts.  After
 initialization, rewrite only the canonical artifacts whose content or durable
-state actually changes; an unchanged role need not be rewritten.  Persist any
+state actually changes; a role whose content and durable state are unchanged
+must not be rewritten at all — its inode must remain identical, including in a
+crash-recovery invocation, which must never republish an unchanged role.  Persist any
 retryable pending operation inside the three canonical artifacts, not as a
 fourth durable file.  One invocation may perform at most one GET, at most one
 PATCH, and at most 32 total rename calls, including canonical, staged, and
