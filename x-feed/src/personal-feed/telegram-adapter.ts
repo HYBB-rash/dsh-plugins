@@ -53,7 +53,7 @@ export function registerPersonalFeedTelegramAdapter(
   }
 }
 
-function isExplicitPersonalFeedRequest(envelope: TelegramInboundEnvelope): boolean {
+export function isExplicitPersonalFeedRequest(envelope: TelegramInboundEnvelope): boolean {
   if (containsXLink(envelope.currentText) || containsXLink(envelope.reference?.selectedText)
     || containsXLink(envelope.reference?.messageText)) return false
   const text = envelope.currentText.trim()

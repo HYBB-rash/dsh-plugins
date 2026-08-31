@@ -240,6 +240,78 @@ describe('Telegram X feedback adapter', () => {
     dispose()
   })
 
+  it('hands an explicit Personal Feed request to the next adapter before touching X pending state', async () => {
+    const pending = {
+      kind: 'awaiting_reason' as const,
+      target: { id: 'x-status:123', content: '内容', source: 'https://x.com/a/status/123', scope: 'current' as const },
+      dimension: 'content_value' as const,
+      sentiment: 'dislike' as const,
+      rawUserExpression: '不喜欢',
+    }
+    const { ctx, registered } = context()
+    const { dependencies, calls } = makeDependencies()
+    dependencies.pendingStore.get.mockImplementation(key => {
+      calls.order.push(`pending-get:${key}`)
+      return pending
+    })
+    dependencies.pendingStore.clear.mockImplementation(key => {
+      calls.order.push(`pending-clear:${key}`)
+    })
+    const dispose = registerTelegramFeedbackAdapter(ctx, dependencies)
+    const next = vi.fn(() => {
+      calls.order.push('next')
+      return { kind: 'feed-adapter-sentinel' as const }
+    })
+
+    const result = await registered.get('telegram/inbound')!(envelope('给我一次个人 Feed'), next)
+
+    expect(result).toEqual({ kind: 'feed-adapter-sentinel' })
+    expect(calls.order).toEqual([
+      'pending-get:telegram-chat:7',
+      'pending-clear:telegram-chat:7',
+      'next',
+    ])
+    expect(dependencies.runCleanFeedback).not.toHaveBeenCalled()
+    expect(dependencies.trustedFactRepository.readAll).not.toHaveBeenCalled()
+    expect(dependencies.useCase.execute).not.toHaveBeenCalled()
+    expect(dependencies.effectSink.apply).not.toHaveBeenCalled()
+    dispose()
+  })
+
+  it.each(['具体理由。', '帮我设计个人 Feed'] as const)(
+    'does not broaden the Personal Feed handoff to the non-X message %s', async currentText => {
+      const pending = {
+        kind: 'awaiting_reason' as const,
+        target: { id: 'x-status:123', content: '内容', source: 'https://x.com/a/status/123', scope: 'current' as const },
+        dimension: 'content_value' as const,
+        sentiment: 'dislike' as const,
+        rawUserExpression: '不喜欢',
+      }
+      const completed = {
+        kind: 'completed' as const,
+        decision: { kind: 'completed' as const, state: { kind: 'idle' as const }, effects: [] },
+        effects: [],
+        reply: '旧 X 处理结果',
+      }
+      const { ctx, registered } = context()
+      const { dependencies, calls } = makeDependencies(pass('ordinary'), completed)
+      dependencies.pendingStore.get.mockReturnValue(pending)
+      const dispose = registerTelegramFeedbackAdapter(ctx, dependencies)
+      const next = vi.fn(rootResult)
+
+      const result = await registered.get('telegram/inbound')!(envelope(currentText), next)
+
+      expect(result).toEqual({ kind: 'handled', finalText: '旧 X 处理结果' })
+      expect(dependencies.runCleanFeedback).toHaveBeenCalledOnce()
+      expect(dependencies.trustedFactRepository.readAll).toHaveBeenCalledOnce()
+      expect(dependencies.useCase.execute).toHaveBeenCalledOnce()
+      expect(calls.effects).toEqual([])
+      expect(dependencies.pendingStore.clear).not.toHaveBeenCalled()
+      expect(next).not.toHaveBeenCalled()
+      dispose()
+    },
+  )
+
   it.each(['not_feedback', 'mixed_intent', 'target_ambiguous'] as const)(
     'routes %s through clean classification then root with no effects',
     async reason => {

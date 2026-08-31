@@ -18,6 +18,7 @@ import type {
   FeedbackUseCaseInput,
   FeedbackUseCaseResult,
 } from './use-case.ts'
+import { isExplicitPersonalFeedRequest } from '../personal-feed/telegram-adapter.ts'
 
 /** The only Cordis surface needed by this delivery adapter. */
 export type TelegramFeedbackAdapterContext = Pick<Context, 'on'>
@@ -84,6 +85,10 @@ async function handleInbound(
   } catch (error: unknown) {
     clearPending(dependencies.pendingStore, conversationKey)
     return failed(formatFailure(cleanFailurePrefix, error))
+  }
+  if (pending !== undefined && isExplicitPersonalFeedRequest(envelope)) {
+    clearPending(dependencies.pendingStore, conversationKey)
+    return await next()
   }
   const referenceText = selectedReferenceText(envelope)
   const targetCatalog = collectFeedbackTargetCatalog(envelope.currentText, referenceText)
