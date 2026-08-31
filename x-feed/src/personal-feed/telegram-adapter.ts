@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {
   TelegramInboundDeliveryReceipt,
   TelegramInboundEnvelope,
+  TelegramInboundResult,
 } from '@deepseek-ai/dsh-telegram-gateway'
 import type {
   PersonalFeedV2RequestCoordinator,
@@ -16,14 +17,15 @@ export interface PersonalFeedTelegramAdapterOptions {
 
 const failedText = '这次没有完成：判断或执行未完成。'
 
-/** Install the narrow explicit Personal Feed request interceptor. */
-export function registerPersonalFeedTelegramAdapter(
-  ctx: PersonalFeedTelegramAdapterContext,
-  options: PersonalFeedTelegramAdapterOptions,
-): () => void {
-  let disposed = false
-  const stop = ctx.on('telegram/inbound', async (envelope, next) => {
-    if (disposed || !isExplicitPersonalFeedRequest(envelope)) return await next()
+export interface PersonalFeedTelegramRequestHandlerOptions {
+  readonly coordinator: PersonalFeedV2RequestCoordinator
+}
+
+/** The single request/prepare/receipt boundary shared by every Telegram entry. */
+export function createPersonalFeedTelegramRequestHandler(
+  options: PersonalFeedTelegramRequestHandlerOptions,
+): (envelope: TelegramInboundEnvelope) => Promise<TelegramInboundResult> {
+  return async (envelope: TelegramInboundEnvelope): Promise<TelegramInboundResult> => {
     try {
       const prepared = await options.coordinator.prepare({
         chatId: envelope.chat.id,
@@ -44,6 +46,21 @@ export function registerPersonalFeedTelegramAdapter(
     } catch {
       return { kind: 'failed', visibleError: failedText }
     }
+  }
+}
+
+/** Install the narrow explicit Personal Feed request interceptor. */
+export function registerPersonalFeedTelegramAdapter(
+  ctx: PersonalFeedTelegramAdapterContext,
+  options: PersonalFeedTelegramAdapterOptions,
+): () => void {
+  let disposed = false
+  const handler = createPersonalFeedTelegramRequestHandler(options)
+  const stop = ctx.on('telegram/inbound', async (envelope, next) => {
+    if (disposed) return await next()
+    if (envelope.currentText.trim() === '') return { kind: 'handled', finalText: '' }
+    if (!isExplicitPersonalFeedRequest(envelope)) return await next()
+    return handler(envelope)
   })
 
   return () => {

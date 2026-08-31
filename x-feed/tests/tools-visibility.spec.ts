@@ -70,8 +70,18 @@ interface Harness {
 function makeCtx(agents: MockAgent[]): Harness {
   const createdHandlers: Harness['createdHandlers'] = []
   const eventNames: string[] = []
+  const sessionQuery = {
+    listEvents: async (_sessionId: string) => [],
+    readEvent: async (_input: unknown) => undefined,
+  }
   const ctx = {
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    get: (name: string) => name === 'sessionQuery'
+      ? sessionQuery
+      : name === 'agentDefaultModel'
+        ? { currentSelection: () => ({ provider: 'test-provider', model: 'test-model' }) }
+        : undefined,
+    llm: { stream: async function* (_request: unknown) { /* empty fixture stream */ } },
     on: (name: string, handler: unknown) => {
       eventNames.push(name)
       const handlers = name === 'agent/created' ? createdHandlers : undefined
@@ -127,8 +137,12 @@ describe('root isolation (§10.3)', () => {
     const telegramAgent = makeAgent('session-telegram', tools, sections)
     const harness = makeCtx([telegram, telegramAgent])
     try {
-      const dispose = await installTelegramExtension(harness.ctx as never, { dataDir })
+      const dispose = await installTelegramExtension(harness.ctx as never, {
+        dataDir,
+        personalFeedDataDir: join(dataDir, 'personal-feed'),
+      })
       expect(tools).toEqual(expect.arrayContaining(['x_feed_record_feedback', 'x_feed_list_saved']))
+      expect(tools.filter(name => /personal.?context|semantic|submission/u.test(name))).toEqual([])
       expect(sections).toContain('x-feed:contract')
       await dispose()
     } finally {
@@ -143,7 +157,10 @@ describe('root isolation (§10.3)', () => {
     const cron = makeAgent('session-cron-cron-x-1', tools, sections)
     const harness = makeCtx([cron])
     try {
-      const dispose = await installTelegramExtension(harness.ctx as never, { dataDir })
+      const dispose = await installTelegramExtension(harness.ctx as never, {
+        dataDir,
+        personalFeedDataDir: join(dataDir, 'personal-feed'),
+      })
       expect(tools).toEqual([])
       expect(sections).toEqual([])
       await dispose()
@@ -159,7 +176,10 @@ describe('root isolation (§10.3)', () => {
     const web = makeAgent('session-web-root', tools, sections)
     const harness = makeCtx([web])
     try {
-      const dispose = await installTelegramExtension(harness.ctx as never, { dataDir })
+      const dispose = await installTelegramExtension(harness.ctx as never, {
+        dataDir,
+        personalFeedDataDir: join(dataDir, 'personal-feed'),
+      })
       expect(tools).toEqual([])
       expect(sections).toEqual([])
       await dispose()
@@ -174,12 +194,16 @@ describe('root isolation (§10.3)', () => {
     const sections: string[] = []
     const harness = makeCtx([])
     try {
-      const dispose = await installTelegramExtension(harness.ctx as never, { dataDir })
+      const dispose = await installTelegramExtension(harness.ctx as never, {
+        dataDir,
+        personalFeedDataDir: join(dataDir, 'personal-feed'),
+      })
       expect(harness.createdHandlers.length).toBe(1)
       const future = makeAgent('session-telegram', tools, sections)
       harness.agents.push(future)
       harness.createdHandlers[0]!({ agent: future.agent })
       expect(tools).toEqual(expect.arrayContaining(['x_feed_record_feedback', 'x_feed_list_saved']))
+      expect(tools.filter(name => /personal.?context|semantic|submission/u.test(name))).toEqual([])
       expect(sections).toContain('x-feed:contract')
       const cronTools: string[] = []
       const cronSections: string[] = []
@@ -202,7 +226,10 @@ describe('root isolation (§10.3)', () => {
     const telegram = makeAgent('session-telegram', tools, sections, rootEventNames)
     const harness = makeCtx([telegram])
     try {
-      const dispose = await installTelegramExtension(harness.ctx as never, { dataDir })
+      const dispose = await installTelegramExtension(harness.ctx as never, {
+        dataDir,
+        personalFeedDataDir: join(dataDir, 'personal-feed'),
+      })
       expect(rootEventNames).not.toContain('agent/pre-step')
       expect(rootEventNames).not.toContain('agent/status')
       expect(harness.eventNames).not.toContain('dsh-cron/run-finished')

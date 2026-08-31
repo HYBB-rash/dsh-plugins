@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   createPersonalFeedV2RequestCoordinator,
+  personalFeedV2TelegramRequestId,
   type PersonalFeedV2R2Input,
   type PersonalFeedV2R3Input,
   type PersonalFeedV2R4Input,
@@ -161,6 +162,17 @@ afterEach(() => {
 })
 
 describe('Personal Feed v2 honest request lifecycle', () => {
+  it('exports the one Telegram request identity function and rejects unsafe/non-positive coordinates', () => {
+    expect(personalFeedV2TelegramRequestId(42, 5)).toBe('telegram:42:5')
+    expect(personalFeedV2TelegramRequestId(-42, 5)).toBe('telegram:-42:5')
+    expect(() => personalFeedV2TelegramRequestId(0, 1)).toThrow()
+    expect(() => personalFeedV2TelegramRequestId(Number.MAX_SAFE_INTEGER + 1, 5)).toThrow()
+    expect(() => personalFeedV2TelegramRequestId(42, 0)).toThrow()
+    expect(() => personalFeedV2TelegramRequestId(42, -1)).toThrow()
+    expect(() => personalFeedV2TelegramRequestId(42, 1.5)).toThrow()
+    expect(() => personalFeedV2TelegramRequestId(42, Number.MAX_SAFE_INTEGER + 1)).toThrow()
+  })
+
   it('reads one clock boundary per chat/message and reuses it across Shanghai midnight without colliding across chats', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-lifecycle-'))
     temporaryDirectories.push(directory)

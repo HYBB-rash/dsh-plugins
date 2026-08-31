@@ -123,9 +123,9 @@ export interface PersonalContextNoFactInput {
 }
 
 export interface PersonalContextSemanticPorts {
-  readonly classifier: (input: PersonalContextClassifierInput) => unknown | Promise<unknown>
-  readonly entailmentValidator: (input: PersonalContextEntailmentInput) => unknown | Promise<unknown>
-  readonly noFactValidator: (input: PersonalContextNoFactInput) => unknown | Promise<unknown>
+  readonly classifier: (input: PersonalContextClassifierInput, signal?: AbortSignal) => unknown | Promise<unknown>
+  readonly entailmentValidator: (input: PersonalContextEntailmentInput, signal?: AbortSignal) => unknown | Promise<unknown>
+  readonly noFactValidator: (input: PersonalContextNoFactInput, signal?: AbortSignal) => unknown | Promise<unknown>
 }
 
 export interface PersonalContextTerminalEvidence {
@@ -174,7 +174,7 @@ export interface PersonalContextTerminalChange {
   readonly validationInputDigest: string
 }
 
-type ParsedClassifierOutput =
+export type ParsedClassifierOutput =
   | { readonly kind: 'facts'; readonly facts: readonly PersonalContextFactProposal[] }
   | { readonly kind: 'no_fact'; readonly reason: PersonalContextNoFactReason }
 

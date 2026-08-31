@@ -209,7 +209,7 @@ export function createPersonalFeedV2RequestCoordinator(
     if (state === undefined || state.request === undefined || state.prepared === undefined) {
       throw new PersonalFeedScopeStoreError(`personal Feed v2 request ${requestId} is not prepared`)
     }
-    if (requestIdFor(parsedReceipt.chatId, parsedReceipt.triggerMessageId) !== requestId) {
+    if (personalFeedV2TelegramRequestId(parsedReceipt.chatId, parsedReceipt.triggerMessageId) !== requestId) {
       throw new PersonalFeedScopeInputError('personal Feed v2 delivery receipt belongs to another request')
     }
     if (parsedReceipt.visibleText !== state.prepared.outcome.finalText) {
@@ -233,7 +233,7 @@ export function createPersonalFeedV2RequestCoordinator(
 
   const prepare = async (input: PersonalFeedV2PrepareInput): Promise<PersonalFeedV2PrepareResult> => {
     validatePrepareInput(input)
-    const requestId = requestIdFor(input.chatId, input.messageId)
+    const requestId = personalFeedV2TelegramRequestId(input.chatId, input.messageId)
     const existing = readLedger().states.get(requestId)
     if (existing !== undefined) return { kind: 'duplicate_consumed' }
 
@@ -340,7 +340,7 @@ export function createPersonalFeedV2RequestCoordinator(
 
 function validatePrepareInput(input: PersonalFeedV2PrepareInput): void {
   if (!isRecord(input) || !hasExactlyKeys(input, ['chatId', 'messageId', 'signal'])
-    || !isSafeInteger(input.chatId) || !isSafePositiveInteger(input.messageId)
+    || !isSafeInteger(input.chatId) || input.chatId === 0 || !isSafePositiveInteger(input.messageId)
     || !isAbortSignal(input.signal)) {
     throw new PersonalFeedScopeInputError('personal Feed v2 request input is invalid')
   }
@@ -398,10 +398,10 @@ function parseLedgerRecord(value: unknown, lineNumber: number): LedgerRecord {
   if (value.event === 'request_opened' && hasExactlyKeys(value, ['schemaVersion', 'event', 'requestId', 'request']) && isRecord(value.request)) {
     const request = value.request
     if (hasExactlyKeys(request, ['chatId', 'messageId', 'cutoff', 'shanghaiDay'])
-      && isSafeInteger(request.chatId) && isSafePositiveInteger(request.messageId)
+      && isSafeInteger(request.chatId) && request.chatId !== 0 && isSafePositiveInteger(request.messageId)
       && isValidIso(request.cutoff) && isValidShanghaiDay(request.shanghaiDay)
       && shanghaiDay(new Date(request.cutoff)) === request.shanghaiDay
-      && requestIdFor(request.chatId, request.messageId) === value.requestId) {
+      && personalFeedV2TelegramRequestId(request.chatId, request.messageId) === value.requestId) {
       return deepFreeze(value as unknown as RequestOpenedRecord)
     }
   }
@@ -415,7 +415,7 @@ function parseLedgerRecord(value: unknown, lineNumber: number): LedgerRecord {
     && hasExactlyKeys(value, ['schemaVersion', 'event', 'requestId', 'outcomeDigest', 'receipt'])
     && isDigest(value.outcomeDigest) && isRecord(value.receipt)) {
     const receipt = parseReceipt(value.receipt, lineNumber)
-    if (receipt !== undefined && requestIdFor(receipt.chatId, receipt.triggerMessageId) === value.requestId) {
+    if (receipt !== undefined && personalFeedV2TelegramRequestId(receipt.chatId, receipt.triggerMessageId) === value.requestId) {
       return deepFreeze(value as unknown as DeliveredTerminalRecord)
     }
   }
@@ -442,7 +442,7 @@ function parseOutcome(value: Record<string, unknown>): PersonalFeedV2Outcome | u
 
 function parseReceipt(value: unknown, fromLedgerLine?: number): PersonalFeedV2Receipt {
   if (!isRecord(value) || !hasExactlyKeys(value, ['chatId', 'triggerMessageId', 'visibleText', 'messageIds'])
-    || !isSafeInteger(value.chatId) || !isSafePositiveInteger(value.triggerMessageId)
+    || !isSafeInteger(value.chatId) || value.chatId === 0 || !isSafePositiveInteger(value.triggerMessageId)
     || typeof value.visibleText !== 'string' || !Array.isArray(value.messageIds)
     || Object.getPrototypeOf(value.messageIds) !== Array.prototype || !hasSingleArrayItem(value.messageIds)
     || !isSafePositiveInteger(value.messageIds[0])) {
@@ -518,7 +518,13 @@ function publicRequest(record: RequestOpenedRecord): PersonalFeedV2Request {
   return { requestId: record.requestId, cutoff: record.request.cutoff, shanghaiDay: record.request.shanghaiDay }
 }
 
-function requestIdFor(chatId: number, messageId: number): string {
+export function personalFeedV2TelegramRequestId(chatId: number, messageId: number): string {
+  if (!Number.isSafeInteger(chatId) || chatId === 0) {
+    throw new TypeError('personal Feed Telegram chat id must be a non-zero safe integer')
+  }
+  if (!Number.isSafeInteger(messageId) || messageId <= 0) {
+    throw new TypeError('personal Feed Telegram message id must be a positive safe integer')
+  }
   return `telegram:${chatId}:${messageId}`
 }
 

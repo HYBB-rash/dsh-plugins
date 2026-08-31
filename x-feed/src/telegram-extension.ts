@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createPersonalFeedV2RequestCoordinator } from '@herman/personal-feed'
+import { createPersonalContextOwner, createSessionUserHistoryAdapter } from '@herman/personal-feed'
 import { parseXFeedRuntimeConfig } from './config.ts'
 import { XFeedbackStore } from './store.ts'
 import { registerXFeedTools } from './tools.ts'
@@ -10,7 +11,9 @@ import { runCleanFeedback } from './x-feedback/clean-agent.ts'
 import { FeedbackEffectAdapter, type FeedbackOperationStore } from './x-feedback/feedback-effect-adapter.ts'
 import { InMemoryPendingStore } from './x-feedback/pending-store.ts'
 import { registerTelegramFeedbackAdapter } from './x-feedback/telegram-adapter.ts'
-import { registerPersonalFeedTelegramAdapter } from './personal-feed/telegram-adapter.ts'
+import { createPersonalFeedTelegramRequestHandler, registerPersonalFeedTelegramAdapter } from './personal-feed/telegram-adapter.ts'
+import { createPersonalContextTelegramRuntime } from './personal-feed/personal-context-telegram-runtime.ts'
+import { createPersonalContextSemanticLlmPorts } from './personal-feed/personal-context-semantic-llm.ts'
 import { FileTrustedFactRepository } from './x-feedback/trusted-fact-repository.ts'
 import { FeedbackUseCase } from './x-feedback/use-case.ts'
 import {
@@ -76,29 +79,77 @@ export async function installTelegramExtension(
     clock: { now: () => Date.now() },
   })
   const useCase = new FeedbackUseCase(pendingStore)
-  const stopFeedback = registerTelegramFeedbackAdapter(ctx, {
-    pendingStore,
-    trustedFactRepository,
-    effectSink,
-    useCase,
-    runCleanFeedback: (request, signal) => runBoundedCleanFeedback(
-      ctx,
-      request,
-      signal,
-      config.feedbackTurnTimeoutMs,
-    ),
+  const service = (ctx as unknown as { get?: (name: string) => unknown }).get?.('sessionQuery')
+  if (!isSessionQuery(service)) throw new Error('x-feed: Telegram sessionQuery service is unavailable')
+  const modelService = (ctx as unknown as { get?: (name: string) => unknown }).get?.('agentDefaultModel')
+  if (!isModelSelectionService(modelService)) throw new Error('x-feed: default model selection service is unavailable')
+  const selection = modelService.currentSelection()
+  if (!isModelSelection(selection)) throw new Error('x-feed: default model selection is invalid')
+  const history = createSessionUserHistoryAdapter({
+    sessionId: config.telegramSessionId,
+    sessionQuery: service,
   })
+  const semantics = createPersonalContextSemanticLlmPorts({
+    ctx,
+    provider: selection.provider,
+    model: selection.model,
+  })
+  const owner = createPersonalContextOwner({
+    databasePath: join(config.personalFeedDataDir, 'v2', 'personal-context.sqlite'),
+    clock: { now: () => new Date() },
+    semantics,
+  })
+  const personalContextRuntime = createPersonalContextTelegramRuntime({ owner })
+  let bootstrap: Awaited<ReturnType<typeof owner.bootstrap>>
+  try {
+    bootstrap = await owner.bootstrap({ history })
+  } catch (error) {
+    owner.close()
+    throw error
+  }
+  if (bootstrap.status !== 'complete') {
+    owner.close()
+    throw new Error(`x-feed: personal context bootstrap incomplete (${bootstrap.reason})`)
+  }
+
   const personalFeedCoordinator = createPersonalFeedV2RequestCoordinator({
     ledgerPath: join(config.personalFeedDataDir, 'v2', 'requests.jsonl'),
     clock: { now: () => new Date() },
-    r4: { snapshot: async () => ({ kind: 'unknown' }) },
+    r4: personalContextRuntime.r4,
     r2: { observe: async () => ({ kind: 'unknown' }) },
     r3: { admit: async () => ({ kind: 'unknown' }) },
     r5: { judge: async () => ({ kind: 'unknown' }) },
   })
-  const stopPersonalFeed = registerPersonalFeedTelegramAdapter(ctx, {
-    coordinator: personalFeedCoordinator,
-  })
+  const personalFeedHandler = createPersonalFeedTelegramRequestHandler({ coordinator: personalFeedCoordinator })
+  let stopSource: (() => void) | undefined
+  let stopFeedback: (() => void) | undefined
+  let stopPersonalFeed: (() => void) | undefined
+  try {
+    stopSource = personalContextRuntime.registerSourceFirst(ctx, {
+      personalFeedHandler,
+    })
+    stopFeedback = registerTelegramFeedbackAdapter(ctx, {
+      pendingStore,
+      trustedFactRepository,
+      effectSink,
+      useCase,
+      runCleanFeedback: (request, signal) => runBoundedCleanFeedback(
+        ctx,
+        request,
+        signal,
+        config.feedbackTurnTimeoutMs,
+      ),
+    })
+    stopPersonalFeed = registerPersonalFeedTelegramAdapter(ctx, {
+      coordinator: personalFeedCoordinator,
+    })
+  } catch (error) {
+    stopPersonalFeed?.()
+    stopFeedback?.()
+    stopSource?.()
+    owner.close()
+    throw error
+  }
 
   const runtimes = new Map<Agent, () => void>()
   let stopping = false
@@ -128,12 +179,36 @@ export async function installTelegramExtension(
   return async () => {
     stopping = true
     stopCreated()
-    stopPersonalFeed()
-    stopFeedback()
+    stopPersonalFeed?.()
+    stopFeedback?.()
+    stopSource?.()
     const cleanups = [...runtimes.values()]
     runtimes.clear()
     await Promise.allSettled(cleanups.map(cleanup => Promise.resolve(cleanup())))
+    owner.close()
   }
+}
+
+function isSessionQuery(value: unknown): value is {
+  readonly listEvents: (sessionId: string, signal?: AbortSignal) => unknown | Promise<unknown>
+  readonly readEvent: (input: unknown, signal?: AbortSignal) => unknown | Promise<unknown>
+} {
+  return value !== null && typeof value === 'object'
+    && typeof (value as { listEvents?: unknown }).listEvents === 'function'
+    && typeof (value as { readEvent?: unknown }).readEvent === 'function'
+}
+
+function isModelSelectionService(value: unknown): value is { currentSelection(): unknown } {
+  return value !== null && typeof value === 'object'
+    && typeof (value as { currentSelection?: unknown }).currentSelection === 'function'
+}
+
+function isModelSelection(value: unknown): value is { readonly provider: string; readonly model: string } {
+  return value !== null && typeof value === 'object'
+    && typeof (value as { provider?: unknown }).provider === 'string'
+    && (value as { provider: string }).provider.trim() !== ''
+    && typeof (value as { model?: unknown }).model === 'string'
+    && (value as { model: string }).model.trim() !== ''
 }
 
 export function createTrustedFactNavigation(

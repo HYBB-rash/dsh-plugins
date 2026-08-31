@@ -1,5 +1,6 @@
 export {
   createPersonalFeedV2RequestCoordinator,
+  personalFeedV2TelegramRequestId,
   type CreatePersonalFeedV2RequestCoordinatorOptions,
   type PersonalFeedV2Clock,
   type PersonalFeedV2DuplicateResult,
@@ -36,6 +37,8 @@ export {
 export {
   PERSONAL_CONTEXT_USE_AUTHORIZATION,
   createPersonalContextOwner,
+  parseClassifierOutput,
+  type ParsedClassifierOutput,
   type PersonalContextBootstrapResult,
   type CreatePersonalContextOwnerOptions,
   type PersonalContextActiveFact,

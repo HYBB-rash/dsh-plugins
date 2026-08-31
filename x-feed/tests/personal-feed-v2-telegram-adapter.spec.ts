@@ -107,6 +107,49 @@ afterEach(() => {
 })
 
 describe('Personal Feed v2 Telegram adapter matcher', () => {
+  it('exports one shared request handler that can be invoked independently of adapter registration', async () => {
+    const module = await import('../src/personal-feed/telegram-adapter.ts') as {
+      readonly createPersonalFeedTelegramRequestHandler?: (options: { readonly coordinator: unknown }) =>
+        (envelope: TelegramInboundEnvelope) => Promise<TelegramInboundResult>
+    }
+    expect(typeof module.createPersonalFeedTelegramRequestHandler).toBe('function')
+    if (typeof module.createPersonalFeedTelegramRequestHandler !== 'function') return
+
+    const directory = mkdtempSync(join(tmpdir(), 'x-feed-shared-handler-'))
+    temporaryDirectories.push(directory)
+    const { coordinator, calls } = realCoordinator(directory)
+    const handler = module.createPersonalFeedTelegramRequestHandler({ coordinator })
+    expect(typeof handler).toBe('function')
+    const result = await handler(envelope('给我一次个人 Feed'))
+    expect(result).toMatchObject({
+      kind: 'handled-awaiting-delivery',
+      finalText: 'https://x.com/alice/status/42',
+    })
+    if (result.kind !== 'handled-awaiting-delivery') throw new Error('shared handler did not prepare delivery')
+    result.settle({
+      chatId: 7,
+      triggerMessageId: 11,
+      visibleText: result.finalText,
+      messageIds: [901],
+    })
+    expect(coordinator.read('telegram:7:11')).toMatchObject({ status: 'delivered' })
+    expect(calls).toEqual({ r4: 1, r2: 1, r3: 1, r5: 1 })
+  })
+
+  it('handles an empty or whitespace envelope before matcher, request ledger, capture, X, or root', async () => {
+    const { ctx, registered } = context()
+    const prepare = vi.fn(async () => { throw new Error('blank must not prepare') })
+    const dispose = registerPersonalFeedTelegramAdapter(ctx as never, {
+      coordinator: { prepare, read: () => undefined },
+    } as never)
+    const next = vi.fn(() => ({ kind: 'root-delivered' as const }))
+
+    await expect(listener(registered)(envelope('  \t\n  '), next)).resolves.toEqual({ kind: 'handled', finalText: '' })
+    expect(prepare).not.toHaveBeenCalled()
+    expect(next).not.toHaveBeenCalled()
+    dispose()
+  })
+
   it.each([
     '给我一次个人 Feed',
     '我想看一下 personal feed',

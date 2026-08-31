@@ -26,9 +26,12 @@ import {
   type PersonalContextTerminalChange,
   type PersonalContextTerminalDisposition,
 } from './personal-context-semantics.ts'
+import { personalFeedV2TelegramRequestId } from './request-coordinator.ts'
 
 export {
   PERSONAL_CONTEXT_USE_AUTHORIZATION,
+  parseClassifierOutput,
+  type ParsedClassifierOutput,
   type PersonalContextAttitude,
   type PersonalContextActiveFact,
   type PersonalContextCanonicalFact,
@@ -522,7 +525,7 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
       })
       let classifierAwaited: AwaitedSemanticPort<unknown>
       try {
-        classifierAwaited = await awaitSemanticPort(options.semantics.classifier(classifierInput), parsed.signal)
+        classifierAwaited = await awaitSemanticPort(options.semantics.classifier(classifierInput, parsed.signal), parsed.signal)
       } catch {
         if (isAbortRequested(parsed.signal)) return pendingSettleResult(parsed.sourceKey, 'aborted')
         continue
@@ -539,7 +542,7 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
         })
         let validationAwaited: AwaitedSemanticPort<unknown>
         try {
-          validationAwaited = await awaitSemanticPort(options.semantics.noFactValidator(validatorInput), parsed.signal)
+          validationAwaited = await awaitSemanticPort(options.semantics.noFactValidator(validatorInput, parsed.signal), parsed.signal)
         } catch {
           if (isAbortRequested(parsed.signal)) return pendingSettleResult(parsed.sourceKey, 'aborted')
           continue
@@ -582,7 +585,7 @@ export function createPersonalContextOwner(options: CreatePersonalContextOwnerOp
         let validationAwaited: AwaitedSemanticPort<unknown>
         try {
           validationAwaited = await awaitSemanticPort(
-            options.semantics.entailmentValidator(validatorInput),
+            options.semantics.entailmentValidator(validatorInput, parsed.signal),
             parsed.signal,
           )
         } catch {
@@ -1516,7 +1519,7 @@ function preflightLegacyState(database: DatabaseSync, path: string, version: 2 |
     const locator: PersonalContextTelegramLocator = { kind: 'telegram_inbound', chatId: row.chat_id, messageId: row.message_id }
     if (row.source_key !== sourceKeyFor(locator)) throw new PersonalFeedScopeStoreError('legacy personal context source key does not match locator')
     const excludedRequestId = row.excluded_request_id
-    if (excludedRequestId !== null && (typeof excludedRequestId !== 'string' || excludedRequestId !== requestIdFor(locator))) {
+    if (excludedRequestId !== null && (typeof excludedRequestId !== 'string' || !isRequestIdForLocator(excludedRequestId, locator))) {
       throw new PersonalFeedScopeStoreError('legacy personal context excluded request id is invalid')
     }
     const excluded = typeof excludedRequestId === 'string' ? excludedRequestId : undefined
@@ -1712,8 +1715,7 @@ function validateCaptureInput(input: PersonalContextCaptureInput): PersonalConte
     if (typeof input.excludedRequestId !== 'string' || input.excludedRequestId === '') {
       throw new PersonalFeedScopeInputError('personal context excluded request id is invalid')
     }
-    const expected = requestIdFor(input.locator)
-    if (input.excludedRequestId !== expected) {
+    if (!isRequestIdForLocator(input.excludedRequestId, input.locator)) {
       throw new PersonalFeedScopeInputError('personal context excluded request id does not match locator')
     }
   }
@@ -1885,7 +1887,7 @@ function validateFreezeFenceInput(input: PersonalContextFreezeFenceInput): Perso
     throw new PersonalFeedScopeInputError('personal context fence input has an unsupported shape')
   }
   const request = input.request
-  if (typeof request.requestId !== 'string' || !/^telegram:-?\d+:[1-9]\d*$/.test(request.requestId)) {
+  if (typeof request.requestId !== 'string' || !isCanonicalTelegramRequestId(request.requestId)) {
     throw new PersonalFeedScopeInputError('personal context fence request id is invalid')
   }
   if (typeof request.cutoff !== 'string' || !Number.isFinite(Date.parse(request.cutoff))) {
@@ -2168,7 +2170,7 @@ function sourceFromRow(row: SourceRow, coverage: PersonalContextCoverage): Perso
     : { kind: 'telegram_session_history', sessionId: row.session_id as string, eventSeq: row.event_seq as number }
   if (row.source_key !== sourceKeyFor(locator)) throw new PersonalFeedScopeStoreError('personal context source key is invalid')
   const excludedRequestId = row.excluded_request_id
-  if (excludedRequestId !== null && (locator.kind !== 'telegram_inbound' || typeof excludedRequestId !== 'string' || excludedRequestId !== requestIdFor(locator))) {
+  if (excludedRequestId !== null && (locator.kind !== 'telegram_inbound' || typeof excludedRequestId !== 'string' || !isRequestIdForLocator(excludedRequestId, locator))) {
     throw new PersonalFeedScopeStoreError('personal context excluded request id is invalid')
   }
   if (row.raw_text !== null) {
@@ -2315,8 +2317,24 @@ function digestFor(value: unknown): string {
   return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`
 }
 
-function requestIdFor(locator: PersonalContextTelegramLocator): string {
-  return `telegram:${locator.chatId}:${locator.messageId}`
+function isRequestIdForLocator(value: string, locator: PersonalContextTelegramLocator): boolean {
+  try {
+    return value === personalFeedV2TelegramRequestId(locator.chatId, locator.messageId)
+  } catch {
+    return false
+  }
+}
+
+function isCanonicalTelegramRequestId(value: string): boolean {
+  const match = /^telegram:(-?\d+):([1-9]\d*)$/.exec(value)
+  if (match === null) return false
+  const chatId = Number(match[1])
+  const messageId = Number(match[2])
+  try {
+    return personalFeedV2TelegramRequestId(chatId, messageId) === value
+  } catch {
+    return false
+  }
 }
 
 function isSafeNonZeroInteger(value: unknown): value is number {

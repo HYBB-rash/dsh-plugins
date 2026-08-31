@@ -19,6 +19,10 @@ afterEach(() => {
 function makeCtx(logs = { info: [] as string[], warn: [] as string[], error: [] as string[] }) {
   const handlers: string[] = []
   const listeners: Array<{ readonly name: string; readonly listener: (...args: any[]) => unknown }> = []
+  const sessionQuery = {
+    listEvents: async (_sessionId: string) => [],
+    readEvent: async (_input: unknown) => undefined,
+  }
   return {
     logs,
     handlers,
@@ -29,10 +33,25 @@ function makeCtx(logs = { info: [] as string[], warn: [] as string[], error: [] 
         warn: (message: string) => logs.warn.push(message),
         error: (message: string) => logs.error.push(message),
       },
+      get: (name: string) => name === 'sessionQuery'
+        ? sessionQuery
+        : name === 'agentDefaultModel'
+          ? { currentSelection: () => ({ provider: 'test-provider', model: 'test-model' }) }
+          : undefined,
+      llm: { stream: async function* (_request: unknown) { /* empty fixture stream */ } },
       on: (name: string, listener?: (...args: any[]) => unknown) => {
         handlers.push(name)
         if (listener !== undefined) listeners.push({ name, listener })
         return () => undefined
+      },
+      waterfall: (name: string, value: unknown, root: () => unknown) => {
+        const chain = listeners.filter(entry => entry.name === name).map(entry => entry.listener)
+        let index = 0
+        const next = (): unknown => {
+          const listener = chain[index++]
+          return listener === undefined ? root() : listener(value, next)
+        }
+        return next()
       },
       agents: { roots: () => [] },
     },
@@ -75,7 +94,10 @@ describe('Telegram extension boundary', () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'x-feed-telegram-extension-'))
     try {
       const harness = makeCtx()
-      const dispose = await installTelegramExtension(harness.ctx as never, { dataDir })
+      const dispose = await installTelegramExtension(harness.ctx as never, {
+        dataDir,
+        personalFeedDataDir: join(dataDir, 'personal-feed'),
+      })
       expect(JSON.parse(readFileSync(join(dataDir, 'trusted-fact-navigation.json'), 'utf8'))).toMatchObject({
         schemaVersion: 1,
         items: [],
@@ -88,7 +110,7 @@ describe('Telegram extension boundary', () => {
     }
   })
 
-  it('installs X feedback before the ordinary Personal Feed listener, whose unavailable ports fail explicit Feed safely', async () => {
+  it('installs source capture before X feedback and Personal Feed, whose unavailable ports fail explicit Feed safely', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'x-feed-telegram-personal-feed-'))
     const personalFeedDataDir = join(dataDir, 'personal-feed')
     const harness = makeCtx()
@@ -101,7 +123,7 @@ describe('Telegram extension boundary', () => {
       const waterfallListeners = harness.listeners
         .filter(entry => entry.name === 'telegram/inbound')
         .map(entry => entry.listener)
-      expect(waterfallListeners).toHaveLength(2)
+      expect(waterfallListeners).toHaveLength(3)
 
       const root = vi.fn(() => ({ kind: 'root-delivered' as const }))
       const envelope = Object.freeze({
@@ -110,7 +132,7 @@ describe('Telegram extension boundary', () => {
         currentText: '给我一次个人 Feed',
         signal: new AbortController().signal,
       })
-      const result = await waterfallListeners[1]!(envelope, root)
+      const result = await harness.ctx.waterfall!('telegram/inbound', envelope, root)
 
       expect(result).toMatchObject({
         kind: 'handled-awaiting-delivery',
@@ -131,7 +153,10 @@ describe('Telegram extension boundary', () => {
       throw new Error('navigation disk unavailable')
     })
     try {
-      await expect(installTelegramExtension(harness.ctx as never, { dataDir }))
+      await expect(installTelegramExtension(harness.ctx as never, {
+        dataDir,
+        personalFeedDataDir: join(dataDir, 'personal-feed'),
+      }))
         .rejects.toThrow('x-feed: trusted-fact navigation not-ready: navigation disk unavailable')
       expect(harness.handlers).toEqual([])
       expect(harness.logs.error.some(message => message.includes('not-ready'))).toBe(true)

@@ -99,11 +99,18 @@ describe('TODO 4 trusted-fact navigation integration', () => {
       agents: { roots: () => [] },
       on: () => () => {},
       effect: async (callback: () => unknown) => callback(),
+      get: (name: string) => name === 'sessionQuery'
+        ? { listEvents: async () => [], readEvent: async () => undefined }
+        : name === 'agentDefaultModel'
+          ? { currentSelection: () => ({ provider: 'test-provider', model: 'test-model' }) }
+          : undefined,
+      llm: { stream: async function* (_request: unknown) { /* empty fixture stream */ } },
     }
 
     try {
       const dispose = await installTelegramExtension(context as never, {
         dataDir: directory,
+        personalFeedDataDir: join(directory, 'personal-feed'),
         pythonBin: '/usr/bin/python3',
         pipelinePath: '/tmp/x-insight-pipeline.py',
         telegramSessionId: 'session-telegram',
