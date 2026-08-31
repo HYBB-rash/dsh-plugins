@@ -32,6 +32,21 @@ export interface TelegramInboundHandled {
   readonly finalText: string
 }
 
+/** The authoritative visible-message receipt returned by Telegram delivery. */
+export interface TelegramInboundDeliveryReceipt {
+  readonly chatId: number
+  readonly triggerMessageId: number
+  readonly visibleText: string
+  readonly messageIds: readonly number[]
+}
+
+/** A handled result whose durable owner must be settled after transport delivery. */
+export interface TelegramInboundHandledAwaitingDelivery {
+  readonly kind: 'handled-awaiting-delivery'
+  readonly finalText: string
+  readonly settle: (receipt: TelegramInboundDeliveryReceipt) => void | Promise<void>
+}
+
 export interface TelegramInboundFailed {
   readonly kind: 'failed'
   readonly visibleError: string
@@ -43,6 +58,7 @@ export interface TelegramInboundRootDelivered {
 
 export type TelegramInboundResult =
   | TelegramInboundHandled
+  | TelegramInboundHandledAwaitingDelivery
   | TelegramInboundFailed
   | TelegramInboundRootDelivered
 

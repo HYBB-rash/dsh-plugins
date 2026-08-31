@@ -34,10 +34,19 @@ describe('telegram inbound contract', () => {
 
   it('uses terminal outcomes that distinguish interception, failure, and root delivery', () => {
     const handled: TelegramInboundHandled = { kind: 'handled', finalText: '已处理完成' }
+    const awaiting: TelegramInboundResult = {
+      kind: 'handled-awaiting-delivery',
+      finalText: '已处理完成',
+      settle: (_receipt) => {},
+    }
     const failed: TelegramInboundResult = { kind: 'failed', visibleError: '处理失败' }
     const delivered: TelegramInboundRootDelivered = { kind: 'root-delivered' }
 
-    expect([handled.kind, failed.kind, delivered.kind]).toEqual(['handled', 'failed', 'root-delivered'])
+    expect([handled.kind, awaiting.kind, failed.kind, delivered.kind]).toEqual([
+      'handled', 'handled-awaiting-delivery', 'failed', 'root-delivered',
+    ])
+    expect(awaiting.finalText).toBe('已处理完成')
+    expect(awaiting.settle).toEqual(expect.any(Function))
   })
 
   it('uses the real Cordis ready and waterfall event signatures', () => {

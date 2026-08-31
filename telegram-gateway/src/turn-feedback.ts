@@ -19,6 +19,9 @@
 
 import { chunkText, type SendMessageOptions, type TelegramHttp } from './telegram-contract.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { TelegramInboundDeliveryReceipt } from './inbound-contract.ts'
+
+export type TurnFeedbackReceipt = TelegramInboundDeliveryReceipt
 
 /** Narrow logger surface used by feedback calls. */
 export interface TurnFeedbackLogger {
@@ -164,11 +167,23 @@ export class TurnFeedback {
 
   /** Close new frames and deliver the authoritative final text, then 👍. */
   async finish(finalText: string): Promise<void> {
+    await this.finishWithReceipt(finalText)
+  }
+
+  /** Close new frames, deliver the final text, and return its transport receipt. */
+  async finishWithReceipt(finalText: string): Promise<TurnFeedbackReceipt> {
     this.close()
     await this.deliveryTail
-    await this.writeFinal(finalText)
+    const normalized = normalizeVisibleText(finalText)
+    const messageIds = await this.writeFinal(normalized)
     await ignoreFeedbackFailure(this.logger, 'success reaction', () => {
       return this.http.setReaction(this.chatId, this.triggerMessageId, '👍', this.signal)
+    })
+    return Object.freeze({
+      chatId: this.chatId,
+      triggerMessageId: this.triggerMessageId,
+      visibleText: normalized,
+      messageIds: Object.freeze([...messageIds]),
     })
   }
 
@@ -234,11 +249,11 @@ export class TurnFeedback {
    * delivered interim full text is not resent (exact dedup on the whole text);
    * a failed interim does not count as delivered, so the same text is sent.
    */
-  private async writeFinal(finalText: string): Promise<void> {
+  private async writeFinal(finalText: string): Promise<readonly number[]> {
     const normalized = normalizeVisibleText(finalText)
-    if (normalized === '') return
-    if (this.deliveredVisibleTexts.has(normalized)) return
-    await this.sendSemanticMessage(normalized)
+    if (normalized === '') return []
+    if (this.deliveredVisibleTexts.has(normalized)) return []
+    return this.sendSemanticMessage(normalized)
   }
 
   /**
@@ -247,18 +262,21 @@ export class TurnFeedback {
    * trigger message; later messages are sent plain. Multi-chunk finals keep
    * replying to their previous chunk so ordering is explicit.
    */
-  private async sendSemanticMessage(text: string): Promise<void> {
+  private async sendSemanticMessage(text: string): Promise<readonly number[]> {
     const replyTo = this.hasDeliveredVisibleMessage ? undefined : this.triggerMessageId
     const chunks = chunkText(text, this.maxMessageChars)
     let lastMessageId: number | undefined
+    const messageIds: number[] = []
     for (const [index, chunk] of chunks.entries()) {
       const options: SendMessageOptions | undefined = index === 0
         ? (replyTo !== undefined ? { replyToMessageId: replyTo } : undefined)
         : (lastMessageId !== undefined ? { replyToMessageId: lastMessageId } : undefined)
       const ref = await this.http.sendMessage(this.chatId, chunk, options, this.signal)
       lastMessageId = ref.messageId
+      messageIds.push(ref.messageId)
     }
     this.hasDeliveredVisibleMessage = true
+    return messageIds
   }
 
   private describe(error: unknown): string {

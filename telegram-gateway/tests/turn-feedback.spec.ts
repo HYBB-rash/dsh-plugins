@@ -251,10 +251,31 @@ describe('TurnFeedback', () => {
     await flush()
     expect(http.sendMessage).not.toHaveBeenCalled()
 
-    await feedback.finish('最终结果')
+    expect(await feedback.finish('最终结果')).toBeUndefined()
     expect(http.sendMessage).toHaveBeenCalledTimes(1)
     expect(http.sendMessage).toHaveBeenCalledWith(CHAT_ID, '最终结果', { replyToMessageId: TRIGGER_ID }, expect.any(AbortSignal))
     expect(http.setReaction).toHaveBeenLastCalledWith(CHAT_ID, TRIGGER_ID, '👍', expect.any(AbortSignal))
+  })
+
+  it('finishWithReceipt returns the real final Bot API message id and exact visible text', async () => {
+    const { http, feedback } = makeHarness()
+    await feedback.start()
+
+    const receipt = await feedback.finishWithReceipt('最终结果')
+
+    expect(receipt).toEqual({
+      chatId: CHAT_ID,
+      triggerMessageId: TRIGGER_ID,
+      visibleText: '最终结果',
+      messageIds: [100],
+    })
+    expect(http.sendMessage).toHaveBeenCalledOnce()
+    expect(http.sendMessage).toHaveBeenCalledWith(
+      CHAT_ID,
+      '最终结果',
+      { replyToMessageId: TRIGGER_ID },
+      expect.any(AbortSignal),
+    )
   })
 
   it('sends a complete text + tool-call message immediately as one immutable message', async () => {

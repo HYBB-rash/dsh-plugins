@@ -85,6 +85,8 @@ export {
   type TelegramInboundEnvelope,
   type TelegramInboundFailed,
   type TelegramInboundHandled,
+  type TelegramInboundHandledAwaitingDelivery,
+  type TelegramInboundDeliveryReceipt,
   type TelegramInboundMessage,
   type TelegramInboundReference,
   type TelegramInboundResult,
@@ -552,6 +554,26 @@ export async function runGateway(
 
           if (result.kind === 'handled') {
             await feedback.finish(result.finalText)
+            armedReaction = undefined
+            continue
+          }
+          if (result.kind === 'handled-awaiting-delivery') {
+            try {
+              const receipt = await feedback.finishWithReceipt(result.finalText)
+              await result.settle(receipt)
+            } catch (error) {
+              feedback.close()
+              try {
+                await feedback.markFailed()
+              } catch {
+                // Failure reaction is best-effort and must not reopen generic delivery.
+              }
+              try {
+                ctx.logger.warn(`telegram-gateway: handled delivery unavailable: ${error instanceof Error ? error.message : String(error)}`)
+              } catch {
+                // Logging is non-authoritative at this terminal boundary.
+              }
+            }
             armedReaction = undefined
             continue
           }
