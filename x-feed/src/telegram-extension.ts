@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { createPersonalFeedV2RequestCoordinator } from '@herman/personal-feed'
 import { parseXFeedRuntimeConfig } from './config.ts'
 import { XFeedbackStore } from './store.ts'
 import { registerXFeedTools } from './tools.ts'
@@ -9,6 +10,7 @@ import { runCleanFeedback } from './x-feedback/clean-agent.ts'
 import { FeedbackEffectAdapter, type FeedbackOperationStore } from './x-feedback/feedback-effect-adapter.ts'
 import { InMemoryPendingStore } from './x-feedback/pending-store.ts'
 import { registerTelegramFeedbackAdapter } from './x-feedback/telegram-adapter.ts'
+import { registerPersonalFeedTelegramAdapter } from './personal-feed/telegram-adapter.ts'
 import { FileTrustedFactRepository } from './x-feedback/trusted-fact-repository.ts'
 import { FeedbackUseCase } from './x-feedback/use-case.ts'
 import {
@@ -86,6 +88,17 @@ export async function installTelegramExtension(
       config.feedbackTurnTimeoutMs,
     ),
   })
+  const personalFeedCoordinator = createPersonalFeedV2RequestCoordinator({
+    ledgerPath: join(config.personalFeedDataDir, 'v2', 'requests.jsonl'),
+    clock: { now: () => new Date() },
+    r4: { snapshot: async () => ({ kind: 'unknown' }) },
+    r2: { observe: async () => ({ kind: 'unknown' }) },
+    r3: { admit: async () => ({ kind: 'unknown' }) },
+    r5: { judge: async () => ({ kind: 'unknown' }) },
+  })
+  const stopPersonalFeed = registerPersonalFeedTelegramAdapter(ctx, {
+    coordinator: personalFeedCoordinator,
+  })
 
   const runtimes = new Map<Agent, () => void>()
   let stopping = false
@@ -115,6 +128,7 @@ export async function installTelegramExtension(
   return async () => {
     stopping = true
     stopCreated()
+    stopPersonalFeed()
     stopFeedback()
     const cleanups = [...runtimes.values()]
     runtimes.clear()

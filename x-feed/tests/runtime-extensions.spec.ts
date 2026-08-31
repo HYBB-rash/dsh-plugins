@@ -18,17 +18,20 @@ afterEach(() => {
 
 function makeCtx(logs = { info: [] as string[], warn: [] as string[], error: [] as string[] }) {
   const handlers: string[] = []
+  const listeners: Array<{ readonly name: string; readonly listener: (...args: any[]) => unknown }> = []
   return {
     logs,
     handlers,
+    listeners,
     ctx: {
       logger: {
         info: (message: string) => logs.info.push(message),
         warn: (message: string) => logs.warn.push(message),
         error: (message: string) => logs.error.push(message),
       },
-      on: (name: string) => {
+      on: (name: string, listener?: (...args: any[]) => unknown) => {
         handlers.push(name)
+        if (listener !== undefined) listeners.push({ name, listener })
         return () => undefined
       },
       agents: { roots: () => [] },
@@ -85,7 +88,43 @@ describe('Telegram extension boundary', () => {
     }
   })
 
-  it('fails before registering handlers when navigation is unavailable', async () => {
+  it('installs X feedback before the ordinary Personal Feed listener, whose unavailable ports fail explicit Feed safely', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'x-feed-telegram-personal-feed-'))
+    const personalFeedDataDir = join(dataDir, 'personal-feed')
+    const harness = makeCtx()
+    try {
+      const dispose = await installTelegramExtension(harness.ctx as never, {
+        dataDir,
+        personalFeedDataDir,
+        personalFeedRequiredSources: ['x'],
+      })
+      const waterfallListeners = harness.listeners
+        .filter(entry => entry.name === 'telegram/inbound')
+        .map(entry => entry.listener)
+      expect(waterfallListeners).toHaveLength(2)
+
+      const root = vi.fn(() => ({ kind: 'root-delivered' as const }))
+      const envelope = Object.freeze({
+        chat: Object.freeze({ id: 7, type: 'private' }),
+        message: Object.freeze({ id: 11 }),
+        currentText: '给我一次个人 Feed',
+        signal: new AbortController().signal,
+      })
+      const result = await waterfallListeners[1]!(envelope, root)
+
+      expect(result).toMatchObject({
+        kind: 'handled-awaiting-delivery',
+        finalText: '这次没有完成：个人语境不足或未完成。',
+      })
+      expect((result as { readonly finalText: string }).finalText).not.toBe('这次没有值得看的内容。')
+      expect(root).not.toHaveBeenCalled()
+      await dispose()
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('Telegram adapter fails before registering handlers when navigation is unavailable', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'x-feed-startup-failure-'))
     const harness = makeCtx()
     vi.spyOn(FileNavigationSnapshotStore.prototype, 'replace').mockImplementation(() => {

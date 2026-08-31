@@ -16,12 +16,14 @@ type Listener = (...args: never[]) => unknown
 interface CordisFixture {
   readonly ctx: Record<string, unknown>
   readonly listeners: Map<string, Listener[]>
+  readonly invokedListeners: Listener[]
   readonly disposerSpies: ReturnType<typeof vi.fn>[]
   readonly cleanups: Array<() => unknown>
 }
 
 function makeFixture(): CordisFixture {
   const listeners = new Map<string, Listener[]>()
+  const invokedListeners: Listener[] = []
   const disposerSpies: ReturnType<typeof vi.fn>[] = []
   const cleanups: Array<() => unknown> = []
   const services: Record<string, unknown> = {
@@ -60,14 +62,14 @@ function makeFixture(): CordisFixture {
       let index = 0
       const next = (): TelegramInboundResult | Promise<TelegramInboundResult> => {
         const listener = chain[index++]
-        return listener === undefined
-          ? root()
-          : listener(value, next)
+        if (listener === undefined) return root()
+        invokedListeners.push(listener)
+        return listener(value, next)
       }
       return next()
     },
   }
-  return { ctx, listeners, disposerSpies, cleanups }
+  return { ctx, listeners, invokedListeners, disposerSpies, cleanups }
 }
 
 function envelope(currentText: string): TelegramInboundEnvelope {
@@ -110,7 +112,7 @@ afterEach(() => {
 })
 
 describe('dsh-x-feed shared composition', () => {
-  it('registers readiness and waterfall, handles one operation after clean output, and unloads both listeners', async () => {
+  it('registers one readiness and two ordered waterfalls, handles an X operation through the first, and unloads every listener', async () => {
     dataDir = mkdtempSync(join(tmpdir(), 'x-feed-integration-'))
     const fixture = makeFixture()
     const cleanRunner = vi.mocked(runCleanFeedback)
@@ -126,20 +128,23 @@ describe('dsh-x-feed shared composition', () => {
     const dispose = await installTelegramExtension(fixture.ctx as never, config(dataDir))
 
     expect(fixture.listeners.get('telegram/inbound/ready')).toHaveLength(1)
-    expect(fixture.listeners.get('telegram/inbound')).toHaveLength(1)
+    const inboundListeners = fixture.listeners.get('telegram/inbound') ?? []
+    expect(inboundListeners).toHaveLength(2)
     const value = envelope('请收藏 https://x.com/OpenAI/status/123')
     expect(fixture.ctx.bail!('telegram/inbound/ready', value)).toBe(true)
     const root = vi.fn((): TelegramInboundResult => ({ kind: 'root-delivered' }))
     const result = await fixture.ctx.waterfall!('telegram/inbound', value, root)
 
     expect(result).toEqual({ kind: 'handled', finalText: '已记录这次反馈。' })
+    expect(fixture.invokedListeners).toEqual([inboundListeners[0]])
     expect(root).not.toHaveBeenCalled()
     expect(cleanOutputValidated).toBe(true)
     expect(JSON.parse(readFileSync(join(dataDir, 'feedback.jsonl'), 'utf8')).operation).toBe('save')
 
     await dispose()
-    expect(fixture.disposerSpies).toHaveLength(3)
+    expect(fixture.disposerSpies).toHaveLength(4)
     expect(fixture.disposerSpies.every(dispose => dispose.mock.calls.length === 1)).toBe(true)
+    expect([...fixture.listeners.values()].every(registered => registered.length === 0)).toBe(true)
   })
 
   it.each([
