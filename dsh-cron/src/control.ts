@@ -55,7 +55,6 @@ import type {
   JobLogEntry,
   JobSessionMode,
   RunFinishRecord,
-  RunRecord,
   RunScheduleReanchorRecord,
 } from './types.ts'
 
@@ -382,9 +381,7 @@ function publicRunStatus(status: string): CronRunExecutionStatus {
   return 'error'
 }
 
-type TerminalRunRecord = RunRecord | RunFinishRecord
-
-function publicDeliveryState(record: TerminalRunRecord): CronRunDeliveryState {
+function publicDeliveryState(record: RunFinishRecord): CronRunDeliveryState {
   if (record.deliveryState !== undefined) return record.deliveryState
   if (record.status === 'silent') return 'silent'
   if (record.status === 'expired') return 'not_requested'
@@ -394,18 +391,16 @@ function publicDeliveryState(record: TerminalRunRecord): CronRunDeliveryState {
   return 'silent'
 }
 
-function publicRun(record: TerminalRunRecord): CronRunSnapshot {
-  const outputPreview = 'outputPreview' in record && typeof record.outputPreview === 'string'
+function publicRun(record: RunFinishRecord): CronRunSnapshot {
+  const outputPreview = typeof record.outputPreview === 'string'
     ? record.outputPreview.slice(0, SUMMARY_LIMIT)
     : undefined
   const runStatus = publicRunStatus(record.status)
   const deliveryState = publicDeliveryState(record)
   return {
-    runId: 'runId' in record && typeof record.runId === 'string' ? record.runId : `${record.jobId}@${record.finishedAt}`,
+    runId: record.runId,
     jobId: record.jobId,
-    scheduledFor: 'scheduledFor' in record && typeof record.scheduledFor === 'string'
-      ? record.scheduledFor
-      : record.finishedAt,
+    scheduledFor: record.scheduledFor,
     finishedAt: record.finishedAt,
     runStatus,
     ...(outputPreview === undefined ? {} : { summary: outputPreview }),
@@ -418,9 +413,9 @@ function publicRun(record: TerminalRunRecord): CronRunSnapshot {
 
 function latestRunForJobs(runStore: RunStore, jobs: readonly Job[]): CronRunSnapshot | null {
   const jobIds = new Set(jobs.map(job => job.id))
-  let latest: TerminalRunRecord | undefined
+  let latest: RunFinishRecord | undefined
   for (const record of runStore.readForJobs(jobIds)) {
-    if (!('finishedAt' in record) || !('status' in record) || typeof record.finishedAt !== 'string') continue
+    if (record.event !== 'finish') continue
     if (latest === undefined || record.finishedAt >= latest.finishedAt) latest = record
   }
   return latest === undefined ? null : publicRun(latest)

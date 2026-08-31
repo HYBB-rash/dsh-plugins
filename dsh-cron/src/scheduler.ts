@@ -826,12 +826,9 @@ export class SchedulerRuntime implements RunNowPort {
       if (folded.anyRecord) return undefined
       return Date.parse(job.schedule.runAt)
     }
-    // A V2 claim/finish carries the authoritative recovery anchor.
+    // A supported ledger event carries the authoritative recovery anchor.
     if (folded.nextRunAt !== undefined) return Date.parse(folded.nextRunAt)
-    // V1 fallback: anchor off the last finished run, else creation time.
-    const base = folded.legacyFinishedAt !== undefined
-      ? Date.parse(folded.legacyFinishedAt)
-      : Date.parse(job.createdAt)
+    const base = Date.parse(job.createdAt)
     if (job.schedule.kind === 'interval') return base + job.schedule.minutes * 60_000
     return nextAfter(parseCron(job.schedule.expr), base)
   }

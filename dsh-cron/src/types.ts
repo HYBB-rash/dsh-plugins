@@ -226,20 +226,6 @@ export type RunStatus = 'success' | 'error' | 'silent' | 'expired'
 /** V2 execution trigger; omitted on old rows means the natural schedule. */
 export type RunTrigger = 'scheduled' | 'manual'
 
-/** One append-only line in runs.jsonl. */
-export interface RunRecord {
-  readonly jobId: string
-  readonly sessionId: string
-  readonly startedAt: string
-  readonly finishedAt: string
-  readonly status: RunStatus
-  readonly deliveredAt?: string
-  readonly deliveryState?: RunDeliveryState
-  readonly deliveryError?: string
-  readonly error?: string
-  readonly outputPreview?: string
-}
-
 /**
  * V2 ledger event: a durable claim persisted BEFORE any Agent, tool, or
  * Telegram side effect. A claimed run must never be re-executed after a
@@ -387,8 +373,8 @@ export type RunEventRecord =
   | RunDeliveryReceiptRecord
   | RunEnvironmentPrefinishSettleRecord
 
-/** Every durable run line, including the legacy V1 terminal shape. */
-export type RunHistoryRecord = RunRecord | RunEventRecord
+/** Every supported durable run line. */
+export type RunHistoryRecord = RunEventRecord
 
 /**
  * Generic terminal-outcome event emitted by the scheduler AFTER a finish

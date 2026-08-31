@@ -8,7 +8,7 @@
  * - a recurring claim alone supplies the crash-recovery nextRunAt;
  * - claim + finish adopt the finish's re-anchored nextRunAt;
  * - orphan claims surface as interrupted but stay settled (never re-dispatched);
- * - V1 terminal lines mixed with V2 events still recover;
+ * - unversioned terminal rows are ignored rather than treated as scheduler state;
  * - corrupt or unknown-version lines never break valid records.
  */
 
@@ -21,7 +21,6 @@ import type {
   RunClaimRecord,
   RunFailureAlertClaimRecord,
   RunFinishRecord,
-  RunRecord,
 } from '../src/types.ts'
 
 const dirs: string[] = []
@@ -106,7 +105,7 @@ function failureAlertClaim(
   }
 }
 
-function v1Record(overrides: Partial<RunRecord> = {}): RunRecord {
+function unversionedTerminal(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     jobId: 'cron-a',
     sessionId: 'session-cron-cron-a',
@@ -218,12 +217,12 @@ describe('RunLedger.foldJob', () => {
     expect(folded.settledRunIds.has(RUN_ID)).toBe(true)
   })
 
-  it('recovers when V1 terminal lines mix with V2 events', () => {
+  it('ignores unversioned terminal rows mixed with V2 events', () => {
     const dir = tempDir()
-    seed(dir, [v1Record({ finishedAt: '2026-08-14T09:00:10.000Z' }), claim({ nextRunAt: '2026-08-14T10:05:00.000Z' })])
+    seed(dir, [unversionedTerminal(), claim({ nextRunAt: '2026-08-14T10:05:00.000Z' })])
     const ledger = new RunLedger(dir)
     const folded = ledger.foldJob('cron-a')
-    expect(folded.legacyFinishedAt).toBe('2026-08-14T09:00:10.000Z')
+    expect(folded).not.toHaveProperty('legacyFinishedAt')
     expect(folded.nextRunAt).toBe('2026-08-14T10:05:00.000Z')
     expect(folded.anyRecord).toBe(true)
   })
@@ -399,17 +398,15 @@ describe('RunLedger V2 strict validation', () => {
     expect(folded.anyRecord).toBe(false)
   })
 
-  it('keeps V1 compatibility untouched after strict V2 validation', () => {
+  it('does not let an unversioned terminal row settle or fail a job', () => {
     const dir = tempDir()
-    seed(dir, [
-      v1Record({ finishedAt: '2026-08-14T09:00:10.000Z' }),
-      claim({ nextRunAt: '2026-08-14T10:05:00.000Z' }),
-    ])
+    seed(dir, [unversionedTerminal({ status: 'error' })])
     const ledger = new RunLedger(dir)
     const folded = ledger.foldJob('cron-a')
-    expect(folded.legacyFinishedAt).toBe('2026-08-14T09:00:10.000Z')
-    expect(folded.nextRunAt).toBe('2026-08-14T10:05:00.000Z')
-    expect(folded.anyRecord).toBe(true)
+    expect(folded).not.toHaveProperty('legacyFinishedAt')
+    expect(folded.nextRunAt).toBeUndefined()
+    expect(folded.anyRecord).toBe(false)
+    expect(folded.consecutiveExecutionErrors).toBe(0)
   })
 
   it('rejects manual nextRunAt and unknown trigger values fail closed', () => {

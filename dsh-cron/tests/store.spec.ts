@@ -1,10 +1,10 @@
 /**
  * Characterization tests for the durable JSONL stores (src/store.ts).
  *
- * These lock the CURRENT V1 behavior: job-log folding (tombstones, corrupt
- * line skipping, last-writer-wins), atomic appends, and V1 run-record
- * reading. Every test uses an isolated mkdtemp store directory and never
- * touches the live ~/.dsh/storages/dsh-cron.
+ * These lock the current job-log folding (tombstones, corrupt line skipping,
+ * last-writer-wins), atomic appends, and V2 run-record reading. Every test
+ * uses an isolated mkdtemp store directory and never touches the live
+ * ~/.dsh/storages/dsh-cron.
  */
 
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { foldJobLog, JobStore, JsonlStore, RunStore } from '../src/store.ts'
-import type { RunRecord } from '../src/types.ts'
+import type { RunFinishRecord } from '../src/types.ts'
 
 const dirs: string[] = []
 
@@ -107,29 +107,33 @@ describe('JobStore', () => {
 })
 
 describe('RunStore', () => {
-  it('round-trips a V1 terminal record (compat baseline)', () => {
+  it('round-trips a V2 terminal event', () => {
     const store = new RunStore(tempDir())
-    const record: RunRecord = {
+    const record: RunFinishRecord = {
+      schemaVersion: 2,
+      event: 'finish',
+      runId: 'cron-a@2026-08-14T00:00:00.000Z',
       jobId: 'cron-a',
       sessionId: 'session-cron-cron-a',
+      scheduledFor: '2026-08-14T00:00:00.000Z',
       startedAt: '2026-08-14T00:00:00.000Z',
       finishedAt: '2026-08-14T00:00:10.000Z',
       status: 'success',
       deliveredAt: '2026-08-14T00:00:11.000Z',
       outputPreview: 'ok',
     }
-    store.append(record)
+    store.appendEvent(record)
     expect(store.readAll()).toEqual([record])
   })
 
-  it('skips corrupt lines and keeps valid records', () => {
+  it('skips unversioned terminal rows and corrupt lines', () => {
     const dir = tempDir()
     writeFileSync(
       join(dir, 'runs.jsonl'),
-      '{"jobId":"cron-a","sessionId":"s","startedAt":"t","finishedAt":"t","status":"silent"}\n{corrupt\n',
+      '{"jobId":"cron-a","sessionId":"s","startedAt":"2026-08-14T00:00:00.000Z","finishedAt":"2026-08-14T00:00:10.000Z","status":"silent"}\n{corrupt\n',
       'utf8',
     )
     const reloaded = new RunStore(dir)
-    expect(reloaded.readAll().map(record => record.jobId)).toEqual(['cron-a'])
+    expect(reloaded.readAll()).toEqual([])
   })
 })

@@ -28,7 +28,6 @@ import type {
   RunFailureAlertClaimRecord,
   RunFinishRecord,
   RunHistoryRecord,
-  RunRecord,
   RunTrigger,
 } from './types.ts'
 import {
@@ -331,17 +330,12 @@ export class RunStore {
     this.store = new JsonlStore(join(storeDir, 'runs.jsonl'))
   }
 
-  /** Append one run record atomically. */
-  append(record: RunRecord): void {
-    this.store.append(record)
-  }
-
-  /** Append a V1 or V2 history line when the caller already has its shape. */
+  /** Append one supported history event atomically. */
   appendEvent(record: RunHistoryRecord): void {
     this.store.append(record)
   }
 
-  /** Read every recorded V1/V2 line (absent file = empty). */
+  /** Read every supported history event (absent file = empty). */
   readAll(): RunHistoryRecord[] {
     const records: RunHistoryRecord[] = []
     for (const raw of this.store.readLines()) {
@@ -349,8 +343,7 @@ export class RunStore {
       if (line === '') continue
       const parsed = parseRunLine(line)
       if (
-        parsed.kind === 'v1'
-        || parsed.kind === 'claim'
+        parsed.kind === 'claim'
         || parsed.kind === 'failure-alert-claim'
         || parsed.kind === 'finish'
         || parsed.kind === 'schedule-reanchor'
@@ -369,18 +362,6 @@ export class RunStore {
     const wanted = jobIds instanceof Set ? jobIds : new Set(jobIds)
     return this.readAll().filter(record => wanted.has(record.jobId))
   }
-
-  /** Return the latest terminal run for one job, including legacy V1 rows. */
-  latestForJob(jobId: string): RunRecord | RunFinishRecord | undefined {
-    let latest: RunRecord | RunFinishRecord | undefined
-    for (const record of this.readAll()) {
-      if (record.jobId !== jobId || !('finishedAt' in record) || typeof record.finishedAt !== 'string') continue
-      if (latest === undefined || record.finishedAt >= latest.finishedAt) {
-        latest = record as RunRecord | RunFinishRecord
-      }
-    }
-    return latest
-  }
 }
 
 /** Resolve the default store directory under DSH_HOME. */
@@ -389,13 +370,11 @@ export function defaultStoreDir(dshHome: string): string {
 }
 
 /**
- * One parsed ledger line: a V1 terminal record (no schemaVersion), a V2
- * claim/finish event, or an ignorable line (blank / corrupt / unknown
- * version). V2 parsing requires the discriminating fields so a malformed
- * event never counts as a valid record.
+ * One parsed V2 ledger event or an ignorable line (blank, corrupt,
+ * unversioned, or unknown version). Parsing requires the discriminating
+ * fields so a malformed event never counts as a valid record.
  */
 export type ParsedRunLine =
-  | { readonly kind: 'v1'; readonly record: RunRecord }
   | { readonly kind: 'claim'; readonly record: RunClaimRecord }
   | { readonly kind: 'failure-alert-claim'; readonly record: RunFailureAlertClaimRecord }
   | { readonly kind: 'finish'; readonly record: RunFinishRecord }
@@ -442,8 +421,7 @@ export function parseRunLine(raw: string): ParsedRunLine {
   if (typeof value !== 'object' || value === null) return { kind: 'skip' }
   const record = value as Record<string, unknown>
   if (typeof record.jobId !== 'string') return { kind: 'skip' }
-  if (record.schemaVersion !== undefined) {
-    if (record.schemaVersion === 2) {
+  if (record.schemaVersion === 2) {
       // Strict V2 validation: an event with a bad status, an unparsable
       // required time, an invalid optional nextRunAt, or an empty identifier
       // is skipped as a whole — it must never enter the fold as a real event.
@@ -552,18 +530,15 @@ export function parseRunLine(raw: string): ParsedRunLine {
           ? { kind: 'delivery-receipt', record: record as unknown as RunDeliveryReceiptRecord }
           : { kind: 'environment-prefinish-settle', record: record as unknown as RunEnvironmentPrefinishSettleRecord }
       }
-    }
-    // An explicit but unknown/unsupported version must not fall back to V1.
-    return { kind: 'skip' }
   }
-  return { kind: 'v1', record: record as unknown as RunRecord }
+  return { kind: 'skip' }
 }
 
 /** One job's folded run projection (restart view of the ledger). */
 export interface FoldedJobRuns {
   /** Every runId that is claimed or finished — never re-dispatch these. */
   readonly settledRunIds: ReadonlySet<string>
-  /** Whether natural scheduled/legacy evidence consumed the job (once-settled check). */
+  /** Whether natural scheduled evidence consumed the job (once-settled check). */
   readonly anyRecord: boolean
   /** Recovery nextRunAt (ISO) from the latest V2 claim/finish, if any. */
   readonly nextRunAt?: string
@@ -573,8 +548,6 @@ export interface FoldedJobRuns {
   readonly claims: ReadonlyMap<string, RunClaimRecord>
   /** Durable finishes whose business environment has not acknowledged settlement. */
   readonly unsettledFinishes: readonly RunFinishRecord[]
-  /** Latest non-expired V1 terminal record's finishedAt (legacy anchor). */
-  readonly legacyFinishedAt?: string
   /** Consecutive business-execution errors; delivery failures are separate. */
   readonly consecutiveExecutionErrors: number
   /** Run ids whose failure-alert side effect was durably claimed. */
@@ -598,9 +571,8 @@ export interface FoldedJobRuns {
 }
 
 /**
- * Fold one job's run ledger. V2 claims/finishes take precedence over the V1
- * legacy anchor; the recovery nextRunAt is the value of the last V2 line
- * that carries one (append order = event order).
+ * Fold one job's run ledger. The recovery nextRunAt is the value of the last
+ * supported event that carries one (append order = event order).
  */
 export function foldRunLines(lines: readonly string[], jobId: string): FoldedJobRuns {
   const settled = new Set<string>()
@@ -626,7 +598,6 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
   }
   let anyRecord = false
   let nextRunAt: string | undefined
-  let legacyFinishedAt: string | undefined
   let consecutiveExecutionErrors = 0
   let lastFailureAlertClaimedAt: string | undefined
   const foldExecutionStatus = (status: string) => {
@@ -655,15 +626,6 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
       continue
     }
     if (parsed.record.jobId !== jobId) continue
-    if (parsed.kind === 'v1') {
-      anyRecord = true
-      foldExecutionStatus(parsed.record.status)
-      if (parsed.record.status !== 'expired') {
-        const finished = parsed.record.finishedAt
-        if (legacyFinishedAt === undefined || finished > legacyFinishedAt) legacyFinishedAt = finished
-      }
-      continue
-    }
     if (parsed.kind === 'failure-alert-claim') {
       failureAlertRunIds.add(parsed.record.runId)
       if (
@@ -743,7 +705,6 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
     interrupted,
     claims,
     unsettledFinishes,
-    ...(legacyFinishedAt === undefined ? {} : { legacyFinishedAt }),
     consecutiveExecutionErrors,
     failureAlertRunIds,
     ...(lastFailureAlertClaimedAt === undefined ? {} : { lastFailureAlertClaimedAt }),
