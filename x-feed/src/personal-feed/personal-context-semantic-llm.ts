@@ -54,18 +54,12 @@ export function createPersonalContextSemanticLlmPorts(options: {
     if (signal.aborted) abort()
     else signal.addEventListener('abort', abort, { once: true })
     const tool = toolFor(kind, input)
-    const request: GenerateOptions = deepFreeze({
+    const request = buildSemanticRequest({
       provider: options.provider,
       model: options.model,
-      reasoningEffort: ReasoningEffortId('off'),
-      messages: [createUserMessage({
-        content: [{ type: 'text', text: JSON.stringify(input) }],
-        source: { kind: 'plugin', plugin: 'x-feed' },
-      })],
-      system: systemFor(kind),
-      tools: [tool],
-      temperature: 0,
-      maxTokens: 512,
+      input,
+      kind,
+      tool,
       signal,
     })
     const assembler = new BlockAssembler()
@@ -93,6 +87,37 @@ export function createPersonalContextSemanticLlmPorts(options: {
     entailmentValidator: (input, signal) => run(input, 'entailment', signal),
     noFactValidator: (input, signal) => run(input, 'noFact', signal),
   }
+}
+
+function buildSemanticRequest({
+  provider,
+  model,
+  input,
+  kind,
+  tool,
+  signal,
+}: {
+  readonly provider: string
+  readonly model: string
+  readonly input: unknown
+  readonly kind: 'classifier' | 'entailment' | 'noFact'
+  readonly tool: ToolSchema
+  readonly signal: AbortSignal
+}): GenerateOptions {
+  return deepFreeze({
+    provider,
+    model,
+    reasoningEffort: ReasoningEffortId('off'),
+    messages: [createUserMessage({
+      content: [{ type: 'text', text: JSON.stringify(input) }],
+      source: { kind: 'plugin', plugin: 'x-feed' },
+    })],
+    system: systemFor(kind),
+    tools: [tool],
+    temperature: 0,
+    maxTokens: 512,
+    signal,
+  })
 }
 
 function toolFor(kind: 'classifier' | 'entailment' | 'noFact', input: unknown): ToolSchema {
