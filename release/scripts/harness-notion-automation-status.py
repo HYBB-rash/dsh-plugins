@@ -20,7 +20,7 @@ MAX_DOCKER_OUTPUT = 256 * 1024
 OWNER_LABEL = "io.dsh.owner=harness-notion-automation"
 EXPECTED_HARNESS_COMMIT = "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e"
 EXPECTED_HARNESS_PATCH_SHA256 = (
-    "sha256:1c8e1b65538f4ca50138f61503e05c14515884ed84a0c906fdc95c2d83784e97"
+    "sha256:df85af4402b238a666bc7117092e559ae843df55c850ea6b711c1c8f3a292e0b"
 )
 ERROR = "harness notion automation status unavailable"
 
