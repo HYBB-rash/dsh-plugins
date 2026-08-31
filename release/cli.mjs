@@ -1371,19 +1371,6 @@ function normalizeDevelopmentRuntime(runtime) {
   }
 }
 
-function legacyDevelopmentRuntime() {
-  return {
-    schemaVersion: 1,
-    legacy: true,
-    network: 'dsh-dev-internal',
-    fakeTelegram: 'dsh-dev-fake-telegram',
-    fakeNotion: 'dsh-dev-fake-notion',
-    telegram: 'dsh-dev-telegram',
-    web: 'dsh-dev-web',
-    webPort: 13080,
-  }
-}
-
 function allocatedDevelopmentPorts() {
   const ports = new Set()
   const runtimesRoot = join(stateRoot, 'dev/runtimes')
@@ -1545,7 +1532,10 @@ function protectedCandidateIds() {
 }
 
 function runtimeForLease(lease) {
-  return normalizeDevelopmentRuntime(lease?.runtime) ?? developmentRuntime(lease?.sourcePath ?? '') ?? legacyDevelopmentRuntime()
+  const runtime = normalizeDevelopmentRuntime(lease?.runtime)
+    ?? (lease?.sourcePath ? developmentRuntime(lease.sourcePath) : null)
+  if (!runtime) fail('开发租约缺少当前 runtime 元数据，拒绝猜测容器身份', exitCodes.safety)
+  return runtime
 }
 
 function stopDev(runtime) {
@@ -1662,20 +1652,11 @@ function admitDevelopmentCandidate(candidate, candidatePath) {
   const invalidatedSourcePaths = invalidateDevelopmentEnvironments({ exceptCandidateId: candidate.candidateId })
   const cleanedCandidateIds = removeObsoleteDevelopmentCandidates(candidate.candidateId)
   writeJson(developmentCandidatePointerPath(), candidate)
-  const legacyLatest = join(stateRoot, 'candidates/latest.json')
-  if (existsSync(legacyLatest)) {
-    try {
-      if (candidatePurpose(readJson(legacyLatest, 'latest candidate')) === 'development') rmSync(legacyLatest, { force: true })
-    } catch (error) {
-      warn(error.message)
-    }
-  }
   return { candidatePath, invalidatedSourcePaths, cleanedCandidateIds }
 }
 
 function cleanupAcceptedDevelopmentState() {
   const invalidatedSourcePaths = invalidateDevelopmentEnvironments()
-  stopDev(legacyDevelopmentRuntime())
   const devRoot = join(stateRoot, 'dev')
   const inferredDevelopmentIds = new Set()
   if (existsSync(devRoot)) {

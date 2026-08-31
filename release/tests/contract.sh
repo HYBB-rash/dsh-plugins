@@ -756,6 +756,8 @@ grep -Fq "['run', '--rm', '--network', 'none', ...containerBaseArgs(homePath), .
 grep -Fq "fakeNotion: runtime.fakeNotion ??" "$repo_root/release/cli.mjs"
 grep -Fq "runtime.fakeTelegram, runtime.fakeNotion, runtime.web" "$repo_root/release/cli.mjs"
 grep -Fq "runtime.telegram, runtime.fakeTelegram, runtime.fakeNotion" "$repo_root/release/cli.mjs"
+! grep -Fq 'function legacyDevelopmentRuntime()' "$repo_root/release/cli.mjs"
+! grep -Eq "'dsh-dev-(internal|fake-telegram|fake-notion|telegram|web)'" "$repo_root/release/cli.mjs"
 grep -Fq "notionApiBase = 'http://fake-notion:8081/v1'" "$repo_root/release/cli.mjs"
 grep -Fq "notionPageId = '00000000000000000000000000000001'" "$repo_root/release/cli.mjs"
 ! grep -Fq 'pageRequestCount' "$repo_root/release/cli.mjs"
@@ -763,12 +765,16 @@ python3 - "$repo_root/release/cli.mjs" <<'PY'
 import pathlib, sys
 source = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
 preflight = source[source.index('function runPreflightRuntime'):source.index('function commandBuild')]
+development_admission = source[source.index('function admitDevelopmentCandidate'):
+                               source.index('function cleanupAcceptedDevelopmentState')]
 automation_parser = source[source.index('function parseNotionAutomationReceipt'):
                            source.index('function validateNotionInboxInitReceipt')]
 init_validator = source[source.index('function validateNotionInboxInitReceipt'):
                         source.index('const remoteAutomationCheckerLoader')]
 assert "notionApiBase: 'http://fake-notion:8081/v1'" in preflight
 assert 'fake-notion.invalid' not in preflight
+assert 'candidates/latest.json' not in development_admission
+assert 'legacyLatest' not in development_admission
 assert preflight.index('startFakeNotion(candidate, runtime') < preflight.index("runtime.web, '--network', runtime.network")
 assert "'status', 'owner', 'path', 'handoffPath', 'interfaceVersion', 'artifactContract'" in automation_parser
 assert '!isExactNotionArtifactContract(receipt.artifactContract)' in automation_parser

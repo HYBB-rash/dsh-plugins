@@ -150,6 +150,27 @@ json_field() {
   node -e 'const value=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(String(value[process.argv[2]]))' "$1" "$2"
 }
 
+write_development_lease() {
+  node -e '
+    const fs = require("fs")
+    const [leasePath, sourcePath, candidateId, devRoot, key] = process.argv.slice(1)
+    const suffix = key.slice(0, 12)
+    const runtime = {
+      schemaVersion: 3,
+      sourcePath,
+      key,
+      network: `dsh-dev-${suffix}-internal`,
+      toolbox: `dsh-dev-${suffix}-toolbox`,
+      fakeTelegram: `dsh-dev-${suffix}-fake-telegram`,
+      fakeNotion: `dsh-dev-${suffix}-fake-notion`,
+      telegram: `dsh-dev-${suffix}-telegram`,
+      web: `dsh-dev-${suffix}-web`,
+      webPort: 13080,
+    }
+    fs.writeFileSync(leasePath, `${JSON.stringify({schemaVersion: 2, sourcePath, candidateId, devRoot, runtime}, null, 2)}\n`)
+  ' "$1" "$2" "$3" "$4" "$5"
+}
+
 run_build() {
   local purpose="${1:-development}"
   DSH_RELEASE_STATE_ROOT="$state_root" \
@@ -183,8 +204,8 @@ lease_key="$(printf '%s' "$source_fixture" | sha256sum | awk '{print $1}')"
 dev_root="$state_root/dev/environments/$lease_key"
 mkdir -p "$dev_root/home/herman" "$state_root/dev/leases"
 printf '%s\n' fixture >"$dev_root/home/herman/data"
-node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({schemaVersion:2,sourcePath:process.argv[2],candidateId:process.argv[3],devRoot:process.argv[4]}, null, 2)+"\n")' \
-  "$state_root/dev/leases/$lease_key.json" "$source_fixture" "$candidate_id" "$dev_root"
+write_development_lease \
+  "$state_root/dev/leases/$lease_key.json" "$source_fixture" "$candidate_id" "$dev_root" "$lease_key"
 
 DSH_RELEASE_STATE_ROOT="$state_root" DSH_CONTAINER_ENGINE="$mock_engine" \
 MOCK_ENGINE_STATE="$mock_state" MOCK_ENGINE_LOG="$test_root/engine.log" \
@@ -206,8 +227,8 @@ node -e 'const fs=require("fs"); const c=JSON.parse(fs.readFileSync(process.argv
 stale_key="$(printf '%s' "$source_fixture/stale" | sha256sum | awk '{print $1}')"
 stale_dev="$state_root/dev/environments/$stale_key"
 mkdir -p "$stale_dev"
-node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({schemaVersion:2,sourcePath:process.argv[2],candidateId:process.argv[3],devRoot:process.argv[4]}, null, 2)+"\n")' \
-  "$state_root/dev/leases/$stale_key.json" "$source_fixture/stale" "$stale_id" "$stale_dev"
+write_development_lease \
+  "$state_root/dev/leases/$stale_key.json" "$source_fixture/stale" "$stale_id" "$stale_dev" "$stale_key"
 stale_engine_key="$(printf '%s' "$stale_tag" | sha256sum | awk '{print $1}')"
 cp "$(find "$mock_state/images" -name '*.labels' -print -quit)" "$mock_state/images/$stale_engine_key.labels"
 printf '%s\n' "$stale_tag" >"$mock_state/images/$stale_engine_key.tag"
@@ -279,8 +300,8 @@ test -d "$stale_build"
 # Accepted production invalidates the current development base while preserving
 # task source and all small candidate/test evidence.
 mkdir -p "$dev_root" "$state_root/dev/leases" "$state_root/releases/accepted"
-node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({schemaVersion:2,sourcePath:process.argv[2],candidateId:process.argv[3],devRoot:process.argv[4]}, null, 2)+"\n")' \
-  "$state_root/dev/leases/$lease_key.json" "$source_fixture" "$candidate_id" "$dev_root"
+write_development_lease \
+  "$state_root/dev/leases/$lease_key.json" "$source_fixture" "$candidate_id" "$dev_root" "$lease_key"
 
 # Add one exact failed/historical formal candidate with a distinct Podman image
 # so archive and image cleanup are both observable.
