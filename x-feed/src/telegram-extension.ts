@@ -108,21 +108,23 @@ export async function installTelegramExtension(
     owner,
     semanticLifecycle,
   })
+  const shutdownPersonalContext = async (errors: unknown[]): Promise<void> => {
+    try { await personalContextRuntime.shutdown() } catch (error) { errors.push(error) }
+    try { owner.close() } catch (error) { errors.push(error) }
+  }
   let bootstrap: Awaited<ReturnType<typeof owner.bootstrap>>
   try {
     bootstrap = await owner.bootstrap({ history })
   } catch (error) {
     const cleanupErrors: unknown[] = []
-    try { await personalContextRuntime.shutdown() } catch (shutdownError) { cleanupErrors.push(shutdownError) }
-    try { owner.close() } catch (closeError) { cleanupErrors.push(closeError) }
+    await shutdownPersonalContext(cleanupErrors)
     if (cleanupErrors.length > 0) throw new AggregateError([error, ...cleanupErrors])
     throw error
   }
   if (bootstrap.status !== 'complete') {
     const primary = new Error(`x-feed: personal context bootstrap incomplete (${bootstrap.reason})`)
     const cleanupErrors: unknown[] = []
-    try { await personalContextRuntime.shutdown() } catch (shutdownError) { cleanupErrors.push(shutdownError) }
-    try { owner.close() } catch (closeError) { cleanupErrors.push(closeError) }
+    await shutdownPersonalContext(cleanupErrors)
     if (cleanupErrors.length > 0) throw new AggregateError([primary, ...cleanupErrors])
     throw primary
   }
@@ -171,8 +173,7 @@ export async function installTelegramExtension(
       ...(stopFeedback === undefined ? [] : [stopFeedback]),
       ...(stopSource === undefined ? [] : [stopSource]),
     ])
-    try { await personalContextRuntime.shutdown() } catch (shutdownError) { cleanup.push(shutdownError) }
-    try { owner.close() } catch (closeError) { cleanup.push(closeError) }
+    await shutdownPersonalContext(cleanup)
     if (cleanup.length > 0) throw new AggregateError([error, ...cleanup])
     throw error
   }
@@ -228,8 +229,7 @@ export async function installTelegramExtension(
       ...(stopFeedback === undefined ? [] : [stopFeedback]),
       ...(stopSource === undefined ? [] : [stopSource]),
     ]))
-    try { await personalContextRuntime.shutdown() } catch (shutdownError) { cleanup.push(shutdownError) }
-    try { owner.close() } catch (closeError) { cleanup.push(closeError) }
+    await shutdownPersonalContext(cleanup)
     if (cleanup.length > 0) throw new AggregateError([error, ...cleanup])
     throw error
   }
@@ -249,8 +249,7 @@ export async function installTelegramExtension(
       try { stopPersonalFeed?.() } catch (error) { errors.push(error) }
       try { stopFeedback?.() } catch (error) { errors.push(error) }
       try { stopSource?.() } catch (error) { errors.push(error) }
-      try { await personalContextRuntime.shutdown() } catch (error) { errors.push(error) }
-      try { owner.close() } catch (error) { errors.push(error) }
+      await shutdownPersonalContext(errors)
       if (errors.length > 0) throw new AggregateError(errors)
     })()
     void disposePromise.then(undefined, () => undefined)
