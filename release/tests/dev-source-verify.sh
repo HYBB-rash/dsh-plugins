@@ -103,7 +103,7 @@ grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/harness-notion
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/notion-inbox-init.py' "$log"
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/test_scrub_preflight_state.py' "$log"
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/test_workspace_migration_content.py' "$log"
-test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 12
+test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 11
 test "$(grep -Fc 'args=--test /opt/dsh/release-system/tests/assistant-cron-health.mjs' "$log")" = 1
 test "$(grep -Fc 'args=--test /opt/dsh/release-system/tests/fake-notion.mjs' "$log")" = 1
 test "$(grep -Fc 'args=--test /opt/dsh/release-system/tests/notion-retry-binding.mjs' "$log")" = 1
