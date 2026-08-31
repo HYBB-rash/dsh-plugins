@@ -164,7 +164,7 @@ value = {
         "pluginsCommit": "b" * 40,
         "releaseToolCommit": "c" * 40,
         "harnessCommit": "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e",
-        "harnessPatchSha256": "sha256:df85af4402b238a666bc7117092e559ae843df55c850ea6b711c1c8f3a292e0b",
+        "harnessPatchSha256": "sha256:1c8e1b65538f4ca50138f61503e05c14515884ed84a0c906fdc95c2d83784e97",
     },
     "containers": {
         "web": container("dsh-web", True, "running", "healthy"),

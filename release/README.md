@@ -128,9 +128,9 @@ JSON
 
 正式发版的生产快照测试副本和临时开发副本在测试结束或失败后都会清理。生产候选启动后、用户执行 `accept` 前，当前候选与上一 accepted 版本两代完整材料同时存在，停机快照与上一镜像共同构成完整回退边界。流程不会执行无边界的 `podman system prune` 或 `docker system prune`。
 
-个人业务 automation 的唯一长期所有者是线上 DeepSeek Harness，源码只由它在持久化 `$DSH_HOME/workspace/automations/` 中维护；这些 automation 永远不进入仓库或产品镜像。它们的任务定义属于 dsh-cron 持久化账本。普通 build、release、migration 和 rollback 都不保存业务脚本副本或业务 manifest，也不安装、复制、生成、覆盖、删除、迁移或回退这些代码和任务。镜像只提供通用解释器、命令行工具、产品 Skill 行为和 Harness 指导；发布只读检查既有入口与 Cron binding 是否满足候选合同，缺失或漂移时停止，绝不自行 `ensure` 或修复。
+个人业务 automation 的运行时所有者是持久化 `$DSH_HOME/workspace/automations/`；安装后的源码、交接回执和任务定义分别由 Workspace 与 dsh-cron 账本持有。仓库可为一次性首次创建入口保存经过 trusted probe 验证的 bootstrap 实现和测试，但普通 build、release、migration 和 rollback 不把这些 bootstrap 字节安装进产品镜像，也不覆盖、删除、迁移或回退已存在的 Workspace automation。镜像只提供通用解释器、命令行工具、产品 Skill 行为和 Harness 指导；发布只读检查既有入口与 Cron binding 是否满足候选合同，缺失或漂移时停止，绝不自行 `ensure` 或修复。
 
-`harness notion-automation --approved` 是这条规则的窄而显式的首次创建入口，不是生产发布。它只使用当前 `current == last-good` 的 accepted 镜像，在独立只读容器、临时 DSH_HOME、专用内部网络和只允许 DeepSeek chat-completions 的凭据 relay 中让线上 Harness 生成自己的三份业务文件；容器看不到生产 Workspace、Notion token、Telegram、Cron 或其他 automation。仓库只保存固定任务说明、Harness lockdown、通用隔离 runner 和 release-owned 黑盒 probe，不保存可用业务实现或正常路径 fixture。生成物必须在无外网假 Notion 上通过十二项独立合同门、原子写入与逐 rename 崩溃恢复门，随后才以 `renameat2(RENAME_NOREPLACE)` 把整个目录 create-only 安装到准确目标。目标已存在、accepted 身份漂移、生产容器不健康、测试自报、秘密泄漏、Docker 清理不完整或任一门失败都会保持目标不存在；该命令不访问真实 Notion、不改 Cron、不停服务，也不授予后续发布权限。
+`harness notion-automation --approved` 是这条规则的窄而显式的首次创建入口，不是生产发布。当前确定性路径把 Git commit 绑定的 bootstrap 实现和测试作为独立 payload 交给隔离 runner；缺少该 payload 时才回退到线上 Harness 的两阶段 authoring。fallback 只开放 workspace-write sandbox 内的有界前台 bash，让作者运行编译检查和生成测试；持久 shell、后台 jobs、code-runtime、子代理和外网仍禁用。两条路径都运行在独立只读容器、临时 DSH_HOME 和无生产 Workspace/Notion token/Telegram/Cron 挂载的边界内，并必须在无外网假 Notion 上通过十二项独立合同门、原子写入与逐 rename 崩溃恢复门，随后才以 `renameat2(RENAME_NOREPLACE)` 把整个目录 create-only 安装到准确目标。目标已存在、accepted 身份漂移、生产容器不健康、测试自报、秘密泄漏、Docker 清理不完整或任一门失败都会保持目标原状；该命令不访问真实 Notion、不改 Cron、不停服务，也不授予后续发布权限。
 
 Notion 任务入口同样由线上 Harness 维护，准确入口为 `$DSH_HOME/workspace/automations/notion/notion_inbox_sync.py`，交接回执为同目录的 `notion_inbox_sync.handoff.json`。正式发布在请求停机之前只读核验这两个文件的身份、owner、大小、入口 SHA-256 和接口，并把脱敏 handoff 身份与哈希锁入 waiting release；入口或回执缺失、不安全、漂移或不匹配都会在 writers 仍运行时阻断，发版不会用仓库或镜像内容补齐它们。停止 writers 后还会要求现场结果与停机前锁定的回执完全一致，避免把停机前看到的脚本替换成另一份脚本。
 

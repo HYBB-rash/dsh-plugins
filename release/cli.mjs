@@ -745,7 +745,7 @@ function parseHarnessNotionStatusReceipt(text, expected) {
     && commit.test(release.pluginsCommit ?? '')
     && commit.test(release.releaseToolCommit ?? '')
     && release.harnessCommit === 'b150a551b8d465e31e418e1b2eaf5e79bbb7d28e'
-    && release.harnessPatchSha256 === 'sha256:df85af4402b238a666bc7117092e559ae843df55c850ea6b711c1c8f3a292e0b'
+    && release.harnessPatchSha256 === 'sha256:1c8e1b65538f4ca50138f61503e05c14515884ed84a0c906fdc95c2d83784e97'
   const validContainers = hasExactKeys(containers, Object.keys(expectedContainers))
     && Object.entries(expectedContainers).every(([role, values]) => {
       const value = containers[role]
@@ -813,7 +813,7 @@ function parseHarnessNotionReceipt(text, expected) {
     || !/^[0-9A-Za-z._-]+$/u.test(receipt.releaseId ?? '')
     || !/^sha256:[0-9a-f]{64}$/u.test(receipt.imageId ?? '')
     || receipt.harnessCommit !== 'b150a551b8d465e31e418e1b2eaf5e79bbb7d28e'
-    || receipt.harnessPatchSha256 !== 'sha256:df85af4402b238a666bc7117092e559ae843df55c850ea6b711c1c8f3a292e0b'
+    || receipt.harnessPatchSha256 !== 'sha256:1c8e1b65538f4ca50138f61503e05c14515884ed84a0c906fdc95c2d83784e97'
     || !/^[0-9a-f]{40}$/u.test(receipt.acceptedReleaseToolCommit ?? '')
     || receipt.orchestrationCommit !== expected.orchestrationCommit
     || !hasExactKeys(receipt.orchestrationSha256, [

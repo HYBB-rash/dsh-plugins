@@ -1129,6 +1129,12 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
         self.assertNotIn("reasoningEffort: high", patch)
         self.assertIn("retryPolicy:\n      mode: normal\n      maxRetries: 0", patch)
 
+        self.assertIn("- id: tool-bash\n  config:\n    enableRunInBackground: false", patch)
+        for dependency in ("subprocess", "sandbox", "bash-sandbox", "shell-env"):
+            self.assertIn(f"- id: {dependency}\n", patch)
+            self.assertNotIn(f"- id: {dependency}\n  disabled: true", patch)
+        self.assertNotIn("- id: tool-bash\n  disabled: true", patch)
+
         task = (RELEASE_ROOT / "scripts/harness-notion-automation-task.md").read_text()
         normalized_task = " ".join(task.split())
         for required in (
@@ -2063,6 +2069,7 @@ class HarnessNotionRunnerContracts(unittest.TestCase):
             ],
             "tools": ["    mode: native", "    maxParallelSubCalls: 1"],
             "agent-loop": ["    agents: []", "    maxParallelToolCalls: 1"],
+            "tool-bash": ["    enableRunInBackground: false"],
             "sandbox-policy": [
                 "    mode: workspace-write",
                 "    workspaceRoot: /work",

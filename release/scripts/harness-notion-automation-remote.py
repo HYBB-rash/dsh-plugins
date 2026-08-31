@@ -87,7 +87,7 @@ MAX_TEST_BYTES = 2 * 1024 * 1024
 MAX_RECEIPT_BYTES = 64 * 1024
 MAX_PROBE_BYTES = 512 * 1024
 EXPECTED_HARNESS_COMMIT = "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e"
-EXPECTED_HARNESS_PATCH_SHA256 = "sha256:df85af4402b238a666bc7117092e559ae843df55c850ea6b711c1c8f3a292e0b"
+EXPECTED_HARNESS_PATCH_SHA256 = "sha256:1c8e1b65538f4ca50138f61503e05c14515884ed84a0c906fdc95c2d83784e97"
 ASSET_LIMITS = {
     "bridge": 64 * 1024,
     "patch": 64 * 1024,
@@ -237,9 +237,13 @@ Create exactly one persistent file: `/work/notion_inbox_sync.py`.  The existing
 empty `/work/tests` directory is reserved for the next phase; leave it empty.
 Do not create any other file, directory, cache, receipt, handoff, log, fixture,
 or configuration artifact under `/work`.  Implement the complete command-line
-program described by the shared contract.  Finish only after the source parses
-and compiles.  Your final response must contain no source or private content;
-say only that the implementation file was created for external verification.
+program described by the shared contract.  You may use the bounded foreground
+`bash` tool inside the workspace-write sandbox.  Before finishing, run this
+check from `/work` and repair any failure:
+`PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'from pathlib import Path; compile(Path("notion_inbox_sync.py").read_bytes(), "notion_inbox_sync.py", "exec")'`.
+Do not run commands that create files under `/work` other than the permitted
+implementation file.  Your final response must contain no source or private
+content; say only that the implementation file was created for external verification.
 """.strip(),
     "tests": b"""
 AUTHORING PHASE 2 OF 2 - TESTS
@@ -250,14 +254,15 @@ create exactly two persistent files: an empty `/work/tests/__init__.py` and
 rename, or unlink the implementation.  Do not create any other file, directory,
 cache, receipt, handoff, log, fixture, or configuration artifact under
 `/work/tests`.  Implement all twelve tests described by the shared contract.
-You have only native filesystem tools and cannot execute the suite; the harness
-will rerun each test method in its own fresh process and container, so every
-method must be self-contained and pass independently.  Before finishing,
+You have a bounded foreground `bash` tool inside the workspace-write sandbox.
+Before finishing, run this command from `/work` and repair every failure:
+`PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest -v tests.test_notion_inbox_sync`.
+The command must not create persistent files under `/work`; keep test data in
+fresh temporary directories outside the working directory.  Before finishing,
 re-read the exact wire contract in the shared prompt and ensure every assertion
 matches it precisely, both in direction and in the exact request counts it
-pins.
-Your final response must contain no source, test body, token, task text, or
-workspace content; say only that the two test files were created for external
+pins.  Your final response must contain no source, test body, token, task text,
+or workspace content; say only that the two test files were created for external
 verification.
 """.strip(),
 }
@@ -1975,7 +1980,8 @@ ACTIVE_ROWS = {
     "timer", "llm", "session", "agent", "agent-default-model", "llm-retry",
     "session-persistence-jsonl", "sandbox-policy", "approval", "fs-observation-policy",
     "tool-fs", "timeout-policy", "tools", "system-prompt", "agent-loop", "fs-sandbox",
-    "llm-deepseek", "headless-startup", "headless-runner",
+    "llm-deepseek", "headless-startup", "headless-runner", "subprocess", "sandbox",
+    "bash-sandbox", "shell-env", "tool-bash",
 }
 
 
@@ -2017,6 +2023,7 @@ def validate_dump(value: bytes) -> None:
         ),
         "tools": ("    mode: native", "    maxParallelSubCalls: 1"),
         "agent-loop": ("    agents: []", "    maxParallelToolCalls: 1"),
+        "tool-bash": ("    enableRunInBackground: false",),
         "sandbox-policy": ("    mode: workspace-write", "    workspaceRoot: /work"),
     }
     for name, expected_lines in required_blocks.items():

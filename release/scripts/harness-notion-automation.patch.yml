@@ -1,5 +1,6 @@
 # Last-layer lockdown for the one-shot Notion automation authoring task.
-# The task gets only native filesystem read/write/edit tools inside /work.
+# The task gets native filesystem tools plus bounded foreground bash execution
+# inside the workspace-write sandbox.
 
 - id: tools
   config:
@@ -46,7 +47,6 @@
 - id: permission
   disabled: true
 - id: shell-env
-  disabled: true
 
 - id: code-runtime
   disabled: true
@@ -79,15 +79,14 @@
 - id: session-telemetry-otel
   disabled: true
 - id: subprocess
-  disabled: true
 - id: sandbox
-  disabled: true
 - id: bash-sandbox
-  disabled: true
+
 - id: pwsh-sandbox
   disabled: true
 - id: tool-bash
-  disabled: true
+  config:
+    enableRunInBackground: false
 - id: tool-pwsh
   disabled: true
 - id: jobs
