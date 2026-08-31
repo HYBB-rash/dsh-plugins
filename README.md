@@ -217,7 +217,7 @@ python '<path-to-skill-creator>/scripts/quick_validate.py' skills/x-feed
 
 ```text
 telegram-gateway/       Telegram bot/gateway 插件源码与测试
-dsh-assistant/          个人助理责任、提醒、outbox 与迁移工具
+dsh-assistant/          个人助理责任、提醒与 outbox
 dsh-cron/               定时 Agent manager/scheduler
 x-feed/                 X 洞察私有业务运行时与 Python 流水线（非插件）
 skills/x-feed/          X 反馈与收藏的 Agent 行为说明

@@ -18,10 +18,8 @@ const assistantPackage = readPackage(fileURLToPath(new URL('../package.json', im
 const cronPackage = readPackage(fileURLToPath(new URL('../../dsh-cron/package.json', import.meta.url)))
 
 describe('published package contracts', () => {
-  it('exposes the v4 assistant migration binary from lib', () => {
-    expect(assistantPackage.bin).toMatchObject({
-      'dsh-assistant-migrate-to-v4': 'lib/migrate-cli.js',
-    })
+  it('does not publish the retired assistant migration binary', () => {
+    expect(assistantPackage.bin).toBeUndefined()
   })
 
   it('declares dsh-cron in assistant peer and development dependencies', () => {
@@ -29,10 +27,10 @@ describe('published package contracts', () => {
     expect(assistantPackage.devDependencies?.['@deepseek-ai/dsh-cron']).toBeDefined()
   })
 
-  it('keeps assistant public migration exports without source-path exports', () => {
+  it('keeps only current assistant exports without migration or source-path exports', () => {
     const exports = assistantPackage.exports ?? {}
-    expect(exports).toHaveProperty('./migrate')
-    expect(exports).toHaveProperty('./historical-recovery')
+    expect(exports).not.toHaveProperty('./migrate')
+    expect(exports).not.toHaveProperty('./historical-recovery')
     expect(Object.keys(exports).filter(key => key.startsWith('./src/'))).toEqual([])
   })
 

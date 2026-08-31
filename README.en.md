@@ -201,7 +201,7 @@ For local development, change one plugin and build/test its directory, or change
 
 ```text
 telegram-gateway/       Telegram bot/gateway source and tests
-dsh-assistant/          Personal-assistant responsibilities, reminders, outbox, migration tool
+dsh-assistant/          Personal-assistant responsibilities, reminders, and outbox
 dsh-cron/               Scheduled agent manager/scheduler
 x-feed/                 Private X insight business runtime and Python pipeline (not a plugin)
 skills/x-feed/          Agent guidance for X feedback and saves

@@ -463,7 +463,7 @@ function configureDatabase(db: DatabaseSync, path: string): void {
     }
     if (onDisk !== 0 && onDisk !== ASSISTANT_SCHEMA_VERSION) {
       throw new Error(
-        `assistant database at "${path}" has schema version ${onDisk}; run the explicit offline migration before starting this build (target ${ASSISTANT_SCHEMA_VERSION})`,
+        `assistant database at "${path}" has unsupported schema version ${onDisk}; this build accepts only schema ${ASSISTANT_SCHEMA_VERSION}`,
       )
     }
     if (onDisk === ASSISTANT_SCHEMA_VERSION && applicationId !== ASSISTANT_APPLICATION_ID) {

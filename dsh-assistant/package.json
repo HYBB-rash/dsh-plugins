@@ -8,21 +8,10 @@
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
-  "bin": {
-    "dsh-assistant-migrate-to-v4": "lib/migrate-cli.js"
-  },
   "exports": {
     ".": {
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
-    },
-    "./migrate": {
-      "types": "./lib/types/migrate-cli.d.ts",
-      "default": "./lib/migrate-cli.js"
-    },
-    "./historical-recovery": {
-      "types": "./lib/types/historical-recovery.d.ts",
-      "default": "./lib/historical-recovery.js"
     },
     "./package.json": "./package.json"
   },
