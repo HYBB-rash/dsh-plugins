@@ -24,7 +24,8 @@ import z from '@deepseek-ai/schemastery'
 import { join } from 'node:path'
 import { registerCronTools } from './manager.ts'
 import { JobStore, defaultStoreDir } from './store.ts'
-import { createControlService } from './control.ts'
+import { createControlService, isValidBoundCronCommandSpec } from './control.ts'
+import type { BoundCronCommandSpec } from './control-contract.ts'
 import { createControlRpcClient, createControlRpcServer } from './control-rpc.ts'
 import { provideCronAgentEnvironmentRegistry } from './run-environment.ts'
 import { installRunNowTools } from './run-now-tool.ts'
@@ -92,6 +93,8 @@ export interface Config {
   storeDir?: string
   /** Unix socket override. Defaults to `<storeDir>/control.sock` in manager mode. */
   controlSocketPath?: string
+  /** Exact create-only command bindings owned by the manager profile. */
+  managedCommandBindings?: BoundCronCommandSpec[]
   /** Operator-owned prepared-delivery bindings for restricted per-run jobs. */
   preparedDeliveryBindings?: Array<{
     jobId: string
@@ -116,6 +119,25 @@ export const Config: z<Config> = z.object({
   deliverOnError: z.boolean().default(true),
   storeDir: z.string().default(''),
   controlSocketPath: z.string().default(''),
+  managedCommandBindings: z.array(z.object({
+    externalRef: z.string(),
+    schedule: z.union([
+      z.object({ kind: z.const('cron'), expr: z.string() }),
+      z.object({ kind: z.const('interval'), minutes: z.number().step(1).min(1) }),
+      z.object({ kind: z.const('once'), runAt: z.string() }),
+    ]),
+    command: z.object({
+      argv: z.array(z.string()),
+      timeoutSeconds: z.number().step(1).min(1),
+      outputMaxBytes: z.number().step(1).min(1),
+    }),
+    deliver: z.union(['telegram', 'silent'] as const),
+    failureAlert: (z.object({
+      after: z.number().step(1).min(1),
+      cooldownMinutes: z.number().step(1).min(1),
+    }) as unknown as z<{ after: number; cooldownMinutes: number } | undefined>).default(undefined),
+    cwd: z.string(),
+  })).default([]) as unknown as z<BoundCronCommandSpec[]>,
   preparedDeliveryBindings: z.array(z.object({
     jobId: z.string(),
     driver: z.object({
@@ -156,6 +178,21 @@ export async function applyManager(ctx: Context, config: Config): Promise<void> 
   const storeDir = resolveStoreDir(config)
   const store = new JobStore(storeDir)
   const control = createControlService({ storeDir })
+  const managedCommandBindings = config.managedCommandBindings ?? []
+  const externalRefs = new Set<string>()
+  for (const spec of managedCommandBindings) {
+    if (!isValidBoundCronCommandSpec(spec) || externalRefs.has(spec.externalRef)) {
+      throw new Error('invalid managed command binding configuration')
+    }
+    externalRefs.add(spec.externalRef)
+  }
+  for (const spec of managedCommandBindings) {
+    const response = await control.ensureBoundCommand(spec)
+    if (!('ok' in response) || !response.ok) {
+      const code = 'errorCode' in response ? response.errorCode : response.code
+      throw new Error(`managed command binding conflict: ${code}`)
+    }
+  }
   const controlRpc = createControlRpcServer({
     socketPath: resolveControlSocketPath(config),
     control,

@@ -717,6 +717,25 @@ assert release_command.index('verifyProductionNotionAutomation(candidate)') < re
 PY
 grep -Fq "getBoundCommand(NOTION_RETRY_EXTERNAL_REF)" "$repo_root/release/scripts/check-notion-retry-binding.mjs"
 ! grep -Eq 'ensureBoundCommand|replaceBoundCommand|deleteBoundCommand' "$repo_root/release/scripts/check-notion-retry-binding.mjs"
+python3 - "$repo_root/release/profiles/web/cordis.patch.yml" <<'PY'
+import pathlib, sys
+profile = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+required = [
+    'managedCommandBindings:',
+    'externalRef: dsh:notion-task-inbox:retry:v1',
+    'kind: interval',
+    'minutes: 5',
+    '- /usr/bin/python3',
+    '- /home/herman/.dsh/workspace/automations/notion/notion_inbox_sync.py',
+    '- --retry-pending',
+    '- --json',
+    'timeoutSeconds: 120',
+    'outputMaxBytes: 4096',
+    'deliver: silent',
+    'cwd: /home/herman/.dsh/workspace',
+]
+assert all(token in profile for token in required), [token for token in required if token not in profile]
+PY
 grep -Fq "'cron-reanchor-inspect'" "$repo_root/release/cli.mjs"
 grep -Fq 'validateReanchorInspectionReceipt' "$repo_root/release/cli.mjs"
 grep -Fq "'evidence': evidence" "$repo_root/release/cli.mjs"

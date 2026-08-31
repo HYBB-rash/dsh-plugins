@@ -46,6 +46,21 @@
       name: '@deepseek-ai/dsh-cron'
       config:
         mode: manager
+        managedCommandBindings:
+          - externalRef: dsh:notion-task-inbox:retry:v1
+            schedule:
+              kind: interval
+              minutes: 5
+            command:
+              argv:
+                - /usr/bin/python3
+                - /home/herman/.dsh/workspace/automations/notion/notion_inbox_sync.py
+                - --retry-pending
+                - --json
+              timeoutSeconds: 120
+              outputMaxBytes: 4096
+            deliver: silent
+            cwd: /home/herman/.dsh/workspace
     - id: dsh-assistant
       name: '@deepseek-ai/dsh-assistant'
       config:

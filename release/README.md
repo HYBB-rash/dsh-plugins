@@ -128,7 +128,7 @@ JSON
 
 正式发版的生产快照测试副本和临时开发副本在测试结束或失败后都会清理。生产候选启动后、用户执行 `accept` 前，当前候选与上一 accepted 版本两代完整材料同时存在，停机快照与上一镜像共同构成完整回退边界。流程不会执行无边界的 `podman system prune` 或 `docker system prune`。
 
-个人业务 automation 的运行时所有者是持久化 `$DSH_HOME/workspace/automations/`；安装后的源码、交接回执和任务定义分别由 Workspace 与 dsh-cron 账本持有。仓库可为一次性首次创建入口保存经过 trusted probe 验证的 bootstrap 实现和测试，但普通 build、release、migration 和 rollback 不把这些 bootstrap 字节安装进产品镜像，也不覆盖、删除、迁移或回退已存在的 Workspace automation。镜像只提供通用解释器、命令行工具、产品 Skill 行为和 Harness 指导；发布只读检查既有入口与 Cron binding 是否满足候选合同，缺失或漂移时停止，绝不自行 `ensure` 或修复。
+个人业务 automation 的运行时所有者是持久化 `$DSH_HOME/workspace/automations/`；安装后的源码、交接回执和任务定义分别由 Workspace 与 dsh-cron 账本持有。仓库可为一次性首次创建入口保存经过 trusted probe 验证的 bootstrap 实现和测试，但普通 build、release、migration 和 rollback 不把这些 bootstrap 字节安装进产品镜像，也不覆盖、删除、迁移或回退已存在的 Workspace automation。镜像只提供通用解释器、命令行工具、产品 Skill 行为和 Harness 指导；发布只读检查既有入口是否满足候选合同，缺失或漂移时停止。固定 profile 声明的受管 Cron binding 由 `dsh-cron` manager 在 control socket ready 前以 create-only 语义持久化：完全一致时重启幂等，冲突时启动失败；发布健康检查只调用 readiness/get，不会 ensure、replace 或修复 binding。
 
 `harness notion-automation --approved` 是这条规则的窄而显式的首次创建入口，不是生产发布。当前确定性路径把 Git commit 绑定的 bootstrap 实现和测试作为独立 payload 交给隔离 runner；缺少该 payload 时才回退到线上 Harness 的两阶段 authoring。fallback 只开放 workspace-write sandbox 内的有界前台 bash，让作者运行编译检查和生成测试；持久 shell、后台 jobs、code-runtime、子代理和外网仍禁用。两条路径都运行在独立只读容器、临时 DSH_HOME 和无生产 Workspace/Notion token/Telegram/Cron 挂载的边界内，并必须在无外网假 Notion 上通过十二项独立合同门、原子写入与逐 rename 崩溃恢复门，随后才以 `renameat2(RENAME_NOREPLACE)` 把整个目录 create-only 安装到准确目标。目标已存在、accepted 身份漂移、生产容器不健康、测试自报、秘密泄漏、Docker 清理不完整或任一门失败都会保持目标原状；该命令不访问真实 Notion、不改 Cron、不停服务，也不授予后续发布权限。
 

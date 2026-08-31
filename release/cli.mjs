@@ -2886,13 +2886,29 @@ function verifyDev(candidate, homePath, runtime) {
     fail('开发 Telegram 容器的 Assistant→Cron 健康门没有通过', exitCodes.test)
   }
   const cronLedger = join(homePath, '.dsh/storages/dsh-cron/jobs.jsonl')
-  if (existsSync(cronLedger) && readFileSync(cronLedger, 'utf8').trim() !== '') fail('开发 cron 台账不是空的，拒绝启动真实任务', exitCodes.test)
+  const notionRetryBinding = JSON.parse(run(engine, [
+    'exec', runtime.web, 'node',
+    '/opt/dsh/release-system/scripts/check-notion-retry-binding.mjs',
+  ], { capture: true, announce: false, code: exitCodes.test }))
+  if (notionRetryBinding.status !== 'ready'
+    || notionRetryBinding.externalRef !== 'dsh:notion-task-inbox:retry:v1') {
+    fail('开发 Web 没有注册固定 Notion pending-retry binding', exitCodes.test)
+  }
+  const cronRows = existsSync(cronLedger)
+    ? readFileSync(cronLedger, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    : []
+  if (cronRows.length !== 1
+    || cronRows[0].op !== 'create'
+    || cronRows[0].externalRef !== 'dsh:notion-task-inbox:retry:v1') {
+    fail('开发 cron 台账包含受管 Notion retry binding 之外的任务', exitCodes.test)
+  }
   return {
     requests: ['getMe', 'getUpdates', 'sendMessage'],
     realTelegramReachable: false,
     realNotionReachable: false,
     assistantCronHealth,
-    cronJobs: 0,
+    cronJobs: 1,
+    notionRetryBinding,
     webAccess: 'container-exec/internal-no-external-route',
   }
 }
