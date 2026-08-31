@@ -680,6 +680,7 @@ grep -Eq '\./release/dsh release --release <[^>]+> --approved-release' "$repo_ro
 ! grep -Eq 'docker compose .* down .*\|\| true' "$repo_root/release/cli.mjs"
 grep -Fq "systemctl --user list-units --no-legend --plain --state=running --type=service 'dsh*'" "$repo_root/release/cli.mjs"
 grep -Fq 'copyFileSync(candidate.composePath, admittedComposePath)' "$repo_root/release/cli.mjs"
+grep -Fq 'docker load --input "$release_dir/image.tar" >/dev/null' "$repo_root/release/cli.mjs"
 grep -Fq 'if (sha256File(admittedComposePath) !== candidate.composeSha256)' "$repo_root/release/cli.mjs"
 grep -Fq "run('scp', ['-p', admittedComposePath," "$repo_root/release/cli.mjs"
 grep -Fq 'writeJson(admittedCandidatePath, candidate)' "$repo_root/release/cli.mjs"

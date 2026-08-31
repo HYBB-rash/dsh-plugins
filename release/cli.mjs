@@ -4278,7 +4278,7 @@ actual_compose="sha256:$(sha256sum "$release_dir/compose.production.yml" | awk '
 test "$actual_compose" = ${shellQuote(candidate.composeSha256)} || { echo 'compose sha256 mismatch' >&2; exit 51; }
 archive_identity="$(tar -xOf "$release_dir/image.tar" manifest.json | python3 -c 'import json,sys; entry=json.load(sys.stdin)[0]; print(entry["Config"]+"|"+entry["RepoTags"][0])')"
 test "$archive_identity" = "${candidate.imageId.replace(/^sha256:/u, '')}.json|$expected_tag" || { echo "archive identity mismatch: $archive_identity" >&2; exit 52; }
-docker load --input "$release_dir/image.tar"
+docker load --input "$release_dir/image.tar" >/dev/null
 engine_image="$(docker image inspect "$expected_tag" --format '{{.Id}}')"
 test "$(docker image inspect "$expected_tag" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = ${shellQuote(candidate.pluginsCommit)}
 test "$(docker image inspect "$expected_tag" --format '{{index .Config.Labels "io.dsh.release.revision"}}')" = ${shellQuote(candidate.releaseToolCommit)}
