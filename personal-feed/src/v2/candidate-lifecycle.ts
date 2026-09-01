@@ -821,20 +821,45 @@ function parseWindow(
   now: Date,
   handles: readonly CaptureCloseHandle[],
 ): ParsedWindow | undefined {
-  if (!isRecord(value) || !hasExactlyKeys(value, ['requestId', 'cutoff', 'shanghaiDay', 'surfaces'])
+  if (!isRecord(value) || !hasExactlyKeys(value, [
+    'requestId', 'cutoff', 'shanghaiDay', 'startedAt', 'completedAt', 'surfaces',
+  ])
     || value.requestId !== request.requestId || value.cutoff !== request.cutoff
     || value.shanghaiDay !== request.shanghaiDay || !hasDenseArray(value.surfaces, SURFACES.length)) return undefined
+
+  const cutoff = Date.parse(request.cutoff)
+  const topStartedAt = parseWindowTime(value.startedAt)
+  const topCompletedAt = parseWindowTime(value.completedAt)
+  if (topStartedAt === undefined || topCompletedAt === undefined
+    || !isWindowTimeInBounds(topStartedAt, cutoff, now.getTime(), request.shanghaiDay)
+    || !isWindowTimeInBounds(topCompletedAt, cutoff, now.getTime(), request.shanghaiDay)
+    || topStartedAt > topCompletedAt) return undefined
 
   const handleByOwner = new Map(handles.map(handle => [handle.owner, handle]))
   const usedHandles = new Set<CaptureCloseHandle>()
   const occurrences: ParsedOccurrence[] = []
+  let previousSurfaceCompletedAt = topStartedAt
   for (let surfaceOrdinal = 0; surfaceOrdinal < SURFACES.length; surfaceOrdinal += 1) {
     const expectedSurface = SURFACES[surfaceOrdinal]
     const surface = value.surfaces[surfaceOrdinal]
     if (expectedSurface === undefined || !isRecord(surface)
-      || !hasExactlyKeys(surface, ['kind', 'surface', 'surfaceOrdinal', 'occurrences'])
-      || surface.kind !== 'complete' || surface.surface !== expectedSurface
-      || surface.surfaceOrdinal !== surfaceOrdinal || !hasDenseArray(surface.occurrences)) return undefined
+      || !hasExactlyKeys(surface, [
+        'kind', 'surface', 'surfaceOrdinal', 'startedAt', 'completedAt', 'occurrences',
+      ])
+      || (surface.kind !== 'complete' && surface.kind !== 'natural_zero')
+      || surface.surface !== expectedSurface || surface.surfaceOrdinal !== surfaceOrdinal
+      || !hasDenseArray(surface.occurrences)) return undefined
+
+    const surfaceStartedAt = parseWindowTime(surface.startedAt)
+    const surfaceCompletedAt = parseWindowTime(surface.completedAt)
+    if (surfaceStartedAt === undefined || surfaceCompletedAt === undefined
+      || !isWindowTimeInBounds(surfaceStartedAt, cutoff, now.getTime(), request.shanghaiDay)
+      || !isWindowTimeInBounds(surfaceCompletedAt, cutoff, now.getTime(), request.shanghaiDay)
+      || surfaceStartedAt < topStartedAt || surfaceCompletedAt > topCompletedAt
+      || surfaceStartedAt < previousSurfaceCompletedAt || surfaceStartedAt > surfaceCompletedAt
+      || (surface.kind === 'complete' && surface.occurrences.length === 0)
+      || (surface.kind === 'natural_zero' && surface.occurrences.length !== 0)) return undefined
+    previousSurfaceCompletedAt = surfaceCompletedAt
 
     for (let occurrenceOrdinal = 0; occurrenceOrdinal < surface.occurrences.length; occurrenceOrdinal += 1) {
       const occurrence = surface.occurrences[occurrenceOrdinal]
@@ -847,7 +872,8 @@ function parseWindow(
 
       const capturedAt = Date.parse(occurrence.capturedAt)
       if (capturedAt < Date.parse(request.cutoff) || capturedAt > now.getTime()
-        || shanghaiDayAt(capturedAt) !== request.shanghaiDay) return undefined
+        || shanghaiDayAt(capturedAt) !== request.shanghaiDay
+        || capturedAt < surfaceStartedAt || capturedAt > surfaceCompletedAt) return undefined
       const identity = parseXStatusUrl(occurrence.sourceUrl)
       const body = parseBodyCapture(occurrence.body, handleByOwner)
       if (identity === undefined || body === undefined || usedHandles.has(body.handle)) return undefined
@@ -865,7 +891,21 @@ function parseWindow(
       })
     }
   }
+  if (previousSurfaceCompletedAt > topCompletedAt) return undefined
   return { shanghaiDay: request.shanghaiDay, occurrences }
+}
+
+function parseWindowTime(value: unknown): number | undefined {
+  return isCanonicalIsoInstant(value) ? Date.parse(value) : undefined
+}
+
+function isWindowTimeInBounds(
+  value: number,
+  cutoff: number,
+  now: number,
+  shanghaiDay: string,
+): boolean {
+  return value >= cutoff && value <= now && shanghaiDayAt(value) === shanghaiDay
 }
 
 function parseBodyCapture(

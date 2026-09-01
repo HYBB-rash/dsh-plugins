@@ -255,14 +255,19 @@ function candidateWindow(
 ) {
   const ids = [101, 202, 303]
   const surfaces = ['for_you', 'following', 'explore'] as const
+  const surfaceTimes = [1, 2, 3].map(offset => new Date(Date.parse(request.cutoff) + offset).toISOString())
   return {
     requestId: request.requestId,
     cutoff: request.cutoff,
     shanghaiDay: request.shanghaiDay,
+    startedAt: request.cutoff,
+    completedAt: surfaceTimes[2],
     surfaces: surfaces.map((surface, surfaceOrdinal) => ({
       kind: 'complete' as const,
       surface,
       surfaceOrdinal,
+      startedAt: surfaceOrdinal === 0 ? request.cutoff : surfaceTimes[surfaceOrdinal - 1],
+      completedAt: surfaceTimes[surfaceOrdinal],
       occurrences: [{
         sourceUrl: `https://x.com/reader_${surfaceOrdinal}/status/${ids[surfaceOrdinal]}`,
         body: candidateCapture(`candidate-body-${ids[surfaceOrdinal]}`, counters[surfaceOrdinal]!, [
@@ -271,7 +276,7 @@ function candidateWindow(
           `R2_FAILED_CANARY_${surfaceOrdinal}`,
         ]),
         occurrenceOrdinal: 0,
-        capturedAt: request.cutoff,
+        capturedAt: surfaceTimes[surfaceOrdinal],
         authorHandle: `author_${surfaceOrdinal}`,
         publishedAt: '2026-08-30T12:34:56.000Z',
       }],

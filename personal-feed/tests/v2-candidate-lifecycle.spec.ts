@@ -86,15 +86,22 @@ function completeWindow(
   boundRequest = request(),
   duplicateCapturedAt = CAPTURE_AT_DAY_ONE_END,
 ) {
+  const topCompletedAt = Date.parse(firstCapturedAt) >= Date.parse(duplicateCapturedAt)
+    ? firstCapturedAt
+    : duplicateCapturedAt
   return {
     requestId: boundRequest.requestId,
     cutoff: boundRequest.cutoff,
     shanghaiDay: boundRequest.shanghaiDay,
+    startedAt: boundRequest.cutoff,
+    completedAt: topCompletedAt,
     surfaces: [
       {
         kind: 'complete',
         surface: 'for_you',
         surfaceOrdinal: 0,
+        startedAt: boundRequest.cutoff,
+        completedAt: firstCapturedAt,
         occurrences: [
           occurrence(
             'https://x.com/Alice/status/123',
@@ -107,6 +114,8 @@ function completeWindow(
         kind: 'complete',
         surface: 'following',
         surfaceOrdinal: 1,
+        startedAt: firstCapturedAt,
+        completedAt: duplicateCapturedAt,
         occurrences: [
           occurrence(
             'https://twitter.com/DifferentUser/status/123/photo/1/?utm_source=fixture#fragment',
@@ -119,6 +128,8 @@ function completeWindow(
         kind: 'complete',
         surface: 'explore',
         surfaceOrdinal: 2,
+        startedAt: duplicateCapturedAt,
+        completedAt: duplicateCapturedAt,
         occurrences: [
           occurrence(
             'https://x.com/ThirdUser/status/123/video/2/',
@@ -162,16 +173,101 @@ function replaceFirstSourceUrl(window: ReturnType<typeof completeWindow>, source
 }
 
 function replaceFirstCapturedAt(window: ReturnType<typeof completeWindow>, capturedAt: string) {
+  const shiftedDuplicateCapturedAt = Date.parse(capturedAt) > Date.parse(window.surfaces[1].completedAt)
+    ? capturedAt
+    : window.surfaces[1].completedAt
   return {
     ...window,
+    completedAt: shiftedDuplicateCapturedAt,
     surfaces: [
       {
         ...window.surfaces[0],
+        completedAt: capturedAt,
         occurrences: [{ ...window.surfaces[0].occurrences[0], capturedAt }],
       },
-      window.surfaces[1],
-      window.surfaces[2],
+      {
+        ...window.surfaces[1],
+        startedAt: capturedAt,
+        completedAt: shiftedDuplicateCapturedAt,
+        occurrences: [{ ...window.surfaces[1].occurrences[0], capturedAt: shiftedDuplicateCapturedAt }],
+      },
+      {
+        ...window.surfaces[2],
+        startedAt: shiftedDuplicateCapturedAt,
+        completedAt: shiftedDuplicateCapturedAt,
+        occurrences: [{ ...window.surfaces[2].occurrences[0], capturedAt: shiftedDuplicateCapturedAt }],
+      },
     ],
+  } as const
+}
+
+function mixedNaturalZeroWindow(
+  counters: CaptureCounters[],
+  boundRequest = request(),
+) {
+  const capturedAt = boundRequest.cutoff
+  return {
+    requestId: boundRequest.requestId,
+    cutoff: boundRequest.cutoff,
+    shanghaiDay: boundRequest.shanghaiDay,
+    startedAt: capturedAt,
+    completedAt: capturedAt,
+    surfaces: [
+      {
+        kind: 'natural_zero',
+        surface: 'for_you',
+        surfaceOrdinal: 0,
+        startedAt: capturedAt,
+        completedAt: capturedAt,
+        occurrences: [],
+      },
+      {
+        kind: 'complete',
+        surface: 'following',
+        surfaceOrdinal: 1,
+        startedAt: capturedAt,
+        completedAt: capturedAt,
+        occurrences: [
+          occurrence(
+            'https://x.com/Following/status/4242',
+            sufficientBody('CANARY_R3_FOLLOWING_STATUS_4242_7f3c9a2e', counters[1]),
+            capturedAt,
+          ),
+        ],
+      },
+      {
+        kind: 'natural_zero',
+        surface: 'explore',
+        surfaceOrdinal: 2,
+        startedAt: capturedAt,
+        completedAt: capturedAt,
+        occurrences: [],
+      },
+    ] as const,
+  } as const
+}
+
+function allNaturalZeroWindow(boundRequest = request()) {
+  const capturedAt = boundRequest.cutoff
+  const naturalZero = (surface: 'for_you' | 'following' | 'explore', surfaceOrdinal: number) => ({
+    kind: 'natural_zero' as const,
+    surface,
+    surfaceOrdinal,
+    startedAt: capturedAt,
+    completedAt: capturedAt,
+    occurrences: [],
+  })
+  return {
+    requestId: boundRequest.requestId,
+    cutoff: boundRequest.cutoff,
+    shanghaiDay: boundRequest.shanghaiDay,
+    startedAt: capturedAt,
+    completedAt: capturedAt,
+    surfaces: [
+      naturalZero('for_you', 0),
+      naturalZero('following', 1),
+      naturalZero('explore', 2),
+    ] as const,
   } as const
 }
 
@@ -279,6 +375,131 @@ afterEach(() => {
 })
 
 describe('Personal Feed v2 candidate lifecycle contract', () => {
+  it('Group3B-1 validates exact R3 window handoff for mixed and all-natural-zero surfaces', async () => {
+    const makeOwner = (now: string) => {
+      const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-r3-group3b1-'))
+      temporaryDirectories.push(directory)
+      const completionLedgerPath = join(directory, 'completion.jsonl')
+      return createPersonalFeedV2CandidateLifecycle({
+        completionLedgerPath,
+        clock: { now: () => new Date(now) },
+      })
+    }
+
+    const mixedCounters: CaptureCounters[] = [{ take: 0, close: 0 }, { take: 0, close: 0 }, { take: 0, close: 0 }]
+    const mixedOwner = makeOwner(CAPTURE_AT_DAY_ONE_END)
+    const mixedWindow = mixedNaturalZeroWindow(mixedCounters)
+    const mixedAdmission = await mixedOwner.admit({ request: request(), window: mixedWindow as never, signal: signal() })
+    expect(mixedAdmission).toMatchObject({ kind: 'admitted' })
+    if (mixedAdmission.kind !== 'admitted') throw new Error('Group3B-1 mixed window was not admitted')
+    const mixedBorrow = await mixedAdmission.cursor.borrowCurrent({ signal: signal() })
+    expect(mixedBorrow).toMatchObject({
+      kind: 'candidate',
+      lease: {
+        position: 0,
+        provenance: {
+          surface: 'following',
+          surfaceOrdinal: 1,
+          occurrenceOrdinal: 0,
+          capturedAt: REQUEST_CUTOFF,
+        },
+      },
+    })
+    await mixedAdmission.cursor.close('group3b1-mixed')
+    expect(mixedCounters).toEqual([{ take: 0, close: 0 }, { take: 1, close: 1 }, { take: 0, close: 0 }])
+
+    const allZeroOwner = makeOwner(CAPTURE_AT_DAY_ONE_END)
+    const allZeroRequest = request('telegram:4242:9004')
+    const allZeroWindow = allNaturalZeroWindow(allZeroRequest)
+    const allZeroAdmission = await allZeroOwner.admit({ request: allZeroRequest, window: allZeroWindow as never, signal: signal() })
+    expect(allZeroAdmission).toMatchObject({ kind: 'admitted' })
+    if (allZeroAdmission.kind !== 'admitted') throw new Error('Group3B-1 all-natural-zero window was not admitted')
+    expect(await allZeroAdmission.cursor.borrowCurrent({ signal: signal() })).toEqual({ kind: 'done' })
+    await allZeroAdmission.cursor.close('group3b1-all-natural-zero')
+    expect(allZeroWindow.surfaces.every(surface => surface.occurrences.length === 0)).toBe(true)
+
+    const invalidWindows: readonly [string, () => InvalidFixture][] = [
+      ['old schema missing top times', () => invalidFixture(window => {
+        const { startedAt: _startedAt, completedAt: _completedAt, ...withoutTopTimes } = window
+        return withoutTopTimes
+      })],
+      ['top started before cutoff', () => invalidFixture(window => ({ ...window, startedAt: '2026-08-31T15:59:59.999Z' }))],
+      ['top completed at Shanghai midnight', () => invalidFixture(window => ({ ...window, completedAt: '2026-09-01T16:00:00.000Z' }))],
+      ['top reversed', () => invalidFixture(window => ({ ...window, startedAt: CAPTURE_AT_DAY_ONE_END, completedAt: REQUEST_CUTOFF }))],
+      ['face outside top', () => invalidFixture(window => ({
+        ...window,
+        surfaces: [
+          { ...window.surfaces[0], completedAt: '2026-09-01T15:59:59.001Z' },
+          window.surfaces[1],
+          window.surfaces[2],
+        ],
+      }))],
+      ['surface time overlap violating frozen order', () => invalidFixture(window => ({
+        ...window,
+        surfaces: [
+          { ...window.surfaces[0], completedAt: CAPTURE_AT_DAY_ONE_END },
+          { ...window.surfaces[1], startedAt: CAPTURE_AT_DAY_ONE_START },
+          window.surfaces[2],
+        ],
+      }))],
+      ['surface time reverse violating frozen order', () => invalidFixture(window => ({
+        ...window,
+        surfaces: [
+          window.surfaces[0],
+          { ...window.surfaces[1], startedAt: CAPTURE_AT_DAY_ONE_END, completedAt: CAPTURE_AT_DAY_ONE_START },
+          window.surfaces[2],
+        ],
+      }))],
+      ['capturedAt outside face', () => invalidFixture(window => ({
+        ...window,
+        surfaces: [
+          {
+            ...window.surfaces[0],
+            occurrences: [{ ...window.surfaces[0].occurrences[0], capturedAt: CAPTURE_AT_DAY_ONE_END }],
+          },
+          window.surfaces[1],
+          window.surfaces[2],
+        ],
+      }))],
+      ['complete empty', () => invalidFixture(window => ({
+        ...window,
+        surfaces: [
+          { ...window.surfaces[0], occurrences: [] },
+          window.surfaces[1],
+          window.surfaces[2],
+        ],
+      }), [1, 2])],
+      ['natural_zero nonempty', () => invalidFixture(window => ({
+        ...window,
+        surfaces: [
+          { ...window.surfaces[0], kind: 'natural_zero' },
+          window.surfaces[1],
+          window.surfaces[2],
+        ],
+      }))],
+      ['extra top key', () => invalidFixture(window => ({ ...window, unexpected: 'CANARY_R3_TOP_EXTRA' }))],
+      ['extra face key', () => invalidFixture(window => ({
+        ...window,
+        surfaces: [
+          { ...window.surfaces[0], unexpected: 'CANARY_R3_FACE_EXTRA' },
+          window.surfaces[1],
+          window.surfaces[2],
+        ],
+      }))],
+      ['noncanonical time', () => invalidFixture(window => ({ ...window, startedAt: '2026-09-01T00:00:00Z' }))],
+      ['wrong-type time', () => invalidFixture(window => ({ ...window, completedAt: 123 }))],
+    ]
+    for (const [label, createFixture] of invalidWindows) {
+      const fixture = createFixture()
+      const owner = makeOwner(CAPTURE_AT_DAY_SEVEN_END)
+      const result = await owner.admit({ request: request(), window: fixture.window as never, signal: signal() })
+      expect(result, label).toMatchObject({ kind: 'incomplete' })
+      for (const counters of fixture.ownedCounters) {
+        expect(counters, label).toEqual({ take: 0, close: 1 })
+      }
+    }
+  })
+
   it('admits one complete three-surface window with stable X identity, first provenance, and Shanghai-day expiry', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-candidate-lifecycle-'))
     temporaryDirectories.push(directory)
@@ -585,11 +806,15 @@ describe('Personal Feed v2 candidate lifecycle contract', () => {
       requestId: request.requestId,
       cutoff: request.cutoff,
       shanghaiDay: request.shanghaiDay,
+      startedAt: request.cutoff,
+      completedAt: request.cutoff,
       surfaces: [
         {
           kind: 'complete',
           surface: 'for_you',
           surfaceOrdinal: 0,
+          startedAt: request.cutoff,
+          completedAt: request.cutoff,
           occurrences: [{
             sourceUrl: 'https://x.com/alpha/status/101',
             body: sufficientBody(canaries[101], counters[0]),
@@ -603,6 +828,8 @@ describe('Personal Feed v2 candidate lifecycle contract', () => {
           kind: 'complete',
           surface: 'following',
           surfaceOrdinal: 1,
+          startedAt: request.cutoff,
+          completedAt: request.cutoff,
           occurrences: [{
             sourceUrl: 'https://twitter.com/beta/status/202/photo/1',
             body: sufficientBody(canaries[202], counters[1]),
@@ -616,6 +843,8 @@ describe('Personal Feed v2 candidate lifecycle contract', () => {
           kind: 'complete',
           surface: 'explore',
           surfaceOrdinal: 2,
+          startedAt: request.cutoff,
+          completedAt: request.cutoff,
           occurrences: [{
             sourceUrl: 'https://x.com/gamma/status/303/video/2',
             body: sufficientBody(canaries[303], counters[2]),
@@ -1009,11 +1238,15 @@ describe('Personal Feed v2 candidate lifecycle contract', () => {
       requestId: requestValue.requestId,
       cutoff: requestValue.cutoff,
       shanghaiDay: requestValue.shanghaiDay,
+      startedAt: requestValue.cutoff,
+      completedAt: requestValue.cutoff,
       surfaces: [
         {
           kind: 'complete',
           surface: 'for_you',
           surfaceOrdinal: 0,
+          startedAt: requestValue.cutoff,
+          completedAt: requestValue.cutoff,
           occurrences: [{
             sourceUrl: 'https://x.com/alpha/status/101',
             body: makeSufficientCapture('CANARY_B2_STATUS_101_37af9e2c', counters[0]!, closeFailures[0]!),
@@ -1027,6 +1260,8 @@ describe('Personal Feed v2 candidate lifecycle contract', () => {
           kind: 'complete',
           surface: 'following',
           surfaceOrdinal: 1,
+          startedAt: requestValue.cutoff,
+          completedAt: requestValue.cutoff,
           occurrences: [{
             sourceUrl: 'https://twitter.com/beta/status/202/photo/1',
             body: makeSufficientCapture('CANARY_B2_STATUS_202_5bc18d40', counters[1]!, closeFailures[1]!),
@@ -1040,6 +1275,8 @@ describe('Personal Feed v2 candidate lifecycle contract', () => {
           kind: 'complete',
           surface: 'explore',
           surfaceOrdinal: 2,
+          startedAt: requestValue.cutoff,
+          completedAt: requestValue.cutoff,
           occurrences: [{
             sourceUrl: 'https://x.com/gamma/status/303/video/2',
             body: makeSufficientCapture('CANARY_B2_STATUS_303_6e27a1f9', counters[2]!, closeFailures[2]!),
