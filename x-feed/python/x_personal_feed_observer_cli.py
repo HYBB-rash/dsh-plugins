@@ -285,6 +285,22 @@ class _MechanicalCdpEvaluator:
         )
         return "Runtime.evaluate", {"expression": expression, "returnByValue": True}
 
+    def _read_matching_cdp_value(self, socket, request_id):
+        raw = socket.recv()
+        if isinstance(raw, bytes):
+            size = len(raw)
+            raw = raw.decode("utf-8")
+        elif isinstance(raw, str):
+            size = len(raw.encode("utf-8"))
+        else:
+            raise _CdpFailure()
+        if size > MAX_CDP_BYTES:
+            raise _CdpFailure()
+        response = json.loads(raw)
+        if not isinstance(response, dict) or response.get("id") != request_id:
+            raise _CdpFailure()
+        return response.get("result", {}).get("result", {}).get("value")
+
     def evaluate(self, ws_url, action, *, surface, stable_id=None, timeout_seconds):
         socket = None
         try:
@@ -296,20 +312,7 @@ class _MechanicalCdpEvaluator:
             socket.settimeout(timeout)
             request_id = 1
             socket.send(json.dumps({"id": request_id, "method": method, "params": params}, separators=(",", ":")))
-            raw = socket.recv()
-            if isinstance(raw, bytes):
-                size = len(raw)
-                raw = raw.decode("utf-8")
-            elif isinstance(raw, str):
-                size = len(raw.encode("utf-8"))
-            else:
-                raise _CdpFailure()
-            if size > MAX_CDP_BYTES:
-                raise _CdpFailure()
-            response = json.loads(raw)
-            if not isinstance(response, dict) or response.get("id") != request_id:
-                raise _CdpFailure()
-            value = response.get("result", {}).get("result", {}).get("value")
+            value = self._read_matching_cdp_value(socket, request_id)
             if action == "navigate":
                 if not isinstance(value, dict):
                     value = {}
