@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -218,6 +218,16 @@ function makeCoordinator(
 
 function signal(): AbortSignal {
   return new AbortController().signal
+}
+
+function manualDeferred<Value>() {
+  let resolve!: (value: Value | PromiseLike<Value>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<Value>((resolveValue, rejectValue) => {
+    resolve = resolveValue
+    reject = rejectValue
+  })
+  return { promise, resolve, reject }
 }
 
 type CandidateCaptureCounters = { take: number; close: number; reasons: string[] }
@@ -678,6 +688,120 @@ afterEach(() => {
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+type TerminalAbortCase = {
+  readonly name: string
+  readonly phase: 'finalize' | 'close'
+  readonly terminal: 'none' | 'selected'
+  readonly messageId: number
+}
+
+async function runTerminalAbortCase(testCase: TerminalAbortCase, race: boolean) {
+  const directory = mkdtempSync(join(tmpdir(), `personal-feed-v2-terminal-${testCase.phase}-${testCase.terminal}-${race ? 'race' : 'control'}-`))
+  temporaryDirectories.push(directory)
+  const controller = new AbortController()
+  const request: CandidateWindowRequest = {
+    requestId: `telegram:4242:${testCase.messageId + (race ? 100 : 0)}`,
+    cutoff: '2026-08-31T16:00:00.000Z',
+    shanghaiDay: '2026-09-01',
+  }
+  const fixture = makeCandidateOwner(directory, request, new Date('2026-08-31T16:00:01.000Z'))
+  const terminalWindow = Object.freeze({
+    ...fixture.window,
+    surfaces: Object.freeze([
+      fixture.window.surfaces[0],
+      Object.freeze({ ...fixture.window.surfaces[1], kind: 'natural_zero' as const, occurrences: Object.freeze([]) }),
+      Object.freeze({ ...fixture.window.surfaces[2], kind: 'natural_zero' as const, occurrences: Object.freeze([]) }),
+    ]),
+  })
+  const order: string[] = []
+  let finalizeEntered = false
+  let closeEntered = false
+  let releaseFinalize!: (value: void | PromiseLike<void>) => void
+  let releaseClose!: (value: void | PromiseLike<void>) => void
+  const finalizeGate = manualDeferred<void>()
+  const closeGate = manualDeferred<void>()
+  releaseFinalize = finalizeGate.resolve
+  releaseClose = closeGate.resolve
+  let finalizeCalls = 0
+  let closeCalls = 0
+  let r5Calls = 0
+  const coordinator = createPersonalFeedV2RequestCoordinator({
+    ledgerPath: join(directory, 'requests.jsonl'),
+    clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
+    r4: { snapshot: async () => ({ kind: 'sufficient', snapshot: Object.freeze({ source: 'terminal-r4' }) }) },
+    r2: { observe: async () => ({ kind: 'complete', window: terminalWindow, close: async () => undefined }) },
+    r3: {
+      admit: async (input: PersonalFeedV2R3Input) => {
+        const admitted = await fixture.owner.admit({ request: input.request, window: input.window, signal: input.signal })
+        if (admitted.kind !== 'admitted') throw new Error('terminal fixture did not admit')
+        const ownerCursor = admitted.cursor
+        const cursor = Object.freeze({
+          borrowCurrent: ownerCursor.borrowCurrent,
+          finalize: async function (this: unknown, claim: unknown) {
+            finalizeCalls += 1
+            if (race && testCase.phase === 'finalize') {
+              finalizeEntered = true
+              order.push('finalize-enter')
+              await finalizeGate.promise
+              order.push('finalize-return')
+            }
+            return Reflect.apply(ownerCursor.finalize, ownerCursor, [claim])
+          },
+          close: async function (this: unknown, reason: string) {
+            closeCalls += 1
+            if (race && testCase.phase === 'close') {
+              closeEntered = true
+              order.push('close-enter')
+              await closeGate.promise
+              order.push('close-return')
+            }
+            return Reflect.apply(ownerCursor.close, ownerCursor, [reason])
+          },
+        })
+        return { kind: 'admitted' as const, cursor }
+      },
+    },
+    r5: {
+      judge: async (input: PersonalFeedV2R5Input) => {
+        r5Calls += 1
+        assertCandidateJudgeView(input.candidates)
+        const first = await input.candidates.borrowCurrent({ signal: input.signal })
+        if (first.kind !== 'candidate') throw new Error('terminal fixture candidate missing')
+        const judgment = testCase.terminal === 'selected' ? 'qualified' as const : 'not_qualified' as const
+        const receipt = await first.lease.completeCurrent({ judgment })
+        if (testCase.terminal === 'none') {
+          expect(await input.candidates.borrowCurrent({ signal: input.signal })).toEqual({ kind: 'done' })
+          return { kind: 'none' as const, completed: Object.freeze([receipt]) }
+        }
+        return { kind: 'selected' as const, completed: Object.freeze([receipt]), selected: receipt }
+      },
+    },
+  })
+
+  const pending = coordinator.prepare({
+    chatId: 4242,
+    messageId: testCase.messageId + (race ? 100 : 0),
+    signal: controller.signal,
+  })
+  if (race) {
+    if (testCase.phase === 'finalize') {
+      for (let attempt = 0; attempt < 100 && !finalizeEntered; attempt += 1) await Promise.resolve()
+      expect(finalizeEntered, testCase.name).toBe(true)
+      controller.abort()
+      order.push('abort')
+      releaseFinalize(undefined)
+    } else {
+      for (let attempt = 0; attempt < 100 && !closeEntered; attempt += 1) await Promise.resolve()
+      expect(closeEntered, testCase.name).toBe(true)
+      controller.abort()
+      order.push('abort')
+      releaseClose(undefined)
+    }
+  }
+  const prepared = await pending as PreparedResult
+  return { prepared, fixture, order, r5Calls, finalizeCalls, closeCalls }
+}
 
 describe('Personal Feed v2 honest request lifecycle', () => {
   it('exports the one Telegram request identity function and rejects unsafe/non-positive coordinates', () => {
@@ -1933,5 +2057,257 @@ describe('Personal Feed v2 honest request lifecycle', () => {
       expect(capture.take({ signal: signal() }), variant).toBeUndefined()
       expect(touches, variant).toBe(0)
     }
+  })
+
+  it.each([
+    { name: 'R2 sync throw / R3 success', row: 0, r2: 'sync_throw', r3: 'success' },
+    { name: 'R2 reject / R3 sync throw', row: 1, r2: 'reject', r3: 'sync_throw' },
+    { name: 'R2 pending fulfill / R3 reject', row: 2, r2: 'pending_fulfill', r3: 'reject' },
+    { name: 'R2 pending reject / R3 success', row: 3, r2: 'pending_reject', r3: 'success' },
+  ] as const)('salvages cleanup-only cursor rows with body-free replay and retained-owner settle retry: $name', async (testCase) => {
+    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-salvage-revise-'))
+    temporaryDirectories.push(directory)
+    const request: CandidateWindowRequest = {
+      requestId: `telegram:4242:${1100 + testCase.row}`,
+      cutoff: '2026-08-31T16:00:00.000Z',
+      shanghaiDay: '2026-09-01',
+    }
+    const counters: CandidateCaptureCounters[] = [
+      { take: 0, close: 0, reasons: [] }, { take: 0, close: 0, reasons: [] }, { take: 0, close: 0, reasons: [] },
+    ]
+    const ids = [101, 202, 303]
+    const surfaces = ['for_you', 'following', 'explore'] as const
+    const surfaceTimes = [1, 2, 3].map(offset => new Date(Date.parse(request.cutoff) + offset).toISOString())
+    const window = {
+      requestId: request.requestId,
+      cutoff: request.cutoff,
+      shanghaiDay: request.shanghaiDay,
+      startedAt: request.cutoff,
+      completedAt: surfaceTimes[2],
+      surfaces: surfaces.map((surface, surfaceOrdinal) => ({
+        kind: 'complete' as const,
+        surface,
+        surfaceOrdinal,
+        startedAt: surfaceOrdinal === 0 ? request.cutoff : surfaceTimes[surfaceOrdinal - 1],
+        completedAt: surfaceTimes[surfaceOrdinal],
+        occurrences: [{
+          sourceUrl: `https://x.com/revise_${surfaceOrdinal}/status/${ids[surfaceOrdinal]}`,
+          body: closeAwareCandidateCapture(
+            surfaceOrdinal === 0 ? `BODY_CANARY_${testCase.row}` : `BODY_CANARY_${testCase.row}_${surfaceOrdinal}`,
+            counters[surfaceOrdinal]!, [
+            `SALVAGE_ROW_${testCase.row}_${surfaceOrdinal}`,
+            ],
+          ),
+          occurrenceOrdinal: 0,
+          capturedAt: surfaceTimes[surfaceOrdinal],
+          authorHandle: `revise_author_${surfaceOrdinal}`,
+          publishedAt: '2026-08-30T12:34:56.000Z',
+        }],
+      })),
+    } as const
+    const order: string[] = []
+    const r2Deferred = testCase.r2.startsWith('pending') ? manualDeferred<void>() : undefined
+    let r2CloseCalls = 0
+    let r2CapturesClosed = false
+    let r2!: Record<string, unknown>
+    const r2Close = function (this: unknown, reason: string) {
+      expect(this).toBe(r2)
+      expect(reason).toBe('coordinator_incomplete')
+      r2CloseCalls += 1
+      order.push('r2-close')
+      if (!r2CapturesClosed) {
+        r2CapturesClosed = true
+        for (const surface of window.surfaces) for (const occurrence of surface.occurrences) {
+          const body = occurrence.body as { readonly capture: { readonly close: (reason?: string) => unknown } }
+          body.capture.close(reason)
+        }
+      }
+      if (testCase.r2 === 'sync_throw') throw new Error('scripted R2 close throw')
+      if (testCase.r2 === 'reject') return Promise.reject(new Error('scripted R2 close reject'))
+      return r2Deferred!.promise
+    }
+    r2 = Object.freeze({ kind: 'complete', window, close: r2Close })
+    let r3Cursor!: Record<string, unknown>
+    let r3CloseCalls = 0
+    const r3Close = function (this: unknown, reason: string) {
+      expect(this).toBe(r3Cursor)
+      expect(reason).toBe('coordinator_incomplete')
+      r3CloseCalls += 1
+      order.push('r3-close')
+      if (testCase.r3 === 'sync_throw') throw new Error('scripted R3 close throw')
+      if (testCase.r3 === 'reject') return Promise.reject(new Error('scripted R3 close reject'))
+      return undefined
+    }
+    r3Cursor = { borrowCurrent: 'not callable', finalize: 'not callable', close: r3Close }
+    let r5Calls = 0
+    let admitCalls = 0
+    let r2Input: PersonalFeedV2R2Input | undefined
+    let r3Input: PersonalFeedV2R3Input | undefined
+    let takeValue: unknown
+    const requestSignal = signal()
+    const ledgerPath = join(directory, 'requests.jsonl')
+    const coordinator = createPersonalFeedV2RequestCoordinator({
+      ledgerPath,
+      clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
+      r4: { snapshot: async () => ({ kind: 'sufficient', snapshot: Object.freeze({ source: 'salvage-r4' }) }) },
+      r2: { observe: async (input: PersonalFeedV2R2Input) => { r2Input = input; return r2 } },
+      r3: {
+        admit: async (input: PersonalFeedV2R3Input) => {
+          admitCalls += 1
+          r3Input = input
+          const body = input.window as { readonly surfaces: readonly [{ readonly occurrences: readonly [{ readonly body: unknown }] }] }
+          const bodyValue = body.surfaces[0]!.occurrences[0]!.body as { readonly capture: { readonly take: (input: { readonly signal: AbortSignal }) => unknown } }
+          const capture = bodyValue.capture
+          takeValue = capture.take({ signal: input.signal })
+          return { kind: 'admitted' as const, cursor: r3Cursor }
+        },
+      },
+      r5: { judge: async () => { r5Calls += 1; return { kind: 'none', completed: [] } } },
+    })
+    const prepared = await coordinator.prepare({ chatId: 4242, messageId: 1100 + testCase.row, signal: requestSignal }) as PreparedResult
+    expect({ kind: prepared.outcome.kind, category: prepared.outcome.category, finalText: prepared.outcome.finalText }).toEqual({
+      kind: 'incomplete', category: 'source_window', finalText: '这次没有完成：X 来源或观察窗口未完成。',
+    })
+    expect(r5Calls).toBe(0)
+    expect(admitCalls).toBe(1)
+    expect(r2Input).not.toBeUndefined()
+    expect(r2Input!.request).toEqual(request)
+    expect(r2Input!.signal).toBe(requestSignal)
+    expect(r3Input).not.toBeUndefined()
+    expect(r3Input!.request).toEqual(request)
+    expect(r3Input!.window).toBe(window)
+    expect(r3Input!.signal).toBe(requestSignal)
+    expect(takeValue).toBe(`BODY_CANARY_${testCase.row}`)
+    expect(order[0]).toBe('r2-close')
+    expect(order.indexOf('r2-close')).toBeLessThan(order.indexOf('r3-close'))
+    expect(r2CloseCalls).toBe(1)
+    expect(r3CloseCalls).toBe(1)
+    expect(coordinator.read(request.requestId)).toMatchObject({
+      status: 'prepared', request, outcome: prepared.outcome,
+    })
+    expect(JSON.stringify(prepared.outcome)).not.toContain('BODY_CANARY')
+    expect(JSON.stringify(coordinator.read(request.requestId))).not.toContain('BODY_CANARY')
+    expect(readFileSync(ledgerPath, 'utf8')).not.toContain('BODY_CANARY')
+    const receipt: Receipt = {
+      chatId: 4242, triggerMessageId: 1100 + testCase.row,
+      visibleText: prepared.outcome.finalText, messageIds: [1200 + testCase.row],
+    }
+    if (testCase.r2 === 'pending_fulfill') {
+      r2Deferred!.resolve(undefined)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(r2CloseCalls).toBe(1)
+    }
+    if (testCase.r2 === 'pending_reject') {
+      r2Deferred!.reject(new Error('late R2 close reject'))
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(r2CloseCalls).toBe(1)
+    }
+    expect(prepared.settle(receipt)).toBeUndefined()
+    expect(coordinator.read(request.requestId)).toMatchObject({ status: 'delivered', receipt })
+    const expectedR2CloseCalls = testCase.r2 === 'pending_fulfill' ? 1 : 2
+    const expectedR3CloseCalls = testCase.r3 === 'success' ? 1 : 2
+    expect(r2CloseCalls).toBe(expectedR2CloseCalls)
+    expect(r3CloseCalls).toBe(expectedR3CloseCalls)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(r2CloseCalls).toBe(expectedR2CloseCalls)
+    expect(r3CloseCalls).toBe(expectedR3CloseCalls)
+    expect(readFileSync(ledgerPath, 'utf8')).not.toContain('BODY_CANARY')
+    expect(coordinator.read(request.requestId)).toMatchObject({ status: 'delivered', receipt })
+    expect(counters[0]!.close).toBe(1)
+    expect(counters.every(counter => counter.take <= 1)).toBe(true)
+    expect(r2CloseCalls + r3CloseCalls).toBeGreaterThanOrEqual(2)
+  })
+
+  it.each([
+    { name: 'invalid receipt', invalidLedger: false },
+    { name: 'invalid ledger', invalidLedger: true },
+  ] as const)('starts retained-owner settle retry before $name validation: $name', async (testCase) => {
+    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-settle-barrier-'))
+    temporaryDirectories.push(directory)
+    const ledgerPath = join(directory, 'requests.jsonl')
+    const controller = new AbortController()
+    let closeCalls = 0
+    const secondClose = manualDeferred<void>()
+    const cursor = Object.freeze({
+      borrowCurrent: async () => ({ kind: 'done' as const }),
+      finalize: async (claim: unknown) => {
+        expect(claim).toMatchObject({ kind: 'incomplete', reason: 'failed' })
+        return { kind: 'incomplete' as const, reason: 'failed' as const }
+      },
+      close: async () => {
+        closeCalls += 1
+        if (closeCalls === 1) return Promise.reject(new Error('first close reject'))
+        if (testCase.invalidLedger) return secondClose.promise
+        throw new Error('second close throw')
+      },
+    })
+    const coordinator = createPersonalFeedV2RequestCoordinator({
+      ledgerPath,
+      clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
+      r4: { snapshot: async () => ({ kind: 'sufficient', snapshot: Object.freeze({ source: 'barrier-r4' }) }) },
+      r2: { observe: async () => ({ kind: 'complete', window: Object.freeze({ source: 'barrier-r2' }), close: async () => undefined }) },
+      r3: { admit: async () => ({ kind: 'admitted' as const, cursor }) },
+      r5: { judge: async () => ({ kind: 'incomplete' as const, completed: Object.freeze([]), reason: 'failed' as const }) },
+    })
+    const prepared = await coordinator.prepare({ chatId: 4242, messageId: testCase.invalidLedger ? 1151 : 1150, signal: controller.signal }) as PreparedResult
+    expect(prepared.outcome.kind).toBe('incomplete')
+    expect(prepared.outcome.category).toBe('judgement_execution')
+    expect(closeCalls).toBe(1)
+    const requestId = `telegram:4242:${testCase.invalidLedger ? 1151 : 1150}`
+    if (testCase.invalidLedger) {
+      const receipt: Receipt = {
+        chatId: 4242, triggerMessageId: 1151, visibleText: prepared.outcome.finalText, messageIds: [1251],
+      }
+      writeFileSync(ledgerPath, 'not-json\n')
+      expect(() => prepared.settle(receipt)).toThrow('ledger line 1 is not valid JSON')
+      expect(closeCalls).toBe(2)
+      secondClose.reject(new Error('late retained-owner close reject'))
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(closeCalls).toBe(2)
+      expect(readFileSync(ledgerPath, 'utf8')).toBe('not-json\n')
+    } else {
+      const invalidReceipt = {
+        chatId: 4242, triggerMessageId: 1150, visibleText: prepared.outcome.finalText, messageIds: [],
+      } as unknown as Receipt
+      expect(() => prepared.settle(invalidReceipt)).toThrow('delivery receipt is invalid')
+      expect(closeCalls).toBe(2)
+      expect(coordinator.read(requestId)).toMatchObject({ status: 'prepared', outcome: prepared.outcome })
+    }
+    expect(readFileSync(ledgerPath, 'utf8')).not.toContain('BODY_CANARY')
+  })
+
+  it.each([
+    { name: 'finalize / none', phase: 'finalize', terminal: 'none', messageId: 1180 },
+    { name: 'finalize / selected', phase: 'finalize', terminal: 'selected', messageId: 1181 },
+    { name: 'close / none', phase: 'close', terminal: 'none', messageId: 1182 },
+    { name: 'close / selected', phase: 'close', terminal: 'selected', messageId: 1183 },
+  ] as const)('marks terminal success incomplete when abort wins the awaited $name race', async (testCase) => {
+    const control = await runTerminalAbortCase(testCase, false)
+    expect({ kind: control.prepared.outcome.kind, finalText: control.prepared.outcome.finalText }).toEqual(
+      testCase.terminal === 'none'
+        ? { kind: 'business_empty', finalText: '这次没有值得看的内容。' }
+        : { kind: 'one_link', finalText: 'https://x.com/reader_0/status/101' },
+    )
+    expect(control.r5Calls).toBe(1)
+    expect(control.finalizeCalls).toBe(1)
+    expect(control.closeCalls).toBe(1)
+
+    const race = await runTerminalAbortCase(testCase, true)
+    expect({ kind: race.prepared.outcome.kind, category: race.prepared.outcome.category, finalText: race.prepared.outcome.finalText }).toEqual({
+      kind: 'incomplete', category: 'judgement_execution', finalText: '这次没有完成：判断或执行未完成。',
+    })
+    expect(race.r5Calls).toBe(1)
+    expect(race.finalizeCalls).toBe(1)
+    expect(race.closeCalls).toBe(1)
+    expect(race.order).toEqual(
+      testCase.phase === 'finalize'
+        ? ['finalize-enter', 'abort', 'finalize-return']
+        : ['close-enter', 'abort', 'close-return'],
+    )
+    expect(race.fixture.counters[0]!.close).toBe(1)
   })
 })

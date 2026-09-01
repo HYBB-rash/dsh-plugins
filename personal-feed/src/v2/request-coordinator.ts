@@ -261,6 +261,10 @@ export function createPersonalFeedV2RequestCoordinator(
 
   const readLedger = (): ParsedLedger => parseLedger(options.ledgerPath)
 
+  const retryCleanupDetached = (): void => {
+    void cleanupRegistry.retry().catch(() => undefined)
+  }
+
   const read = (requestId: string): PersonalFeedV2RequestSnapshot | undefined => {
     const parsed = readLedger()
     const state = parsed.states.get(requestId)
@@ -281,6 +285,7 @@ export function createPersonalFeedV2RequestCoordinator(
   }
 
   const settle = (requestId: string, receipt: PersonalFeedV2Receipt): void => {
+    retryCleanupDetached()
     const parsedReceipt = parseReceipt(receipt)
     const parsed = readLedger()
     const state = parsed.states.get(requestId)
@@ -293,7 +298,6 @@ export function createPersonalFeedV2RequestCoordinator(
     if (parsedReceipt.visibleText !== state.prepared.outcome.finalText) {
       throw new PersonalFeedScopeInputError('personal Feed v2 delivery receipt text does not match prepared outcome')
     }
-    void cleanupRegistry.retry()
     if (state.terminal !== undefined) {
       if (canonical(state.terminal.receipt) !== canonical(parsedReceipt)) {
         throw new PersonalFeedScopeStoreError(`personal Feed v2 request ${requestId} has a conflicting terminal receipt`)
@@ -387,8 +391,9 @@ export function createPersonalFeedV2RequestCoordinator(
                   } else if (r3Result.kind === 'salvage') {
                     const r3Authority = cleanupRegistry.register(r3Result.receiver, r3Result.close)
                     const r2Closed = await cleanupRegistry.attempt(r2Authority)
-                    const r3Closed = await cleanupRegistry.attempt(r3Authority)
-                    outcome = incomplete(r2Closed && r3Closed ? 'judgement_execution' : (r2Closed ? 'judgement_execution' : 'source_window'), JUDGEMENT_EXECUTION_TEXT)
+                    await cleanupRegistry.attempt(r3Authority)
+                    const category: PersonalFeedV2IncompleteCategory = r2Closed ? 'judgement_execution' : 'source_window'
+                    outcome = incomplete(category, incompleteText(category))
                   } else {
                     const r3Authority = cleanupRegistry.register(r3Result.cursor.owner, r3Result.cursor.close)
                     const r2Closed = await cleanupRegistry.attempt(r2Authority)
@@ -722,14 +727,16 @@ async function coordinateCandidateJudgement(
       return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
     }
     const closed = await cleanupRegistry.attempt(cursorAuthority)
-    return closed ? makeOutcome('business_empty', BUSINESS_EMPTY_TEXT) : incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
+    if (!closed || signal.aborted) return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
+    return makeOutcome('business_empty', BUSINESS_EMPTY_TEXT)
   }
   if (!isProvenSelection(finalization.selected, tracker)) {
     await cleanupRegistry.attempt(cursorAuthority)
     return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
   }
   const closed = await cleanupRegistry.attempt(cursorAuthority)
-  return closed ? makeOutcome('one_link', finalization.selected.canonicalUrl) : incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
+  if (!closed || signal.aborted) return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
+  return makeOutcome('one_link', finalization.selected.canonicalUrl)
 }
 
 function createCandidateTracker(
