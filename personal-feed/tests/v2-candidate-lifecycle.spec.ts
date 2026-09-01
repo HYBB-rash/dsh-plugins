@@ -357,6 +357,108 @@ interface InvalidFixture {
   readonly ownedCounters: readonly CaptureCounters[]
 }
 
+type ReflectionTrap = 'getPrototypeOf' | 'ownKeys' | 'getOwnPropertyDescriptor' | 'get'
+type ProxyNode = 'top window' | 'surfaces array' | 'surface' | 'occurrences array' | 'occurrence'
+
+function throwingReflectionProxy<T extends object>(
+  target: T,
+  trap: ReflectionTrap,
+  onGet: () => void = () => {},
+): T {
+  const handler: ProxyHandler<T> = {}
+  if (trap === 'getPrototypeOf') handler.getPrototypeOf = () => { throw new Error('CANARY_PROXY_GET_PROTOTYPE_OF') }
+  if (trap === 'ownKeys') handler.ownKeys = () => { throw new Error('CANARY_PROXY_OWN_KEYS') }
+  if (trap === 'getOwnPropertyDescriptor') {
+    handler.getOwnPropertyDescriptor = () => { throw new Error('CANARY_PROXY_GET_OWN_PROPERTY_DESCRIPTOR') }
+  }
+  if (trap === 'get') {
+    handler.get = (proxyTarget, property, receiver) => {
+      onGet()
+      return Reflect.get(proxyTarget, property, receiver)
+    }
+  }
+  return new Proxy(target, handler)
+}
+
+function proxyWindowNode(
+  window: ReturnType<typeof completeWindow>,
+  node: ProxyNode,
+  trap: ReflectionTrap,
+  onGet: () => void = () => {},
+): unknown {
+  if (node === 'top window') return throwingReflectionProxy(window, trap, onGet)
+  if (node === 'surfaces array') {
+    return {
+      ...window,
+      surfaces: throwingReflectionProxy(window.surfaces, trap, onGet),
+    }
+  }
+  if (node === 'surface') {
+    return {
+      ...window,
+      surfaces: [
+        throwingReflectionProxy(window.surfaces[0], trap, onGet),
+        window.surfaces[1],
+        window.surfaces[2],
+      ],
+    }
+  }
+  if (node === 'occurrences array') {
+    return {
+      ...window,
+      surfaces: [
+        {
+          ...window.surfaces[0],
+          occurrences: throwingReflectionProxy(window.surfaces[0].occurrences, trap, onGet),
+        },
+        window.surfaces[1],
+        window.surfaces[2],
+      ],
+    }
+  }
+  return {
+    ...window,
+    surfaces: [
+      {
+        ...window.surfaces[0],
+        occurrences: [
+          throwingReflectionProxy(window.surfaces[0].occurrences[0], trap, onGet),
+        ],
+      },
+      window.surfaces[1],
+      window.surfaces[2],
+    ],
+  }
+}
+
+function expectedProxyCleanup(node: ProxyNode, trap: ReflectionTrap): readonly number[] {
+  if (trap !== 'getOwnPropertyDescriptor') return [0, 1, 2]
+  if (node === 'top window' || node === 'surfaces array') return []
+  return [1, 2]
+}
+
+async function resolveAdmitOrRejected(
+  owner: ReturnType<typeof createPersonalFeedV2CandidateLifecycle>,
+  window: unknown,
+): Promise<unknown> {
+  try {
+    return await owner.admit({ request: request(), window: window as never, signal: signal() })
+  } catch {
+    return { kind: 'rejected' }
+  }
+}
+
+function assertCaptureCleanup(
+  counters: readonly CaptureCounters[],
+  closeIndexes: readonly number[],
+): void {
+  const expected = new Set(closeIndexes)
+  counters.forEach((counter, index) => {
+    expect(counter.take, `capture ${index} must not be taken`).toBe(0)
+    if (expected.has(index)) expect(counter.close, `capture ${index} must close`).toBe(1)
+  })
+}
+
 function invalidFixture(
   mutate: (window: ReturnType<typeof completeWindow>) => unknown,
   ownedIndexes: readonly number[] = [0, 1, 2],
@@ -497,6 +599,310 @@ describe('Personal Feed v2 candidate lifecycle contract', () => {
       for (const counters of fixture.ownedCounters) {
         expect(counters, label).toEqual({ take: 0, close: 1 })
       }
+    }
+  })
+
+  it('R3 rejects every proxy node and reflection failure without reading a get trap', async () => {
+    const makeOwner = (now: string) => {
+      const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-r3-proxy-matrix-'))
+      temporaryDirectories.push(directory)
+      return createPersonalFeedV2CandidateLifecycle({
+        completionLedgerPath: join(directory, 'completion.jsonl'),
+        clock: { now: () => new Date(now) },
+      })
+    }
+    const nodes: readonly ProxyNode[] = ['top window', 'surfaces array', 'surface', 'occurrences array', 'occurrence']
+    const traps: readonly ReflectionTrap[] = ['getPrototypeOf', 'ownKeys', 'getOwnPropertyDescriptor', 'get']
+
+    for (const node of nodes) {
+      for (const trap of traps) {
+        const counters: CaptureCounters[] = [{ take: 0, close: 0 }, { take: 0, close: 0 }, { take: 0, close: 0 }]
+        const base = completeWindow(counters)
+        let getTrapCalls = 0
+        const window = proxyWindowNode(base, node, trap, () => { getTrapCalls += 1 })
+        const label = `${node} ${trap}`
+        const result = await resolveAdmitOrRejected(makeOwner(CAPTURE_AT_DAY_SEVEN_END), window)
+        expect(result, label).toEqual({ kind: 'incomplete', reason: 'invalid_input' })
+        if (trap === 'get') expect(getTrapCalls, `${label} get trap calls`).toBe(0)
+        assertCaptureCleanup(counters, expectedProxyCleanup(node, trap))
+      }
+    }
+  })
+
+  it('R3 rejects accessor descriptors without invoking getter or setter on every capture-bearing node', async () => {
+    const makeOwner = () => {
+      const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-r3-accessor-zero-read-'))
+      temporaryDirectories.push(directory)
+      return createPersonalFeedV2CandidateLifecycle({
+        completionLedgerPath: join(directory, 'completion.jsonl'),
+        clock: { now: () => new Date(CAPTURE_AT_DAY_SEVEN_END) },
+      })
+    }
+    const layers = ['top', 'surface', 'occurrence', 'body', 'capture', 'unavailable body'] as const
+    const modes = ['getter', 'setter'] as const
+
+    for (const layer of layers) {
+      for (const mode of modes) {
+        const counters: CaptureCounters[] = [{ take: 0, close: 0 }, { take: 0, close: 0 }, { take: 0, close: 0 }]
+        const base = completeWindow(counters)
+        let window: ReturnType<typeof completeWindow> = base
+        let target: object
+        let key: string
+        let validValue: unknown
+        if (layer === 'top') {
+          target = window
+          key = 'surfaces'
+          validValue = window.surfaces
+        } else if (layer === 'surface') {
+          target = window.surfaces[0]
+          key = 'occurrences'
+          validValue = window.surfaces[0].occurrences
+        } else if (layer === 'occurrence') {
+          target = window.surfaces[0].occurrences[0]
+          key = 'body'
+          validValue = window.surfaces[0].occurrences[0].body
+        } else if (layer === 'body') {
+          target = window.surfaces[0].occurrences[0].body
+          const body = window.surfaces[0].occurrences[0].body
+          if (body.kind !== 'sufficient') throw new Error('complete fixture body was not sufficient')
+          key = 'capture'
+          validValue = body.capture
+        } else if (layer === 'capture') {
+          const body = window.surfaces[0].occurrences[0].body
+          if (body.kind !== 'sufficient') throw new Error('complete fixture body was not sufficient')
+          target = body.capture
+          key = 'take'
+          validValue = body.capture.take
+        } else {
+          const unavailable: BodyCapture = { kind: 'insufficient', close: () => { counters[0].close += 1 } }
+          window = replaceFirstBody(window, unavailable)
+          const body = window.surfaces[0].occurrences[0].body
+          if (body.kind === 'sufficient') throw new Error('unavailable fixture body was sufficient')
+          target = body
+          key = 'close'
+          validValue = body.close
+        }
+        let getterReads = 0
+        let setterWrites = 0
+        Object.defineProperty(target, key, mode === 'getter'
+          ? {
+              configurable: true,
+              enumerable: true,
+              get: () => {
+                getterReads += 1
+                return validValue
+              },
+            }
+          : {
+              configurable: true,
+              enumerable: true,
+              set: () => { setterWrites += 1 },
+            })
+        const label = `${layer} ${mode}`
+        const result = await resolveAdmitOrRejected(makeOwner(), window)
+        expect(result, label).toEqual({ kind: 'incomplete', reason: 'invalid_input' })
+        expect(getterReads, `${label} getter reads`).toBe(0)
+        expect(setterWrites, `${label} setter writes`).toBe(0)
+        assertCaptureCleanup(counters, layer === 'top' ? [] : layer === 'capture' ? [0, 1, 2] : [1, 2])
+      }
+    }
+  })
+
+  it('R3 rejects non-enumerable and extra record keys plus every non-exact array shape', async () => {
+    const makeOwner = () => {
+      const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-r3-exact-descriptors-'))
+      temporaryDirectories.push(directory)
+      return createPersonalFeedV2CandidateLifecycle({
+        completionLedgerPath: join(directory, 'completion.jsonl'),
+        clock: { now: () => new Date(CAPTURE_AT_DAY_SEVEN_END) },
+      })
+    }
+    const recordLayers = ['top', 'surface', 'occurrence', 'body', 'capture', 'unavailable body'] as const
+    const recordMutations = ['non-enumerable expected', 'non-enumerable extra', 'string extra', 'symbol extra'] as const
+
+    for (const layer of recordLayers) {
+      for (const mutation of recordMutations) {
+        const counters: CaptureCounters[] = [{ take: 0, close: 0 }, { take: 0, close: 0 }, { take: 0, close: 0 }]
+        let window = completeWindow(counters)
+        let target: object
+        let expectedKey: string
+        if (layer === 'top') {
+          target = window
+          expectedKey = 'startedAt'
+        } else if (layer === 'surface') {
+          target = window.surfaces[0]
+          expectedKey = 'kind'
+        } else if (layer === 'occurrence') {
+          target = window.surfaces[0].occurrences[0]
+          expectedKey = 'authorHandle'
+        } else if (layer === 'body') {
+          target = window.surfaces[0].occurrences[0].body
+          expectedKey = 'kind'
+        } else if (layer === 'capture') {
+          const body = window.surfaces[0].occurrences[0].body
+          if (body.kind !== 'sufficient') throw new Error('complete fixture body was not sufficient')
+          target = body.capture
+          expectedKey = 'take'
+        } else {
+          const unavailable: BodyCapture = { kind: 'insufficient', close: () => { counters[0].close += 1 } }
+          window = replaceFirstBody(window, unavailable)
+          const body = window.surfaces[0].occurrences[0].body
+          if (body.kind === 'sufficient') throw new Error('unavailable fixture body was sufficient')
+          target = body
+          expectedKey = 'kind'
+        }
+        if (mutation === 'non-enumerable expected') {
+          const descriptor = Object.getOwnPropertyDescriptor(target, expectedKey)
+          if (descriptor === undefined) throw new Error(`missing fixture descriptor: ${layer}.${expectedKey}`)
+          Object.defineProperty(target, expectedKey, { ...descriptor, enumerable: false })
+        } else if (mutation === 'non-enumerable extra') {
+          Object.defineProperty(target, 'CANARY_NON_ENUM_EXTRA', {
+            configurable: true,
+            enumerable: false,
+            value: 'CANARY_R3_NON_ENUM_EXTRA',
+            writable: true,
+          })
+        } else if (mutation === 'string extra') {
+          Object.defineProperty(target, 'CANARY_STRING_EXTRA', {
+            configurable: true,
+            enumerable: true,
+            value: 'CANARY_R3_STRING_EXTRA',
+            writable: true,
+          })
+        } else {
+          Object.defineProperty(target, Symbol('CANARY_SYMBOL_EXTRA'), {
+            configurable: true,
+            enumerable: true,
+            value: 'CANARY_R3_SYMBOL_EXTRA',
+            writable: true,
+          })
+        }
+        const label = `record ${layer} ${mutation}`
+        const result = await resolveAdmitOrRejected(makeOwner(), window)
+        expect(result, label).toEqual({ kind: 'incomplete', reason: 'invalid_input' })
+        assertCaptureCleanup(counters, [0, 1, 2])
+      }
+    }
+
+    const arrayLayers = ['surfaces', 'occurrences'] as const
+    const arrayMutations = ['string extra', 'symbol extra', 'numeric extra', 'non-enumerable index', 'accessor index', 'hole'] as const
+    for (const layer of arrayLayers) {
+      for (const mutation of arrayMutations) {
+        const counters: CaptureCounters[] = [{ take: 0, close: 0 }, { take: 0, close: 0 }, { take: 0, close: 0 }]
+        const window = completeWindow(counters)
+        const target = layer === 'surfaces' ? window.surfaces : window.surfaces[0].occurrences
+        const first = target[0]
+        let accessorReads = 0
+        if (mutation === 'string extra') {
+          Object.defineProperty(target, 'CANARY_ARRAY_STRING_EXTRA', {
+            configurable: true,
+            enumerable: true,
+            value: first,
+            writable: true,
+          })
+        } else if (mutation === 'symbol extra') {
+          Object.defineProperty(target, Symbol('CANARY_ARRAY_SYMBOL_EXTRA'), {
+            configurable: true,
+            enumerable: true,
+            value: first,
+            writable: true,
+          })
+        } else if (mutation === 'numeric extra') {
+          Object.defineProperty(target, String(target.length), {
+            configurable: true,
+            enumerable: true,
+            value: first,
+            writable: true,
+          })
+        } else if (mutation === 'non-enumerable index') {
+          const descriptor = Object.getOwnPropertyDescriptor(target, '0')
+          if (descriptor === undefined) throw new Error(`missing fixture array index: ${layer}[0]`)
+          Object.defineProperty(target, '0', { ...descriptor, enumerable: false })
+        } else if (mutation === 'accessor index') {
+          Object.defineProperty(target, '0', {
+            configurable: true,
+            enumerable: true,
+            get: () => {
+              accessorReads += 1
+              return first
+            },
+          })
+        } else {
+          if (!Reflect.deleteProperty(target, '0')) throw new Error(`could not create fixture hole: ${layer}[0]`)
+        }
+        const label = `array ${layer} ${mutation}`
+        const result = await resolveAdmitOrRejected(makeOwner(), window)
+        expect(result, label).toEqual({ kind: 'incomplete', reason: 'invalid_input' })
+        if (mutation === 'accessor index') expect(accessorReads, `${label} getter reads`).toBe(0)
+        assertCaptureCleanup(counters, mutation === 'accessor index' || mutation === 'hole' ? [1, 2] : [0, 1, 2])
+      }
+    }
+  })
+
+  it('R3 best-effort cleanup closes known siblings and tolerates a throwing discovered close', async () => {
+    const makeOwner = () => {
+      const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-r3-best-effort-cleanup-'))
+      temporaryDirectories.push(directory)
+      return createPersonalFeedV2CandidateLifecycle({
+        completionLedgerPath: join(directory, 'completion.jsonl'),
+        clock: { now: () => new Date(CAPTURE_AT_DAY_SEVEN_END) },
+      })
+    }
+
+    {
+      const counters: CaptureCounters[] = [{ take: 0, close: 0 }, { take: 0, close: 0 }, { take: 0, close: 0 }]
+      const base = completeWindow(counters)
+      const nestedSurface = throwingReflectionProxy(base.surfaces[0], 'getPrototypeOf')
+      const surfaces = throwingReflectionProxy([
+        nestedSurface,
+        base.surfaces[1],
+        base.surfaces[2],
+      ], 'ownKeys')
+      const composite = throwingReflectionProxy({ ...base, surfaces }, 'ownKeys')
+      const result = await resolveAdmitOrRejected(makeOwner(), composite)
+      expect(result).toEqual({ kind: 'incomplete', reason: 'invalid_input' })
+      expect(counters).toEqual([{ take: 0, close: 1 }, { take: 0, close: 1 }, { take: 0, close: 1 }])
+    }
+
+    {
+      const counters: CaptureCounters[] = [{ take: 0, close: 0 }, { take: 0, close: 0 }, { take: 0, close: 0 }]
+      const base = completeWindow(counters)
+      const firstOccurrence = throwingReflectionProxy(base.surfaces[0].occurrences[0], 'getOwnPropertyDescriptor')
+      const window = {
+        ...base,
+        surfaces: [
+          { ...base.surfaces[0], occurrences: [firstOccurrence] },
+          base.surfaces[1],
+          base.surfaces[2],
+        ],
+      }
+      const result = await resolveAdmitOrRejected(makeOwner(), window)
+      expect(result).toEqual({ kind: 'incomplete', reason: 'invalid_input' })
+      expect(counters[0]).toMatchObject({ take: 0 })
+      expect(counters[1]).toEqual({ take: 0, close: 1 })
+      expect(counters[2]).toEqual({ take: 0, close: 1 })
+    }
+
+    {
+      const counters: CaptureCounters[] = [{ take: 0, close: 0 }, { take: 0, close: 0 }, { take: 0, close: 0 }]
+      const base = completeWindow(counters)
+      const throwingBody: BodyCapture = {
+        kind: 'sufficient',
+        capture: {
+          take: () => {
+            counters[0].take += 1
+            return FIRST_BODY
+          },
+          close: () => {
+            counters[0].close += 1
+            throw new Error('CANARY_CLOSE_FAILURE')
+          },
+        },
+      }
+      const invalidWindow = { ...replaceFirstBody(base, throwingBody), unexpected: 'CANARY_R3_INVALID' }
+      const result = await resolveAdmitOrRejected(makeOwner(), invalidWindow)
+      expect(result).toEqual({ kind: 'incomplete', reason: 'invalid_input' })
+      expect(counters).toEqual([{ take: 0, close: 1 }, { take: 0, close: 1 }, { take: 0, close: 1 }])
     }
   })
 

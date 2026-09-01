@@ -1,5 +1,6 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { types as nodeTypes } from 'node:util'
 import { encodeCanonicalJson } from '../canonical-json.ts'
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -180,6 +181,7 @@ export interface PersonalFeedV2CandidateLifecycle {
 }
 
 type SurfaceName = PersonalFeedV2CandidateProvenance['surface']
+type UnknownCallable = (...args: unknown[]) => unknown
 
 interface CaptureCloseHandle {
   readonly owner: object
@@ -210,6 +212,16 @@ interface ParsedOccurrence {
 interface ParsedWindow {
   readonly shanghaiDay: string
   readonly occurrences: readonly ParsedOccurrence[]
+}
+
+interface WindowRecordSnapshot {
+  readonly owner: object
+  readonly values: ReadonlyMap<string, unknown>
+}
+
+interface WindowArraySnapshot {
+  readonly owner: object
+  readonly values: readonly unknown[]
 }
 
 interface WindowInterval {
@@ -279,7 +291,13 @@ export function createPersonalFeedV2CandidateLifecycle(
   const reservations = new Map<string, object>()
 
   const admit = async (input: PersonalFeedV2CandidateAdmitInput): Promise<PersonalFeedV2CandidateAdmitResult> => {
-    const handles = collectCloseHandles(isRecord(input) ? input.window : undefined)
+    let handles: CaptureCloseHandle[] = []
+    try {
+      handles = collectCloseHandles(isRecord(input) ? input.window : undefined)
+    } catch {
+      // Discovery is best effort; a failed reflection must still resolve through
+      // the ordinary invalid-input cleanup path.
+    }
     let activeReservation: CandidateReservation | undefined
     const fail = async (reason: PersonalFeedV2CandidateIncompleteReason): Promise<PersonalFeedV2CandidateIncomplete> => {
       if (activeReservation !== undefined) releaseReservation(reservations, activeReservation)
@@ -299,9 +317,14 @@ export function createPersonalFeedV2CandidateLifecycle(
       }
     const now = readClock(clock)
     if (now === undefined) return fail('clock_failed')
-    const parsed = request === undefined
-      ? undefined
-      : parseWindow(input.window, request, now, handles)
+    let parsed: ParsedWindow | undefined
+    try {
+      parsed = request === undefined
+        ? undefined
+        : parseWindow(input.window, request, now, handles)
+    } catch {
+      return fail('invalid_input')
+    }
     if (parsed === undefined) return fail('invalid_input')
 
     const occurrencesByIdentity = new Map<string, ParsedOccurrence[]>()
@@ -826,16 +849,24 @@ function parseWindow(
   now: Date,
   handles: readonly CaptureCloseHandle[],
 ): ParsedWindow | undefined {
-  if (!isRecord(value) || !hasExactlyKeys(value, [
+  const window = snapshotWindowRecord(value, [
     'requestId', 'cutoff', 'shanghaiDay', 'startedAt', 'completedAt', 'surfaces',
   ])
-    || value.requestId !== request.requestId || value.cutoff !== request.cutoff
-    || value.shanghaiDay !== request.shanghaiDay || !hasDenseArray(value.surfaces, SURFACES.length)) return undefined
+  if (window === undefined) return undefined
+  const windowValues = window.values
+  const requestId = windowValues.get('requestId')
+  const cutoffValue = windowValues.get('cutoff')
+  const shanghaiDayValue = windowValues.get('shanghaiDay')
+  const startedAt = windowValues.get('startedAt')
+  const completedAt = windowValues.get('completedAt')
+  const surfaces = snapshotWindowArray(windowValues.get('surfaces'), SURFACES.length)
+  if (requestId !== request.requestId || cutoffValue !== request.cutoff
+    || shanghaiDayValue !== request.shanghaiDay || surfaces === undefined) return undefined
 
   const cutoff = Date.parse(request.cutoff)
   const topInterval = parseWindowInterval(
-    value.startedAt,
-    value.completedAt,
+    startedAt,
+    completedAt,
     cutoff,
     now.getTime(),
     request.shanghaiDay,
@@ -848,18 +879,22 @@ function parseWindow(
   let previousSurfaceCompletedAt = topInterval.startedAt
   for (let surfaceOrdinal = 0; surfaceOrdinal < SURFACES.length; surfaceOrdinal += 1) {
     const expectedSurface = SURFACES[surfaceOrdinal]
-    const surface = value.surfaces[surfaceOrdinal]
-    if (expectedSurface === undefined || !isRecord(surface)
-      || !hasExactlyKeys(surface, [
+    const surface = snapshotWindowRecord(surfaces.values[surfaceOrdinal], [
         'kind', 'surface', 'surfaceOrdinal', 'startedAt', 'completedAt', 'occurrences',
       ])
-      || (surface.kind !== 'complete' && surface.kind !== 'natural_zero')
-      || surface.surface !== expectedSurface || surface.surfaceOrdinal !== surfaceOrdinal
-      || !hasDenseArray(surface.occurrences)) return undefined
+    if (expectedSurface === undefined || surface === undefined) return undefined
+    const surfaceValues = surface.values
+    const surfaceKind = surfaceValues.get('kind')
+    const surfaceName = surfaceValues.get('surface')
+    const surfaceOrdinalValue = surfaceValues.get('surfaceOrdinal')
+    const surfaceOccurrences = snapshotWindowArray(surfaceValues.get('occurrences'))
+    if ((surfaceKind !== 'complete' && surfaceKind !== 'natural_zero')
+      || surfaceName !== expectedSurface || surfaceOrdinalValue !== surfaceOrdinal
+      || surfaceOccurrences === undefined) return undefined
 
     const surfaceInterval = parseWindowInterval(
-      surface.startedAt,
-      surface.completedAt,
+      surfaceValues.get('startedAt'),
+      surfaceValues.get('completedAt'),
       cutoff,
       now.getTime(),
       request.shanghaiDay,
@@ -868,36 +903,42 @@ function parseWindow(
       || surfaceInterval.startedAt < topInterval.startedAt
       || surfaceInterval.completedAt > topInterval.completedAt
       || surfaceInterval.startedAt < previousSurfaceCompletedAt
-      || (surface.kind === 'complete' && surface.occurrences.length === 0)
-      || (surface.kind === 'natural_zero' && surface.occurrences.length !== 0)) return undefined
+      || (surfaceKind === 'complete' && surfaceOccurrences.values.length === 0)
+      || (surfaceKind === 'natural_zero' && surfaceOccurrences.values.length !== 0)) return undefined
     previousSurfaceCompletedAt = surfaceInterval.completedAt
 
-    for (let occurrenceOrdinal = 0; occurrenceOrdinal < surface.occurrences.length; occurrenceOrdinal += 1) {
-      const occurrence = surface.occurrences[occurrenceOrdinal]
-      if (!isRecord(occurrence) || !hasExactlyKeys(occurrence, [
+    for (let occurrenceOrdinal = 0; occurrenceOrdinal < surfaceOccurrences.values.length; occurrenceOrdinal += 1) {
+      const occurrence = snapshotWindowRecord(surfaceOccurrences.values[occurrenceOrdinal], [
         'sourceUrl', 'body', 'occurrenceOrdinal', 'capturedAt', 'authorHandle', 'publishedAt',
-      ]) || occurrence.occurrenceOrdinal !== occurrenceOrdinal
-        || typeof occurrence.authorHandle !== 'string' || occurrence.authorHandle.trim() === ''
-        || !isCanonicalIsoInstant(occurrence.publishedAt)
-        || !isCanonicalIsoInstant(occurrence.capturedAt)) return undefined
+      ])
+      if (occurrence === undefined) return undefined
+      const occurrenceValues = occurrence.values
+      const occurrenceOrdinalValue = occurrenceValues.get('occurrenceOrdinal')
+      const authorHandle = occurrenceValues.get('authorHandle')
+      const publishedAt = occurrenceValues.get('publishedAt')
+      const capturedAtValue = occurrenceValues.get('capturedAt')
+      if (occurrenceOrdinalValue !== occurrenceOrdinal
+        || typeof authorHandle !== 'string' || authorHandle.trim() === ''
+        || !isCanonicalIsoInstant(publishedAt)
+        || !isCanonicalIsoInstant(capturedAtValue)) return undefined
 
-      const capturedAt = Date.parse(occurrence.capturedAt)
+      const capturedAt = Date.parse(capturedAtValue)
       if (capturedAt < Date.parse(request.cutoff) || capturedAt > now.getTime()
         || shanghaiDayAt(capturedAt) !== request.shanghaiDay
         || capturedAt < surfaceInterval.startedAt || capturedAt > surfaceInterval.completedAt) return undefined
-      const identity = parseXStatusUrl(occurrence.sourceUrl)
-      const body = parseBodyCapture(occurrence.body, handleByOwner)
+      const identity = parseXStatusUrl(occurrenceValues.get('sourceUrl'))
+      const body = parseBodyCapture(occurrenceValues.get('body'), handleByOwner)
       if (identity === undefined || body === undefined || usedHandles.has(body.handle)) return undefined
       usedHandles.add(body.handle)
       occurrences.push({
         stableId: identity.stableId,
         canonicalUrl: identity.canonicalUrl,
-        capturedAt: occurrence.capturedAt,
+        capturedAt: capturedAtValue,
         surface: expectedSurface,
         surfaceOrdinal,
         occurrenceOrdinal,
-        authorHandle: occurrence.authorHandle,
-        publishedAt: occurrence.publishedAt,
+        authorHandle,
+        publishedAt,
         body,
       })
     }
@@ -935,27 +976,112 @@ function isWindowTimeInBounds(
   return value >= cutoff && value <= now && shanghaiDayAt(value) === shanghaiDay
 }
 
+function snapshotWindowRecord(
+  value: unknown,
+  expectedKeys: readonly string[],
+): WindowRecordSnapshot | undefined {
+  if (!isSnapshotObject(value) || nodeTypes.isProxy(value)) return undefined
+  let prototype: object | null
+  let ownKeys: readonly PropertyKey[]
+  try {
+    prototype = Object.getPrototypeOf(value)
+    ownKeys = Reflect.ownKeys(value)
+  } catch {
+    return undefined
+  }
+  if (prototype !== Object.prototype && prototype !== null) return undefined
+  if (ownKeys.length !== expectedKeys.length
+    || ownKeys.some(key => typeof key !== 'string' || !expectedKeys.includes(key))) return undefined
+
+  const values = new Map<string, unknown>()
+  for (const key of expectedKeys) {
+    let descriptor: PropertyDescriptor | undefined
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(value, key)
+    } catch {
+      return undefined
+    }
+    if (descriptor === undefined || descriptor.enumerable !== true
+      || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) return undefined
+    values.set(key, descriptor.value)
+  }
+  return { owner: value, values }
+}
+
+function snapshotWindowArray(
+  value: unknown,
+  expectedLength?: number,
+): WindowArraySnapshot | undefined {
+  if (!isSnapshotObject(value) || nodeTypes.isProxy(value)) return undefined
+  let prototype: object | null
+  let ownKeys: readonly PropertyKey[]
+  let lengthDescriptor: PropertyDescriptor | undefined
+  try {
+    prototype = Object.getPrototypeOf(value)
+    ownKeys = Reflect.ownKeys(value)
+    lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length')
+  } catch {
+    return undefined
+  }
+  if (prototype !== Array.prototype || lengthDescriptor === undefined
+    || lengthDescriptor.enumerable !== false
+    || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
+    || typeof lengthDescriptor.value !== 'number'
+    || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0
+    || (expectedLength !== undefined && lengthDescriptor.value !== expectedLength)) return undefined
+  const length = lengthDescriptor.value
+  const expectedKeys = ['length', ...Array.from({ length }, (_, index) => String(index))]
+  if (ownKeys.length !== expectedKeys.length
+    || ownKeys.some(key => typeof key !== 'string' || !expectedKeys.includes(key))) return undefined
+
+  const values: unknown[] = []
+  for (let index = 0; index < length; index += 1) {
+    const key = String(index)
+    let descriptor: PropertyDescriptor | undefined
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(value, key)
+    } catch {
+      return undefined
+    }
+    if (descriptor === undefined || descriptor.enumerable !== true
+      || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) return undefined
+    values.push(descriptor.value)
+  }
+  return { owner: value, values }
+}
+
+function isSnapshotObject(value: unknown): value is object {
+  return (typeof value === 'object' && value !== null) || typeof value === 'function'
+}
+
 function parseBodyCapture(
   value: unknown,
   handleByOwner: ReadonlyMap<object, CaptureCloseHandle>,
 ): ParsedBodyCapture | undefined {
-  if (!isRecord(value) || typeof value.kind !== 'string') return undefined
-  if (value.kind === 'sufficient') {
-    if (!hasExactlyKeys(value, ['kind', 'capture']) || !isRecord(value.capture)
-      || !hasExactlyKeys(value.capture, ['take', 'close'])
-      || typeof value.capture.take !== 'function' || typeof value.capture.close !== 'function') return undefined
-    const handle = handleByOwner.get(value.capture)
+  const kind = readDataDescriptor(value, 'kind')
+  if (kind === 'sufficient') {
+    const body = snapshotWindowRecord(value, ['kind', 'capture'])
+    if (body === undefined) return undefined
+    const capture = snapshotWindowRecord(body.values.get('capture'), ['take', 'close'])
+    if (capture === undefined) return undefined
+    const take = capture.values.get('take')
+    const close = capture.values.get('close')
+    if (!isUnknownCallable(take) || !isUnknownCallable(close)) return undefined
+    const handle = handleByOwner.get(capture.owner)
     if (handle === undefined) return undefined
     return {
       kind: 'sufficient',
       handle,
-      take: input => (value.capture as { readonly take: (input: { readonly signal: AbortSignal }) => unknown }).take(input),
+      take: input => Reflect.apply(take, capture.owner, [input]),
     }
   }
-  if (value.kind !== 'insufficient' && value.kind !== 'failed' && value.kind !== 'unknown') return undefined
-  if (!hasExactlyKeys(value, ['kind', 'close']) || typeof value.close !== 'function') return undefined
-  const handle = handleByOwner.get(value)
-  return handle === undefined ? undefined : { kind: value.kind, handle }
+  if (kind !== 'insufficient' && kind !== 'failed' && kind !== 'unknown') return undefined
+  const body = snapshotWindowRecord(value, ['kind', 'close'])
+  if (body === undefined) return undefined
+  const close = body.values.get('close')
+  if (!isUnknownCallable(close)) return undefined
+  const handle = handleByOwner.get(body.owner)
+  return handle === undefined ? undefined : { kind, handle }
 }
 
 function bodyUnavailableReason(
@@ -969,39 +1095,107 @@ function bodyUnavailableReason(
 function collectCloseHandles(window: unknown): CaptureCloseHandle[] {
   const handles: CaptureCloseHandle[] = []
   const owners = new Set<object>()
-  if (!isRecord(window) || !Array.isArray(window.surfaces)) return handles
-  for (const surface of window.surfaces) {
-    if (!isRecord(surface) || !Array.isArray(surface.occurrences)) continue
-    for (const occurrence of surface.occurrences) {
-      if (!isRecord(occurrence) || !isRecord(occurrence.body)) continue
-      const body = occurrence.body
-      if (isRecord(body.capture) && typeof body.capture.close === 'function') {
-        addCloseHandle(
-          handles,
-          owners,
-          body.capture,
-          body.capture.close as (...args: unknown[]) => unknown,
-        )
-      }
-      if (typeof body.close === 'function') {
-        addCloseHandle(handles, owners, body, body.close as (...args: unknown[]) => unknown)
-      }
+  discoverWindowEdge(window, 'surfaces', surfaces => {
+    discoverArrayElements(surfaces, surface => {
+      discoverWindowEdge(surface, 'occurrences', occurrences => {
+        discoverArrayElements(occurrences, occurrence => {
+          discoverWindowEdge(occurrence, 'body', body => {
+            if (!isSnapshotObject(body)) return
+            const bodyClose = readDataDescriptor(body, 'close')
+            if (isUnknownCallable(bodyClose)) {
+              addCloseHandle(handles, owners, body, bodyClose)
+            }
+            const capture = readDataDescriptor(body, 'capture')
+            if (isSnapshotObject(capture)) {
+              const captureClose = readDataDescriptor(capture, 'close')
+              if (isUnknownCallable(captureClose)) {
+                addCloseHandle(handles, owners, capture, captureClose)
+              }
+            }
+          })
+        })
+      })
+    })
+  })
+  return handles
+}
+
+function discoverWindowEdge(
+  owner: unknown,
+  key: string,
+  visit: (value: unknown) => void,
+): void {
+  const value = readDataDescriptor(owner, key)
+  if (value !== undefined) visit(value)
+}
+
+function discoverArrayElements(value: unknown, visit: (value: unknown) => void): void {
+  if (!isSnapshotObject(value)) return
+  const indices = new Set<number>()
+  let ownKeys: readonly PropertyKey[] | undefined
+  try {
+    ownKeys = Reflect.ownKeys(value)
+  } catch {
+    // A readable length descriptor still permits discovery of known indices.
+  }
+  if (ownKeys !== undefined) {
+    for (const key of ownKeys) {
+      if (typeof key !== 'string') continue
+      const index = canonicalArrayIndex(key)
+      if (index !== undefined) indices.add(index)
     }
   }
-  return handles
+  const lengthDescriptor = readOwnDataDescriptor(value, 'length')
+  if (lengthDescriptor !== undefined && typeof lengthDescriptor === 'number'
+    && Number.isSafeInteger(lengthDescriptor) && lengthDescriptor >= 0) {
+    for (let index = 0; index < lengthDescriptor; index += 1) indices.add(index)
+  }
+  for (const index of [...indices].sort((left, right) => left - right)) {
+    const element = readDataDescriptor(value, String(index))
+    if (element !== undefined) visit(element)
+  }
+}
+
+function readDataDescriptor(owner: unknown, key: string): unknown {
+  if (!isSnapshotObject(owner)) return undefined
+  let descriptor: PropertyDescriptor | undefined
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(owner, key)
+  } catch {
+    return undefined
+  }
+  return descriptor !== undefined
+    && Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    ? descriptor.value
+    : undefined
+}
+
+function readOwnDataDescriptor(owner: unknown, key: string): unknown {
+  return readDataDescriptor(owner, key)
+}
+
+function isUnknownCallable(value: unknown): value is UnknownCallable {
+  return typeof value === 'function'
+}
+
+function canonicalArrayIndex(key: string): number | undefined {
+  if (!/^(?:0|[1-9][0-9]*)$/.test(key)) return undefined
+  const index = Number(key)
+  return Number.isSafeInteger(index) && index >= 0 && index < 0xffffffff
+    && String(index) === key ? index : undefined
 }
 
 function addCloseHandle(
   handles: CaptureCloseHandle[],
   owners: Set<object>,
   owner: object,
-  close: (...args: unknown[]) => unknown,
+  close: UnknownCallable,
 ): void {
   if (owners.has(owner)) return
   owners.add(owner)
   handles.push({
     owner,
-    close: reason => close.call(owner, reason),
+    close: reason => Reflect.apply(close, owner, [reason]),
     state: 'open',
     firstReason: undefined,
     attempt: undefined,
