@@ -326,6 +326,49 @@ function validBody(value: unknown):
   return undefined
 }
 
+function mapObservationOccurrence(
+  occurrenceRecord: DataRecord | undefined,
+  occurrenceOrdinal: number,
+  cutoffEpochMs: number,
+  surfaceStartedEpochMs: number,
+  surfaceCompletedEpochMs: number,
+  totalOccurrences: { value: number },
+  batch: Batch,
+): unknown | undefined {
+  if (occurrenceRecord === undefined || occurrenceRecord.occurrenceOrdinal !== occurrenceOrdinal
+    || !validSafeNonNegativeInteger(occurrenceRecord.occurrenceOrdinal)) return undefined
+  const sourceUrl = occurrenceRecord.sourceUrl
+  const authorHandle = occurrenceRecord.authorHandle
+  const capturedAt = occurrenceRecord.capturedAt
+  const publishedAt = occurrenceRecord.publishedAt
+  if (typeof sourceUrl !== 'string' || typeof authorHandle !== 'string' || typeof capturedAt !== 'string'
+    || typeof publishedAt !== 'string' || !validUnicode(sourceUrl) || !validUnicode(authorHandle)) return undefined
+  const urlMatch = /^https:\/\/x\.com\/([a-z0-9_]{1,15})\/status\/([1-9]\d*)$/.exec(sourceUrl)
+  const capturedEpochMs = parseTimestamp(capturedAt)
+  if (urlMatch === null || authorHandle !== urlMatch[1] || capturedEpochMs === undefined
+    || capturedEpochMs < cutoffEpochMs || capturedEpochMs < surfaceStartedEpochMs || capturedEpochMs >= surfaceCompletedEpochMs
+    || parseTimestamp(publishedAt) === undefined) return undefined
+  const body = validBody(occurrenceRecord.body)
+  if (body === undefined) return undefined
+  totalOccurrences.value += 1
+  if (totalOccurrences.value > MAX_TOTAL_OCCURRENCES) return undefined
+  let outputBody: unknown
+  if (body.kind === 'sufficient') {
+    const capture = makeCapture(batch, body.text)
+    outputBody = Object.freeze({ kind: 'sufficient' as const, capture })
+  } else {
+    outputBody = makeInsufficientCapture(batch)
+  }
+  return Object.freeze({
+    sourceUrl,
+    body: outputBody,
+    occurrenceOrdinal,
+    capturedAt,
+    authorHandle,
+    publishedAt,
+  })
+}
+
 function parseComplete(
   value: unknown,
   request: Request,
@@ -345,7 +388,7 @@ function parseComplete(
 
   const outputSurfaces: unknown[] = []
   let previousCompletedEpochMs = cutoffEpochMs
-  let totalOccurrences = 0
+  const totalOccurrences = { value: 0 }
   for (let surfaceOrdinal = 0; surfaceOrdinal < 3; surfaceOrdinal += 1) {
     const surfaceRecord = exactRecord(surfacesInput[surfaceOrdinal], SURFACE_KEYS)
     const expectedSurface = SURFACES[surfaceOrdinal]
@@ -367,39 +410,17 @@ function parseComplete(
 
     const outputOccurrences: unknown[] = []
     for (let occurrenceOrdinal = 0; occurrenceOrdinal < occurrencesInput.length; occurrenceOrdinal += 1) {
-      const occurrenceRecord = exactRecord(occurrencesInput[occurrenceOrdinal], OCCURRENCE_KEYS)
-      if (occurrenceRecord === undefined || occurrenceRecord.occurrenceOrdinal !== occurrenceOrdinal
-        || !validSafeNonNegativeInteger(occurrenceRecord.occurrenceOrdinal)) return undefined
-      const sourceUrl = occurrenceRecord.sourceUrl
-      const authorHandle = occurrenceRecord.authorHandle
-      const capturedAt = occurrenceRecord.capturedAt
-      const publishedAt = occurrenceRecord.publishedAt
-      if (typeof sourceUrl !== 'string' || typeof authorHandle !== 'string' || typeof capturedAt !== 'string'
-        || typeof publishedAt !== 'string' || !validUnicode(sourceUrl) || !validUnicode(authorHandle)) return undefined
-      const urlMatch = /^https:\/\/x\.com\/([a-z0-9_]{1,15})\/status\/([1-9]\d*)$/.exec(sourceUrl)
-      const capturedEpochMs = parseTimestamp(capturedAt)
-      if (urlMatch === null || authorHandle !== urlMatch[1] || capturedEpochMs === undefined
-        || capturedEpochMs < cutoffEpochMs || capturedEpochMs < surfaceStartedEpochMs || capturedEpochMs >= surfaceCompletedEpochMs
-        || parseTimestamp(publishedAt) === undefined) return undefined
-      const body = validBody(occurrenceRecord.body)
-      if (body === undefined) return undefined
-      totalOccurrences += 1
-      if (totalOccurrences > MAX_TOTAL_OCCURRENCES) return undefined
-      let outputBody: unknown
-      if (body.kind === 'sufficient') {
-        const capture = makeCapture(batch, body.text)
-        outputBody = Object.freeze({ kind: 'sufficient' as const, capture })
-      } else {
-        outputBody = makeInsufficientCapture(batch)
-      }
-      outputOccurrences.push(Object.freeze({
-        sourceUrl,
-        body: outputBody,
+      const outputOccurrence = mapObservationOccurrence(
+        exactRecord(occurrencesInput[occurrenceOrdinal], OCCURRENCE_KEYS),
         occurrenceOrdinal,
-        capturedAt,
-        authorHandle,
-        publishedAt,
-      }))
+        cutoffEpochMs,
+        surfaceStartedEpochMs,
+        surfaceCompletedEpochMs,
+        totalOccurrences,
+        batch,
+      )
+      if (outputOccurrence === undefined) return undefined
+      outputOccurrences.push(outputOccurrence)
     }
     outputSurfaces.push(Object.freeze({
       kind: surfaceRecord.kind,
