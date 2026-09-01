@@ -238,6 +238,7 @@ type ChildStream = Readonly<{
 }>
 
 type ChildProcess = Readonly<{
+  readonly pid?: unknown
   readonly stdin: Readonly<{
     readonly end: (...args: unknown[]) => unknown
   }>
@@ -692,6 +693,17 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     return Promise.resolve(frozenError('observer_failed'))
   }
 
+  let capturedPid: number | undefined
+  try {
+    if ((typeof child === 'object' || typeof child === 'function') && child !== null) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(child, 'pid')
+      if (descriptor !== undefined && descriptor.enumerable === true && 'value' in descriptor
+        && validSafePositiveInteger(descriptor.value)) capturedPid = descriptor.value
+    }
+  } catch {
+    // Descriptor lookup failure is an invalid spawn identity and must not invoke a pid getter.
+  }
+
   return new Promise<ObserverResult>((resolve) => {
     type TimerSlot = {
       generation: number
@@ -699,9 +711,11 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       handle: unknown
     }
 
+    let spawnState: 'pending' | 'running' | 'failed' = capturedPid === undefined ? 'failed' : 'running'
+    let processExited = spawnState === 'failed'
+    let stdioClosed = false
     let settled = false
-    let closed = false
-    let firstReason: ErrorCode | undefined
+    let firstReason: ErrorCode | undefined = spawnState === 'failed' ? 'observer_failed' : undefined
     let stdout = ''
     const stdoutDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
     const stderrDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
@@ -719,12 +733,18 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     let graceConsumed = false
     let budgetKillAttempted = false
 
-    const safeKill = (signalToSend: 'SIGTERM' | 'SIGKILL'): void => {
+    const canSignalChild = (): boolean => spawnState === 'running'
+      && !processExited && !stdioClosed && !settled
+
+    const safeKill = (signalToSend: 'SIGTERM' | 'SIGKILL', markAttempted: () => void): boolean => {
+      if (!canSignalChild()) return false
+      markAttempted()
       try {
         child.kill(signalToSend)
       } catch {
         // A kill failure cannot prove that the child exited; close remains authoritative.
       }
+      return true
     }
 
     const cancelTimer = (slot: TimerSlot): void => {
@@ -754,10 +774,10 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
           if (slot.generation !== token || !slot.active) return
           slot.active = false
           slot.handle = undefined
-          if (closed || settled) return
+          if (stdioClosed || settled) return
           callback()
         }, delayMs)
-        if (callbackEntered || closed || !slot.active || slot.generation !== token) {
+        if (callbackEntered || stdioClosed || !slot.active || slot.generation !== token) {
           try {
             options.clearTimeout(handle)
           } catch {
@@ -768,7 +788,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
         slot.handle = handle
         return true
       } catch {
-        if (callbackEntered || closed || !slot.active || slot.generation !== token) return true
+        if (callbackEntered || stdioClosed || !slot.active || slot.generation !== token) return true
         slot.generation += 1
         slot.active = false
         slot.handle = undefined
@@ -777,46 +797,45 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     }
 
     const attemptTerm = (): void => {
-      if (closed || termAttempted) return
-      termAttempted = true
-      safeKill('SIGTERM')
+      if (termAttempted) return
+      safeKill('SIGTERM', () => { termAttempted = true })
     }
 
     const attemptGraceKill = (): void => {
-      if (closed || graceKillAttempted || graceConsumed) return
-      graceConsumed = true
-      graceKillAttempted = true
-      safeKill('SIGKILL')
+      if (graceKillAttempted || graceConsumed) return
+      safeKill('SIGKILL', () => {
+        graceConsumed = true
+        graceKillAttempted = true
+      })
     }
 
     const scheduleGrace = (): void => {
-      if (closed || graceConsumed || graceKillAttempted || graceSlot.active) return
+      if (!canSignalChild() || graceConsumed || graceKillAttempted || graceSlot.active) return
       const registered = armTimer(graceSlot, onGrace, options.killGraceMs)
-      if (!registered && !closed && !graceConsumed && !graceKillAttempted) attemptGraceKill()
+      if (!registered && canSignalChild() && !graceConsumed && !graceKillAttempted) attemptGraceKill()
     }
 
     const attemptBudgetKill = (): void => {
-      if (closed || budgetKillAttempted) return
-      budgetKillAttempted = true
-      safeKill('SIGKILL')
+      if (budgetKillAttempted) return
+      safeKill('SIGKILL', () => { budgetKillAttempted = true })
     }
 
     const lockFirstReason = (reason: ErrorCode): void => {
-      if (closed || firstReason !== undefined) return
+      if (stdioClosed || settled || firstReason !== undefined) return
       firstReason = reason
       stdout = ''
       cancelTimer(deadlineSlot)
       attemptTerm()
-      if (!closed) scheduleGrace()
+      scheduleGrace()
     }
 
     function onAbort(): void {
-      if (closed) return
+      if (stdioClosed || settled) return
       lockFirstReason('aborted')
     }
 
     const collectStdout = (chunk: unknown): void => {
-      if (closed || firstReason !== undefined) return
+      if (stdioClosed || settled || firstReason !== undefined) return
 
       const byteChunk = strictByteChunk(chunk, STDOUT_MAX_BYTES - stdoutRawBytes)
       if (byteChunk.kind === 'failed') {
@@ -871,7 +890,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     }
 
     const collectStderr = (chunk: unknown): void => {
-      if (closed || firstReason !== undefined) return
+      if (stdioClosed || settled || firstReason !== undefined) return
 
       const byteChunk = strictByteChunk(chunk, STDERR_MAX_BYTES - stderrRawBytes)
       if (byteChunk.kind === 'failed' || byteChunk.kind === 'overflow') {
@@ -888,7 +907,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       }
     }
     const markStreamFailure = (): void => {
-      if (closed) return
+      if (stdioClosed || settled) return
       lockFirstReason('observer_failed')
     }
     const consumeGraceForBudget = (): void => {
@@ -897,7 +916,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     }
 
     const failWithoutBudgetTimer = (): void => {
-      if (!closed && firstReason === undefined) {
+      if (!stdioClosed && !settled && firstReason === undefined) {
         firstReason = 'observer_failed'
         stdout = ''
       }
@@ -905,26 +924,25 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       cancelTimer(graceSlot)
       cancelTimer(budgetSlot)
       attemptTerm()
-      if (!closed) attemptBudgetKill()
+      attemptBudgetKill()
     }
 
     function onGrace(): void {
-      if (closed) return
+      if (stdioClosed || settled) return
       attemptGraceKill()
     }
 
     const onDeadline = (): void => {
-      if (closed) return
+      if (stdioClosed || settled) return
       lockFirstReason('timed_out')
     }
 
     const onBudget = (): void => {
-      if (closed) return
-      budgetKillAttempted = true
+      if (stdioClosed || settled) return
       consumeGraceForBudget()
       if (firstReason === undefined) lockFirstReason('timed_out')
       else attemptTerm()
-      if (!closed) safeKill('SIGKILL')
+      attemptBudgetKill()
     }
 
     const cleanup = (): void => {
@@ -941,9 +959,43 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       }
     }
 
+    const onExit = (): void => {
+      if (stdioClosed || settled || processExited) return
+      processExited = true
+      cancelTimer(graceSlot)
+    }
+
+    const onSpawn = (): void => {
+      if (stdioClosed || settled || spawnState !== 'running') return
+      let matchingPid = false
+      try {
+        const descriptor = Reflect.getOwnPropertyDescriptor(child, 'pid')
+        matchingPid = descriptor !== undefined && descriptor.enumerable === true && 'value' in descriptor
+          && validSafePositiveInteger(descriptor.value) && descriptor.value === capturedPid
+      } catch {
+        // Descriptor lookup failure is an invalid late spawn identity.
+      }
+      if (matchingPid) return
+      spawnState = 'failed'
+      processExited = true
+      cancelTimer(graceSlot)
+      lockFirstReason('observer_failed')
+    }
+
+    const markChildFailure = (): void => {
+      if (stdioClosed || settled) return
+      if (spawnState !== 'running') {
+        spawnState = 'failed'
+        processExited = true
+        cancelTimer(graceSlot)
+      }
+      lockFirstReason('observer_failed')
+    }
+
     const onClose = (code?: unknown, signalToReport?: unknown): void => {
-      if (closed || settled) return
-      closed = true
+      if (stdioClosed || settled) return
+      stdioClosed = true
+      processExited = true
       settled = true
       let result: ObserverResult
       if (firstReason !== undefined) {
@@ -979,26 +1031,49 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       resolve(result)
     }
 
+    let exitGateInstalled = false
     let closeGateInstalled = false
+    let listenerInstallationFailed = false
     try {
-      // Install close first so every post-spawn failure still has a close gate.
-      child.on('close', onClose)
-      closeGateInstalled = true
+      child.on('exit', onExit)
+      exitGateInstalled = true
     } catch {
+      spawnState = 'failed'
+      processExited = true
       if (firstReason === undefined) {
         firstReason = 'observer_failed'
         stdout = ''
       }
-      attemptTerm()
-      if (!closed) attemptBudgetKill()
-      return
+    }
+    try {
+      child.on('close', onClose)
+      closeGateInstalled = true
+    } catch {
+      listenerInstallationFailed = true
+    }
+    try {
+      child.on('spawn', onSpawn)
+    } catch {
+      listenerInstallationFailed = true
+    }
+    try {
+      child.on('error', markChildFailure)
+    } catch {
+      listenerInstallationFailed = true
     }
 
-    if (!closeGateInstalled) return
+    if (!closeGateInstalled) {
+      failWithoutBudgetTimer()
+      return
+    }
+    if (!exitGateInstalled) {
+      spawnState = 'failed'
+      processExited = true
+    }
+    if (listenerInstallationFailed) lockFirstReason('observer_failed')
 
     try {
-
-      if (!closed) {
+      if (!stdioClosed && !settled) {
         const budgetArmed = armTimer(budgetSlot, onBudget, budgetEnd - snapshot)
         if (!budgetArmed) {
           failWithoutBudgetTimer()
@@ -1006,12 +1081,12 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
         }
       }
 
-      if (!closed && firstReason === undefined) {
+      if (!stdioClosed && !settled && firstReason === undefined) {
         const deadlineArmed = armTimer(deadlineSlot, onDeadline, deadlineEpochMs - snapshot)
         if (!deadlineArmed) lockFirstReason('observer_failed')
       }
 
-      if (!closed) {
+      if (!stdioClosed && !settled) {
         abortOwnership = 'adding'
         try {
           realAbortSignal.addEventListener('abort', onAbort, { once: true })
@@ -1023,7 +1098,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
 
       // The child can abort synchronously inside spawn, before the listener existed.
       let abortedAfterRegistration = false
-      if (!closed) {
+      if (!stdioClosed && !settled) {
         try {
           abortedAfterRegistration = realAbortSignal.aborted
         } catch {
@@ -1032,16 +1107,20 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       }
       if (abortedAfterRegistration) onAbort()
 
-      if (!closed) {
+      if (!stdioClosed && !settled) {
         child.stdout.on('data', collectStdout)
         child.stderr.on('data', collectStderr)
         child.stdout.on('error', markStreamFailure)
         child.stderr.on('error', markStreamFailure)
-        child.on('error', markStreamFailure)
       }
 
-      if (!closed) child.stdin.end(payload, 'utf8', (error?: unknown) => {
-        if (error !== undefined) lockFirstReason('observer_failed')
+      if (!stdioClosed && !settled) child.stdin.end(payload, 'utf8', (...callbackValues: unknown[]) => {
+        for (const callbackValue of callbackValues) {
+          if (callbackValue !== undefined && callbackValue !== null) {
+            lockFirstReason('observer_failed')
+            return
+          }
+        }
       })
     } catch {
       lockFirstReason('observer_failed')
