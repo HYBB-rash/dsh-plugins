@@ -89,14 +89,6 @@
         "@deepseek-ai/dsh-cron",
         "@herman/x-feed"
       ]
-    },
-    {
-      "name": "@herman/personal-feed",
-      "kind": "release",
-      "releaseDirectory": "personal-feed",
-      "requiredBy": [
-        "@herman/x-feed"
-      ]
     }
   ]
 }

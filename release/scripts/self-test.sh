@@ -13,9 +13,10 @@ ssh_known_hosts="$(ssh -G git@github.com 2>/dev/null \
 test "$ssh_known_hosts" = /home/herman/.ssh/known_hosts
 
 test -f /opt/dsh/harness/apps/cli/lib/bin.js
-for package in dsh-assistant dsh-cron telegram-gateway x-feed personal-feed-selector personal-feed; do
+for package in dsh-assistant dsh-cron telegram-gateway x-feed personal-feed-selector; do
   test -d "/opt/dsh/harness/local-plugins/$package/lib"
 done
+test ! -e /opt/dsh/harness/local-plugins/personal-feed
 test ! -e /opt/dsh/harness/local-plugins/dsh-assistant/lib/migrate-cli.js
 test ! -e /opt/dsh/harness/local-plugins/dsh-assistant/lib/historical-recovery.js
 test ! -e /opt/dsh/harness/local-plugins/ui-context-compactor

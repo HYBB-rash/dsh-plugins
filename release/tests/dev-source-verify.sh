@@ -14,7 +14,7 @@ real_bash="$(command -v bash)"
 mkdir -p "$source_root/.git" "$source_root/x-feed/python" "$fake_bin" "$harness_root/node_modules/.bin" "$harness_root/node_modules/vitest"
 printf '%s\n' '{}' >"$source_root/runtime-package-topology.json"
 
-for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed x-feed; do
+for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector x-feed; do
   mkdir -p "$harness_root/local-plugins/$package/src" "$harness_root/local-plugins/$package/tests"
   printf '%s\n' '{}' >"$harness_root/local-plugins/$package/package.json"
 done
@@ -78,10 +78,10 @@ NODE_PATH='/must-not-reach-test-resolver' \
 MOCK_VERIFY_LOG="$log" \
   "$script" all
 
-test "$(grep -Fc 'build tool=tsc setpriv_marker=' "$log")" = 12
-test "$(grep -Fc 'build tool=tsdown setpriv_marker=' "$log")" = 6
-test "$(grep -Fc 'setpriv args=--reuid=1000 --regid=1000 --init-groups' "$log")" = 26
-test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 10
+test "$(grep -Fc 'build tool=tsc setpriv_marker=' "$log")" = 10
+test "$(grep -Fc 'build tool=tsdown setpriv_marker=' "$log")" = 5
+test "$(grep -Fc 'setpriv args=--reuid=1000 --regid=1000 --init-groups' "$log")" = 25
+test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 9
 test "$(grep -Fc 'python setpriv_marker=1000' "$log")" = 14
 test "$(grep -Fc 'chown args=-R 1000:1000' "$log")" = 3
 grep -q 'build tool=tsc setpriv_marker= node_path=unset' "$log"
@@ -104,7 +104,7 @@ grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/notion-inbox-i
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/notion-https-compat.py' "$log"
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/test_scrub_preflight_state.py' "$log"
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/test_workspace_migration_content.py' "$log"
-test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 10
+test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 9
 test "$(grep -Fc 'args=--test /opt/dsh/release-system/tests/assistant-cron-health.mjs' "$log")" = 1
 test "$(grep -Fc 'args=--test /opt/dsh/release-system/tests/fake-notion.mjs' "$log")" = 1
 test "$(grep -Fc 'args=--test /opt/dsh/release-system/tests/inspect-cron-reanchor.mjs' "$log")" = 1
