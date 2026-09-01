@@ -21,6 +21,7 @@ import x_timeline_store
 MAX_INPUT_BYTES = 4096
 MAX_HTTP_BYTES = 1024 * 1024
 MAX_CDP_BYTES = 1024 * 1024
+MAX_CDP_EVENTS_PER_EXCHANGE = 8
 MAX_URL_BYTES = 512
 MAX_BODY_BYTES = 6144
 
@@ -539,36 +540,50 @@ class _MechanicalCdpEvaluator:
         )
         return "Runtime.evaluate", {"expression": expression, "returnByValue": True}
 
-    def _read_response(self, socket, request_id):
-        try:
-            raw = socket.recv()
-            if isinstance(raw, bytes):
-                size = len(raw)
-                raw = raw.decode("utf-8")
-            elif isinstance(raw, str):
-                size = len(raw.encode("utf-8"))
-            else:
-                raise _CdpFailure()
-            if size > MAX_CDP_BYTES:
-                raise _CdpFailure()
-            response = json.loads(raw)
-            if (
-                not isinstance(response, dict)
-                or type(response.get("id")) is not int
-                or response.get("id") != request_id
-            ):
-                raise _CdpFailure()
-            if "error" in response:
-                raise _CdpFailure()
-            return response
-        except _CdpFailure:
-            raise
-        except Exception:
-            raise _CdpFailure() from None
+    def _read_response(self, socket, request_id, remaining):
+        total_size = 0
+        event_count = 0
+        while True:
+            try:
+                socket.settimeout(remaining())
+                raw = socket.recv()
+                if isinstance(raw, bytes):
+                    size = len(raw)
+                    raw = raw.decode("utf-8")
+                elif isinstance(raw, str):
+                    size = len(raw.encode("utf-8"))
+                else:
+                    raise _CdpFailure()
+                if size > MAX_CDP_BYTES or total_size + size > MAX_CDP_BYTES:
+                    raise _CdpFailure()
+                total_size += size
+                frame = json.loads(raw)
+                if not isinstance(frame, dict):
+                    raise _CdpFailure()
+                if "id" not in frame:
+                    if (
+                        not isinstance(frame.get("method"), str)
+                        or not frame["method"]
+                        or not isinstance(frame.get("params"), dict)
+                    ):
+                        raise _CdpFailure()
+                    event_count += 1
+                    if event_count > MAX_CDP_EVENTS_PER_EXCHANGE:
+                        raise _CdpFailure()
+                    continue
+                if type(frame.get("id")) is not int or frame.get("id") != request_id:
+                    raise _CdpFailure()
+                if "error" in frame:
+                    raise _CdpFailure()
+                return frame
+            except _CdpFailure:
+                raise
+            except Exception:
+                raise _CdpFailure() from None
 
     def _runtime_value(self, response):
         result = response.get("result") if isinstance(response, dict) else None
-        if not isinstance(result, dict) or result.get("exceptionDetails"):
+        if not isinstance(result, dict) or "exceptionDetails" in result:
             raise _CdpFailure()
         inner = result.get("result")
         if not isinstance(inner, dict) or "value" not in inner:
@@ -635,8 +650,7 @@ class _MechanicalCdpEvaluator:
                         separators=(",", ":"),
                     )
                 )
-                socket.settimeout(remaining())
-                response = self._read_response(socket, command_id)
+                response = self._read_response(socket, command_id, remaining)
                 remaining()
                 return response
 

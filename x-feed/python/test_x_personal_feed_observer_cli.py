@@ -1295,6 +1295,30 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                 },
             }
 
+        def runtime_frame_with_empty_exception_details(_request, response_id, _value):
+            return {
+                "id": response_id,
+                "result": {
+                    "result": {
+                        "type": "object",
+                        "value": _surface_facts("for_you"),
+                    },
+                    "exceptionDetails": {},
+                },
+            }
+
+        def runtime_frame_with_empty_exception_details_canary(_request, response_id, _value):
+            return {
+                "id": response_id,
+                "result": {
+                    "result": {
+                        "type": "object",
+                        "value": {"body": "正文CANARY"},
+                    },
+                    "exceptionDetails": {},
+                },
+            }
+
         def runtime_frame_without_value(_request, response_id, _value):
             return {
                 "id": response_id,
@@ -1312,7 +1336,10 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         def event_then_matching_success(request, response_id, value):
             event_frames_seen[0] += 1
             if event_frames_seen[0] == 1:
-                return {"method": "Page.loadEventFired", "params": {}}
+                return {
+                    "method": "Page.loadEventFired",
+                    "params": {"canary": "正文CANARY"},
+                }
             return {
                 "id": response_id,
                 "result": {"result": {"type": "object", "value": value}},
@@ -1324,9 +1351,24 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             ("navigate_error_text", "navigate", page_frame_with_error_text),
             ("matching_top_level_error", "probe", top_level_error),
             ("runtime_exception_details", "probe", runtime_frame_with_exception),
+            (
+                "runtime_empty_exception_details",
+                "probe",
+                runtime_frame_with_empty_exception_details,
+            ),
             ("runtime_inner_result_without_value", "probe", runtime_frame_without_value),
             ("snapshot_missing_value", "snapshot", runtime_frame_without_value),
         )
+
+        empty_exception_canary_response = runtime_frame_with_empty_exception_details_canary(
+            None,
+            1,
+            None,
+        )
+        with self.assertRaises(Exception) as empty_exception_context:
+            evaluator._runtime_value(empty_exception_canary_response)
+        self.assertNotIn("正文CANARY", str(empty_exception_context.exception))
+
         for name, action, frame_factory in protocol_failures:
             failure = _FakeWebSocket(
                 {"body": "正文CANARY"},
@@ -1347,12 +1389,44 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                 self.assertEqual(failure.recv_count, 1)
 
         event_frames_seen[0] = 0
+        event_clock = _FakeMonotonic()
         event_frame = _FakeWebSocket(
-            {"surfaceProof": dict(SURFACE_PROOFS["for_you"])},
+            _surface_facts("for_you"),
             frame_factory=event_then_matching_success,
+            on_recv=lambda: event_clock.advance(0.01),
         )
         with self.subTest(protocol_failure="event_without_id"):
             with mock.patch.object(module.websocket, "create_connection", return_value=event_frame):
+                event_result = evaluator_type(monotonic=event_clock).evaluate(
+                    ws_url,
+                    "probe",
+                    surface="for_you",
+                    timeout_seconds=timeout_seconds,
+                )
+            self.assertEqual(event_result, {"surfaceProof": SURFACE_PROOFS["for_you"]})
+            self.assertNotIn("正文CANARY", str(event_result))
+            self.assertTrue(event_frame.closed)
+            self.assertEqual(event_frame.recv_count, 2)
+            self.assertTrue(all(value > 0 for value in event_frame.timeouts))
+            self.assertTrue(
+                all(left >= right for left, right in zip(event_frame.timeouts, event_frame.timeouts[1:]))
+            )
+
+        def assert_recv_timeout_contract(socket):
+            self.assertTrue(all(value > 0 for value in socket.timeouts))
+            self.assertTrue(
+                all(left >= right for left, right in zip(socket.timeouts, socket.timeouts[1:]))
+            )
+
+        def malformed_no_id_event(_request, _response_id, _value):
+            return {"method": "Page.loadEventFired", "params": []}
+
+        malformed_event = _FakeWebSocket(
+            {},
+            frame_factory=malformed_no_id_event,
+        )
+        with self.subTest(protocol_failure="malformed_event_without_id"):
+            with mock.patch.object(module.websocket, "create_connection", return_value=malformed_event):
                 assert_fixed_error(
                     lambda: evaluator.evaluate(
                         ws_url,
@@ -1361,8 +1435,127 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                         timeout_seconds=timeout_seconds,
                     )
                 )
-            self.assertTrue(event_frame.closed)
-            self.assertEqual(event_frame.recv_count, 1)
+            self.assertTrue(malformed_event.closed)
+            self.assertEqual(malformed_event.recv_count, 1)
+            assert_recv_timeout_contract(malformed_event)
+
+        event_budget_clock = _FakeMonotonic()
+        event_budget_seen = [0]
+
+        def eight_events_then_matching_success(_request, response_id, value):
+            event_budget_seen[0] += 1
+            if event_budget_seen[0] <= 8:
+                return {
+                    "method": "Page.loadEventFired",
+                    "params": {"canary": "正文CANARY"},
+                }
+            return {
+                "id": response_id,
+                "result": {"result": {"type": "object", "value": value}},
+            }
+
+        eight_events = _FakeWebSocket(
+            _surface_facts("for_you"),
+            frame_factory=eight_events_then_matching_success,
+            on_recv=lambda: event_budget_clock.advance(0.01),
+        )
+        with self.subTest(protocol_failure="eight_events_then_matching_success"):
+            with mock.patch.object(module.websocket, "create_connection", return_value=eight_events):
+                result = evaluator_type(monotonic=event_budget_clock).evaluate(
+                    ws_url,
+                    "probe",
+                    surface="for_you",
+                    timeout_seconds=timeout_seconds,
+                )
+            self.assertEqual(result, {"surfaceProof": SURFACE_PROOFS["for_you"]})
+            self.assertNotIn("正文CANARY", str(result))
+            self.assertTrue(eight_events.closed)
+            self.assertEqual(eight_events.recv_count, 9)
+            assert_recv_timeout_contract(eight_events)
+
+        ninth_event_clock = _FakeMonotonic()
+        ninth_event_seen = [0]
+
+        def nine_events_then_no_response(_request, _response_id, _value):
+            ninth_event_seen[0] += 1
+            return {
+                "method": "Page.loadEventFired",
+                "params": {"canary": "正文CANARY"},
+            }
+
+        nine_events = _FakeWebSocket(
+            {},
+            frame_factory=nine_events_then_no_response,
+            on_recv=lambda: ninth_event_clock.advance(0.01),
+        )
+        with self.subTest(protocol_failure="ninth_event_immediate_failure"):
+            with mock.patch.object(module.websocket, "create_connection", return_value=nine_events):
+                assert_fixed_error(
+                    lambda: evaluator_type(monotonic=ninth_event_clock).evaluate(
+                        ws_url,
+                        "probe",
+                        surface="for_you",
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    canary="正文CANARY",
+                )
+            self.assertTrue(nine_events.closed)
+            self.assertEqual(nine_events.recv_count, 9)
+            self.assertEqual(ninth_event_seen[0], 9)
+            assert_recv_timeout_contract(nine_events)
+
+        cumulative_clock = _FakeMonotonic()
+        cumulative_frames_seen = [0]
+        cumulative_wire_sizes = []
+        cumulative_padding = "x" * (module.MAX_CDP_BYTES // 2)
+
+        def cumulative_frame_then_matching(request, response_id, _value):
+            cumulative_frames_seen[0] += 1
+            if cumulative_frames_seen[0] <= 2:
+                response = {
+                    "method": "Page.loadEventFired",
+                    "params": {
+                        "padding": cumulative_padding,
+                        "canary": "正文CANARY",
+                    },
+                }
+            else:
+                response = {
+                    "id": response_id,
+                    "result": {
+                        "result": {
+                            "type": "object",
+                            "value": _surface_facts("for_you"),
+                        },
+                        "padding": cumulative_padding,
+                    },
+                }
+            encoded = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
+            cumulative_wire_sizes.append(len(encoded.encode("utf-8")))
+            self.assertLess(cumulative_wire_sizes[-1], module.MAX_CDP_BYTES)
+            return response
+
+        cumulative_socket = _FakeWebSocket(
+            {},
+            frame_factory=cumulative_frame_then_matching,
+            on_recv=lambda: cumulative_clock.advance(0.01),
+        )
+        with self.subTest(protocol_failure="cumulative_event_response_bytes"):
+            with mock.patch.object(module.websocket, "create_connection", return_value=cumulative_socket):
+                assert_fixed_error(
+                    lambda: evaluator_type(monotonic=cumulative_clock).evaluate(
+                        ws_url,
+                        "probe",
+                        surface="for_you",
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    canary="正文CANARY",
+                )
+            self.assertEqual(cumulative_frames_seen[0], 2)
+            self.assertEqual(cumulative_socket.recv_count, 2)
+            self.assertGreater(sum(cumulative_wire_sizes), module.MAX_CDP_BYTES)
+            self.assertTrue(cumulative_socket.closed)
+            assert_recv_timeout_contract(cumulative_socket)
 
         for name, raw_frame in (
             ("malformed_json", "{malformed-json"),
