@@ -346,7 +346,7 @@ export function createPersonalFeedV2RequestCoordinator(
               if (r3Result === undefined || r3Result.kind === 'incomplete') {
                 outcome = incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
               } else {
-                outcome = await runJudgement(
+                outcome = await coordinateCandidateJudgement(
                   r3Result.cursor,
                   publicRequest(opened),
                   r4Result.snapshot,
@@ -597,7 +597,7 @@ function parseOwnerCursor(value: unknown): OwnerCandidateCursor | undefined {
   }
 }
 
-async function runJudgement(
+async function coordinateCandidateJudgement(
   ownerCursor: OwnerCandidateCursor,
   request: PersonalFeedV2Request,
   snapshot: unknown,
