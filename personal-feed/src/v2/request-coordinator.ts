@@ -35,8 +35,60 @@ export interface PersonalFeedV2R3Input {
 export interface PersonalFeedV2R5Input {
   readonly request: PersonalFeedV2Request
   readonly snapshot: unknown
-  readonly candidates: unknown
+  readonly candidates: PersonalFeedV2R5CandidateCursor
   readonly signal: AbortSignal
+}
+
+export interface PersonalFeedV2R5CandidateProvenance {
+  readonly capturedAt: string
+  readonly surface: 'for_you' | 'following' | 'explore'
+  readonly surfaceOrdinal: number
+  readonly occurrenceOrdinal: number
+  readonly canonicalUrl: string
+  readonly authorHandle: string
+  readonly publishedAt: string
+}
+
+export type PersonalFeedV2R5CandidateIncompleteReason =
+  | 'aborted'
+  | 'body_failed'
+  | 'body_insufficient'
+  | 'body_unknown'
+  | 'capture_failed'
+  | 'clock_failed'
+  | 'completion_claim_invalid'
+  | 'completion_conflict'
+  | 'completion_store_failed'
+  | 'concurrent_reservation'
+  | 'expired'
+  | 'failed'
+  | 'invalid_input'
+  | 'processed_query_aborted'
+  | 'processed_query_failed'
+  | 'processed_query_unknown'
+  | 'timeout'
+  | 'unknown'
+
+export interface PersonalFeedV2R5CandidateLease {
+  readonly stableId: string
+  readonly canonicalUrl: string
+  readonly position: number
+  readonly body: string
+  readonly provenance: PersonalFeedV2R5CandidateProvenance
+  readonly completeCurrent: (input: {
+    readonly judgment: 'qualified' | 'not_qualified'
+  }) => Promise<unknown>
+}
+
+export type PersonalFeedV2R5CandidateBorrowResult =
+  | { readonly kind: 'candidate'; readonly lease: PersonalFeedV2R5CandidateLease }
+  | { readonly kind: 'done' }
+  | { readonly kind: 'incomplete'; readonly reason: PersonalFeedV2R5CandidateIncompleteReason }
+
+export interface PersonalFeedV2R5CandidateCursor {
+  readonly borrowCurrent: (input: {
+    readonly signal: AbortSignal
+  }) => Promise<PersonalFeedV2R5CandidateBorrowResult>
 }
 
 export interface PersonalFeedV2R4Port {
@@ -287,31 +339,20 @@ export function createPersonalFeedV2RequestCoordinator(
             const r3 = input.signal.aborted
               ? undefined
               : await callPort(() => options.r3.admit({ request: publicRequest(opened), window: r2Result.window, signal: input.signal }))
-            if (r3 === undefined || input.signal.aborted) {
+            if (r3 === undefined) {
               outcome = incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
             } else {
               const r3Result = parseR3(r3)
-              if (r3Result === undefined) {
+              if (r3Result === undefined || r3Result.kind === 'incomplete') {
                 outcome = incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
               } else {
-                const r5 = input.signal.aborted
-                  ? undefined
-                  : await callPort(() => options.r5.judge({ request: publicRequest(opened), snapshot: r4Result.snapshot, candidates: r3Result.candidates, signal: input.signal }))
-                if (r5 === undefined || input.signal.aborted) {
-                  outcome = incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
-                } else {
-                  const r5Result = parseR5(r5)
-                  if (r5Result === undefined) {
-                    outcome = incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
-                  } else if (r5Result.kind === 'none') {
-                    outcome = makeOutcome('business_empty', BUSINESS_EMPTY_TEXT)
-                  } else {
-                    const finalText = canonicalizeXStatusIdentity(r5Result.url)
-                    outcome = finalText === undefined
-                      ? incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
-                      : makeOutcome('one_link', finalText)
-                  }
-                }
+                outcome = await runJudgement(
+                  r3Result.cursor,
+                  publicRequest(opened),
+                  r4Result.snapshot,
+                  options.r5,
+                  input.signal,
+                )
               }
             }
           }
@@ -469,19 +510,496 @@ function parseR2(value: unknown): { readonly window: unknown } | undefined {
   return { window: value.window }
 }
 
-function parseR3(value: unknown): { readonly candidates: unknown } | undefined {
-  if (!isRecord(value)) return undefined
-  if (value.kind !== 'admitted' || !hasExactlyKeys(value, ['kind', 'candidates'])) return undefined
-  return { candidates: value.candidates }
+type CandidateIncompleteReason = PersonalFeedV2R5CandidateIncompleteReason
+
+type CandidateJudgment = 'qualified' | 'not_qualified'
+
+interface OwnerCandidateCursor {
+  readonly owner: object
+  readonly borrowCurrent: (input: unknown) => unknown
+  readonly finalize: (claim: unknown) => unknown
+  readonly close: (reason: string) => unknown
 }
 
-function parseR5(value: unknown): { readonly kind: 'one_link'; readonly url: string } | { readonly kind: 'none' } | undefined {
-  if (!isRecord(value)) return undefined
-  if (value.kind === 'none' && hasExactlyKeys(value, ['kind'])) return { kind: 'none' }
-  if (value.kind === 'one_link' && hasExactlyKeys(value, ['kind', 'url']) && typeof value.url === 'string') {
-    return { kind: 'one_link', url: value.url }
+interface OwnerCandidateLease {
+  readonly owner: object
+  readonly stableId: string
+  readonly canonicalUrl: string
+  readonly position: number
+  readonly body: string
+  readonly provenance: PersonalFeedV2R5CandidateProvenance
+  readonly completeCurrent: (input: unknown) => unknown
+}
+
+interface CandidateCompletionReceipt {
+  readonly kind: 'candidate_judgment_completed'
+  readonly stableId: string
+  readonly requestId: string
+  readonly position: number
+  readonly judgment: CandidateJudgment
+  readonly completedAt: string
+}
+
+interface TrackedLease {
+  readonly ownerLease: OwnerCandidateLease
+  readonly judgeLease: PersonalFeedV2R5CandidateLease
+  readonly judgeBorrow: { readonly kind: 'candidate'; readonly lease: PersonalFeedV2R5CandidateLease }
+  receipt?: CandidateCompletionReceipt
+  judgment?: CandidateJudgment
+}
+
+interface CandidateTracker {
+  readonly candidates: PersonalFeedV2R5CandidateCursor
+  readonly receipts: readonly CandidateCompletionReceipt[]
+  readonly leases: readonly TrackedLease[]
+  readonly valid: () => boolean
+  readonly sawDone: () => boolean
+  readonly failureReason: () => 'failed' | 'aborted' | undefined
+}
+
+type ParsedFinalization =
+  | {
+      readonly kind: 'selected'
+      readonly selected: {
+        readonly stableId: string
+        readonly canonicalUrl: string
+        readonly position: number
+      }
+    }
+  | { readonly kind: 'none' }
+  | { readonly kind: 'incomplete'; readonly reason: CandidateIncompleteReason }
+
+function parseR3(
+  value: unknown,
+): { readonly kind: 'admitted'; readonly cursor: OwnerCandidateCursor }
+  | { readonly kind: 'incomplete'; readonly reason: CandidateIncompleteReason }
+  | undefined {
+  const record = plainRecord(value, ['kind', 'cursor'])
+  if (record?.get('kind') === 'admitted') {
+    const cursor = parseOwnerCursor(record.get('cursor'))
+    return cursor === undefined ? undefined : { kind: 'admitted', cursor }
   }
-  return undefined
+  return parseOwnerIncomplete(value)
+}
+
+function parseOwnerCursor(value: unknown): OwnerCandidateCursor | undefined {
+  const record = plainRecord(value, ['borrowCurrent', 'finalize', 'close'])
+  const borrowCurrent = record?.get('borrowCurrent')
+  const finalize = record?.get('finalize')
+  const close = record?.get('close')
+  if (record === undefined || typeof borrowCurrent !== 'function'
+    || typeof finalize !== 'function' || typeof close !== 'function') return undefined
+  return {
+    owner: value as object,
+    borrowCurrent: borrowCurrent as OwnerCandidateCursor['borrowCurrent'],
+    finalize: finalize as OwnerCandidateCursor['finalize'],
+    close: close as OwnerCandidateCursor['close'],
+  }
+}
+
+async function runJudgement(
+  ownerCursor: OwnerCandidateCursor,
+  request: PersonalFeedV2Request,
+  snapshot: unknown,
+  r5: PersonalFeedV2R5Port,
+  signal: AbortSignal,
+): Promise<PersonalFeedV2Outcome> {
+  const tracker = createCandidateTracker(ownerCursor, request, signal)
+  let rawClaim: unknown
+  let judgeResolved = false
+  if (!signal.aborted) {
+    try {
+      rawClaim = await r5.judge({ request, snapshot, candidates: tracker.candidates, signal })
+      judgeResolved = true
+    } catch {
+      // A failed judge has no authority to invent receipts or a terminal result.
+    }
+  }
+
+  const failureReason = signal.aborted
+    ? 'aborted'
+    : tracker.failureReason() ?? (judgeResolved ? undefined : 'failed')
+  const claim = failureReason === undefined
+    ? rawClaim
+    : Object.freeze({
+        kind: 'incomplete' as const,
+        completed: Object.freeze([...tracker.receipts]),
+        reason: failureReason,
+      })
+
+  let rawFinalization: unknown
+  try {
+    rawFinalization = await Reflect.apply(ownerCursor.finalize, ownerCursor.owner, [claim])
+  } catch {
+    await closeCoordinatorIncomplete(ownerCursor)
+    return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
+  }
+  const finalization = parseFinalization(rawFinalization)
+  if (finalization === undefined) {
+    await closeCoordinatorIncomplete(ownerCursor)
+    return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
+  }
+  if (finalization.kind === 'incomplete') {
+    return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
+  }
+  if (finalization.kind === 'none') {
+    if (!isProvenNone(tracker)) {
+      await closeCoordinatorIncomplete(ownerCursor)
+      return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
+    }
+    return makeOutcome('business_empty', BUSINESS_EMPTY_TEXT)
+  }
+  if (!isProvenSelection(finalization.selected, tracker)) {
+    await closeCoordinatorIncomplete(ownerCursor)
+    return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
+  }
+  return makeOutcome('one_link', finalization.selected.canonicalUrl)
+}
+
+function createCandidateTracker(
+  ownerCursor: OwnerCandidateCursor,
+  request: PersonalFeedV2Request,
+  signal: AbortSignal,
+): CandidateTracker {
+  const receipts: CandidateCompletionReceipt[] = []
+  const leases: TrackedLease[] = []
+  let activeLease: TrackedLease | undefined
+  let trackerValid = true
+  let trackerSawDone = false
+  let trackerFailure: 'failed' | 'aborted' | undefined
+
+  const fail = (reason: 'failed' | 'aborted'): void => {
+    trackerValid = false
+    if (trackerFailure === undefined || reason === 'aborted') trackerFailure = reason
+  }
+  const operationError = (): Error => new Error('personal Feed candidate operation failed')
+
+  const complete = async (tracked: TrackedLease, input: unknown): Promise<unknown> => {
+    const parsedInput = plainRecord(input, ['judgment'])
+    const judgment = parsedInput?.get('judgment')
+    if (parsedInput === undefined || (judgment !== 'qualified' && judgment !== 'not_qualified')) {
+      fail(signal.aborted ? 'aborted' : 'failed')
+      throw operationError()
+    }
+
+    let ownerResult: unknown
+    try {
+      ownerResult = await Reflect.apply(tracked.ownerLease.completeCurrent, tracked.ownerLease.owner, [
+        Object.freeze({ judgment }),
+      ])
+    } catch {
+      fail(signal.aborted ? 'aborted' : 'failed')
+      throw operationError()
+    }
+
+    const ownerIncomplete = parseOwnerIncomplete(ownerResult)
+    if (ownerIncomplete !== undefined) {
+      if (tracked.receipt !== undefined && tracked.judgment !== judgment) fail('failed')
+      fail(signal.aborted || ownerIncomplete.reason === 'aborted' ? 'aborted' : 'failed')
+      return Object.freeze({ kind: 'incomplete' as const, reason: ownerIncomplete.reason })
+    }
+
+    const receipt = parseCompletionReceipt(ownerResult)
+    if (receipt === undefined
+      || receipt.stableId !== tracked.ownerLease.stableId
+      || receipt.requestId !== request.requestId
+      || receipt.position !== tracked.ownerLease.position
+      || receipt.judgment !== judgment) {
+      fail(signal.aborted ? 'aborted' : 'failed')
+      throw operationError()
+    }
+
+    if (tracked.receipt !== undefined) {
+      if (tracked.judgment !== judgment || tracked.receipt !== receipt) {
+        fail(signal.aborted ? 'aborted' : 'failed')
+        throw operationError()
+      }
+      return receipt
+    }
+    if (activeLease !== tracked || receipt.position !== receipts.length) {
+      fail(signal.aborted ? 'aborted' : 'failed')
+      throw operationError()
+    }
+    tracked.receipt = receipt
+    tracked.judgment = judgment
+    receipts.push(receipt)
+    activeLease = undefined
+    if (signal.aborted) fail('aborted')
+    return receipt
+  }
+
+  const borrowCurrent = async (input: unknown): Promise<PersonalFeedV2R5CandidateBorrowResult> => {
+    const parsedInput = plainRecord(input, ['signal'])
+    if (parsedInput === undefined || parsedInput.get('signal') !== signal || !trackerValid) {
+      fail(signal.aborted ? 'aborted' : 'failed')
+      throw operationError()
+    }
+
+    let ownerResult: unknown
+    try {
+      ownerResult = await Reflect.apply(ownerCursor.borrowCurrent, ownerCursor.owner, [
+        Object.freeze({ signal }),
+      ])
+    } catch {
+      fail(signal.aborted ? 'aborted' : 'failed')
+      throw operationError()
+    }
+
+    const incompleteResult = parseOwnerIncomplete(ownerResult)
+    if (incompleteResult !== undefined) {
+      fail(signal.aborted || incompleteResult.reason === 'aborted' ? 'aborted' : 'failed')
+      return Object.freeze({ kind: 'incomplete' as const, reason: incompleteResult.reason })
+    }
+
+    const result = plainRecord(ownerResult, ['kind'])
+    if (result?.get('kind') === 'done') {
+      if (activeLease !== undefined) {
+        fail(signal.aborted ? 'aborted' : 'failed')
+        throw operationError()
+      }
+      trackerSawDone = true
+      if (signal.aborted) fail('aborted')
+      return Object.freeze({ kind: 'done' as const })
+    }
+
+    const candidate = plainRecord(ownerResult, ['kind', 'lease'])
+    const ownerLease = candidate?.get('kind') === 'candidate'
+      ? parseOwnerLease(candidate.get('lease'))
+      : undefined
+    if (ownerLease === undefined || trackerSawDone) {
+      fail(signal.aborted ? 'aborted' : 'failed')
+      throw operationError()
+    }
+    if (activeLease !== undefined) {
+      if (activeLease.ownerLease.owner !== ownerLease.owner) {
+        fail(signal.aborted ? 'aborted' : 'failed')
+        throw operationError()
+      }
+      if (signal.aborted) fail('aborted')
+      return activeLease.judgeBorrow
+    }
+    if (ownerLease.position !== leases.length
+      || leases.some(existing => existing.ownerLease.owner === ownerLease.owner
+        || existing.ownerLease.stableId === ownerLease.stableId
+        || existing.ownerLease.canonicalUrl === ownerLease.canonicalUrl)) {
+      fail(signal.aborted ? 'aborted' : 'failed')
+      throw operationError()
+    }
+
+    let tracked!: TrackedLease
+    const judgeLease: PersonalFeedV2R5CandidateLease = Object.freeze({
+      stableId: ownerLease.stableId,
+      canonicalUrl: ownerLease.canonicalUrl,
+      position: ownerLease.position,
+      body: ownerLease.body,
+      provenance: ownerLease.provenance,
+      completeCurrent: (input: { readonly judgment: CandidateJudgment }) => complete(tracked, input),
+    })
+    const judgeBorrow = Object.freeze({ kind: 'candidate' as const, lease: judgeLease })
+    tracked = { ownerLease, judgeLease, judgeBorrow }
+    leases.push(tracked)
+    activeLease = tracked
+    if (signal.aborted) fail('aborted')
+    return judgeBorrow
+  }
+
+  return {
+    candidates: Object.freeze({ borrowCurrent }),
+    receipts,
+    leases,
+    valid: () => trackerValid,
+    sawDone: () => trackerSawDone,
+    failureReason: () => trackerFailure,
+  }
+}
+
+function parseOwnerLease(value: unknown): OwnerCandidateLease | undefined {
+  const record = plainRecord(value, [
+    'stableId', 'canonicalUrl', 'position', 'body', 'provenance', 'completeCurrent',
+  ])
+  const stableId = record?.get('stableId')
+  const canonicalUrl = record?.get('canonicalUrl')
+  const position = record?.get('position')
+  const body = record?.get('body')
+  const completeCurrent = record?.get('completeCurrent')
+  const provenance = parseCandidateProvenance(record?.get('provenance'))
+  if (record === undefined || typeof stableId !== 'string' || typeof canonicalUrl !== 'string'
+    || !isDensePosition(position) || typeof body !== 'string' || body.trim() === ''
+    || typeof completeCurrent !== 'function' || provenance === undefined
+    || provenance.canonicalUrl !== canonicalUrl || !isMatchingStatusIdentity(stableId, canonicalUrl)) return undefined
+  return {
+    owner: value as object,
+    stableId,
+    canonicalUrl,
+    position,
+    body,
+    provenance,
+    completeCurrent: completeCurrent as OwnerCandidateLease['completeCurrent'],
+  }
+}
+
+function parseCandidateProvenance(value: unknown): PersonalFeedV2R5CandidateProvenance | undefined {
+  const record = plainRecord(value, [
+    'capturedAt', 'surface', 'surfaceOrdinal', 'occurrenceOrdinal', 'canonicalUrl', 'authorHandle', 'publishedAt',
+  ])
+  const capturedAt = record?.get('capturedAt')
+  const surface = record?.get('surface')
+  const surfaceOrdinal = record?.get('surfaceOrdinal')
+  const occurrenceOrdinal = record?.get('occurrenceOrdinal')
+  const canonicalUrl = record?.get('canonicalUrl')
+  const authorHandle = record?.get('authorHandle')
+  const publishedAt = record?.get('publishedAt')
+  if (record === undefined || !isValidIso(capturedAt) || !isValidIso(publishedAt)
+    || (surface !== 'for_you' && surface !== 'following' && surface !== 'explore')
+    || !isDensePosition(surfaceOrdinal) || surfaceOrdinal > 2 || !isDensePosition(occurrenceOrdinal)
+    || typeof canonicalUrl !== 'string' || canonicalizeXStatusIdentity(canonicalUrl) !== canonicalUrl
+    || typeof authorHandle !== 'string' || authorHandle.trim() === '') return undefined
+  const expectedSurfaceOrdinal = surface === 'for_you' ? 0 : surface === 'following' ? 1 : 2
+  if (surfaceOrdinal !== expectedSurfaceOrdinal) return undefined
+  return Object.freeze({
+    capturedAt,
+    surface,
+    surfaceOrdinal,
+    occurrenceOrdinal,
+    canonicalUrl,
+    authorHandle,
+    publishedAt,
+  })
+}
+
+function parseCompletionReceipt(value: unknown): CandidateCompletionReceipt | undefined {
+  const record = plainRecord(value, [
+    'kind', 'stableId', 'requestId', 'position', 'judgment', 'completedAt',
+  ])
+  const stableId = record?.get('stableId')
+  const requestId = record?.get('requestId')
+  const position = record?.get('position')
+  const judgment = record?.get('judgment')
+  const completedAt = record?.get('completedAt')
+  let frozen = false
+  try {
+    frozen = Object.isFrozen(value)
+  } catch {
+    return undefined
+  }
+  if (!frozen || record?.get('kind') !== 'candidate_judgment_completed'
+    || typeof stableId !== 'string' || !/^x-status:[1-9][0-9]*$/.test(stableId)
+    || typeof requestId !== 'string' || !isDensePosition(position)
+    || (judgment !== 'qualified' && judgment !== 'not_qualified') || !isValidIso(completedAt)) return undefined
+  return value as CandidateCompletionReceipt
+}
+
+function parseOwnerIncomplete(
+  value: unknown,
+): { readonly kind: 'incomplete'; readonly reason: CandidateIncompleteReason } | undefined {
+  const record = plainRecord(value, ['kind', 'reason'])
+  const reason = record?.get('reason')
+  return record?.get('kind') !== 'incomplete' || !isCandidateIncompleteReason(reason)
+    ? undefined
+    : Object.freeze({ kind: 'incomplete', reason })
+}
+
+function parseFinalization(value: unknown): ParsedFinalization | undefined {
+  const incompleteResult = parseOwnerIncomplete(value)
+  if (incompleteResult !== undefined) return incompleteResult
+  const none = plainRecord(value, ['kind'])
+  if (none?.get('kind') === 'none') return Object.freeze({ kind: 'none' })
+  const record = plainRecord(value, ['kind', 'selected'])
+  if (record?.get('kind') !== 'selected') return undefined
+  const selected = plainRecord(record.get('selected'), ['stableId', 'canonicalUrl', 'position'])
+  const stableId = selected?.get('stableId')
+  const canonicalUrl = selected?.get('canonicalUrl')
+  const position = selected?.get('position')
+  if (selected === undefined || typeof stableId !== 'string' || typeof canonicalUrl !== 'string'
+    || !isDensePosition(position) || !isMatchingStatusIdentity(stableId, canonicalUrl)) return undefined
+  return Object.freeze({
+    kind: 'selected',
+    selected: Object.freeze({ stableId, canonicalUrl, position }),
+  })
+}
+
+function isProvenSelection(
+  selected: { readonly stableId: string; readonly canonicalUrl: string; readonly position: number },
+  tracker: CandidateTracker,
+): boolean {
+  if (!tracker.valid() || tracker.receipts.length === 0
+    || tracker.leases.length !== tracker.receipts.length) return false
+  const lastReceipt = tracker.receipts.at(-1)
+  if (lastReceipt === undefined || lastReceipt.judgment !== 'qualified'
+    || tracker.receipts.slice(0, -1).some(receipt => receipt.judgment !== 'not_qualified')
+    || tracker.receipts.filter(receipt => receipt.judgment === 'qualified').length !== 1
+    || selected.stableId !== lastReceipt.stableId || selected.position !== lastReceipt.position) return false
+  const lease = tracker.leases[selected.position]?.ownerLease
+  return lease !== undefined && lease.stableId === selected.stableId
+    && lease.position === selected.position && lease.canonicalUrl === selected.canonicalUrl
+    && canonicalizeXStatusIdentity(selected.canonicalUrl) === selected.canonicalUrl
+}
+
+function isProvenNone(tracker: CandidateTracker): boolean {
+  return tracker.valid() && tracker.sawDone()
+    && tracker.leases.length === tracker.receipts.length
+    && tracker.receipts.every(receipt => receipt.judgment === 'not_qualified')
+}
+
+async function closeCoordinatorIncomplete(ownerCursor: OwnerCandidateCursor): Promise<void> {
+  try {
+    await Reflect.apply(ownerCursor.close, ownerCursor.owner, ['coordinator_incomplete'])
+  } catch {
+    // Finalization already failed closed; cleanup errors have no public authority.
+  }
+}
+
+function plainRecord(value: unknown, expected: readonly string[]): ReadonlyMap<string, unknown> | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  let prototype: object | null
+  let keys: readonly PropertyKey[]
+  try {
+    if (Array.isArray(value)) return undefined
+    prototype = Object.getPrototypeOf(value) as object | null
+    keys = Reflect.ownKeys(value)
+  } catch {
+    return undefined
+  }
+  if (prototype !== Object.prototype && prototype !== null) return undefined
+  const sortedExpected = [...expected].sort()
+  const actual = keys.filter((key): key is string => typeof key === 'string').sort()
+  if (actual.length !== keys.length || actual.length !== sortedExpected.length
+    || !actual.every((key, index) => key === sortedExpected[index])) return undefined
+  const result = new Map<string, unknown>()
+  for (const key of actual) {
+    let descriptor: PropertyDescriptor | undefined
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(value, key)
+    } catch {
+      return undefined
+    }
+    if (descriptor === undefined || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) {
+      return undefined
+    }
+    result.set(key, descriptor.value)
+  }
+  return result
+}
+
+function isMatchingStatusIdentity(stableId: string, canonicalUrl: string): boolean {
+  const canonical = canonicalizeXStatusIdentity(canonicalUrl)
+  if (canonical !== canonicalUrl) return false
+  const match = /\/status\/([1-9][0-9]*)$/.exec(canonicalUrl)
+  return match !== null && stableId === `x-status:${match[1]}`
+}
+
+function isDensePosition(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && !Object.is(value, -0)
+}
+
+function isCandidateIncompleteReason(value: unknown): value is CandidateIncompleteReason {
+  return value === 'aborted' || value === 'body_failed' || value === 'body_insufficient'
+    || value === 'body_unknown' || value === 'capture_failed' || value === 'clock_failed'
+    || value === 'completion_claim_invalid' || value === 'completion_conflict'
+    || value === 'completion_store_failed' || value === 'concurrent_reservation'
+    || value === 'expired' || value === 'failed' || value === 'invalid_input'
+    || value === 'processed_query_aborted' || value === 'processed_query_failed'
+    || value === 'processed_query_unknown' || value === 'timeout' || value === 'unknown'
 }
 
 async function callPort(call: () => unknown | Promise<unknown>): Promise<unknown | undefined> {

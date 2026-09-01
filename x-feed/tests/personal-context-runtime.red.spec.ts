@@ -608,8 +608,8 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
       clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
       r4: runtime.r4,
       r2: { observe: async () => { calls.r2 += 1; return { kind: 'complete' as const, window: {} } } },
-      r3: { admit: async () => { calls.r3 += 1; return { kind: 'admitted' as const, candidates: [] } } },
-      r5: { judge: async () => { calls.r5 += 1; return { kind: 'none' as const } } },
+      r3: { admit: async () => { calls.r3 += 1; return { kind: 'admitted' as const, cursor: { borrowCurrent: async () => ({ kind: 'done' as const }), finalize: async () => ({ kind: 'incomplete' as const, reason: 'failed' as const }), close: async () => undefined } } } },
+      r5: { judge: async () => { calls.r5 += 1; return { kind: 'none' as const, completed: Object.freeze([]) } } },
     })
     const realSharedHandler = adapter.createPersonalFeedTelegramRequestHandler({ coordinator })
     const captureFailureHandler = vi.fn(realSharedHandler)
@@ -991,8 +991,8 @@ describe('Personal Context Telegram package-private runtime seam (RED)', () => {
       clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
       r4: runtime.r4,
       r2: { observe: async () => { calls.r2 += 1; return { kind: 'complete' as const, window: {} } } },
-      r3: { admit: async () => { calls.r3 += 1; return { kind: 'admitted' as const, candidates: [] } } },
-      r5: { judge: async () => { calls.r5 += 1; return { kind: 'none' as const } } },
+      r3: { admit: async () => { calls.r3 += 1; return { kind: 'admitted' as const, cursor: { borrowCurrent: async () => ({ kind: 'done' as const }), finalize: async () => ({ kind: 'incomplete' as const, reason: 'failed' as const }), close: async () => undefined } } } },
+      r5: { judge: async () => { calls.r5 += 1; return { kind: 'none' as const, completed: Object.freeze([]) } } },
     })
     const result = await coordinator.prepare({ chatId: 7, messageId: 11, signal: new AbortController().signal })
     expect(result).toMatchObject({ kind: 'prepared', outcome: { kind: 'incomplete', category: 'personal_context', finalText: '这次没有完成：个人语境不足或未完成。' } })
@@ -1111,8 +1111,8 @@ describe('Personal Context Telegram package-private runtime seam (RED)', () => {
       clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
       r4: runtime.r4,
       r2: { observe: async () => { calls.r2 += 1; return { kind: 'complete' as const, window: {} } } },
-      r3: { admit: async () => { calls.r3 += 1; return { kind: 'admitted' as const, candidates: [] } } },
-      r5: { judge: async () => { calls.r5 += 1; return { kind: 'none' as const } } },
+      r3: { admit: async () => { calls.r3 += 1; return { kind: 'admitted' as const, cursor: { borrowCurrent: async () => ({ kind: 'done' as const }), finalize: async () => ({ kind: 'incomplete' as const, reason: 'failed' as const }), close: async () => undefined } } } },
+      r5: { judge: async () => { calls.r5 += 1; return { kind: 'none' as const, completed: Object.freeze([]) } } },
     })
     const captureFailureHandler = vi.fn(adapter.createPersonalFeedTelegramRequestHandler({ coordinator }))
     const harness = seamContext()
@@ -1211,8 +1211,8 @@ describe('Personal Context Telegram package-private runtime seam (RED)', () => {
       clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
       r4: { snapshot: async input => { const result = await runtime.r4.snapshot(input); r4Results.push(result); return result } },
       r2: { observe: async () => { calls.r2 += 1; return { kind: 'partial' as const } } },
-      r3: { admit: async () => { calls.r3 += 1; return { kind: 'admitted' as const, candidates: [] } } },
-      r5: { judge: async () => { calls.r5 += 1; return { kind: 'none' as const } } },
+      r3: { admit: async () => { calls.r3 += 1; return { kind: 'admitted' as const, cursor: { borrowCurrent: async () => ({ kind: 'done' as const }), finalize: async () => ({ kind: 'incomplete' as const, reason: 'failed' as const }), close: async () => undefined } } } },
+      r5: { judge: async () => { calls.r5 += 1; return { kind: 'none' as const, completed: Object.freeze([]) } } },
     })
     const captureFailureHandler = vi.fn(adapter.createPersonalFeedTelegramRequestHandler({ coordinator }))
     const adapterCoordinator = {

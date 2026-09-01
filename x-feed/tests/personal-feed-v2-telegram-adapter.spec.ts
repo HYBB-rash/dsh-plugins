@@ -80,18 +80,55 @@ function realCoordinator(directory: string) {
       },
     },
     r3: {
-      admit: async () => {
+      admit: async (input: { readonly request: { readonly requestId: string }}) => {
         calls.r3 += 1
+        const receipt = Object.freeze({
+          kind: 'candidate_judgment_completed' as const,
+          stableId: 'x-status:42',
+          requestId: input.request.requestId,
+          position: 0,
+          judgment: 'qualified' as const,
+          completedAt: '2026-08-31T16:00:00.000Z',
+        })
+        const lease = Object.freeze({
+          stableId: receipt.stableId,
+          canonicalUrl: 'https://x.com/alice/status/42',
+          position: 0,
+          body: 'adapter candidate',
+          provenance: Object.freeze({
+            capturedAt: '2026-08-31T16:00:00.000Z',
+            surface: 'for_you' as const,
+            surfaceOrdinal: 0,
+            occurrenceOrdinal: 0,
+            canonicalUrl: 'https://x.com/alice/status/42',
+            authorHandle: 'adapter-author',
+            publishedAt: '2026-08-30T12:00:00.000Z',
+          }),
+          completeCurrent: async () => receipt,
+        })
+        let borrowed = false
         return Object.freeze({
           kind: 'admitted',
-          candidates: Object.freeze([{ candidate: 'x:42' }]),
+          cursor: Object.freeze({
+            borrowCurrent: async () => {
+              if (borrowed) return Object.freeze({ kind: 'done' as const })
+              borrowed = true
+              return Object.freeze({ kind: 'candidate' as const, lease })
+            },
+            finalize: async () => Object.freeze({ kind: 'selected' as const, selected: { stableId: receipt.stableId, canonicalUrl: lease.canonicalUrl, position: 0 } }),
+            close: async () => undefined,
+          }),
         })
       },
     },
     r5: {
-      judge: async () => {
+      judge: async (input: { readonly candidates: { readonly borrowCurrent: (input: { readonly signal: AbortSignal }) => Promise<unknown> }; readonly signal: AbortSignal }) => {
         calls.r5 += 1
-        return Object.freeze({ kind: 'one_link', url: 'https://x.com/alice/status/42' })
+        const first = await input.candidates.borrowCurrent({ signal: input.signal }) as { readonly kind: string; readonly lease?: { readonly completeCurrent: (input: unknown) => Promise<unknown> } }
+        if (first.kind !== 'candidate' || first.lease === undefined) throw new Error('adapter fixture candidate missing')
+        const receipt = await first.lease.completeCurrent({ judgment: 'qualified' })
+        expect(await input.candidates.borrowCurrent({ signal: input.signal })).toEqual({ kind: 'done' })
+        return Object.freeze({ kind: 'selected' as const, completed: Object.freeze([receipt]), selected: receipt })
       },
     },
   })

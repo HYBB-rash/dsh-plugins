@@ -47,18 +47,55 @@ function makePorts() {
       },
     },
     r3: {
-      admit: async (_input: unknown): Promise<unknown> => {
+      admit: async (input: { readonly request: { readonly requestId: string }}): Promise<unknown> => {
         calls.r3 += 1
+        const receipt = Object.freeze({
+          kind: 'candidate_judgment_completed' as const,
+          stableId: 'x-status:1',
+          requestId: input.request.requestId,
+          position: 0,
+          judgment: 'not_qualified' as const,
+          completedAt: '2026-08-31T16:00:00.000Z',
+        })
+        const lease = Object.freeze({
+          stableId: receipt.stableId,
+          canonicalUrl: 'https://x.com/store/status/1',
+          position: 0,
+          body: 'store candidate',
+          provenance: Object.freeze({
+            capturedAt: '2026-08-31T16:00:00.000Z',
+            surface: 'for_you' as const,
+            surfaceOrdinal: 0,
+            occurrenceOrdinal: 0,
+            canonicalUrl: 'https://x.com/store/status/1',
+            authorHandle: 'store-author',
+            publishedAt: '2026-08-30T12:00:00.000Z',
+          }),
+          completeCurrent: async () => receipt,
+        })
+        let borrowed = false
         return Object.freeze({
           kind: 'admitted',
-          candidates: Object.freeze([{ source: 'r3', candidate: 'one' }]),
+          cursor: Object.freeze({
+            borrowCurrent: async () => {
+              if (borrowed) return Object.freeze({ kind: 'done' as const })
+              borrowed = true
+              return Object.freeze({ kind: 'candidate' as const, lease })
+            },
+            finalize: async () => Object.freeze({ kind: 'none' as const }),
+            close: async () => undefined,
+          }),
         })
       },
     },
     r5: {
-      judge: async (_input: unknown): Promise<unknown> => {
+      judge: async (input: { readonly candidates: { readonly borrowCurrent: (input: { readonly signal: AbortSignal }) => Promise<unknown> }; readonly signal: AbortSignal }): Promise<unknown> => {
         calls.r5 += 1
-        return Object.freeze({ kind: 'none' })
+        const first = await input.candidates.borrowCurrent({ signal: input.signal }) as { readonly kind: string; readonly lease?: { readonly completeCurrent: (input: unknown) => Promise<unknown> } }
+        if (first.kind !== 'candidate' || first.lease === undefined) throw new Error('store fixture candidate missing')
+        const receipt = await first.lease.completeCurrent({ judgment: 'not_qualified' })
+        expect(await input.candidates.borrowCurrent({ signal: input.signal })).toEqual({ kind: 'done' })
+        return Object.freeze({ kind: 'none' as const, completed: Object.freeze([receipt]) })
       },
     },
   })
