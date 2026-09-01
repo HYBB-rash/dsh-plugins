@@ -26,6 +26,20 @@ export {
 export { canonicalizeXStatusIdentity } from './v2/x-status-identity.ts'
 
 export {
+  createPersonalFeedV2CandidateLifecycle,
+  type CreatePersonalFeedV2CandidateLifecycleOptions,
+  type PersonalFeedV2CandidateAdmitInput,
+  type PersonalFeedV2CandidateAdmitResult,
+  type PersonalFeedV2CandidateBorrowResult,
+  type PersonalFeedV2CandidateCursor,
+  type PersonalFeedV2CandidateIncomplete,
+  type PersonalFeedV2CandidateIncompleteReason,
+  type PersonalFeedV2CandidateLease,
+  type PersonalFeedV2CandidateLifecycle,
+  type PersonalFeedV2CandidateProvenance,
+} from './v2/candidate-lifecycle.ts'
+
+export {
   createSessionUserHistoryAdapter,
   type SessionUserHistoryAdapter,
   type SessionUserHistoryMessage,
