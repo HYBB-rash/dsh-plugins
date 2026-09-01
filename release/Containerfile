@@ -73,6 +73,7 @@ RUN set -eu; \
     mkdir -p /opt/dsh/harness/local-plugins/scripts; \
     cp /opt/dsh/plugins-src/scripts/materialize-runtime-topology.mjs \
       /opt/dsh/harness/local-plugins/scripts/materialize-runtime-topology.mjs; \
+    bash /opt/dsh/release-system/scripts/check-runtime-module-identity.sh /opt/dsh/harness; \
     for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector x-feed; do \
       (cd "local-plugins/$package" \
        && pnpm exec tsc -b \

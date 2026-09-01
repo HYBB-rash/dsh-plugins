@@ -98,3 +98,4 @@
 - 2026-08-31：Schemastery 可能把省略的嵌套 object 配置实体化为 `{}`；直接把 TypeScript 对象传给启动函数的测试无法发现这种运行时漂移。可选嵌套对象必须在 schema 中显式保留 `undefined`，并让回归测试先经过真实导出的 `Config(...)` 解析器；下游控制合同仍需独立严格验证，不能只信 schema。
 - 2026-09-01：profile 启动时 `ensure` 受管 command binding，并由普通 Agent 的 `cron_list` 隐藏、`cron_delete` 按不存在处理，才能同时建立启动恢复和运行期所有权；必须用真实配置解析、隔离候选启动和 tombstone 后重启测试覆盖这条链。上述证据齐全后，生产发布只需等待通用 cron 控制面就绪并做真实业务验收，不应再复制一套绑定 argv、入口哈希和回执结构的 Notion 专用发布闸门。
 - 2026-09-01：退休未上线的运行包时，先从仍需保留的真实入口切断它的源码依赖，再删除整包和正式接线；镜像包清单、开发挂载、profile manifest、runtime topology、发布夹具与自检必须同步收缩，并保留旧包目录不得出现的负向门。已删除的 cron job 和不再读取的旧账本保持原状，不应为了“清理干净”增加数据迁移或物理删除。
+- 2026-09-01：改正式包集合后，脏工作树的 editable verify 可能被既有 `tsbuildinfo` 和已安装工作区依赖掩盖；本次正式 clean build 才发现五包的 Cordis `"*"` 会解析到 registry 4.0.2，与 Harness workspace 4.0.1 并存，导致 `session/event` 和 `invariants` 模块扩展消失。Harness 内运行包应把 Cordis 的 peer/dev 依赖绑定为 `workspace:*`，并在编译前和镜像 self-test 以真实解析路径证明五包只使用 Harness workspace 的同一份 Cordis；修改包清单后仍须由全新不可变候选验证安装解析。
