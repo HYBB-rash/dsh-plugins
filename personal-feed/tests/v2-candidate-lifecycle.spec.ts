@@ -906,6 +906,217 @@ describe('Personal Feed v2 candidate lifecycle contract', () => {
     }
   })
 
+  it('R3 bounds top-level surfaces descriptor discovery before a finite length can fan out', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-r3-surfaces-discovery-budget-'))
+    temporaryDirectories.push(directory)
+    const counters: CaptureCounters[] = [{ take: 0, close: 0 }, { take: 0, close: 0 }, { take: 0, close: 0 }]
+    const base = completeWindow(counters)
+    const surfaceTarget = new Array<unknown>(64)
+    surfaceTarget[0] = base.surfaces[0]
+    surfaceTarget[1] = base.surfaces[1]
+    surfaceTarget[2] = base.surfaces[2]
+    const numericDescriptorIndices: number[] = []
+    let ownKeysCalls = 0
+    const surfaces = new Proxy(surfaceTarget, {
+      ownKeys: () => {
+        ownKeysCalls += 1
+        throw new Error('CANARY_SURFACES_OWN_KEYS')
+      },
+      getOwnPropertyDescriptor: (target, property) => {
+        if (typeof property === 'string' && /^(0|[1-9][0-9]*)$/.test(property)) {
+          numericDescriptorIndices.push(Number(property))
+        }
+        return Reflect.getOwnPropertyDescriptor(target, property)
+      },
+    })
+    const window = { ...base, surfaces }
+    const owner = createPersonalFeedV2CandidateLifecycle({
+      completionLedgerPath: join(directory, 'completion.jsonl'),
+      clock: { now: () => new Date(CAPTURE_AT_DAY_SEVEN_END) },
+    })
+    const result = await resolveAdmitOrRejected(owner, window)
+    expect(result).toEqual({ kind: 'incomplete', reason: 'invalid_input' })
+    expect([...new Set(numericDescriptorIndices)]).toEqual([0, 1, 2])
+    expect(numericDescriptorIndices.every(index => index <= 2)).toBe(true)
+    expect(ownKeysCalls).toBe(0)
+    expect(counters).toEqual([{ take: 0, close: 1 }, { take: 0, close: 1 }, { take: 0, close: 1 }])
+
+    {
+      const maxCounters: CaptureCounters[] = [{ take: 0, close: 0 }, { take: 0, close: 0 }, { take: 0, close: 0 }]
+      const maxBase = completeWindow(maxCounters)
+      const surfacesTarget: Record<string, unknown> = {
+        0: maxBase.surfaces[0],
+        1: maxBase.surfaces[1],
+        2: maxBase.surfaces[2],
+      }
+      Object.defineProperty(surfacesTarget, 'length', {
+        configurable: true,
+        enumerable: false,
+        value: Number.MAX_SAFE_INTEGER,
+        writable: true,
+      })
+      const maxNumericDescriptorIndices: number[] = []
+      let maxGetTrapCalls = 0
+      const maxSurfaces = new Proxy(surfacesTarget, {
+        get: (target, property, receiver) => {
+          maxGetTrapCalls += 1
+          if (typeof property === 'string' && /^(0|[1-9][0-9]*)$/.test(property) && Number(property) > 2) {
+            throw new Error('CANARY_MAX_SURFACES_GET_INDEX')
+          }
+          return Reflect.get(target, property, receiver)
+        },
+        getOwnPropertyDescriptor: (target, property) => {
+          if (typeof property === 'string' && /^(0|[1-9][0-9]*)$/.test(property)) {
+            const index = Number(property)
+            maxNumericDescriptorIndices.push(index)
+            if (index > 2) throw new Error('CANARY_MAX_SURFACES_DESCRIPTOR_INDEX')
+          }
+          return Reflect.getOwnPropertyDescriptor(target, property)
+        },
+      })
+      const maxWindow = { ...maxBase, surfaces: maxSurfaces }
+      const maxDirectory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-r3-surfaces-max-safe-integer-'))
+      temporaryDirectories.push(maxDirectory)
+      const maxOwner = createPersonalFeedV2CandidateLifecycle({
+        completionLedgerPath: join(maxDirectory, 'completion.jsonl'),
+        clock: { now: () => new Date(CAPTURE_AT_DAY_SEVEN_END) },
+      })
+      const maxResult = await resolveAdmitOrRejected(maxOwner, maxWindow)
+      expect(maxResult).toEqual({ kind: 'incomplete', reason: 'invalid_input' })
+      expect([...new Set(maxNumericDescriptorIndices)]).toEqual([0, 1, 2])
+      expect(maxNumericDescriptorIndices.every(index => index <= 2)).toBe(true)
+      expect(maxGetTrapCalls).toBe(0)
+      expect(maxCounters).toEqual([{ take: 0, close: 1 }, { take: 0, close: 1 }, { take: 0, close: 1 }])
+    }
+  })
+
+  it('R3 shares a bounded occurrences descriptor budget across all three surfaces', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-r3-occurrences-discovery-budget-'))
+    temporaryDirectories.push(directory)
+    const counters: CaptureCounters[] = Array.from(
+      { length: 9 },
+      () => ({ take: 0, close: 0 }),
+    )
+    const base = completeWindow(counters)
+    let numericDescriptorReads = 0
+    let ownKeysCalls = 0
+    const proxiedOccurrences = base.surfaces.map((surface, surfaceOrdinal) => {
+      const target = new Array<unknown>(200)
+      const capturedAt = surface.occurrences[0].capturedAt
+      for (let occurrenceOrdinal = 0; occurrenceOrdinal < 3; occurrenceOrdinal += 1) {
+        target[occurrenceOrdinal] = occurrence(
+          `https://x.com/Bounded${surfaceOrdinal}${occurrenceOrdinal}/status/${1000 + surfaceOrdinal * 3 + occurrenceOrdinal}`,
+          sufficientBody(
+            `CANARY_R3_BOUNDED_${surfaceOrdinal}_${occurrenceOrdinal}`,
+            counters[surfaceOrdinal * 3 + occurrenceOrdinal] as CaptureCounters,
+          ),
+          capturedAt,
+          occurrenceOrdinal,
+        )
+      }
+      return new Proxy(target, {
+        ownKeys: () => {
+          ownKeysCalls += 1
+          throw new Error('CANARY_OCCURRENCES_OWN_KEYS')
+        },
+        getOwnPropertyDescriptor: (targetObject, property) => {
+          if (typeof property === 'string' && /^(0|[1-9][0-9]*)$/.test(property)) numericDescriptorReads += 1
+          return Reflect.getOwnPropertyDescriptor(targetObject, property)
+        },
+      })
+    })
+    const window = {
+      ...base,
+      surfaces: base.surfaces.map((surface, surfaceOrdinal) => ({
+        ...surface,
+        occurrences: proxiedOccurrences[surfaceOrdinal],
+      })),
+    }
+    const owner = createPersonalFeedV2CandidateLifecycle({
+      completionLedgerPath: join(directory, 'completion.jsonl'),
+      clock: { now: () => new Date(CAPTURE_AT_DAY_SEVEN_END) },
+    })
+    const result = await resolveAdmitOrRejected(owner, window)
+    expect(result).toEqual({ kind: 'incomplete', reason: 'invalid_input' })
+    expect(numericDescriptorReads).toBeGreaterThan(0)
+    expect(numericDescriptorReads).toBeLessThanOrEqual(256)
+    expect(ownKeysCalls).toBe(0)
+    expect(counters).toEqual(Array.from({ length: 9 }, () => ({ take: 0, close: 1 })))
+
+    {
+      const maxCounters: CaptureCounters[] = Array.from(
+        { length: 9 },
+        () => ({ take: 0, close: 0 }),
+      )
+      const maxBase = completeWindow(maxCounters)
+      let maxNumericDescriptorReads = 0
+      let maxOwnKeysCalls = 0
+      let maxGetTrapCalls = 0
+      const maxOccurrences = maxBase.surfaces.map((surface, surfaceOrdinal) => {
+        const target: Record<string, unknown> = {}
+        const capturedAt = surface.occurrences[0].capturedAt
+        for (let occurrenceOrdinal = 0; occurrenceOrdinal < 3; occurrenceOrdinal += 1) {
+          target[String(occurrenceOrdinal)] = occurrence(
+            `https://x.com/MaxBounded${surfaceOrdinal}${occurrenceOrdinal}/status/${2000 + surfaceOrdinal * 3 + occurrenceOrdinal}`,
+            sufficientBody(
+              `CANARY_R3_MAX_BOUNDED_${surfaceOrdinal}_${occurrenceOrdinal}`,
+              maxCounters[surfaceOrdinal * 3 + occurrenceOrdinal] as CaptureCounters,
+            ),
+            capturedAt,
+            occurrenceOrdinal,
+          )
+        }
+        Object.defineProperty(target, 'length', {
+          configurable: true,
+          enumerable: false,
+          value: Number.MAX_SAFE_INTEGER,
+          writable: true,
+        })
+        return new Proxy(target, {
+          get: (proxyTarget, property, receiver) => {
+            maxGetTrapCalls += 1
+            if (typeof property === 'string' && /^(0|[1-9][0-9]*)$/.test(property) && Number(property) > 2) {
+              throw new Error('CANARY_MAX_OCCURRENCES_GET_INDEX')
+            }
+            return Reflect.get(proxyTarget, property, receiver)
+          },
+          ownKeys: () => {
+            maxOwnKeysCalls += 1
+            throw new Error('CANARY_MAX_OCCURRENCES_OWN_KEYS')
+          },
+          getOwnPropertyDescriptor: (proxyTarget, property) => {
+            if (typeof property === 'string' && /^(0|[1-9][0-9]*)$/.test(property)) {
+              maxNumericDescriptorReads += 1
+              if (maxNumericDescriptorReads > 256) throw new Error('CANARY_MAX_OCCURRENCES_DESCRIPTOR_BUDGET')
+              if (Number(property) > 2) return undefined
+            }
+            return Reflect.getOwnPropertyDescriptor(proxyTarget, property)
+          },
+        })
+      })
+      const maxWindow = {
+        ...maxBase,
+        surfaces: maxBase.surfaces.map((surface, surfaceOrdinal) => ({
+          ...surface,
+          occurrences: maxOccurrences[surfaceOrdinal],
+        })),
+      }
+      const maxDirectory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-r3-occurrences-max-safe-integer-'))
+      temporaryDirectories.push(maxDirectory)
+      const maxOwner = createPersonalFeedV2CandidateLifecycle({
+        completionLedgerPath: join(maxDirectory, 'completion.jsonl'),
+        clock: { now: () => new Date(CAPTURE_AT_DAY_SEVEN_END) },
+      })
+      const maxResult = await resolveAdmitOrRejected(maxOwner, maxWindow)
+      expect(maxResult).toEqual({ kind: 'incomplete', reason: 'invalid_input' })
+      expect(maxOwnKeysCalls).toBe(0)
+      expect(maxNumericDescriptorReads).toBeGreaterThan(0)
+      expect(maxNumericDescriptorReads).toBeLessThanOrEqual(256)
+      expect(maxGetTrapCalls).toBe(0)
+      expect(maxCounters).toEqual(Array.from({ length: 9 }, () => ({ take: 0, close: 1 })))
+    }
+  })
+
   it('admits one complete three-surface window with stable X identity, first provenance, and Shanghai-day expiry', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-candidate-lifecycle-'))
     temporaryDirectories.push(directory)

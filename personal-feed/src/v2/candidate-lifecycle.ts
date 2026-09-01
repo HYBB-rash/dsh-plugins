@@ -265,6 +265,8 @@ interface CandidateReservation {
 }
 
 const SURFACES = ['for_you', 'following', 'explore'] as const
+const TOP_SURFACE_COUNT = 3
+const MAX_WINDOW_OCCURRENCES = 256
 const ALLOWED_X_HOSTS = new Set(['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com'])
 const SHANGHAI_OFFSET_MILLISECONDS = 8 * 60 * 60 * 1000
 const DONE_RESULT: PersonalFeedV2CandidateBorrowResult = Object.freeze({ kind: 'done' })
@@ -859,7 +861,11 @@ function parseWindow(
   const shanghaiDayValue = windowValues.get('shanghaiDay')
   const startedAt = windowValues.get('startedAt')
   const completedAt = windowValues.get('completedAt')
-  const surfaces = snapshotWindowArray(windowValues.get('surfaces'), SURFACES.length)
+  const surfaces = snapshotWindowArray(
+    windowValues.get('surfaces'),
+    TOP_SURFACE_COUNT,
+    TOP_SURFACE_COUNT,
+  )
   if (requestId !== request.requestId || cutoffValue !== request.cutoff
     || shanghaiDayValue !== request.shanghaiDay || surfaces === undefined) return undefined
 
@@ -876,8 +882,9 @@ function parseWindow(
   const handleByOwner = new Map(handles.map(handle => [handle.owner, handle]))
   const usedHandles = new Set<CaptureCloseHandle>()
   const occurrences: ParsedOccurrence[] = []
+  let remainingOccurrences = MAX_WINDOW_OCCURRENCES
   let previousSurfaceCompletedAt = topInterval.startedAt
-  for (let surfaceOrdinal = 0; surfaceOrdinal < SURFACES.length; surfaceOrdinal += 1) {
+  for (let surfaceOrdinal = 0; surfaceOrdinal < TOP_SURFACE_COUNT; surfaceOrdinal += 1) {
     const expectedSurface = SURFACES[surfaceOrdinal]
     const surface = snapshotWindowRecord(surfaces.values[surfaceOrdinal], [
         'kind', 'surface', 'surfaceOrdinal', 'startedAt', 'completedAt', 'occurrences',
@@ -887,10 +894,15 @@ function parseWindow(
     const surfaceKind = surfaceValues.get('kind')
     const surfaceName = surfaceValues.get('surface')
     const surfaceOrdinalValue = surfaceValues.get('surfaceOrdinal')
-    const surfaceOccurrences = snapshotWindowArray(surfaceValues.get('occurrences'))
+    const surfaceOccurrences = snapshotWindowArray(
+      surfaceValues.get('occurrences'),
+      undefined,
+      remainingOccurrences,
+    )
     if ((surfaceKind !== 'complete' && surfaceKind !== 'natural_zero')
       || surfaceName !== expectedSurface || surfaceOrdinalValue !== surfaceOrdinal
       || surfaceOccurrences === undefined) return undefined
+    remainingOccurrences -= surfaceOccurrences.values.length
 
     const surfaceInterval = parseWindowInterval(
       surfaceValues.get('startedAt'),
@@ -1011,28 +1023,40 @@ function snapshotWindowRecord(
 function snapshotWindowArray(
   value: unknown,
   expectedLength?: number,
+  maximumLength?: number,
 ): WindowArraySnapshot | undefined {
   if (!isSnapshotObject(value) || nodeTypes.isProxy(value)) return undefined
   let prototype: object | null
-  let ownKeys: readonly PropertyKey[]
   let lengthDescriptor: PropertyDescriptor | undefined
   try {
     prototype = Object.getPrototypeOf(value)
-    ownKeys = Reflect.ownKeys(value)
+  } catch {
+    return undefined
+  }
+  if (prototype !== Array.prototype) return undefined
+  try {
     lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length')
   } catch {
     return undefined
   }
-  if (prototype !== Array.prototype || lengthDescriptor === undefined
+  if (lengthDescriptor === undefined
     || lengthDescriptor.enumerable !== false
     || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
     || typeof lengthDescriptor.value !== 'number'
     || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0
-    || (expectedLength !== undefined && lengthDescriptor.value !== expectedLength)) return undefined
+    || (expectedLength !== undefined && lengthDescriptor.value !== expectedLength)
+    || (maximumLength !== undefined && lengthDescriptor.value > maximumLength)) return undefined
   const length = lengthDescriptor.value
-  const expectedKeys = ['length', ...Array.from({ length }, (_, index) => String(index))]
-  if (ownKeys.length !== expectedKeys.length
-    || ownKeys.some(key => typeof key !== 'string' || !expectedKeys.includes(key))) return undefined
+  let ownKeys: readonly PropertyKey[]
+  try {
+    ownKeys = Reflect.ownKeys(value)
+  } catch {
+    return undefined
+  }
+  if (ownKeys.length !== length + 1) return undefined
+  const expectedKeys = new Set<string>(['length'])
+  for (let index = 0; index < length; index += 1) expectedKeys.add(String(index))
+  if (ownKeys.some(key => typeof key !== 'string' || !expectedKeys.has(key))) return undefined
 
   const values: unknown[] = []
   for (let index = 0; index < length; index += 1) {
@@ -1095,28 +1119,35 @@ function bodyUnavailableReason(
 function collectCloseHandles(window: unknown): CaptureCloseHandle[] {
   const handles: CaptureCloseHandle[] = []
   const owners = new Set<object>()
+  const occurrenceContainers: { readonly value: unknown; readonly length: number }[] = []
+  const occurrenceContainerOwners = new Set<object>()
+  let remainingOccurrences = MAX_WINDOW_OCCURRENCES
   discoverWindowEdge(window, 'surfaces', surfaces => {
-    discoverArrayElements(surfaces, surface => {
+    discoverFixedArrayElements(surfaces, TOP_SURFACE_COUNT, surface => {
       discoverWindowEdge(surface, 'occurrences', occurrences => {
-        discoverArrayElements(occurrences, occurrence => {
-          discoverWindowEdge(occurrence, 'body', body => {
-            if (!isSnapshotObject(body)) return
-            const bodyClose = readDataDescriptor(body, 'close')
-            if (isUnknownCallable(bodyClose)) {
-              addCloseHandle(handles, owners, body, bodyClose)
-            }
-            const capture = readDataDescriptor(body, 'capture')
-            if (isSnapshotObject(capture)) {
-              const captureClose = readDataDescriptor(capture, 'close')
-              if (isUnknownCallable(captureClose)) {
-                addCloseHandle(handles, owners, capture, captureClose)
-              }
-            }
-          })
-        })
+        const length = readDataArrayLength(occurrences)
+        if (length !== undefined && isSnapshotObject(occurrences)
+          && !occurrenceContainerOwners.has(occurrences)) {
+          occurrenceContainerOwners.add(occurrences)
+          occurrenceContainers.push({ value: occurrences, length })
+        }
       })
     })
   })
+  for (const container of occurrenceContainers) {
+    const count = Math.min(container.length, TOP_SURFACE_COUNT, remainingOccurrences)
+    discoverArrayRange(container.value, 0, count, occurrence => {
+      discoverOccurrenceCloseHandles(occurrence, handles, owners)
+    })
+    remainingOccurrences -= count
+  }
+  for (const container of occurrenceContainers) {
+    const count = Math.min(Math.max(0, container.length - TOP_SURFACE_COUNT), remainingOccurrences)
+    discoverArrayRange(container.value, TOP_SURFACE_COUNT, count, occurrence => {
+      discoverOccurrenceCloseHandles(occurrence, handles, owners)
+    })
+    remainingOccurrences -= count
+  }
   return handles
 }
 
@@ -1129,31 +1160,58 @@ function discoverWindowEdge(
   if (value !== undefined) visit(value)
 }
 
-function discoverArrayElements(value: unknown, visit: (value: unknown) => void): void {
+function discoverFixedArrayElements(
+  value: unknown,
+  count: number,
+  visit: (value: unknown) => void,
+): void {
   if (!isSnapshotObject(value)) return
-  const indices = new Set<number>()
-  let ownKeys: readonly PropertyKey[] | undefined
-  try {
-    ownKeys = Reflect.ownKeys(value)
-  } catch {
-    // A readable length descriptor still permits discovery of known indices.
-  }
-  if (ownKeys !== undefined) {
-    for (const key of ownKeys) {
-      if (typeof key !== 'string') continue
-      const index = canonicalArrayIndex(key)
-      if (index !== undefined) indices.add(index)
-    }
-  }
-  const lengthDescriptor = readOwnDataDescriptor(value, 'length')
-  if (lengthDescriptor !== undefined && typeof lengthDescriptor === 'number'
-    && Number.isSafeInteger(lengthDescriptor) && lengthDescriptor >= 0) {
-    for (let index = 0; index < lengthDescriptor; index += 1) indices.add(index)
-  }
-  for (const index of [...indices].sort((left, right) => left - right)) {
+  for (let index = 0; index < count; index += 1) {
     const element = readDataDescriptor(value, String(index))
     if (element !== undefined) visit(element)
   }
+}
+
+function discoverArrayRange(
+  value: unknown,
+  start: number,
+  count: number,
+  visit: (value: unknown) => void,
+): void {
+  if (!isSnapshotObject(value)) return
+  for (let offset = 0; offset < count; offset += 1) {
+    const index = start + offset
+    const element = readDataDescriptor(value, String(index))
+    if (element !== undefined) visit(element)
+  }
+}
+
+function readDataArrayLength(value: unknown): number | undefined {
+  const length = readDataDescriptor(value, 'length')
+  return typeof length === 'number' && Number.isSafeInteger(length) && length >= 0
+    ? length
+    : undefined
+}
+
+function discoverOccurrenceCloseHandles(
+  occurrence: unknown,
+  handles: CaptureCloseHandle[],
+  owners: Set<object>,
+): void {
+  discoverWindowEdge(occurrence, 'body', body => {
+    if (!isSnapshotObject(body)) return
+    const bodyClose = readDataDescriptor(body, 'close')
+    if (isUnknownCallable(bodyClose)) {
+      addCloseHandle(handles, owners, body, bodyClose)
+    }
+    const capture = readDataDescriptor(body, 'capture')
+    if (isSnapshotObject(capture)) {
+      const captureClose = readDataDescriptor(capture, 'close')
+      if (isUnknownCallable(captureClose)) {
+        addCloseHandle(handles, owners, capture, captureClose)
+      }
+    }
+  })
 }
 
 function readDataDescriptor(owner: unknown, key: string): unknown {
@@ -1170,19 +1228,8 @@ function readDataDescriptor(owner: unknown, key: string): unknown {
     : undefined
 }
 
-function readOwnDataDescriptor(owner: unknown, key: string): unknown {
-  return readDataDescriptor(owner, key)
-}
-
 function isUnknownCallable(value: unknown): value is UnknownCallable {
   return typeof value === 'function'
-}
-
-function canonicalArrayIndex(key: string): number | undefined {
-  if (!/^(?:0|[1-9][0-9]*)$/.test(key)) return undefined
-  const index = Number(key)
-  return Number.isSafeInteger(index) && index >= 0 && index < 0xffffffff
-    && String(index) === key ? index : undefined
 }
 
 function addCloseHandle(
