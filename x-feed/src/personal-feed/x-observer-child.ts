@@ -16,7 +16,7 @@ const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1_000
 const DAY_MS = 24 * 60 * 60 * 1_000
 const OBSERVER_FAILED_LINE = '{"schemaVersion":1,"kind":"observer_failed"}\n'
 
-type ErrorCode = 'aborted' | 'invalid_request' | 'insufficient_budget' | 'observer_failed' | 'protocol_invalid'
+type ErrorCode = 'aborted' | 'invalid_request' | 'child_invalid_input' | 'insufficient_budget' | 'observer_failed' | 'protocol_invalid'
 
 type ObserverError = Readonly<{
   readonly kind: 'error'
@@ -40,10 +40,57 @@ type ObserverOptions = Readonly<{
 }>
 
 type ObserverChild = Readonly<{
-  readonly observe: (input: unknown) => Promise<ObserverError>
+  readonly observe: (input: unknown) => Promise<ObserverResult>
 }>
 
 type DataRecord = Readonly<Record<string, unknown>>
+
+type ObserverBody = Readonly<
+  | { readonly kind: 'sufficient'; readonly text: string }
+  | { readonly kind: 'insufficient'; readonly reason: 'placeholder' | 'empty' | 'too_large' | 'show_more_failed' }
+>
+
+type ObserverOccurrence = Readonly<{
+  readonly sourceUrl: string
+  readonly body: ObserverBody
+  readonly occurrenceOrdinal: number
+  readonly capturedAt: string
+  readonly authorHandle: string
+  readonly publishedAt: string
+}>
+
+type CompleteSurface = Readonly<{
+  readonly kind: 'complete' | 'natural_zero'
+  readonly surface: 'for_you' | 'following' | 'explore'
+  readonly surfaceOrdinal: number
+  readonly startedAt: string
+  readonly completedAt: string
+  readonly occurrences: readonly ObserverOccurrence[]
+}>
+
+type IncompleteSurface = Readonly<{
+  readonly kind: 'complete' | 'natural_zero' | 'partial' | 'failed' | 'unknown'
+  readonly surface: 'for_you' | 'following' | 'explore'
+  readonly surfaceOrdinal: number
+}>
+
+type ObserverComplete = Readonly<{
+  readonly schemaVersion: 1
+  readonly kind: 'complete'
+  readonly startedAt: string
+  readonly completedAt: string
+  readonly surfaces: readonly CompleteSurface[]
+}>
+
+type ObserverIncomplete = Readonly<{
+  readonly schemaVersion: 1
+  readonly kind: 'incomplete'
+  readonly startedAt: string
+  readonly completedAt: string
+  readonly surfaces: readonly IncompleteSurface[]
+}>
+
+type ObserverResult = ObserverError | ObserverComplete | ObserverIncomplete
 
 type ChildStream = Readonly<{
   readonly on: (event: string, listener: (...args: unknown[]) => void) => unknown
@@ -67,7 +114,8 @@ function exactDataRecord(value: unknown, keys: readonly string[]): DataRecord | 
   if (value === null || typeof value !== 'object') return undefined
 
   try {
-    if (nodeTypes.isProxy(value) || Object.getPrototypeOf(value) !== Object.prototype) return undefined
+    const prototype = Object.getPrototypeOf(value)
+    if (nodeTypes.isProxy(value) || (prototype !== Object.prototype && prototype !== null)) return undefined
 
     const ownKeys = Reflect.ownKeys(value)
     if (ownKeys.length !== keys.length) return undefined
@@ -91,6 +139,270 @@ function exactDataRecord(value: unknown, keys: readonly string[]): DataRecord | 
   } catch {
     return undefined
   }
+}
+
+function exactDataArray(value: unknown): readonly unknown[] | undefined {
+  try {
+    if (!Array.isArray(value)) return undefined
+    if (nodeTypes.isProxy(value) || Object.getPrototypeOf(value) !== Array.prototype) return undefined
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    const ownKeys = Reflect.ownKeys(value)
+    if (ownKeys.length !== value.length + 1) return undefined
+    const lengthDescriptor = Reflect.getOwnPropertyDescriptor(value, 'length')
+    if (lengthDescriptor === undefined || lengthDescriptor.enumerable !== false || !('value' in lengthDescriptor)
+      || lengthDescriptor.value !== value.length) return undefined
+
+    for (const key of ownKeys) {
+      if (key === 'length') continue
+      if (typeof key !== 'string' || !/^\d+$/.test(key)) return undefined
+      const index = Number(key)
+      if (!Number.isSafeInteger(index) || index < 0 || index >= value.length || String(index) !== key) return undefined
+      const descriptor = descriptors[key]
+      if (descriptor === undefined || descriptor.enumerable !== true || !('value' in descriptor)) return undefined
+    }
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = descriptors[String(index)]
+      if (descriptor === undefined || descriptor.enumerable !== true || !('value' in descriptor)) return undefined
+    }
+    return value
+  } catch {
+    return undefined
+  }
+}
+
+function validUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false
+      index += 1
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false
+    }
+  }
+  return true
+}
+
+const CANONICAL_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+
+function parseCanonicalTimestamp(value: unknown): number | undefined {
+  if (typeof value !== 'string' || !validUnicode(value) || !CANONICAL_TIMESTAMP.test(value)) return undefined
+  const epochMs = Date.parse(value)
+  if (!Number.isFinite(epochMs)) return undefined
+  try {
+    return new Date(epochMs).toISOString() === value ? epochMs : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength
+}
+
+function parseBody(value: unknown): ObserverBody | undefined {
+  const sufficient = exactDataRecord(value, ['kind', 'text'])
+  if (sufficient !== undefined && sufficient.kind === 'sufficient'
+    && typeof sufficient.text === 'string' && validUnicode(sufficient.text)
+    && sufficient.text.trim().length > 0 && utf8ByteLength(sufficient.text) <= 6_144) {
+    return Object.freeze({ kind: 'sufficient', text: sufficient.text })
+  }
+
+  const insufficient = exactDataRecord(value, ['kind', 'reason'])
+  const reason = insufficient?.reason
+  if (insufficient !== undefined && insufficient.kind === 'insufficient'
+    && (reason === 'placeholder' || reason === 'empty' || reason === 'too_large' || reason === 'show_more_failed')) {
+    return Object.freeze({ kind: 'insufficient', reason })
+  }
+  return undefined
+}
+
+function parseOccurrence(
+  value: unknown,
+  occurrenceOrdinal: number,
+  surfaceStartedEpochMs: number,
+  surfaceCompletedEpochMs: number,
+  cutoffEpochMs: number,
+  deadlineEpochMs: number,
+): ObserverOccurrence | undefined {
+  const record = exactDataRecord(value, ['sourceUrl', 'body', 'occurrenceOrdinal', 'capturedAt', 'authorHandle', 'publishedAt'])
+  if (record === undefined || record.occurrenceOrdinal !== occurrenceOrdinal || !validSafeNonNegativeInteger(record.occurrenceOrdinal)) return undefined
+  const sourceUrl = record.sourceUrl
+  const authorHandle = record.authorHandle
+  const capturedAt = record.capturedAt
+  const publishedAt = record.publishedAt
+  if (typeof sourceUrl !== 'string' || typeof authorHandle !== 'string'
+    || typeof capturedAt !== 'string' || typeof publishedAt !== 'string'
+    || !validUnicode(sourceUrl) || !validUnicode(authorHandle)) return undefined
+  if (utf8ByteLength(sourceUrl) > 512) return undefined
+  const urlMatch = /^https:\/\/x\.com\/([a-z0-9_]{1,15})\/status\/([1-9]\d*)$/.exec(sourceUrl)
+  if (urlMatch === null || authorHandle !== urlMatch[1]) return undefined
+  const capturedEpochMs = parseCanonicalTimestamp(capturedAt)
+  if (capturedEpochMs === undefined || capturedEpochMs < cutoffEpochMs || capturedEpochMs >= deadlineEpochMs
+    || capturedEpochMs < surfaceStartedEpochMs || capturedEpochMs >= surfaceCompletedEpochMs) return undefined
+  if (parseCanonicalTimestamp(publishedAt) === undefined) return undefined
+  const body = parseBody(record.body)
+  if (body === undefined) return undefined
+  return Object.freeze({
+    sourceUrl,
+    body,
+    occurrenceOrdinal,
+    capturedAt,
+    authorHandle,
+    publishedAt,
+  })
+}
+
+function validSafeNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+const SURFACES = Object.freeze(['for_you', 'following', 'explore'] as const)
+const INCOMPLETE_KINDS = Object.freeze(['complete', 'natural_zero', 'partial', 'failed', 'unknown'] as const)
+
+function parseCompleteResult(
+  value: DataRecord,
+  cutoffEpochMs: number,
+  deadlineEpochMs: number,
+): ObserverComplete | undefined {
+  if (value.schemaVersion !== 1 || value.kind !== 'complete') return undefined
+  const startedAt = value.startedAt
+  const completedAt = value.completedAt
+  if (typeof startedAt !== 'string' || typeof completedAt !== 'string') return undefined
+  const startedEpochMs = parseCanonicalTimestamp(startedAt)
+  const completedEpochMs = parseCanonicalTimestamp(completedAt)
+  if (startedEpochMs === undefined || completedEpochMs === undefined
+    || startedEpochMs < cutoffEpochMs || startedEpochMs >= deadlineEpochMs
+    || completedEpochMs < startedEpochMs || completedEpochMs >= deadlineEpochMs) return undefined
+  const surfacesInput = exactDataArray(value.surfaces)
+  if (surfacesInput === undefined || surfacesInput.length !== 3) return undefined
+
+  const surfaces: CompleteSurface[] = []
+  let totalOccurrences = 0
+  let previousCompletedEpochMs = cutoffEpochMs
+  for (let index = 0; index < surfacesInput.length; index += 1) {
+    const surfaceRecord = exactDataRecord(surfacesInput[index], ['kind', 'surface', 'surfaceOrdinal', 'startedAt', 'completedAt', 'occurrences'])
+    const expectedSurface = SURFACES[index]
+    if (surfaceRecord === undefined || expectedSurface === undefined
+      || (surfaceRecord.kind !== 'complete' && surfaceRecord.kind !== 'natural_zero')
+      || surfaceRecord.surface !== expectedSurface || surfaceRecord.surfaceOrdinal !== index
+      || !validSafeNonNegativeInteger(surfaceRecord.surfaceOrdinal)) return undefined
+    const surfaceStartedAt = surfaceRecord.startedAt
+    const surfaceCompletedAt = surfaceRecord.completedAt
+    if (typeof surfaceStartedAt !== 'string' || typeof surfaceCompletedAt !== 'string') return undefined
+    const faceStartedEpochMs = parseCanonicalTimestamp(surfaceStartedAt)
+    const faceCompletedEpochMs = parseCanonicalTimestamp(surfaceCompletedAt)
+    if (faceStartedEpochMs === undefined || faceCompletedEpochMs === undefined
+      || faceStartedEpochMs < cutoffEpochMs || faceStartedEpochMs >= deadlineEpochMs
+      || faceCompletedEpochMs <= faceStartedEpochMs || faceCompletedEpochMs >= deadlineEpochMs
+      || faceStartedEpochMs < previousCompletedEpochMs
+      || (index === 0 && faceStartedEpochMs < startedEpochMs)
+      || (index === surfacesInput.length - 1 && faceCompletedEpochMs > completedEpochMs)) return undefined
+    const occurrencesInput = exactDataArray(surfaceRecord.occurrences)
+    if (occurrencesInput === undefined || occurrencesInput.length > 8
+      || (surfaceRecord.kind === 'natural_zero' && occurrencesInput.length !== 0)
+      || (surfaceRecord.kind === 'complete' && occurrencesInput.length === 0)) return undefined
+    const occurrences: ObserverOccurrence[] = []
+    for (let occurrenceOrdinal = 0; occurrenceOrdinal < occurrencesInput.length; occurrenceOrdinal += 1) {
+      const occurrenceValue = parseOccurrence(
+        occurrencesInput[occurrenceOrdinal],
+        occurrenceOrdinal,
+        faceStartedEpochMs,
+        faceCompletedEpochMs,
+        cutoffEpochMs,
+        deadlineEpochMs,
+      )
+      if (occurrenceValue === undefined) return undefined
+      occurrences.push(occurrenceValue)
+    }
+    totalOccurrences += occurrences.length
+    if (totalOccurrences > 24) return undefined
+    surfaces.push(Object.freeze({
+      kind: surfaceRecord.kind,
+      surface: expectedSurface,
+      surfaceOrdinal: index,
+      startedAt: surfaceStartedAt,
+      completedAt: surfaceCompletedAt,
+      occurrences: Object.freeze(occurrences),
+    }))
+    previousCompletedEpochMs = faceCompletedEpochMs
+  }
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: 'complete',
+    startedAt,
+    completedAt,
+    surfaces: Object.freeze(surfaces),
+  })
+}
+
+function parseIncompleteResult(
+  value: DataRecord,
+  cutoffEpochMs: number,
+  deadlineEpochMs: number,
+  budgetEndEpochMs: number,
+): ObserverIncomplete | undefined {
+  if (value.schemaVersion !== 1 || value.kind !== 'incomplete') return undefined
+  const startedAt = value.startedAt
+  const completedAt = value.completedAt
+  if (typeof startedAt !== 'string' || typeof completedAt !== 'string') return undefined
+  const startedEpochMs = parseCanonicalTimestamp(startedAt)
+  const completedEpochMs = parseCanonicalTimestamp(completedAt)
+  if (startedEpochMs === undefined || completedEpochMs === undefined
+    || startedEpochMs < cutoffEpochMs || startedEpochMs >= deadlineEpochMs
+    || completedEpochMs < startedEpochMs || completedEpochMs >= budgetEndEpochMs) return undefined
+  const surfacesInput = exactDataArray(value.surfaces)
+  if (surfacesInput === undefined || surfacesInput.length !== 3) return undefined
+  const surfaces: IncompleteSurface[] = []
+  for (let index = 0; index < surfacesInput.length; index += 1) {
+    const surfaceRecord = exactDataRecord(surfacesInput[index], ['surface', 'surfaceOrdinal', 'kind'])
+    const expectedSurface = SURFACES[index]
+    if (surfaceRecord === undefined || expectedSurface === undefined || surfaceRecord.surface !== expectedSurface
+      || surfaceRecord.surfaceOrdinal !== index || !validSafeNonNegativeInteger(surfaceRecord.surfaceOrdinal)
+      || !INCOMPLETE_KINDS.includes(surfaceRecord.kind as typeof INCOMPLETE_KINDS[number])) return undefined
+    surfaces.push(Object.freeze({
+      surface: expectedSurface,
+      surfaceOrdinal: index,
+      kind: surfaceRecord.kind as IncompleteSurface['kind'],
+    }))
+  }
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: 'incomplete',
+    startedAt,
+    completedAt,
+    surfaces: Object.freeze(surfaces),
+  })
+}
+
+function parseObserverResult(
+  stdout: string,
+  cutoffEpochMs: number,
+  deadlineEpochMs: number,
+  budgetEndEpochMs: number,
+): ObserverResult {
+  if (stdout === OBSERVER_FAILED_LINE) return frozenError('observer_failed')
+  let decoded: unknown
+  try {
+    decoded = JSON.parse(stdout) as unknown
+  } catch {
+    return frozenError('protocol_invalid')
+  }
+  const record = exactDataRecord(decoded, ['schemaVersion', 'kind'])
+  if (record !== undefined && record.schemaVersion === 1 && record.kind === 'invalid_input') {
+    return frozenError('child_invalid_input')
+  }
+  if (record !== undefined && record.schemaVersion === 1 && record.kind === 'observer_failed') {
+    return frozenError('observer_failed')
+  }
+  const resultRecord = exactDataRecord(decoded, ['schemaVersion', 'kind', 'startedAt', 'completedAt', 'surfaces'])
+  if (resultRecord === undefined) return frozenError('protocol_invalid')
+  const complete = parseCompleteResult(resultRecord, cutoffEpochMs, deadlineEpochMs)
+  if (complete !== undefined) return complete
+  const incomplete = parseIncompleteResult(resultRecord, cutoffEpochMs, deadlineEpochMs, budgetEndEpochMs)
+  if (incomplete !== undefined) return incomplete
+  return frozenError('protocol_invalid')
 }
 
 function validPath(value: unknown): value is string {
@@ -170,7 +482,7 @@ function parseOptions(value: unknown): ObserverOptions {
   }
 }
 
-function observeChild(options: ObserverOptions, input: unknown): Promise<ObserverError> {
+function observeChild(options: ObserverOptions, input: unknown): Promise<ObserverResult> {
   const inputRecord = exactDataRecord(input, INPUT_KEYS)
   if (inputRecord === undefined) return Promise.resolve(frozenError('invalid_request'))
 
@@ -226,7 +538,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     return Promise.resolve(frozenError('observer_failed'))
   }
 
-  return new Promise<ObserverError>((resolve) => {
+  return new Promise<ObserverResult>((resolve) => {
     let settled = false
     let streamFailed = false
     let stdout = ''
@@ -235,10 +547,8 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       settled = true
       if (streamFailed) {
         resolve(frozenError('observer_failed'))
-      } else if (stdout === OBSERVER_FAILED_LINE) {
-        resolve(frozenError('observer_failed'))
       } else {
-        resolve(frozenError('protocol_invalid'))
+        resolve(parseObserverResult(stdout, cutoffEpochMs, deadlineEpochMs, budgetEnd))
       }
     }
     const collectStdout = (chunk: unknown): void => {
@@ -275,6 +585,6 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
 export function createPersonalFeedXObserverChild(options: unknown): ObserverChild {
   const parsedOptions = parseOptions(options)
   return Object.freeze({
-    observe: (input: unknown): Promise<ObserverError> => observeChild(parsedOptions, input),
+    observe: (input: unknown): Promise<ObserverResult> => observeChild(parsedOptions, input),
   })
 }
