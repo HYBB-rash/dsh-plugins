@@ -238,6 +238,12 @@ interface CleanupAuthority {
   promise: Promise<boolean> | undefined
 }
 
+interface CleanupAuthorityRegistry {
+  readonly register: (receiver: object, close: (reason: string) => unknown) => CleanupAuthority
+  readonly retry: () => Promise<boolean>
+  readonly attempt: (authority: CleanupAuthority) => Promise<boolean>
+}
+
 interface ParsedR2 {
   readonly window: unknown
   readonly receiver: object
@@ -251,7 +257,7 @@ export function createPersonalFeedV2RequestCoordinator(
     throw new PersonalFeedScopeStoreError('personal Feed v2 request ledger path must be non-empty')
   }
 
-  const cleanupRegistry = new Set<CleanupAuthority>()
+  const cleanupRegistry = createCleanupAuthorityRegistry()
 
   const readLedger = (): ParsedLedger => parseLedger(options.ledgerPath)
 
@@ -287,7 +293,7 @@ export function createPersonalFeedV2RequestCoordinator(
     if (parsedReceipt.visibleText !== state.prepared.outcome.finalText) {
       throw new PersonalFeedScopeInputError('personal Feed v2 delivery receipt text does not match prepared outcome')
     }
-    void retryCleanupAuthorities(cleanupRegistry)
+    void cleanupRegistry.retry()
     if (state.terminal !== undefined) {
       if (canonical(state.terminal.receipt) !== canonical(parsedReceipt)) {
         throw new PersonalFeedScopeStoreError(`personal Feed v2 request ${requestId} has a conflicting terminal receipt`)
@@ -337,7 +343,7 @@ export function createPersonalFeedV2RequestCoordinator(
     appendLedger(options.ledgerPath, readLedger().values, opened)
 
     let outcome: PersonalFeedV2Outcome
-    const blockedByCleanup = await retryCleanupAuthorities(cleanupRegistry)
+    const blockedByCleanup = await cleanupRegistry.retry()
     if (blockedByCleanup) {
       outcome = incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
     } else {
@@ -363,31 +369,31 @@ export function createPersonalFeedV2RequestCoordinator(
             if (r2Result === undefined) {
               outcome = incomplete('source_window', SOURCE_WINDOW_TEXT)
             } else {
-              const r2Authority = registerCleanupAuthority(cleanupRegistry, r2Result.receiver, r2Result.close)
+              const r2Authority = cleanupRegistry.register(r2Result.receiver, r2Result.close)
               if (input.signal.aborted) {
-                await attemptCleanup(r2Authority, cleanupRegistry)
+                await cleanupRegistry.attempt(r2Authority)
                 outcome = incomplete('source_window', SOURCE_WINDOW_TEXT)
               } else {
                 const r3Call = await callPort(() => options.r3.admit({ request: publicRequest(opened), window: r2Result.window, signal: input.signal }))
                 const r3 = r3Call.ok ? r3Call.value : undefined
                 if (r3 === undefined) {
-                  const r2Closed = await attemptCleanup(r2Authority, cleanupRegistry)
+                  const r2Closed = await cleanupRegistry.attempt(r2Authority)
                   outcome = incomplete(r2Closed ? 'judgement_execution' : 'source_window', r2Closed ? JUDGEMENT_EXECUTION_TEXT : SOURCE_WINDOW_TEXT)
                 } else {
                   const r3Result = parseR3(r3)
                   if (r3Result === undefined || r3Result.kind === 'incomplete') {
-                    const r2Closed = await attemptCleanup(r2Authority, cleanupRegistry)
+                    const r2Closed = await cleanupRegistry.attempt(r2Authority)
                     outcome = incomplete(r2Closed ? 'judgement_execution' : 'source_window', r2Closed ? JUDGEMENT_EXECUTION_TEXT : SOURCE_WINDOW_TEXT)
                   } else if (r3Result.kind === 'salvage') {
-                    const r3Authority = registerCleanupAuthority(cleanupRegistry, r3Result.receiver, r3Result.close)
-                    const r2Closed = await attemptCleanup(r2Authority, cleanupRegistry)
-                    const r3Closed = await attemptCleanup(r3Authority, cleanupRegistry)
+                    const r3Authority = cleanupRegistry.register(r3Result.receiver, r3Result.close)
+                    const r2Closed = await cleanupRegistry.attempt(r2Authority)
+                    const r3Closed = await cleanupRegistry.attempt(r3Authority)
                     outcome = incomplete(r2Closed && r3Closed ? 'judgement_execution' : (r2Closed ? 'judgement_execution' : 'source_window'), JUDGEMENT_EXECUTION_TEXT)
                   } else {
-                    const r3Authority = registerCleanupAuthority(cleanupRegistry, r3Result.cursor.owner, r3Result.cursor.close)
-                    const r2Closed = await attemptCleanup(r2Authority, cleanupRegistry)
+                    const r3Authority = cleanupRegistry.register(r3Result.cursor.owner, r3Result.cursor.close)
+                    const r2Closed = await cleanupRegistry.attempt(r2Authority)
                     if (!r2Closed) {
-                      await attemptCleanup(r3Authority, cleanupRegistry)
+                      await cleanupRegistry.attempt(r3Authority)
                       outcome = incomplete('source_window', SOURCE_WINDOW_TEXT)
                     } else {
                       outcome = await coordinateCandidateJudgement(
@@ -665,7 +671,7 @@ function parseCleanupOnlyCursor(value: unknown): { readonly receiver: object; re
 async function coordinateCandidateJudgement(
   ownerCursor: OwnerCandidateCursor,
   cursorAuthority: CleanupAuthority,
-  cleanupRegistry: Set<CleanupAuthority>,
+  cleanupRegistry: CleanupAuthorityRegistry,
   request: PersonalFeedV2Request,
   snapshot: unknown,
   r5: PersonalFeedV2R5Port,
@@ -698,31 +704,31 @@ async function coordinateCandidateJudgement(
   try {
     rawFinalization = await Reflect.apply(ownerCursor.finalize, ownerCursor.owner, [claim])
   } catch {
-    await attemptCleanup(cursorAuthority, cleanupRegistry)
+    await cleanupRegistry.attempt(cursorAuthority)
     return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
   }
   const finalization = parseFinalization(rawFinalization)
   if (finalization === undefined) {
-    await attemptCleanup(cursorAuthority, cleanupRegistry)
+    await cleanupRegistry.attempt(cursorAuthority)
     return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
   }
   if (finalization.kind === 'incomplete') {
-    await attemptCleanup(cursorAuthority, cleanupRegistry)
+    await cleanupRegistry.attempt(cursorAuthority)
     return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
   }
   if (finalization.kind === 'none') {
     if (!isProvenNone(tracker)) {
-      await attemptCleanup(cursorAuthority, cleanupRegistry)
+      await cleanupRegistry.attempt(cursorAuthority)
       return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
     }
-    const closed = await attemptCleanup(cursorAuthority, cleanupRegistry)
+    const closed = await cleanupRegistry.attempt(cursorAuthority)
     return closed ? makeOutcome('business_empty', BUSINESS_EMPTY_TEXT) : incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
   }
   if (!isProvenSelection(finalization.selected, tracker)) {
-    await attemptCleanup(cursorAuthority, cleanupRegistry)
+    await cleanupRegistry.attempt(cursorAuthority)
     return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
   }
-  const closed = await attemptCleanup(cursorAuthority, cleanupRegistry)
+  const closed = await cleanupRegistry.attempt(cursorAuthority)
   return closed ? makeOutcome('one_link', finalization.selected.canonicalUrl) : incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
 }
 
@@ -988,66 +994,68 @@ function parseFinalization(value: unknown): ParsedFinalization | undefined {
   })
 }
 
-function registerCleanupAuthority(
-  registry: Set<CleanupAuthority>,
-  receiver: object,
-  close: (reason: string) => unknown,
-): CleanupAuthority {
-  const authority: CleanupAuthority = {
-    receiver,
-    close,
-    args: ['coordinator_incomplete'],
-    state: 'ready',
-    promise: undefined,
-  }
-  registry.add(authority)
-  return authority
-}
+function createCleanupAuthorityRegistry(): CleanupAuthorityRegistry {
+  const authorities = new Set<CleanupAuthority>()
 
-async function retryCleanupAuthorities(registry: Set<CleanupAuthority>): Promise<boolean> {
-  await Promise.all([...registry]
-    .filter(authority => authority.state !== 'ready')
-    .map(authority => attemptCleanup(authority, registry)))
-  return registry.size !== 0
-}
-
-async function attemptCleanup(authority: CleanupAuthority, registry: Set<CleanupAuthority>): Promise<boolean> {
-  if (authority.state === 'closing') {
-    if (authority.promise === undefined) return false
-    return waitForCleanup(authority.promise)
+  const register = (receiver: object, close: (reason: string) => unknown): CleanupAuthority => {
+    const authority: CleanupAuthority = {
+      receiver,
+      close,
+      args: ['coordinator_incomplete'],
+      state: 'ready',
+      promise: undefined,
+    }
+    authorities.add(authority)
+    return authority
   }
-  if (authority.state === 'retained') authority.state = 'ready'
 
-  authority.state = 'closing'
-  let result: unknown
-  try {
-    result = Reflect.apply(authority.close, authority.receiver, authority.args)
-  } catch {
-    authority.state = 'retained'
-    return false
+  const wait = async (promise: Promise<boolean>): Promise<boolean> => {
+    const timeout = new Promise<'timeout'>(resolve => {
+      setTimeout(() => resolve('timeout'), CLEANUP_WAIT_MS)
+    })
+    const result = await Promise.race([promise, timeout])
+    return result === true
   }
-  const completion = Promise.resolve(result).then(
-    () => {
-      registry.delete(authority)
-      authority.promise = undefined
-      return true
-    },
-    () => {
+
+  const attempt = async (authority: CleanupAuthority): Promise<boolean> => {
+    if (authority.state === 'closing') {
+      if (authority.promise === undefined) return false
+      return wait(authority.promise)
+    }
+    if (authority.state === 'retained') authority.state = 'ready'
+
+    authority.state = 'closing'
+    let result: unknown
+    try {
+      result = Reflect.apply(authority.close, authority.receiver, authority.args)
+    } catch {
       authority.state = 'retained'
-      authority.promise = undefined
       return false
-    },
-  )
-  authority.promise = completion
-  return waitForCleanup(completion)
-}
+    }
+    const completion = Promise.resolve(result).then(
+      () => {
+        authorities.delete(authority)
+        authority.promise = undefined
+        return true
+      },
+      () => {
+        authority.state = 'retained'
+        authority.promise = undefined
+        return false
+      },
+    )
+    authority.promise = completion
+    return wait(completion)
+  }
 
-async function waitForCleanup(promise: Promise<boolean>): Promise<boolean> {
-  const timeout = new Promise<'timeout'>(resolve => {
-    setTimeout(() => resolve('timeout'), CLEANUP_WAIT_MS)
-  })
-  const result = await Promise.race([promise, timeout])
-  return result === true
+  const retry = async (): Promise<boolean> => {
+    await Promise.all([...authorities]
+      .filter(authority => authority.state !== 'ready')
+      .map(authority => attempt(authority)))
+    return authorities.size !== 0
+  }
+
+  return { register, retry, attempt }
 }
 
 function isProvenSelection(
