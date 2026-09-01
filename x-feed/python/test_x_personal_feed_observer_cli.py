@@ -146,9 +146,9 @@ def _run_bootstrap(source, result):
 
 def _response_value(action, surface="for_you"):
     if action == "navigate":
-        return {"url": SURFACE_TARGETS[surface], "body": "bounded page body"}
+        return {"url": SURFACE_TARGETS[surface], "body": ""}
     if action == "probe":
-        return {"surfaceProof": dict(SURFACE_PROOFS[surface])}
+        return dict(SURFACE_PROOFS[surface])
     if action == "snapshot":
         return {
             "statusCandidates": [
@@ -181,14 +181,26 @@ def _response_value(action, surface="for_you"):
 
 
 class _FakeWebSocket:
-    def __init__(self, value, *, response_id=None, recv_error=None, oversize=False):
+    def __init__(
+        self,
+        value,
+        *,
+        response_id=None,
+        recv_error=None,
+        oversize=False,
+        frame_factory=None,
+        raw_frame=None,
+    ):
         self.value = value
         self.response_id = response_id
         self.recv_error = recv_error
         self.oversize = oversize
+        self.frame_factory = frame_factory
+        self.raw_frame = raw_frame
         self.sent = []
         self.closed = False
         self.timeouts = []
+        self.recv_count = 0
 
     def settimeout(self, value):
         self.timeouts.append(value)
@@ -197,11 +209,27 @@ class _FakeWebSocket:
         self.sent.append(json.loads(message))
 
     def recv(self):
+        self.recv_count += 1
         if self.recv_error is not None:
             raise self.recv_error
+        if self.raw_frame is not None:
+            return self.raw_frame
         request_id = self.sent[-1]["id"]
         response_id = request_id if self.response_id is None else self.response_id
-        response = {"id": response_id, "result": {"result": {"value": self.value}}}
+        if self.frame_factory is not None:
+            response = self.frame_factory(self.sent[-1], response_id, self.value)
+        elif self.sent[-1]["method"] == "Page.navigate":
+            response = {
+                "id": response_id,
+                "result": {"frameId": "frame-1", "loaderId": "loader-1"},
+            }
+        else:
+            response = {
+                "id": response_id,
+                "result": {
+                    "result": {"type": "object", "value": self.value},
+                },
+            }
         encoded = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
         if self.oversize:
             encoded += "x" * (1024 * 1024)
@@ -466,6 +494,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                     )
                 self.assertEqual(navigate["url"], target)
                 self.assertIn("body", navigate)
+                self.assertEqual(navigate["body"], "")
                 self.assertLessEqual(len(navigate["url"].encode("utf-8")), 512)
                 self.assertLessEqual(len(navigate["body"].encode("utf-8")), 6144)
                 self.assertTrue(created[-1].closed)
@@ -547,6 +576,117 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             self.assertIs(type(context.exception), fixed_error_type)
             if canary is not None:
                 self.assertNotIn(canary, str(context.exception))
+
+        def page_frame_without_frame_id(_request, response_id, _value):
+            return {"id": response_id, "result": {"loaderId": "loader-1"}}
+
+        def page_frame_with_empty_frame_id(_request, response_id, _value):
+            return {
+                "id": response_id,
+                "result": {"frameId": "", "loaderId": "loader-1"},
+            }
+
+        def page_frame_with_error_text(_request, response_id, _value):
+            return {"id": response_id, "result": {"errorText": "Navigation failed"}}
+
+        def runtime_frame_with_exception(_request, response_id, _value):
+            return {
+                "id": response_id,
+                "result": {
+                    "result": {
+                        "type": "object",
+                        "value": {"body": "正文CANARY"},
+                    },
+                    "exceptionDetails": {"text": "正文CANARY"},
+                },
+            }
+
+        def runtime_frame_without_value(_request, response_id, _value):
+            return {
+                "id": response_id,
+                "result": {"result": {"type": "object"}},
+            }
+
+        def top_level_error(_request, response_id, _value):
+            return {
+                "id": response_id,
+                "error": {"code": -32000, "message": "正文CANARY"},
+            }
+
+        event_frames_seen = [0]
+
+        def event_then_matching_success(request, response_id, value):
+            event_frames_seen[0] += 1
+            if event_frames_seen[0] == 1:
+                return {"method": "Page.loadEventFired", "params": {}}
+            return {
+                "id": response_id,
+                "result": {"result": {"type": "object", "value": value}},
+            }
+
+        protocol_failures = (
+            ("navigate_missing_frame_id", "navigate", page_frame_without_frame_id),
+            ("navigate_empty_frame_id", "navigate", page_frame_with_empty_frame_id),
+            ("navigate_error_text", "navigate", page_frame_with_error_text),
+            ("matching_top_level_error", "probe", top_level_error),
+            ("runtime_exception_details", "probe", runtime_frame_with_exception),
+            ("runtime_inner_result_without_value", "probe", runtime_frame_without_value),
+            ("snapshot_missing_value", "snapshot", runtime_frame_without_value),
+        )
+        for name, action, frame_factory in protocol_failures:
+            failure = _FakeWebSocket(
+                {"body": "正文CANARY"},
+                frame_factory=frame_factory,
+            )
+            with self.subTest(protocol_failure=name):
+                with mock.patch.object(module.websocket, "create_connection", return_value=failure):
+                    assert_fixed_error(
+                        lambda action=action: evaluator.evaluate(
+                            ws_url,
+                            action,
+                            surface="for_you",
+                            timeout_seconds=timeout_seconds,
+                        ),
+                        canary="正文CANARY",
+                    )
+                self.assertTrue(failure.closed)
+                self.assertEqual(failure.recv_count, 1)
+
+        event_frames_seen[0] = 0
+        event_frame = _FakeWebSocket(
+            {"surfaceProof": dict(SURFACE_PROOFS["for_you"])},
+            frame_factory=event_then_matching_success,
+        )
+        with self.subTest(protocol_failure="event_without_id"):
+            with mock.patch.object(module.websocket, "create_connection", return_value=event_frame):
+                assert_fixed_error(
+                    lambda: evaluator.evaluate(
+                        ws_url,
+                        "probe",
+                        surface="for_you",
+                        timeout_seconds=timeout_seconds,
+                    )
+                )
+            self.assertTrue(event_frame.closed)
+            self.assertEqual(event_frame.recv_count, 1)
+
+        for name, raw_frame in (
+            ("malformed_json", "{malformed-json"),
+            ("non_dict_frame", "[1,2,3]"),
+        ):
+            failure = _FakeWebSocket({}, raw_frame=raw_frame)
+            with self.subTest(protocol_failure=name):
+                with mock.patch.object(module.websocket, "create_connection", return_value=failure):
+                    assert_fixed_error(
+                        lambda: evaluator.evaluate(
+                            ws_url,
+                            "snapshot",
+                            surface="for_you",
+                            timeout_seconds=timeout_seconds,
+                        )
+                    )
+                self.assertTrue(failure.closed)
+                self.assertEqual(failure.recv_count, 1)
 
         for invalid_url in (
             "ws://user:pass@127.0.0.1:9222/devtools/page/1",

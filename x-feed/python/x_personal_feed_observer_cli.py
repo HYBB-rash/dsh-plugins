@@ -239,7 +239,7 @@ def _item_value(item):
 
 def _snapshot_value(value):
     if not isinstance(value, dict):
-        return {"statusCandidates": [], "explicitEmpty": True}
+        raise _CdpFailure()
     if isinstance(value.get("statusCandidates"), list):
         candidates = []
         for item in value["statusCandidates"]:
@@ -247,11 +247,23 @@ def _snapshot_value(value):
             if normalized is not None:
                 candidates.append(normalized)
         return {"statusCandidates": candidates, "explicitEmpty": value.get("explicitEmpty") is True}
+    if "statusCandidates" in value:
+        raise _CdpFailure()
     result = {}
     for name in ("items", "cards"):
         values = value.get(name)
+        if name in value and not isinstance(values, list):
+            raise _CdpFailure()
         if isinstance(values, list):
-            result[name] = [normalized for item in values if (normalized := _item_value(item)) is not None]
+            normalized_values = []
+            for item in values:
+                normalized = _item_value(item)
+                if normalized is None:
+                    raise _CdpFailure()
+                normalized_values.append(normalized)
+            result[name] = normalized_values
+    if "items" not in value and "cards" not in value:
+        raise _CdpFailure()
     result["explicitEmpty"] = value.get("explicitEmpty") is True
     if not result.get("items") and not result.get("cards") and "items" not in result and "cards" not in result:
         result["items"] = []
@@ -301,6 +313,33 @@ class _MechanicalCdpEvaluator:
             raise _CdpFailure()
         return response.get("result", {}).get("result", {}).get("value")
 
+    def _read_response(self, socket, request_id):
+        try:
+            raw = socket.recv()
+            if isinstance(raw, bytes):
+                size = len(raw)
+                raw = raw.decode("utf-8")
+            elif isinstance(raw, str):
+                size = len(raw.encode("utf-8"))
+            else:
+                raise _CdpFailure()
+            if size > MAX_CDP_BYTES:
+                raise _CdpFailure()
+            response = json.loads(raw)
+            if (
+                not isinstance(response, dict)
+                or type(response.get("id")) is not int
+                or response.get("id") != request_id
+            ):
+                raise _CdpFailure()
+            if "error" in response:
+                raise _CdpFailure()
+            return response
+        except _CdpFailure:
+            raise
+        except Exception:
+            raise _CdpFailure() from None
+
     def evaluate(self, ws_url, action, *, surface, stable_id=None, timeout_seconds):
         socket = None
         try:
@@ -312,6 +351,36 @@ class _MechanicalCdpEvaluator:
             socket.settimeout(timeout)
             request_id = 1
             socket.send(json.dumps({"id": request_id, "method": method, "params": params}, separators=(",", ":")))
+            response = self._read_response(socket, request_id)
+            if action == "navigate":
+                result = response.get("result")
+                if not isinstance(result, dict):
+                    raise _CdpFailure()
+                frame_id = result.get("frameId")
+                if not isinstance(frame_id, str) or not frame_id:
+                    raise _CdpFailure()
+                if result.get("errorText"):
+                    raise _CdpFailure()
+                return {"url": SURFACE_TARGETS[surface], "body": ""}
+            result = response.get("result")
+            if not isinstance(result, dict):
+                raise _CdpFailure()
+            exception_details = result.get("exceptionDetails")
+            if exception_details:
+                raise _CdpFailure()
+            inner = result.get("result")
+            if not isinstance(inner, dict) or "value" not in inner:
+                raise _CdpFailure()
+            value = inner["value"]
+            if not isinstance(value, dict):
+                raise _CdpFailure()
+            if action == "probe":
+                return {"surfaceProof": value}
+            if action == "snapshot":
+                return _snapshot_value(value)
+            if "ok" not in value or not isinstance(value["ok"], bool):
+                raise _CdpFailure()
+            return {"ok": value["ok"]}
             value = self._read_matching_cdp_value(socket, request_id)
             if action == "navigate":
                 if not isinstance(value, dict):
