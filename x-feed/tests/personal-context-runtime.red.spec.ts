@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { TelegramInboundEnvelope, TelegramInboundResult } from '@deepseek-ai/dsh-telegram-gateway'
 import { installTelegramExtension } from '../src/index.ts'
 
@@ -204,6 +205,11 @@ function canonical(value: unknown): string {
 
 function digest(value: unknown): string {
   return `sha256:${createHash('sha256').update(canonical(value), 'utf8').digest('hex')}`
+}
+
+function flattenAggregateErrors(error: unknown): unknown[] {
+  if (!(error instanceof AggregateError)) return [error]
+  return error.errors.flatMap(flattenAggregateErrors)
 }
 
 afterEach(() => {
@@ -419,6 +425,107 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
     ])
     expect(ownerObserver.closeCount).toBe(1)
   })
+
+  it.each([
+    ['successfully waits for a real classifier next task before closing the owner', false] as const,
+    ['preserves only independent real classifier next and return errors through extension disposal', true] as const,
+  ])('%s', async (_label, failing) => {
+    const root = mkdtempSync(join(tmpdir(), `x-feed-runtime-real-classifier-${failing ? 'failure' : 'success'}-`))
+    temporaryDirectories.push(root)
+    const harness = emptyHistoryHarness()
+    let wireSignal: AbortSignal | undefined
+    let runtimeAbortReason: unknown
+    let abortCount = 0
+    let returnCount = 0
+    let releaseNext: ((result: IteratorResult<StreamChunk>) => void) | undefined
+    let rejectNext: ((reason: unknown) => void) | undefined
+    let releaseReturn: ((result: IteratorResult<StreamChunk>) => void) | undefined
+    let rejectReturn: ((reason: unknown) => void) | undefined
+    const nextTask = new Promise<IteratorResult<StreamChunk>>((resolve, reject) => {
+      releaseNext = resolve
+      rejectNext = reject
+    })
+    const returnTask = new Promise<IteratorResult<StreamChunk>>((resolve, reject) => {
+      releaseReturn = resolve
+      rejectReturn = reject
+    })
+    ;(harness.ctx as unknown as { readonly llm: { stream: (request: GenerateOptions) => AsyncIterable<StreamChunk> } }).llm.stream = vi.fn((request: GenerateOptions): AsyncIterable<StreamChunk> => {
+      wireSignal = request.signal
+      request.signal?.addEventListener('abort', () => {
+        abortCount += 1
+        runtimeAbortReason = request.signal?.reason
+      }, { once: true })
+      const iterator: AsyncIterator<StreamChunk> = {
+        next: () => nextTask,
+        return: () => {
+          returnCount += 1
+          return returnTask
+        },
+      }
+      return { [Symbol.asyncIterator]: () => iterator }
+    })
+
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const dispose = await installTelegramExtension(harness.ctx as never, config(root, join(root, 'personal-feed')))
+      const inbound = harness.listeners.get('telegram/inbound') ?? []
+      const sourceRun = waterfall(inbound, envelope('普通消息'))
+      void sourceRun.then(() => undefined, () => undefined)
+      for (let turn = 0; turn < 8 && wireSignal === undefined; turn += 1) await Promise.resolve()
+      expect(wireSignal).toBeDefined()
+
+      let disposeSettled = false
+      const firstDispose = dispose()
+      void firstDispose.then(() => { disposeSettled = true }, () => { disposeSettled = true })
+      expect(dispose()).toBe(firstDispose)
+      for (let turn = 0; turn < 8 && returnCount === 0; turn += 1) await Promise.resolve()
+      expect(wireSignal?.aborted).toBe(true)
+      expect(abortCount).toBe(1)
+      expect(returnCount).toBe(1)
+      expect(disposeSettled).toBe(false)
+      expect(ownerObserver.closeCount).toBe(0)
+
+      if (!failing) {
+        releaseNext?.({ done: true, value: undefined })
+        releaseReturn?.({ done: true, value: undefined })
+        await sourceRun
+        await expect(firstDispose).resolves.toBeUndefined()
+        expect(returnCount).toBe(1)
+        expect(abortCount).toBe(1)
+        expect(ownerObserver.closeCount).toBe(1)
+        expect(ownerObserver.events.at(-1)).toBe('owner.close')
+      } else {
+        const lateNextError = new Error('late classifier next failed')
+        const lateReturnError = new Error('late classifier return failed')
+        rejectNext?.(lateNextError)
+        await Promise.resolve()
+        expect(disposeSettled).toBe(false)
+        expect(ownerObserver.closeCount).toBe(0)
+        rejectReturn?.(lateReturnError)
+        await sourceRun
+
+        let disposeError: unknown
+        try { await firstDispose } catch (error) { disposeError = error }
+        const errors = flattenAggregateErrors(disposeError)
+        expect(errors).toEqual([lateNextError, lateReturnError])
+        expect(errors[0]).toBe(lateNextError)
+        expect(errors[1]).toBe(lateReturnError)
+        expect(errors).not.toContain(runtimeAbortReason)
+        expect(returnCount).toBe(1)
+        expect(abortCount).toBe(1)
+        expect(ownerObserver.closeCount).toBe(1)
+        expect(ownerObserver.events.at(-1)).toBe('owner.close')
+      }
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      releaseNext?.({ done: true, value: undefined })
+      releaseReturn?.({ done: true, value: undefined })
+    }
+  }, 2_000)
 
   it('guards blank/whitespace at the first real waterfall layer with zero source, ledger, semantic, X, and root effects', async () => {
     const root = mkdtempSync(join(tmpdir(), 'x-feed-runtime-blank-'))

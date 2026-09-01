@@ -43,9 +43,10 @@ function observe<T>(promise: Promise<T>): Promise<Settled<T>> {
   )
 }
 
-function appendErrors(error: unknown, errors: unknown[]): void {
+function appendErrors(error: unknown, ignored: unknown, errors: unknown[]): void {
+  if (error === ignored) return
   if (error instanceof AggregateError) {
-    for (const nested of error.errors) appendErrors(nested, errors)
+    for (const nested of error.errors) appendErrors(nested, ignored, errors)
     return
   }
   if (!errors.includes(error)) errors.push(error)
@@ -61,6 +62,7 @@ export function createPersonalContextTelegramRuntime(
 ): PersonalContextTelegramRuntime {
   const failureMarkers = new Set<string>()
   const lifetime = new AbortController()
+  const runtimeShutdownReason = new Error('personal context Telegram runtime shutdown')
   let accepting = true
   const actualOperations = new Map<Promise<unknown>, Promise<Settled<unknown>>>()
   let shutdownPromise: Promise<void> | undefined
@@ -178,7 +180,7 @@ export function createPersonalContextTelegramRuntime(
   const shutdown = (): Promise<void> => {
     if (shutdownPromise !== undefined) return shutdownPromise
     accepting = false
-    lifetime.abort(new Error('personal context Telegram runtime shutdown'))
+    lifetime.abort(runtimeShutdownReason)
     shutdownPromise = (async () => {
       const errors: unknown[] = []
       let semanticSettlement: Promise<Settled<void>>
@@ -191,10 +193,10 @@ export function createPersonalContextTelegramRuntime(
       while (actualOperations.size > 0) {
         const current = [...actualOperations.values()]
         const settled = await Promise.all(current)
-        for (const outcome of settled) if (!outcome.ok) appendErrors(outcome.error, errors)
+        for (const outcome of settled) if (!outcome.ok) appendErrors(outcome.error, runtimeShutdownReason, errors)
       }
       const semanticResult = await semanticSettlement
-      if (!semanticResult.ok) appendErrors(semanticResult.error, errors)
+      if (!semanticResult.ok) appendErrors(semanticResult.error, runtimeShutdownReason, errors)
       if (errors.length > 0) throw new AggregateError(errors)
     })()
     void shutdownPromise.then(undefined, () => undefined)
