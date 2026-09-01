@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createPersonalFeedV2RequestCoordinator } from '@herman/personal-feed'
+import { createPersonalFeedV2CandidateLifecycle, createPersonalFeedV2RequestCoordinator } from '@herman/personal-feed'
 import { createPersonalContextOwner, createSessionUserHistoryAdapter } from '@herman/personal-feed'
 import { parseXFeedRuntimeConfig } from './config.ts'
 import { XFeedbackStore } from './store.ts'
@@ -129,13 +129,18 @@ export async function installTelegramExtension(
     throw primary
   }
 
+  const clock = { now: () => new Date() }
+  const personalFeedCandidateLifecycle = createPersonalFeedV2CandidateLifecycle({
+    completionLedgerPath: join(config.personalFeedDataDir, 'v2', 'candidate-judgments.jsonl'),
+    clock,
+  })
   const personalFeedCoordinator = createPersonalFeedV2RequestCoordinator({
     ledgerPath: join(config.personalFeedDataDir, 'v2', 'requests.jsonl'),
-    clock: { now: () => new Date() },
+    clock,
     r4: personalContextRuntime.r4,
     r2: { observe: async () => ({ kind: 'unknown' }) },
-    r3: { admit: async () => ({ kind: 'unknown' }) },
-    r5: { judge: async () => ({ kind: 'unknown' }) },
+    r3: personalFeedCandidateLifecycle,
+    r5: { judge: async () => Object.freeze({ kind: 'incomplete', completed: Object.freeze([]), reason: 'unknown' }) },
   })
   const personalFeedHandler = createPersonalFeedTelegramRequestHandler({ coordinator: personalFeedCoordinator })
   let stopSource: (() => void) | undefined

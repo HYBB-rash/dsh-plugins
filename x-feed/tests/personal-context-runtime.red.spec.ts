@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -7,7 +7,16 @@ import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { TelegramInboundEnvelope, TelegramInboundResult } from '@deepseek-ai/dsh-telegram-gateway'
 import { installTelegramExtension } from '../src/index.ts'
 
-const ownerObserver = vi.hoisted(() => ({ closeCount: 0, events: [] as string[] }))
+const ownerObserver = vi.hoisted(() => ({
+  closeCount: 0,
+  events: [] as string[],
+  wiringEvents: [] as string[],
+  candidateFactoryOptions: [] as unknown[],
+  candidateOwners: [] as unknown[],
+  coordinatorOptions: [] as unknown[],
+  coordinatorOwners: [] as unknown[],
+  personalContextRuntimeR4: [] as unknown[],
+}))
 
 vi.mock('@herman/personal-feed', async importOriginal => {
   const actual = await importOriginal<typeof import('@herman/personal-feed')>()
@@ -23,6 +32,32 @@ vi.mock('@herman/personal-feed', async importOriginal => {
           owner.close()
         },
       })
+    },
+    createPersonalFeedV2CandidateLifecycle: (...args: Parameters<typeof actual.createPersonalFeedV2CandidateLifecycle>) => {
+      ownerObserver.candidateFactoryOptions.push(args[0])
+      const owner = actual.createPersonalFeedV2CandidateLifecycle(...args)
+      ownerObserver.candidateOwners.push(owner)
+      ownerObserver.wiringEvents.push('candidate.factory')
+      return owner
+    },
+    createPersonalFeedV2RequestCoordinator: (...args: Parameters<typeof actual.createPersonalFeedV2RequestCoordinator>) => {
+      ownerObserver.coordinatorOptions.push(args[0])
+      const coordinator = actual.createPersonalFeedV2RequestCoordinator(...args)
+      ownerObserver.coordinatorOwners.push(coordinator)
+      ownerObserver.wiringEvents.push('coordinator.factory')
+      return coordinator
+    },
+  }
+})
+
+vi.mock('../src/personal-feed/personal-context-telegram-runtime.ts', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/personal-feed/personal-context-telegram-runtime.ts')>()
+  return {
+    ...actual,
+    createPersonalContextTelegramRuntime: (...args: Parameters<typeof actual.createPersonalContextTelegramRuntime>) => {
+      const runtime = actual.createPersonalContextTelegramRuntime(...args)
+      ownerObserver.personalContextRuntimeR4.push(runtime.r4)
+      return runtime
     },
   }
 })
@@ -67,6 +102,7 @@ function emptyHistoryHarness(options: { readonly historyFailure?: Error; readonl
     listEvents: vi.fn(async (_sessionId: string) => {
       historyCalls.push('list')
       timeline.push('history:list')
+      ownerObserver.wiringEvents.push('history:list')
       if (options.historyFailure !== undefined) throw options.historyFailure
       if (options.historyIncomplete === true) return { corrupt: true }
       return []
@@ -74,6 +110,7 @@ function emptyHistoryHarness(options: { readonly historyFailure?: Error; readonl
     readEvent: vi.fn(async (_input: unknown) => {
       historyCalls.push('read')
       timeline.push('history:read')
+      ownerObserver.wiringEvents.push('history:read')
       return undefined
     }),
   }
@@ -89,6 +126,7 @@ function emptyHistoryHarness(options: { readonly historyFailure?: Error; readonl
       registration.push(name)
       timeline.push(`register:${name}`)
       ownerObserver.events.push(`listener.register:${name}`)
+      ownerObserver.wiringEvents.push(`listener.register:${name}`)
       const inboundOrdinal = name === 'telegram/inbound'
         ? inboundRegistration.push(inboundRegistration.length) - 1
         : undefined
@@ -216,6 +254,12 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true })
   ownerObserver.closeCount = 0
   ownerObserver.events.length = 0
+  ownerObserver.wiringEvents.length = 0
+  ownerObserver.candidateFactoryOptions.length = 0
+  ownerObserver.candidateOwners.length = 0
+  ownerObserver.coordinatorOptions.length = 0
+  ownerObserver.coordinatorOwners.length = 0
+  ownerObserver.personalContextRuntimeR4.length = 0
   vi.restoreAllMocks()
 })
 
@@ -227,6 +271,7 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
 
     await expect(installTelegramExtension(missingHistory.ctx as never, { dataDir, personalFeedDataDir: join(dataDir, 'personal-feed') }))
       .rejects.toThrow()
+    expect(ownerObserver.candidateFactoryOptions).toHaveLength(0)
     expect(missingHistory.registration).toEqual([])
     expect(missingHistory.historyCalls).toEqual([])
 
@@ -264,8 +309,137 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
 
     await expect(installTelegramExtension(harness.ctx as never, config(root, join(root, 'personal-feed'))))
       .rejects.toThrow()
+    expect(ownerObserver.candidateFactoryOptions).toHaveLength(0)
     expect(harness.listeners.get('telegram/inbound') ?? []).toEqual([])
     expect(harness.registration).not.toContain('telegram/inbound')
+  })
+
+  it('creates one candidate owner only after complete bootstrap and keeps the candidate ledger inert across stale disposal paths', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'x-feed-runtime-candidate-wiring-'))
+    temporaryDirectories.push(root)
+    const personalFeedDataDir = join(root, 'personal-feed')
+    const completionLedgerPath = join(personalFeedDataDir, 'v2', 'candidate-judgments.jsonl')
+    mkdirSync(join(personalFeedDataDir, 'v2'), { recursive: true })
+    const sentinel = Buffer.from('candidate-ledger-sentinel\n', 'utf8')
+    writeFileSync(completionLedgerPath, sentinel)
+
+    const first = rootFixture('session-telegram', undefined, 'candidate-root-1')
+    const second = rootFixture('session-telegram', undefined, 'candidate-root-2')
+    const harness = emptyHistoryHarness()
+    ;(harness.ctx as { agents: { roots: () => unknown[] } }).agents.roots = () => [first.agent, second.agent]
+
+    const dispose = await installTelegramExtension(harness.ctx as never, config(root, personalFeedDataDir))
+
+    // Keep this as the first decisive assertion: the old production entry has
+    // no candidate factory call, so its RED is the missing owner (not a later
+    // shape, fixture, bootstrap, or mock failure).
+    expect(ownerObserver.candidateFactoryOptions).toHaveLength(1)
+    expect(ownerObserver.candidateOwners).toHaveLength(1)
+    expect(ownerObserver.coordinatorOptions).toHaveLength(1)
+
+    const factoryOptions = ownerObserver.candidateFactoryOptions[0] as Record<string, unknown>
+    expect(Object.getPrototypeOf(factoryOptions)).toBe(Object.prototype)
+    expect(Reflect.ownKeys(factoryOptions).sort()).toEqual(['clock', 'completionLedgerPath'])
+    expect(Object.keys(factoryOptions).sort()).toEqual(['clock', 'completionLedgerPath'])
+    expect(Object.keys(factoryOptions).every(key => {
+      const descriptor = Object.getOwnPropertyDescriptor(factoryOptions, key)
+      return descriptor?.enumerable === true && 'value' in (descriptor ?? {})
+    })).toBe(true)
+    expect(factoryOptions.completionLedgerPath).toBe(completionLedgerPath)
+
+    const coordinatorOptions = ownerObserver.coordinatorOptions[0] as {
+      readonly clock: unknown
+      readonly r2: { readonly observe: (input: unknown) => unknown | Promise<unknown> }
+      readonly r3: unknown
+      readonly r4: { readonly snapshot: (input: unknown) => unknown | Promise<unknown> }
+      readonly r5: { readonly judge: (input: unknown) => unknown | Promise<unknown> }
+    }
+    expect(coordinatorOptions.clock).toBe(factoryOptions.clock)
+    expect(coordinatorOptions.r3).toBe(ownerObserver.candidateOwners[0])
+    expect(coordinatorOptions.r4).toBe(ownerObserver.personalContextRuntimeR4[0])
+    expect(typeof coordinatorOptions.r4.snapshot).toBe('function')
+
+    const request = Object.freeze({
+      requestId: 'telegram:7:11',
+      cutoff: '2026-08-31T16:00:00.000Z',
+      shanghaiDay: '2026-09-01',
+    })
+    const signal = new AbortController().signal
+    const r2 = await coordinatorOptions.r2.observe({ request, signal })
+    expect(r2).toEqual({ kind: 'unknown' })
+    expect(Object.keys(r2 as Record<string, unknown>)).toEqual(['kind'])
+    const r5 = await coordinatorOptions.r5.judge({
+      request,
+      snapshot: Object.freeze({}),
+      candidates: Object.freeze({ borrowCurrent: async () => ({ kind: 'done' as const }) }),
+      signal,
+    })
+    expect(r5).toEqual({ kind: 'incomplete', completed: [], reason: 'unknown' })
+    expect(Object.keys(r5 as Record<string, unknown>).sort()).toEqual(['completed', 'kind', 'reason'])
+    expect(Object.isFrozen(r5 as object)).toBe(true)
+    expect(Object.isFrozen((r5 as { readonly completed: readonly unknown[] }).completed)).toBe(true)
+
+    expect(harness.historyCalls).toEqual(['list', 'list'])
+    const firstInbound = harness.timeline.indexOf('register:telegram/inbound')
+    expect(firstInbound).toBeGreaterThan(-1)
+    expect(ownerObserver.wiringEvents.lastIndexOf('history:list')).toBeLessThan(
+      ownerObserver.wiringEvents.indexOf('candidate.factory'),
+    )
+    expect(ownerObserver.wiringEvents.indexOf('candidate.factory')).toBeLessThan(
+      ownerObserver.wiringEvents.indexOf('listener.register:telegram/inbound'),
+    )
+    expect(harness.registration.filter(name => name === 'telegram/inbound')).toHaveLength(3)
+
+    // Existing roots and repeated root-created notifications must not create a
+    // second candidate owner.
+    const createdListeners = harness.listeners.get('agent/created') ?? []
+    for (const listener of createdListeners) {
+      listener({ agent: first.agent } as never, (() => ({ kind: 'root-delivered' })) as never)
+      listener({ agent: second.agent } as never, (() => ({ kind: 'root-delivered' })) as never)
+    }
+    expect(ownerObserver.candidateFactoryOptions).toHaveLength(1)
+
+    const staleInbound = [...(harness.listeners.get('telegram/inbound') ?? [])]
+    const staleSource = staleInbound[0]
+    const stalePersonalFeed = staleInbound.at(-1)
+    expect(staleSource).toBeDefined()
+    expect(stalePersonalFeed).toBeDefined()
+    const staleRoot = vi.fn(() => ({ kind: 'root-delivered' as const }))
+    const beforeDispose = readFileSync(completionLedgerPath)
+    await dispose()
+    expect(readFileSync(completionLedgerPath)).toEqual(beforeDispose)
+    await expect(staleSource!(envelope('普通消息'), staleRoot)).resolves.toEqual({ kind: 'root-delivered' })
+    await expect(stalePersonalFeed!(envelope('给我一次个人 Feed'), staleRoot)).resolves.toEqual({ kind: 'root-delivered' })
+    expect(staleRoot).toHaveBeenCalledTimes(2)
+    expect(readFileSync(completionLedgerPath)).toEqual(sentinel)
+
+    // The only production creation site is the Telegram install entry.  This
+    // bounded check counts calls, so barrel exports/definitions are not treated
+    // as instances; unrelated entries must not mention the fixed ledger name.
+    const telegramSource = readFileSync(new URL('../src/telegram-extension.ts', import.meta.url), 'utf8')
+    expect(telegramSource.match(/\bcreatePersonalFeedV2CandidateLifecycle\s*\(/g) ?? []).toHaveLength(1)
+    const nonCreationSources = [
+      '../src/cron-extension.ts',
+      '../src/personal-feed/personal-context-telegram-runtime.ts',
+      '../src/personal-feed/telegram-adapter.ts',
+      '../src/personal-feed/candidate-local-state.ts',
+      '../src/personal-feed/ordinary-feed-editing-proposal.ts',
+      '../src/personal-feed/ordinary-feed-editor-adapter.ts',
+      '../src/personal-feed/ordinary-feed-run-lifecycle.ts',
+      '../src/x-cron/candidate-editing-input.ts',
+      '../src/x-cron/source-candidate-material-snapshot.ts',
+      '../src/x-cron/source-candidate-report.ts',
+      '../../../local-profiles/telegram/cordis.patch.yml',
+      '../../../local-profiles/web/cordis.patch.yml',
+      '../../telegram-gateway/src/extensions.ts',
+      '../../telegram-gateway/src/index.ts',
+      '../../../../plugins-src/skills/personal-feed-selector/SKILL.md',
+    ]
+    for (const relativePath of nonCreationSources) {
+      const source = readFileSync(new URL(relativePath, import.meta.url), 'utf8')
+      expect(source).not.toMatch(/\bcreatePersonalFeedV2CandidateLifecycle\s*\(/)
+      expect(source).not.toContain('candidate-judgments.jsonl')
+    }
   })
 
   it.each([
