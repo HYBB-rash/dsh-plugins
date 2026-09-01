@@ -2886,14 +2886,6 @@ function verifyDev(candidate, homePath, runtime) {
     fail('开发 Telegram 容器的 Assistant→Cron 健康门没有通过', exitCodes.test)
   }
   const cronLedger = join(homePath, '.dsh/storages/dsh-cron/jobs.jsonl')
-  const notionRetryBinding = JSON.parse(run(engine, [
-    'exec', runtime.web, 'node',
-    '/opt/dsh/release-system/scripts/check-notion-retry-binding.mjs',
-  ], { capture: true, announce: false, code: exitCodes.test }))
-  if (notionRetryBinding.status !== 'ready'
-    || notionRetryBinding.externalRef !== 'dsh:notion-task-inbox:retry:v1') {
-    fail('开发 Web 没有注册固定 Notion pending-retry binding', exitCodes.test)
-  }
   const cronRows = existsSync(cronLedger)
     ? readFileSync(cronLedger, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
     : []
@@ -2908,7 +2900,6 @@ function verifyDev(candidate, homePath, runtime) {
     realNotionReachable: false,
     assistantCronHealth,
     cronJobs: 1,
-    notionRetryBinding,
     webAccess: 'container-exec/internal-no-external-route',
   }
 }
@@ -4444,8 +4435,8 @@ for role, (path, mode) in expected.items():
 PY
 ${remoteReanchorStep}
 
-# Start the manager first; Telegram and LAN stay down until its control plane
-# and the live-Harness-owned retry binding pass read-only checks.
+# Start the manager first; Telegram and LAN stay down until its generic control
+# plane is ready. Managed business bindings are owned by the profile and cron.
 compose up -d prepare web
 wait_http() {
   local url="$1"
@@ -4459,7 +4450,6 @@ wait_http http://127.0.0.1:3080/
 test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-prepare --format '{{.State.Status}}/{{.State.ExitCode}}')" = 'exited/0'
 docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs >/dev/null
-docker exec dsh-web node /opt/dsh/release-system/scripts/check-notion-retry-binding.mjs >"$release_dir/notion-retry-binding.json"
 
 compose up -d telegram lan-proxy
 wait_http http://192.168.6.240:3080/
@@ -4564,7 +4554,6 @@ receipt = {
         'evidence': evidence,
         'operation': reanchor,
     },
-    'notionRetryBinding': load('notion-retry-binding.json'),
     'assistantCron': load('assistant-cron-health.json'),
     'harnessOnly': load('harness-only-health.json'),
     'stateValidation': {
@@ -4613,20 +4602,6 @@ PY
     if (JSON.stringify(productionReanchorEvidence) !== JSON.stringify(reanchorRequest.evidence)) {
       fail('生产 inherited schedule reanchor evidence 已漂移', exitCodes.production)
     }
-  }
-  const notionBinding = productionReceipt?.notionRetryBinding
-  const notionBindingKeys = [
-    'status', 'externalRef', 'jobId', 'specSha256', 'entrypointSha256', 'entrypointSize',
-  ]
-  if (!notionBinding || typeof notionBinding !== 'object' || Array.isArray(notionBinding)
-    || Object.keys(notionBinding).sort().join('\0') !== notionBindingKeys.sort().join('\0')
-    || notionBinding.status !== 'ready'
-    || notionBinding.externalRef !== 'dsh:notion-task-inbox:retry:v1'
-    || typeof notionBinding.jobId !== 'string' || notionBinding.jobId.length === 0
-    || !/^[0-9a-f]{64}$/u.test(notionBinding.specSha256 ?? '')
-    || notionBinding.entrypointSha256 !== notionAutomation.sha256
-    || notionBinding.entrypointSize !== notionAutomation.size) {
-    fail('生产 Harness-owned Notion automation/binding 与停机前证据不一致', exitCodes.production)
   }
   const notionInit = validateNotionInboxInitReceipt(
     productionReceipt?.notionInboxInit,
@@ -4858,7 +4833,7 @@ const acceptanceHealthChecks = Object.freeze([
   'candidate-archive-sha256', 'candidate-engine-image', 'web-image', 'telegram-image',
   'lan-proxy-image', 'prepare-image', 'web-running', 'telegram-running',
   'lan-proxy-running', 'prepare-exited-zero', 'web-loopback-http', 'web-lan-http',
-  'cron-control-ready', 'notion-retry-binding-ready', 'assistant-cron-ready',
+  'cron-control-ready', 'assistant-cron-ready',
   'harness-only-health', 'notion-page-readonly', 'assistant-state-valid',
 ])
 
@@ -4977,7 +4952,6 @@ test "$(docker inspect dsh-prepare --format '{{.State.Status}}/{{.State.ExitCode
 curl --fail --silent --max-time 3 http://127.0.0.1:3080/ >/dev/null
 curl --fail --silent --max-time 3 http://192.168.6.240:3080/ >/dev/null
 docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs >/dev/null
-docker exec dsh-web node /opt/dsh/release-system/scripts/check-notion-retry-binding.mjs >/dev/null
 docker exec dsh-telegram node /opt/dsh/release-system/scripts/check-assistant-cron-ready.mjs >/dev/null
 docker exec dsh-web /opt/dsh/release-system/scripts/entrypoint.sh harness-only-health >/dev/null
 docker exec dsh-web /opt/dsh/release-system/scripts/entrypoint.sh notion-page-check >/dev/null

@@ -93,11 +93,6 @@ case "${1:-help}" in
       --dsh-home "$dsh_home" --owner-uid "$(id -u)" --owner-gid "$(id -g)" \
       --expected-probe-sha256 "$probe_sha256"
     ;;
-  notion-retry-health)
-    shift
-    require_no_args "$@"
-    exec node "$release_root/scripts/check-notion-retry-binding.mjs"
-    ;;
   notion-credential-install)
     shift
     replace=()
@@ -152,7 +147,6 @@ workspace-migrate, workspace-migration-verify, harness-only-health,
 scrub-preflight-state, cron-reanchor, cron-reanchor-inspect,
 assistant-cron-health, notion-page-check, notion-automation-health, notion-inbox-init,
 notion-credential-install,
-notion-retry-health,
 fake-telegram, fake-notion, web, telegram, telegram-test, lan-proxy, toolbox
 EOF
     ;;

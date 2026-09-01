@@ -23,7 +23,7 @@ test ! -e /opt/dsh/automations
 for script in \
   check-assistant-cron-ready.mjs check-harness-only-state.py \
   check-notion-automation-entrypoint.py check-notion-page.py \
-  check-notion-retry-binding.mjs fake-notion.mjs \
+  fake-notion.mjs \
   harness-notion-automation-bridge.mjs harness-notion-automation-remote.py \
   inspect-cron-reanchor.mjs migrate-workspace-state.py notion-credential-remote.py \
   reanchor-cron-schedules.mjs run-notion-inbox-init.py \
@@ -72,7 +72,7 @@ for command in \
   workspace-migrate workspace-migration-verify harness-only-health \
   scrub-preflight-state cron-reanchor cron-reanchor-inspect assistant-cron-health \
   notion-page-check notion-automation-health notion-inbox-init \
-  notion-credential-install notion-retry-health fake-notion; do
+  notion-credential-install fake-notion; do
   grep -Fq "$command" <<<"$entrypoint_help"
 done
 
@@ -107,7 +107,6 @@ PYTHONDONTWRITEBYTECODE=1 \
   python3 /opt/dsh/release-system/scripts/verify-workspace-migration-content.py >/dev/null
 node --test /opt/dsh/release-system/tests/assistant-cron-health.mjs
 node --test /opt/dsh/release-system/tests/fake-notion.mjs
-node --test /opt/dsh/release-system/tests/notion-retry-binding.mjs
 node --test /opt/dsh/release-system/tests/inspect-cron-reanchor.mjs
 NODE_NO_WARNINGS=1 node /opt/dsh/release-system/tests/validate-assistant-state.mjs
 test ! -e /opt/dsh/automations

@@ -140,6 +140,10 @@ if [[ " $* " == *' git-upload-pack '* ]]; then
 fi
 payload="$(cat)"
 arguments=" $* "
+if [[ "${DSH_TEST_REJECT_SPECIALIZED_BINDING_GATE:-}" == 1 ]] && grep -Fq 'check-notion-retry-binding.mjs' <<<"$payload"; then
+  printf '%s\n' 'release must rely on generic cron readiness, not the specialized Notion binding helper' >&2
+  exit 71
+fi
 if [[ "$arguments" == *'check-notion-automation-entrypoint.py'* ]] || grep -Fq 'check-notion-automation-entrypoint.py' <<<"$payload"; then
   printf '%s\n' automation >>"$DSH_TEST_SSH_LOG"
   if [[ "${DSH_TEST_AUTOMATION_MISSING:-}" == 1 ]]; then
@@ -511,8 +515,12 @@ run_expect 2 accept --release "$accept_id" --evidence "$test_root/accept-private
 grep -q '不得夹带正文或额外字段' "$test_root/stderr"
 test ! -e "$ssh_log"
 
-run_expect 6 accept --release "$accept_id" --evidence "$test_root/accept-valid.json"
-grep -q 'accepted-cleanup-incomplete' "$test_root/stdout"
+DSH_TEST_REJECT_SPECIALIZED_BINDING_GATE=1 run_expect 6 accept --release "$accept_id" --evidence "$test_root/accept-valid.json"
+if ! grep -q 'accepted-cleanup-incomplete' "$test_root/stdout"; then
+  printf '%s\n' 'accept did not complete without the specialized Notion binding helper' >&2
+  cat "$test_root/stdout" "$test_root/stderr" >&2
+  exit 1
+fi
 node - <<'NODE' "$accept_dir/release.json" "$test_root/accept-valid.json"
 const fs = require('node:fs')
 const [releasePath, evidencePath] = process.argv.slice(2)
@@ -655,7 +663,10 @@ test -f "$repo_root/skills/personal-task-list/agents/openai.yaml"
 grep -Fq 'personal-task-list' "$repo_root/release/scripts/prepare-runtime.sh"
 grep -Fq 'test_workspace_migration.py' "$repo_root/release/scripts/dev-source-verify.sh"
 grep -Fq 'test_workspace_migration.py' "$repo_root/release/Containerfile"
-grep -Fq 'notion-retry-binding.mjs' "$repo_root/release/Containerfile"
+test ! -e "$repo_root/release/scripts/check-notion-retry-binding.mjs"
+test ! -e "$repo_root/release/tests/notion-retry-binding.mjs"
+! grep -Fq 'notionRetryBinding' "$repo_root/release/cli.mjs"
+! grep -Fq 'notion-retry-health' "$repo_root/release/scripts/entrypoint.sh"
 grep -Fq 'inspect-cron-reanchor.mjs' "$repo_root/release/Containerfile"
 grep -Fq 'cron-reanchor-inspect' "$repo_root/release/scripts/entrypoint.sh"
 node --test "$repo_root/release/tests/inspect-cron-reanchor.mjs"
@@ -703,7 +714,6 @@ ordered = [
     'prepare notion-inbox-init',
     '${remoteReanchorStep}',
     'compose up -d prepare web',
-    'check-notion-retry-binding.mjs',
     'compose up -d telegram lan-proxy',
     'check-assistant-cron-ready.mjs',
 ]
@@ -715,8 +725,6 @@ assert source.count('compose_run ') == 7
 release_command = source[source.index('function commandRelease'):source.index('function validateWaitingReanchorRequest')]
 assert release_command.index('verifyProductionNotionAutomation(candidate)') < release_command.index("if (!options['approved-stop'])")
 PY
-grep -Fq "getBoundCommand(NOTION_RETRY_EXTERNAL_REF)" "$repo_root/release/scripts/check-notion-retry-binding.mjs"
-! grep -Eq 'ensureBoundCommand|replaceBoundCommand|deleteBoundCommand' "$repo_root/release/scripts/check-notion-retry-binding.mjs"
 python3 - "$repo_root/release/profiles/web/cordis.patch.yml" <<'PY'
 import pathlib, sys
 profile = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
