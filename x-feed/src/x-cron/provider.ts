@@ -4,12 +4,6 @@ import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {
-  MaterialProjectionReportScopeEstablished,
-  MechanicalAdmissionPeriodScopeEstablished,
-  PeriodIdentity,
-  SourceCandidateReportAccepted,
-} from '@herman/personal-feed'
-import type {
   CronAgentEnvironmentSkip,
   CronAgentEnvironmentLease,
   CronAgentEnvironmentProvider,
@@ -46,22 +40,6 @@ import {
   type XFeedInsightPackage,
   type XFeedRunCapabilities,
 } from './python-ports.ts'
-import {
-  prepareAndSubmitXSourceCandidateReport,
-  normalizeXCurrentCollection,
-  type XSourceCandidateReportPorts,
-  type XSourceCandidateReportPort,
-  type XSourceCollectionEvidence,
-} from './source-candidate-report.ts'
-import {
-  projectXAcceptedReportIntoEditingInputs,
-  type XCandidateEditingInputPorts,
-} from './candidate-editing-input.ts'
-import {
-  createXSourceCandidateMaterialSnapshotStore,
-  type XSourceCandidateMaterialSnapshot,
-  type XSourceCandidateMaterialSnapshotBinding,
-} from './source-candidate-material-snapshot.ts'
 
 export const X_CRON_AGENT_ENVIRONMENT_MARKER = 'dsh-x-feed/v1'
 
@@ -93,80 +71,17 @@ export interface XFeedCronProviderOptions {
   readonly maxArtifactBytes?: number
   readonly maxArtifactItemBytes?: number
   readonly maxArtifactItems?: number
-  readonly sourceCandidateReport?: XFeedSourceCandidateReportWiring
-}
-
-/** The provider receives C32/C35 and the source's narrow C36 boundary from the cron adapter. */
-export interface XFeedSourceCandidateReportWiring {
-  readonly period: PeriodIdentity
-  readonly mechanicalAdmissionScope: MechanicalAdmissionPeriodScopeEstablished
-  readonly materialProjectionReportScope: MaterialProjectionReportScopeEstablished
-  readonly candidatePort: XSourceCandidateReportPorts
-  readonly reportPort: XSourceCandidateReportPort
-  readonly periodFinalizer?: XCandidateEditingInputPorts['periodFinalizer']
-  readonly crossSourceEditor?: XCandidateEditingInputPorts['crossSourceEditor']
-  readonly acceptedReport?: SourceCandidateReportAccepted
-}
-
-interface OrdinaryFeedRunPreparationPort {
-  readonly prepareOrdinaryFeed: () => Promise<CronAgentEnvironmentLease>
-}
-
-type XFeedCronProviderOptionsWithoutJobId = Omit<XFeedCronProviderOptions, 'cronJobId'>
-
-type XFeedCronProviderMode =
-  | { readonly kind: 'legacy'; readonly cronJobId: string }
-  | { readonly kind: 'ordinary' }
-
-interface InternalXFeedCronProviderOptions extends XFeedCronProviderOptionsWithoutJobId {
-  readonly mode: XFeedCronProviderMode
-  readonly ordinaryFeedRunPreparationPort?: OrdinaryFeedRunPreparationPort
 }
 
 /** Build the exact provider registered for one configured cron job. */
 export function createXFeedCronEnvironmentProvider(
   options: XFeedCronProviderOptions,
 ): CronAgentEnvironmentProvider {
-  return createInternalXFeedCronEnvironmentProvider({
-    ...options,
-    mode: { kind: 'legacy', cronJobId: options.cronJobId },
-  })
-}
-
-/** Build the ordinary Feed provider without exposing the seam through the barrel. */
-export function createXFeedCronEnvironmentProviderForOrdinaryFeed(
-  options: XFeedCronProviderOptionsWithoutJobId,
-  port: OrdinaryFeedRunPreparationPort,
-): CronAgentEnvironmentProvider {
-  const wiring = options.sourceCandidateReport
-  if (wiring === undefined
-    || wiring.periodFinalizer === undefined
-    || wiring.crossSourceEditor === undefined) {
-    throw new Error('ordinary X cron provider requires source candidate report C10 wiring')
-  }
-  return createInternalXFeedCronEnvironmentProvider({
-    ...options,
-    mode: { kind: 'ordinary' },
-    ordinaryFeedRunPreparationPort: port,
-  })
-}
-
-function createInternalXFeedCronEnvironmentProvider(
-  options: InternalXFeedCronProviderOptions,
-): CronAgentEnvironmentProvider {
-  if (options.mode.kind === 'legacy' && options.mode.cronJobId.trim() === '') {
-    throw new Error('X cron provider requires a non-empty cronJobId')
-  }
+  if (options.cronJobId.trim() === '') throw new Error('X cron provider requires a non-empty cronJobId')
   if (options.dataDir.trim() === '') throw new Error('X cron provider requires a non-empty dataDir')
   if (basename(options.pipelinePath) !== 'x_insight_pipeline.py') {
     throw new Error('X cron provider only accepts the shipped x_insight_pipeline.py adapter')
   }
-  const hasPeriodFinalizer = options.sourceCandidateReport?.periodFinalizer !== undefined
-  const hasCrossSourceEditor = options.sourceCandidateReport?.crossSourceEditor !== undefined
-  if (hasPeriodFinalizer !== hasCrossSourceEditor) {
-    throw new Error('X source candidate report wiring requires both periodFinalizer and crossSourceEditor')
-  }
-
   return {
     marker: X_CRON_AGENT_ENVIRONMENT_MARKER,
     requirements: X_CRON_ENVIRONMENT_REQUIREMENTS,
@@ -175,48 +90,17 @@ function createInternalXFeedCronEnvironmentProvider(
 }
 
 async function prepareXFeedRun(
-  options: InternalXFeedCronProviderOptions,
+  options: XFeedCronProviderOptions,
   context: { readonly jobId: string; readonly runId: string },
 ): Promise<CronAgentEnvironmentLease | CronAgentEnvironmentSkip> {
-  if (options.mode.kind === 'legacy' && context.jobId !== options.mode.cronJobId) {
-    throw new Error(`X cron provider job id mismatch: expected ${options.mode.cronJobId}, got ${context.jobId}`)
+  if (context.jobId !== options.cronJobId) {
+    throw new Error(`X cron provider job id mismatch: expected ${options.cronJobId}, got ${context.jobId}`)
   }
 
   const runPart = safeRunPart(context.runId)
   const runDir = join(options.dataDir, '.runs', runPart)
 
   try {
-    const sourceCandidateReport = options.sourceCandidateReport
-    if (sourceCandidateReport?.acceptedReport !== undefined) {
-      mkdirSync(runDir, { recursive: true })
-    }
-    const materialSnapshotStore = sourceCandidateReport === undefined
-      ? undefined
-      : createXSourceCandidateMaterialSnapshotStore({
-        ledgerPath: join(runDir, 'source-candidate-material-snapshot.jsonl'),
-      })
-
-    if (sourceCandidateReport?.acceptedReport !== undefined) {
-      if (options.ordinaryFeedRunPreparationPort === undefined || materialSnapshotStore === undefined) {
-        throw new Error('ordinary X source candidate recovery requires its preparation and snapshot ports')
-      }
-      const binding: XSourceCandidateMaterialSnapshotBinding = {
-        runId: context.runId,
-        period: sourceCandidateReport.period,
-        materialProjectionReportScope: sourceCandidateReport.materialProjectionReportScope,
-      }
-      const readSnapshot = materialSnapshotStore.readSnapshot(binding)
-      if (readSnapshot.status !== 'found') {
-        throw new Error(`X source candidate material snapshot recovery was ${readSnapshot.status}`)
-      }
-      await replayAcceptedSourceCandidateReport(
-        sourceCandidateReport.acceptedReport,
-        readSnapshot.value,
-        sourceCandidateReport,
-      )
-      return options.ordinaryFeedRunPreparationPort.prepareOrdinaryFeed()
-    }
-
     const budget = options.projectionBudget ?? DEFAULT_PROJECTION_BUDGET
 
     // Readiness is deliberately mechanical. No assessment Agent exists on this
@@ -252,62 +136,6 @@ async function prepareXFeedRun(
     const basePorts = createPythonPorts(options, baseCapabilities)
     const insightPackage = await basePorts.runPipeline()
     const parsed = parseInsightPackage(insightPackage, baseCapabilities)
-    if (sourceCandidateReport !== undefined) {
-      if (parsed.currentCollection === undefined) {
-        throw new Error('X source candidate report requires current_collection in the Python package')
-      }
-      const evidence = collectionEvidence(insightPackage, baseCapabilities, context.runId)
-      if (materialSnapshotStore === undefined) {
-        throw new Error('X source candidate report requires its material snapshot store')
-      }
-      const normalizedCollection = normalizeXCurrentCollection(parsed.currentCollection)
-      const snapshot: XSourceCandidateMaterialSnapshot = {
-        runId: context.runId,
-        period: sourceCandidateReport.period,
-        materialProjectionReportScope: sourceCandidateReport.materialProjectionReportScope,
-        collectionEvidence: evidence,
-        currentCollection: normalizedCollection,
-      }
-      const acceptedSnapshot = materialSnapshotStore.acceptSnapshot(snapshot)
-      if (acceptedSnapshot.status !== 'accepted') {
-        throw new Error(`X source candidate material snapshot was ${acceptedSnapshot.status}`)
-      }
-      const readSnapshot = materialSnapshotStore.readSnapshot({
-        runId: acceptedSnapshot.value.runId,
-        period: acceptedSnapshot.value.period,
-        materialProjectionReportScope: acceptedSnapshot.value.materialProjectionReportScope,
-      })
-      if (readSnapshot.status !== 'found') {
-        throw new Error(`X source candidate material snapshot readback was ${readSnapshot.status}`)
-      }
-      const materialSnapshot = readSnapshot.value
-      const acceptedReport = await prepareAndSubmitXSourceCandidateReport({
-        period: sourceCandidateReport.period,
-        mechanicalAdmissionScope: sourceCandidateReport.mechanicalAdmissionScope,
-        materialProjectionReportScope: sourceCandidateReport.materialProjectionReportScope,
-        collectionEvidence: materialSnapshot.collectionEvidence,
-        currentCollection: materialSnapshot.currentCollection,
-        candidatePort: sourceCandidateReport.candidatePort,
-        reportPort: sourceCandidateReport.reportPort,
-      })
-      if (sourceCandidateReport.periodFinalizer !== undefined) {
-        await projectXAcceptedReportIntoEditingInputs({
-          period: sourceCandidateReport.period,
-          collectionEvidence: materialSnapshot.collectionEvidence,
-          acceptedReport,
-          currentCollection: materialSnapshot.currentCollection,
-          periodFinalizer: sourceCandidateReport.periodFinalizer,
-          crossSourceEditor: sourceCandidateReport.crossSourceEditor!,
-        })
-      }
-      if (options.ordinaryFeedRunPreparationPort !== undefined
-        && acceptedReport.report.candidates.length === 0) {
-        return { kind: 'skip', outcome: { text: undefined, error: undefined } }
-      }
-    }
-    if (options.ordinaryFeedRunPreparationPort !== undefined) {
-      return options.ordinaryFeedRunPreparationPort.prepareOrdinaryFeed()
-    }
     if (parsed.candidates.length === 0) {
       return { kind: 'skip', outcome: { text: undefined, error: undefined } }
     }
@@ -354,37 +182,6 @@ async function prepareXFeedRun(
   }
 }
 
-async function replayAcceptedSourceCandidateReport(
-  acceptedReport: SourceCandidateReportAccepted,
-  snapshot: XSourceCandidateMaterialSnapshot,
-  wiring: XFeedSourceCandidateReportWiring,
-): Promise<void> {
-  if (wiring.periodFinalizer === undefined || wiring.crossSourceEditor === undefined) {
-    throw new Error('ordinary X source candidate recovery requires C26/C16/C10 wiring')
-  }
-  const projected = await projectXAcceptedReportIntoEditingInputs({
-    period: wiring.period,
-    collectionEvidence: snapshot.collectionEvidence,
-    acceptedReport,
-    currentCollection: snapshot.currentCollection,
-    periodFinalizer: wiring.periodFinalizer,
-    crossSourceEditor: wiring.crossSourceEditor,
-  })
-  const expected = acceptedReport.report.candidates
-    .map(candidate => candidate.candidate.stableReference)
-    .sort()
-  const actual = projected
-    .map(candidate => candidate.candidate.stableReference)
-    .sort()
-  if (!sameStringArray(expected, actual)) {
-    throw new Error('X source candidate recovery did not project every C36 member into C26/C16/C10')
-  }
-}
-
-function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index])
-}
-
 interface ParsedPackage {
   readonly capabilities: XFeedRunCapabilities
   readonly allowedThemes: readonly string[]
@@ -393,10 +190,9 @@ interface ParsedPackage {
   readonly mechanicalSignals: Readonly<Record<string, boolean | number | string>>
   readonly randomWalk?: XFeedRandomWalkPlan
   readonly candidates: readonly XFeedDigestCandidateInput[]
-  readonly currentCollection: readonly unknown[] | undefined
 }
 
-function createPythonPorts(options: XFeedCronProviderOptionsWithoutJobId, capabilities: XFeedRunCapabilities) {
+function createPythonPorts(options: XFeedCronProviderOptions, capabilities: XFeedRunCapabilities) {
   return createXFeedPythonPorts({
     pythonBin: options.pythonBin,
     pythonDirectory: dirname(options.pipelinePath),
@@ -434,10 +230,6 @@ function parseInsightPackage(value: XFeedInsightPackage, base: XFeedRunCapabilit
     throw new Error('X insight package must contain a bounded recent_items array')
   }
   const candidates: XFeedDigestCandidateInput[] = []
-  const currentCollection = Object.prototype.hasOwnProperty.call(value, 'current_collection')
-    && Array.isArray(value.current_collection)
-    ? Object.freeze([...value.current_collection])
-    : undefined
   const seenIds = new Set<string>()
   for (const raw of value.recent_items) {
     const candidate = parseCandidate(raw)
@@ -454,7 +246,6 @@ function parseInsightPackage(value: XFeedInsightPackage, base: XFeedRunCapabilit
       allowlistedExploreIds: [],
       mechanicalSignals: { candidateCount: 0 },
       candidates: Object.freeze([]),
-      currentCollection,
     }
   }
   const decision = isRecord(value.decision) ? value.decision : {}
@@ -500,43 +291,7 @@ function parseInsightPackage(value: XFeedInsightPackage, base: XFeedRunCapabilit
     mechanicalSignals,
     ...(randomWalk === undefined ? {} : { randomWalk }),
     candidates: Object.freeze(candidates),
-    currentCollection,
   }
-}
-
-function collectionEvidence(
-  value: XFeedInsightPackage,
-  capabilities: XFeedRunCapabilities,
-  runId: string,
-): XSourceCollectionEvidence {
-  const collectionBatch = requirePackageString(value.collection_batch, 'collection_batch')
-  if (collectionBatch !== capabilities.collectionPath) {
-    throw new Error('X insight package collection_batch does not match the known run collection path')
-  }
-  const deliveryId = requirePackageString(value.delivery_id, 'delivery_id')
-  const ts = value.ts
-  if (typeof ts !== 'number' || !Number.isSafeInteger(ts) || ts <= 0) {
-    throw new Error('X insight package ts is invalid')
-  }
-  const collectionStatus = value.collection_status
-  if (collectionStatus !== 'ok' && collectionStatus !== 'empty') {
-    throw new Error('X insight package collection_status is invalid')
-  }
-  return {
-    runId,
-    source: 'x',
-    collectionPath: capabilities.collectionPath,
-    collectionBatch,
-    deliveryId,
-    ts,
-  }
-}
-
-function requirePackageString(value: unknown, name: string): string {
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new Error(`X insight package ${name} is invalid`)
-  }
-  return value
 }
 
 function parseCandidate(value: unknown): XFeedDigestCandidateInput {

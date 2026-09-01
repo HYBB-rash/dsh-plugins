@@ -14,17 +14,6 @@ export {
   type XFeedRuntimeConfig,
 } from './config.ts'
 
-export { createCronEnvironmentExtension } from './cron-extension.ts'
-export {
-  assertXFeedRequiredSources,
-  createXFeedScopeAdapter,
-  X_FEED_SOURCE_IDENTITY,
-  XFeedScopeAdapterError,
-  type ExternalPeriodScopePort,
-  type XFeedExternalPeriodScopeRequest,
-  type XFeedPeriodScopeInput,
-  type XFeedScopeAdapter,
-} from './feed-scope-adapter.ts'
 export {
   createTrustedFactNavigation,
   installTelegramExtension,

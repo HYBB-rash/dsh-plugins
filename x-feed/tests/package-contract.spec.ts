@@ -69,7 +69,8 @@ describe('x-feed business package contract', () => {
     }
 
     const rootSource = readFileSync(resolve(packageDirectory, 'src/index.ts'), 'utf8')
-    expect(rootSource).toContain('createCronEnvironmentExtension')
+    expect(rootSource).not.toContain('createCronEnvironmentExtension')
+    expect(rootSource).not.toContain('@herman/personal-feed')
     expect(rootSource).toContain('installTelegramExtension')
     expect(rootSource).not.toContain('export async function apply')
     expect(rootSource).not.toContain("export const name = 'dsh-x-feed'")
