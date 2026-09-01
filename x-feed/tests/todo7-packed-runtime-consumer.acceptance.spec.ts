@@ -16,7 +16,6 @@ import { afterEach, describe, expect, it } from 'vitest'
 const xFeedDirectory = resolve(import.meta.dirname, '..')
 const workspaceDirectory = resolve(xFeedDirectory, '..')
 const cronDirectory = join(workspaceDirectory, 'dsh-cron')
-const personalFeedDirectory = join(workspaceDirectory, 'personal-feed')
 const harnessDirectory = process.env.DSH_HARNESS_ROOT!
 const harnessDependencies = join(harnessDirectory, 'node_modules/.pnpm/node_modules')
 const typeScript = join(harnessDirectory, 'node_modules/typescript/bin/tsc')
@@ -81,24 +80,19 @@ describe('TODO7 packed NodeNext public-root consumer', () => {
     const consumerNodeModules = join(consumer, 'node_modules')
     const cronPackage = join(consumerNodeModules, '@deepseek-ai/dsh-cron')
     const xFeedPackage = join(consumerNodeModules, '@herman/x-feed')
-    const personalFeedPackage = join(consumerNodeModules, '@herman/personal-feed')
     mkdirSync(tarballs)
     mkdirSync(consumerNodeModules, { recursive: true })
 
     const cronTarball = pack(cronDirectory, tarballs)
-    const personalFeedTarball = pack(personalFeedDirectory, tarballs)
     const xFeedTarball = pack(xFeedDirectory, tarballs)
     unpack(cronTarball, cronPackage)
-    unpack(personalFeedTarball, personalFeedPackage)
     unpack(xFeedTarball, xFeedPackage)
     linkWorkspaceDependencies(consumerNodeModules)
 
     for (const path of [
       cronTarball,
-      personalFeedTarball,
       xFeedTarball,
       cronPackage,
-      personalFeedPackage,
       xFeedPackage,
       consumer,
     ]) {
@@ -119,24 +113,12 @@ describe('TODO7 packed NodeNext public-root consumer', () => {
       types: string
       exports: Record<string, unknown>
     }
-    const personalFeedManifest = JSON.parse(readFileSync(join(personalFeedPackage, 'package.json'), 'utf8')) as {
-      name: string
-      version: string
-      main: string
-      types: string
-      exports: Record<string, unknown>
-    }
     expect(cronManifest.name).toBe('@deepseek-ai/dsh-cron')
-    expect(personalFeedManifest.name).toBe('@herman/personal-feed')
     expect(xFeedManifest.name).toBe('@herman/x-feed')
     expect(cronManifest.version).toBe(JSON.parse(readFileSync(join(cronDirectory, 'package.json'), 'utf8')).version)
     expect(xFeedManifest.version).toBe(JSON.parse(readFileSync(join(xFeedDirectory, 'package.json'), 'utf8')).version)
-    expect(personalFeedManifest.version).toBe(
-      JSON.parse(readFileSync(join(personalFeedDirectory, 'package.json'), 'utf8')).version,
-    )
     for (const [directory, manifest] of [
       [cronPackage, cronManifest],
-      [personalFeedPackage, personalFeedManifest],
       [xFeedPackage, xFeedManifest],
     ] as const) {
       expect(manifest.exports['.']).toBeDefined()
@@ -156,8 +138,8 @@ describe('TODO7 packed NodeNext public-root consumer', () => {
     expect(packedFiles.some(path => path.endsWith('.d.ts'))).toBe(true)
 
     assertNoCrossPackageSubpathImports(consumer, '@deepseek-ai/dsh-cron')
-    assertNoCrossPackageSubpathImports(consumer, '@herman/personal-feed')
     assertNoCrossPackageSubpathImports(consumer, '@herman/x-feed')
+    expect(existsSync(join(consumerNodeModules, '@herman/personal-feed'))).toBe(false)
 
     writeFileSync(join(consumer, 'package.json'), JSON.stringify({ type: 'module' }))
     writeFileSync(join(consumer, 'consumer.ts'), `

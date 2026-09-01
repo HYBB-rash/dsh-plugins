@@ -640,8 +640,29 @@ grep -q 'PYTHONPYCACHEPREFIX="$python_pycache"' "$repo_root/release/scripts/dev-
 grep -q "python3 -m unittest test_insight_engine.py" "$repo_root/release/scripts/dev-source-verify.sh"
 grep -q 'build-identity=rootless-toolbox-uid-0; test-identity=1000:1000' "$repo_root/release/scripts/dev-source-verify.sh"
 "$repo_root/release/tests/dev-source-verify.sh"
+"$repo_root/release/tests/runtime-module-identity.sh"
 grep -q 'vitest/vitest.mjs' "$repo_root/release/Containerfile"
 grep -q "unittest discover" "$repo_root/release/Containerfile"
+grep -Fq 'check-runtime-module-identity.sh /opt/dsh/harness' "$repo_root/release/Containerfile"
+grep -Fq 'check-runtime-module-identity.sh /opt/dsh/harness' "$repo_root/release/scripts/self-test.sh"
+! grep -Fq '/opt/dsh/harness/local-plugins/personal-feed' "$repo_root/release/Containerfile"
+! grep -Fq 'personal-feed"' "$repo_root/release/profiles/telegram/package.json"
+! grep -Fq 'personal-feed"' "$repo_root/release/profiles/telegram-test/package.json"
+! grep -Fq 'cron-af33aa98' "$repo_root/release/profiles/telegram/cordis.patch.yml"
+! grep -Fq 'personalFeedDataDir' "$repo_root/release/profiles/telegram/cordis.patch.yml"
+! grep -Fq 'personalFeedRequiredSources' "$repo_root/release/profiles/telegram/cordis.patch.yml"
+! grep -Fq 'candidateReportingWindowMs' "$repo_root/release/profiles/telegram/cordis.patch.yml"
+python3 - "$repo_root/runtime-package-topology.json" "$repo_root/release/profiles/telegram/cordis.patch.yml" <<'PY'
+import json, pathlib, sys
+topology = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert all(target['name'] != '@herman/personal-feed' for target in topology['targets'])
+assert all('@herman/personal-feed' not in target.get('requiredBy', []) for target in topology['targets'])
+profile = pathlib.Path(sys.argv[2]).read_text()
+cron = profile.split('    - id: dsh-cron\n', 1)[1].split('\n    - id:', 1)[0]
+gateway = profile.split('    - id: telegram-gateway\n', 1)[1].split('\n    - id:', 1)[0]
+assert "modulePath: '@herman/x-feed'" not in cron
+assert "modulePath: '@herman/x-feed'" in gateway
+PY
 grep -q 'runtime.toolbox' "$repo_root/release/cli.mjs"
 grep -q "'toolbox'" "$repo_root/release/cli.mjs"
 grep -q 'exec sleep infinity' "$repo_root/release/scripts/entrypoint.sh"

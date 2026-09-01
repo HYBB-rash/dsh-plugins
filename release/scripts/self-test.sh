@@ -13,15 +13,18 @@ ssh_known_hosts="$(ssh -G git@github.com 2>/dev/null \
 test "$ssh_known_hosts" = /home/herman/.ssh/known_hosts
 
 test -f /opt/dsh/harness/apps/cli/lib/bin.js
-for package in dsh-assistant dsh-cron telegram-gateway x-feed personal-feed-selector personal-feed; do
+for package in dsh-assistant dsh-cron telegram-gateway x-feed personal-feed-selector; do
   test -d "/opt/dsh/harness/local-plugins/$package/lib"
 done
+bash /opt/dsh/release-system/scripts/check-runtime-module-identity.sh /opt/dsh/harness
+test ! -e /opt/dsh/harness/local-plugins/personal-feed
 test ! -e /opt/dsh/harness/local-plugins/dsh-assistant/lib/migrate-cli.js
 test ! -e /opt/dsh/harness/local-plugins/dsh-assistant/lib/historical-recovery.js
 test ! -e /opt/dsh/harness/local-plugins/ui-context-compactor
 test ! -e /opt/dsh/automations
 for script in \
   check-assistant-cron-ready.mjs check-harness-only-state.py \
+  check-runtime-module-identity.sh \
   check-notion-automation-entrypoint.py check-notion-page.py \
   fake-notion.mjs \
   harness-notion-automation-bridge.mjs harness-notion-automation-remote.py \

@@ -3,7 +3,6 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  createCronEnvironmentExtension,
   installTelegramExtension,
   parseXFeedRuntimeConfig,
   resolveDataDir,
@@ -11,8 +10,6 @@ import {
   X_FEED_CONTRACT,
 } from '../src/index.ts'
 import { FileNavigationSnapshotStore } from '../src/navigation/file-navigation-snapshot-store.ts'
-import { DeliveryReceipt } from '../src/receipt.ts'
-import * as xCronProvider from '../src/x-cron/provider.ts'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -40,41 +37,38 @@ function makeCtx(logs = { info: [] as string[], warn: [] as string[], error: [] 
 }
 
 describe('X runtime configuration', () => {
-  it('preserves the existing data directory by default', () => {
+  it('preserves the existing X data directory by default', () => {
     process.env.DSH_HOME = '/tmp/dsh-home'
     expect(resolveDataDir({})).toBe('/tmp/dsh-home/storages/dsh-x-feed')
   })
 
-  it('resolves explicit paths and bounded defaults', () => {
+  it('resolves only the Telegram feedback and bookmark fields used by the formal extension', () => {
     const config = parseXFeedRuntimeConfig({
       cronJobId: 'cron-x',
       dataDir: '/custom/data',
+      pythonBin: '/custom/python3',
       pipelinePath: '/custom/x_insight_pipeline.py',
+      personalFeedDataDir: '/obsolete/personal-feed',
+      personalFeedRequiredSources: ['x'],
+      candidateReportingWindowMs: 300_000,
     })
-    expect(config).toMatchObject({
-      cronJobId: 'cron-x',
+    expect(config).toEqual({
       dataDir: '/custom/data',
-      pipelinePath: '/custom/x_insight_pipeline.py',
-      pythonBin: '/usr/bin/python3',
       telegramSessionId: 'session-telegram',
       feedbackPendingTtlMs: 600_000,
       feedbackTurnTimeoutMs: 30_000,
-      personalFeedRequiredSources: [],
-      candidateReportingWindowMs: undefined,
     })
     expect(resolvePipelinePath({}).endsWith('python/x_insight_pipeline.py')).toBe(true)
   })
 
-  it('rejects invalid values from host JSON', () => {
+  it('rejects invalid fields that remain part of the X runtime contract', () => {
     expect(() => parseXFeedRuntimeConfig({ feedbackTurnTimeoutMs: 0 })).toThrow('feedbackTurnTimeoutMs')
     expect(() => parseXFeedRuntimeConfig({ dataDir: 42 })).toThrow('dataDir')
-    expect(() => parseXFeedRuntimeConfig({ candidateReportingWindowMs: 0 })).toThrow('candidateReportingWindowMs')
-    expect(() => parseXFeedRuntimeConfig({ personalFeedRequiredSources: 'x' })).toThrow('personalFeedRequiredSources')
   })
 })
 
-describe('business extension boundaries', () => {
-  it('Telegram adapter projects navigation and never subscribes to cron terminal events', async () => {
+describe('Telegram extension boundary', () => {
+  it('projects navigation and never subscribes to cron terminal events', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'x-feed-telegram-extension-'))
     try {
       const harness = makeCtx()
@@ -91,7 +85,7 @@ describe('business extension boundaries', () => {
     }
   })
 
-  it('Telegram adapter fails before registering handlers when navigation is unavailable', async () => {
+  it('fails before registering handlers when navigation is unavailable', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'x-feed-startup-failure-'))
     const harness = makeCtx()
     vi.spyOn(FileNavigationSnapshotStore.prototype, 'replace').mockImplementation(() => {
@@ -106,186 +100,10 @@ describe('business extension boundaries', () => {
       rmSync(dataDir, { recursive: true, force: true })
     }
   })
-
-  it('cron adapter returns one provider, owns no global listener, and exposes crash recovery', async () => {
-    const harness = makeCtx()
-    const handle = vi.spyOn(DeliveryReceipt.prototype, 'handle').mockResolvedValue({ ok: true, confirmStatus: 'delivered' })
-    const provider = createCronEnvironmentExtension(harness.ctx as never, {
-      cronJobId: 'cron-x-1',
-      dataDir: '/tmp/x-feed-cron-extension',
-      pipelinePath: '/opt/x-feed/python/x_insight_pipeline.py',
-      personalFeedRequiredSources: ['x'],
-      candidateReportingWindowMs: 300_000,
-    })
-    expect(provider.marker).toBe('dsh-x-feed/v1')
-    expect(provider.requirements).toMatchObject({ jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' })
-    expect(harness.handlers).toEqual([])
-    await provider.settleRecoveredRun?.({
-      jobId: 'cron-x-1',
-      runId: 'cron-x-1@2026-08-21T00:00:00.000Z',
-      sessionId: 'session-cron-x',
-      scheduledFor: '2026-08-21T00:00:00.000Z',
-      status: 'success',
-      deliveryState: 'delivered',
-      deliveredAt: '2026-08-21T00:01:00.000Z',
-    })
-    expect(handle).toHaveBeenCalledOnce()
-  })
-
-  it('ordinary cron adapter accepts a complete config without a profile cronJobId', () => {
-    const harness = makeCtx()
-    const provider = createCronEnvironmentExtension(harness.ctx as never, {
-      dataDir: '/tmp/x-feed-cron-extension-no-profile-job-id',
-      pipelinePath: '/opt/x-feed/python/x_insight_pipeline.py',
-      personalFeedRequiredSources: ['x'],
-      candidateReportingWindowMs: 300_000,
-    })
-    expect(provider.marker).toBe('dsh-x-feed/v1')
-    expect(provider.requirements).toMatchObject({ jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' })
-    expect(harness.handlers).toEqual([])
-  })
-
-  it('returns a provider skip byte-for-byte without decorating it with settleRun', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'x-feed-cron-skip-'))
-    const skip = Object.freeze({
-      kind: 'skip' as const,
-      outcome: Object.freeze({ text: undefined, error: undefined }),
-    })
-    const legacyPrepare = vi.fn(async () => {
-      throw new Error('legacy X cron provider must not prepare ordinary Feed runs')
-    })
-    const ordinaryPrepare = vi.fn(async () => skip)
-    vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProvider').mockReturnValue({
-      marker: 'dsh-x-feed/v1',
-      requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
-      prepare: legacyPrepare,
-    } as never)
-    const ordinaryFactory = vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProviderForOrdinaryFeed')
-      .mockReturnValue({
-        marker: 'dsh-x-feed/v1',
-        requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
-        prepare: ordinaryPrepare,
-      } as never)
-
-    try {
-      const provider = createCronEnvironmentExtension(makeCtx().ctx as never, {
-        cronJobId: 'cron-x-skip',
-        dataDir: directory,
-        pipelinePath: '/opt/x-feed/python/x_insight_pipeline.py',
-        personalFeedDataDir: join(directory, 'personal-feed'),
-        personalFeedRequiredSources: ['x'],
-        candidateReportingWindowMs: 300_000,
-      })
-      const prepared = await provider.prepare({
-        jobId: 'cron-x-skip',
-        jobKind: 'agent',
-        sessionMode: 'per_run',
-        gate: 'forbidden',
-        runId: 'cron-x-skip@once',
-        trigger: 'scheduled',
-        scheduledFor: '2026-08-23T13:00:00.000Z',
-        claimedAt: '2026-08-23T13:00:01.000Z',
-      })
-
-      expect(prepared).toBe(skip)
-      expect(prepared).toEqual(skip)
-      expect('settleRun' in prepared).toBe(false)
-      expect(ordinaryFactory).toHaveBeenCalledOnce()
-      expect(ordinaryPrepare).toHaveBeenCalledOnce()
-      expect(legacyPrepare).not.toHaveBeenCalled()
-    } finally {
-      rmSync(directory, { recursive: true, force: true })
-    }
-  })
-
-  it('establishes one observable Feed period scope before X preparation for scheduled and manual runs', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'x-feed-personal-scope-'))
-    const scopeDirectory = join(directory, 'personal-feed')
-    const ledgerPath = join(scopeDirectory, 'period-scopes.jsonl')
-    const observedScopeCounts: number[] = []
-    const prepare = vi.fn(async () => {
-      observedScopeCounts.push(readFileSync(ledgerPath, 'utf8').trim().split('\n').length)
-      return {
-        kind: 'skip' as const,
-        outcome: { text: undefined, error: undefined },
-      }
-    })
-    const legacyPrepare = vi.fn(async () => {
-      throw new Error('legacy X cron provider must not prepare ordinary Feed runs')
-    })
-    vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProvider').mockReturnValue({
-      marker: 'dsh-x-feed/v1',
-      requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
-      prepare: legacyPrepare,
-    } as never)
-    const ordinaryFactory = vi.spyOn(xCronProvider, 'createXFeedCronEnvironmentProviderForOrdinaryFeed')
-      .mockReturnValue({
-        marker: 'dsh-x-feed/v1',
-        requirements: { jobKind: 'agent', sessionMode: 'per_run', gate: 'forbidden' },
-        prepare,
-      } as never)
-
-    try {
-      const provider = createCronEnvironmentExtension(makeCtx().ctx as never, {
-        cronJobId: 'cron-x-scope',
-        dataDir: directory,
-        pipelinePath: '/opt/x-feed/python/x_insight_pipeline.py',
-        personalFeedDataDir: scopeDirectory,
-        personalFeedRequiredSources: ['x'],
-        candidateReportingWindowMs: 300_000,
-      })
-      const scheduled = {
-        jobId: 'cron-x-scope',
-        jobKind: 'agent' as const,
-        sessionMode: 'per_run' as const,
-        gate: 'forbidden' as const,
-        runId: 'cron-x-scope@2026-08-23T13:30:00.000Z',
-        trigger: 'scheduled' as const,
-        scheduledFor: '2026-08-23T13:30:00.000Z',
-        claimedAt: '2026-08-23T13:30:01.000Z',
-      }
-      const manual = {
-        ...scheduled,
-        runId: 'manual:cron-x-scope:request-1',
-        trigger: 'manual' as const,
-        scheduledFor: '2026-08-23T13:31:00.000Z',
-        claimedAt: '2026-08-23T13:31:01.000Z',
-      }
-
-      await provider.prepare(scheduled)
-      await provider.prepare(manual)
-
-      const records = readFileSync(ledgerPath, 'utf8').trim().split('\n').map(line => JSON.parse(line))
-      expect(observedScopeCounts).toEqual([1, 2])
-      expect(records).toHaveLength(2)
-      expect(records.map(record => record.external.trigger)).toEqual(['scheduled', 'manual'])
-      expect(records[0].c01.value.run).not.toBe(records[1].c01.value.run)
-      for (const record of records) {
-        expect(record.c01.value.run).toBe(record.c01.value.period.run)
-        expect(record.c02.value.start.period).toEqual(record.c01.value.period)
-        expect(record.c34.value.window.period).toEqual(record.c01.value.period)
-        expect(record.c34.value.window.sources).toEqual(['x'])
-        expect(record.c32[0].value.reportingWindow).toEqual(record.c34.value)
-        expect(record.c33.value.period).toEqual(record.c01.value.period)
-        expect(record.c35[0].value.scope.reportingWindow).toEqual(record.c34.value)
-      }
-
-      await expect(provider.prepare({
-        ...manual,
-        claimedAt: '2026-08-23T13:31:02.000Z',
-      })).rejects.toThrow('already established a different period scope')
-      expect(prepare).toHaveBeenCalledTimes(2)
-      expect(ordinaryFactory).toHaveBeenCalledTimes(2)
-      expect(legacyPrepare).not.toHaveBeenCalled()
-      expect(readFileSync(ledgerPath, 'utf8').trim().split('\n')).toHaveLength(2)
-    } finally {
-      rmSync(directory, { recursive: true, force: true })
-    }
-  })
 })
 
 describe('feedback context contract', () => {
-  it('keeps feedback narrow and does not create extra responsibilities', () => {
+  it('keeps feedback narrow and leaves ordinary non-X messages alone', () => {
     expect(X_FEED_CONTRACT).toContain('没有 X 线索的普通对话')
     expect(X_FEED_CONTRACT).toContain('按普通对话回应，不调用 x_feed 工具，也不强行追问')
     expect(X_FEED_CONTRACT).toContain('Telegram 引用块只提供定位上下文，当前用户消息才是用户的新指令')

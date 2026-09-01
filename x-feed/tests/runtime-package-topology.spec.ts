@@ -20,7 +20,6 @@ const topologyManifest = join(repositoryDirectory, 'runtime-package-topology.jso
 const pluginDirectories = [
   'dsh-assistant',
   'dsh-cron',
-  'personal-feed',
   'personal-feed-selector',
   'telegram-gateway',
   'x-feed',
@@ -100,7 +99,7 @@ function resolveFromPlugin(release: string, pluginDirectory: string, packageName
 }
 
 describe('release runtime package topology', () => {
-  it('scans the final plugin libraries and materializes every declared runtime target', () => {
+  it('scans the final plugin libraries and materializes every declared runtime target without Personal Feed', () => {
     const release = createCleanRelease()
 
     expect(() => resolveFromPlugin(release, 'dsh-cron', '@deepseek-ai/dsh-home-paths')).toThrow(
@@ -113,9 +112,14 @@ describe('release runtime package topology', () => {
     expect(resolveFromPlugin(release, 'dsh-cron', '@deepseek-ai/dsh-home-paths')).toBe(
       join(release, 'harness/node_modules/.pnpm/node_modules/@deepseek-ai/dsh-home-paths/index.js'),
     )
-    expect(resolveFromPlugin(release, 'x-feed', '@herman/personal-feed')).toBe(
-      join(release, 'plugins/personal-feed/lib/index.js'),
+    expect(() => resolveFromPlugin(release, 'x-feed', '@herman/personal-feed')).toThrow(
+      expect.objectContaining({ code: 'MODULE_NOT_FOUND' }),
     )
+    const topology = JSON.parse(readFileSync(topologyManifest, 'utf8')) as {
+      targets: Array<{ name: string; requiredBy?: string[] }>
+    }
+    expect(topology.targets.some(target => target.name === '@herman/personal-feed')).toBe(false)
+    expect(topology.targets.some(target => target.requiredBy?.includes('@herman/personal-feed'))).toBe(false)
     expect(resolveFromPlugin(release, 'x-feed', '@deepseek-ai/dsh-telegram-gateway')).toBe(
       join(release, 'plugins/telegram-gateway/lib/index.js'),
     )
@@ -127,12 +131,12 @@ describe('release runtime package topology', () => {
   it('rejects an undeclared final-library import before materializing any link', () => {
     const release = createCleanRelease()
     writeFileSync(
-      join(release, 'plugins/personal-feed/lib/undeclared-runtime.js'),
+      join(release, 'plugins/x-feed/lib/undeclared-runtime.js'),
       "import '@example/undeclared-runtime'\n",
     )
 
     expect(installerError('--materialize', release)).toContain(
-      'undeclared runtime import @example/undeclared-runtime from @herman/personal-feed',
+      'undeclared runtime import @example/undeclared-runtime from @herman/x-feed',
     )
     expect(existsSync(join(release, 'plugins/node_modules'))).toBe(false)
   })

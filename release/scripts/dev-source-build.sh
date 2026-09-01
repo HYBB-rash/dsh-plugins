@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 source_root=/workspace/dsh-plugins
 harness_root=/opt/dsh/harness
-packages=(telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed x-feed)
+packages=(telegram-gateway dsh-cron dsh-assistant personal-feed-selector x-feed)
 
 test -d "$source_root/.git" -o -f "$source_root/.git"
 test -f "$source_root/runtime-package-topology.json"

@@ -47,9 +47,6 @@
         pollIntervalMs: 10000
         maxConcurrent: 3
         deliverOnError: true
-        environmentModules:
-          - modulePath: '@herman/x-feed'
-            configJson: '{"cronJobId":"cron-af33aa98","personalFeedDataDir":"/home/herman/.dsh/storages/personal-feed","personalFeedRequiredSources":["x"],"candidateReportingWindowMs":300000}'
     - id: dsh-assistant
       name: '@deepseek-ai/dsh-assistant'
       config:

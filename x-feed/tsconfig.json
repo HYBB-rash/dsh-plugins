@@ -26,12 +26,7 @@
     "outDir": "lib/types",
     "lib": [
       "ES2024"
-    ],
-    "paths": {
-      "@herman/personal-feed": [
-        "../personal-feed/lib/types/index"
-      ]
-    }
+    ]
   },
   "include": [
     "src"

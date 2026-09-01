@@ -18,7 +18,6 @@ import {
   X_CRON_AGENT_ENVIRONMENT_MARKER,
   X_CRON_ENVIRONMENT_REQUIREMENTS,
 } from '../src/x-cron/provider.ts'
-import { createCronEnvironmentExtension } from '../src/index.ts'
 import { createCronAgentEnvironmentRegistry } from '@deepseek-ai/dsh-cron'
 import { FileNavigationSnapshotStore } from '../src/navigation/file-navigation-snapshot-store.ts'
 import { createFileProjectionSources } from '../src/fact-projection/file-projection-sources.ts'
@@ -207,16 +206,12 @@ describe('dsh-x-feed/v1 cron provider composition boundary', () => {
   it('is loaded as a business provider and its host registration is disposable', async () => {
     const directory = await temporaryDirectory()
     const registry = createCronAgentEnvironmentRegistry()
-    const provider = createCronEnvironmentExtension({
-      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-    } as never, {
+    const provider = createXFeedCronEnvironmentProvider({
+      ctx: {} as never,
       cronJobId: 'cron-x',
       dataDir: directory,
       pythonBin: 'python3',
       pipelinePath: '/pkg/python/x_insight_pipeline.py',
-      personalFeedDataDir: join(directory, 'personal-feed'),
-      personalFeedRequiredSources: ['x'],
-      candidateReportingWindowMs: 300_000,
     })
     const dispose = registry.register(provider)
     expect(registry.resolve(X_CRON_AGENT_ENVIRONMENT_MARKER)).toMatchObject({ ok: true })

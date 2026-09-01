@@ -35,7 +35,7 @@
     "python/x_topic_search.py"
   ],
   "peerDependencies": {
-    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/cordis": "workspace:*",
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-cron": "*",
     "@deepseek-ai/dsh-home-paths": "*",
@@ -43,11 +43,10 @@
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-system-prompt": "*",
     "@deepseek-ai/dsh-telegram-gateway": "*",
-    "@deepseek-ai/dsh-tools": "*",
-    "@herman/personal-feed": "*"
+    "@deepseek-ai/dsh-tools": "*"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/cordis": "workspace:*",
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-cron": "*",
     "@deepseek-ai/dsh-home-paths": "*",
@@ -55,7 +54,6 @@
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-system-prompt": "*",
     "@deepseek-ai/dsh-telegram-gateway": "*",
-    "@deepseek-ai/dsh-tools": "*",
-    "@herman/personal-feed": "*"
+    "@deepseek-ai/dsh-tools": "*"
   }
 }

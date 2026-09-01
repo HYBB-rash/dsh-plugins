@@ -33,13 +33,25 @@ case "$command" in
   run)
     name=''
     detached=false
+    home_path=''
+    telegram_test=false
     while (($#)); do
       case "$1" in
         --name) name="$2"; shift 2 ;;
         --detach) detached=true; shift ;;
+        --volume)
+          if [[ "$2" == *:/home/herman:rw ]]; then home_path="${2%:/home/herman:rw}"; fi
+          shift 2
+          ;;
+        telegram-test) telegram_test=true; shift ;;
         *) shift ;;
       esac
     done
+    if $telegram_test; then
+      mkdir -p "$home_path/.dsh/storages/dsh-cron"
+      printf '%s\n' '{"op":"create","externalRef":"dsh:notion-task-inbox:retry:v1"}' \
+        >>"$home_path/.dsh/storages/dsh-cron/jobs.jsonl"
+    fi
     if $detached; then
       : >"$MOCK_ENGINE_STATE/running/$name"
     fi
@@ -185,11 +197,12 @@ source_a="$test_root/worktree-a"
 source_b="$test_root/worktree-b"
 prepare_source() {
   local source="$1" package profile
-  for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed x-feed; do
+  for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector x-feed; do
     mkdir -p "$source/$package"
     printf '%s\n' '{}' >"$source/$package/package.json"
   done
-  mkdir -p "$source/release/scripts" "$source/skills" "$source/scripts"
+  mkdir -p "$source/release/scripts" "$source/release/tests" "$source/release/workspace-migrations" "$source/skills" "$source/scripts"
+  touch "$source/release/cli.mjs" "$source/release/dsh" "$source/release/notion.production.json"
   touch "$source/release/harness-automation-instructions.md" "$source/release/vitest.external.config.ts"
   touch "$source/runtime-package-topology.json" "$source/scripts/materialize-runtime-topology.mjs"
   for profile in web telegram telegram-test; do

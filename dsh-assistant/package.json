@@ -24,7 +24,7 @@
     "lib/types/**/*.d.ts"
   ],
   "peerDependencies": {
-    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/cordis": "workspace:*",
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-credentials": "*",
     "@deepseek-ai/dsh-home-paths": "*",
@@ -40,7 +40,7 @@
     "@deepseek-ai/schemastery": "*"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/cordis": "workspace:*",
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-credentials": "*",
     "@deepseek-ai/dsh-home-paths": "*",

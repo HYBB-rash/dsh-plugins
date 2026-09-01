@@ -2568,7 +2568,6 @@ const developmentPackages = Object.freeze([
   'dsh-cron',
   'dsh-assistant',
   'personal-feed-selector',
-  'personal-feed',
   'x-feed',
 ])
 
