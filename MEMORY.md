@@ -96,3 +96,4 @@
 - 2026-08-31：HTTP fake 只能证明请求方法、路径和原子状态机，不能证明生产 `https://` transport；曾有 Notion automation 接受 HTTPS URL 却始终构造 `HTTPConnection`，全部假服务探针通过后才在真实 443 端口失败。协议合同必须分别锁定 HTTP/HTTPS constructor。若错误字节已作为 create-only Workspace 资产安装，普通 release 不得覆盖；兼容层只能精确绑定固定 endpoint、复用标准库 TLS、保持入口与 cron argv 不变，并由后续首次安装实现直接修正。
 - 2026-08-31：accepted release 缺少 schedule reanchor evidence 时，只能在停机快照摘要门之后，从最小 `jobs.jsonl`/`runs.jsonl` 隔离副本精确恢复；job projection、migration input、逐任务 schedule hash、next-run 和记录数任一不符都保持 conflict，只有完整不存在才可新建 migration。`dev prepare` 会清空隔离 cron 定义，不能据此判断生产快照漂移。
 - 2026-08-31：Schemastery 可能把省略的嵌套 object 配置实体化为 `{}`；直接把 TypeScript 对象传给启动函数的测试无法发现这种运行时漂移。可选嵌套对象必须在 schema 中显式保留 `undefined`，并让回归测试先经过真实导出的 `Config(...)` 解析器；下游控制合同仍需独立严格验证，不能只信 schema。
+- 2026-09-01：profile 启动时 `ensure` 一个受管 command binding 只能证明启动瞬间存在，不能建立运行期所有权；普通 Agent `cron_list` 若隐藏 command jobs，`cron_delete` 也必须对这些 id 返回不存在，避免验收或误调用写入 tombstone。发布还应在启动和 accept 两端只读核验，并以真实 tombstone 后重启测试证明配置能恢复缺失 binding。
