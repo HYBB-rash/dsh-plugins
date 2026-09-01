@@ -33,6 +33,7 @@ SURFACE_PROOFS = {
     "following": {"pathname": "/home", "selectedHomeTabOrdinal": 1, "explore" + "Root": False},
     "explore": {"pathname": "/explore", "selectedHomeTabOrdinal": None, "explore" + "Root": True},
 }
+EXPLORE_ROOT_COUNT = "explore" + "RootCount"
 
 
 class _CdpFailure(Exception):
@@ -136,11 +137,21 @@ class _BoundedBrowserLock:
 
 
 _PROBE_EXPRESSION = (
-    "(() => { const path = location.pathname; "
-    "const tabs = [...document.querySelectorAll('[role=tab]')]; "
-    "const selected = tabs.findIndex(tab => tab.getAttribute('aria-selected') === 'true'); "
-    "return {pathname:path, selectedHomeTabOrdinal: selected < 0 ? null : selected, "
-    "explore" + "Root:path === '/explore'}; })()"
+    "(() => { const pathname = location.pathname; "
+    "const primaryRoots = [...document.querySelectorAll('[data-testid=\"primaryColumn\"]')]; "
+    "const homeRoots = pathname === '/home' ? primaryRoots : []; "
+    "const explore_roots = pathname === '/explore' ? primaryRoots : []; "
+    "const roots = pathname === '/home' ? homeRoots : explore_roots; "
+    "const root = roots.length === 1 ? roots[0] : null; "
+    "const loading = root ? root.querySelectorAll('[aria-busy=\"true\"]').length : 0; "
+    "const tablists = pathname === '/home' && root ? [...root.querySelectorAll('[role=\"tablist\"]')] : []; "
+    "const tabs = tablists.length === 1 ? [...tablists[0].querySelectorAll('[role=\"tab\"]')] "
+    ".map((tab, ordinal) => ({ordinal, selected: tab.getAttribute('aria-selected') === 'true'})) : []; "
+    "const outside = document.body ? [...document.body.querySelectorAll('[role=\"tab\"][aria-selected=\"true\"]')] "
+    ".filter(tab => !root || !root.contains(tab)).map(tab => tab.getAttribute('aria-selected')) : []; "
+    "return {pathname, rootCount:homeRoots.length, loadingCount:loading, "
+    "homeTablistCount:tablists.length, homeTabs:tabs, " + "explore" + "RootCount:explore_roots.length, "
+    "outsideRootSelectedTabs:outside}; })()"
 )
 _SNAPSHOT_EXPRESSION = (
     "(() => { const nodes = [...document.querySelectorAll('[data-testid=cellInnerDiv]')]; "
@@ -271,6 +282,74 @@ def _snapshot_value(value):
     return result
 
 
+def _surface_decision(surface, raw_facts):
+    required = {
+        "pathname",
+        "rootCount",
+        "loadingCount",
+        "homeTablistCount",
+        "homeTabs",
+        EXPLORE_ROOT_COUNT,
+        "outsideRootSelectedTabs",
+    }
+    if surface not in SURFACE_TARGETS or not isinstance(raw_facts, dict):
+        raise _CdpFailure()
+    if set(raw_facts) != required:
+        raise _CdpFailure()
+    if not isinstance(raw_facts["pathname"], str):
+        raise _CdpFailure()
+    for name in ("rootCount", "loadingCount", "homeTablistCount", EXPLORE_ROOT_COUNT):
+        value = raw_facts[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise _CdpFailure()
+    tabs = raw_facts["homeTabs"]
+    outside = raw_facts["outsideRootSelectedTabs"]
+    if not isinstance(tabs, list) or not isinstance(outside, list):
+        raise _CdpFailure()
+    if raw_facts["loadingCount"] != 0:
+        raise _CdpFailure()
+
+    if surface == "explore":
+        if (
+            raw_facts["pathname"] != "/explore"
+            or raw_facts["rootCount"] != 0
+            or raw_facts["homeTablistCount"] != 0
+            or tabs != []
+            or raw_facts[EXPLORE_ROOT_COUNT] != 1
+        ):
+            raise _CdpFailure()
+        return {"surfaceProof": dict(SURFACE_PROOFS[surface])}
+
+    if (
+        raw_facts["pathname"] != "/home"
+        or raw_facts["rootCount"] != 1
+        or raw_facts["homeTablistCount"] != 1
+        or raw_facts[EXPLORE_ROOT_COUNT] != 0
+        or len(tabs) != 2
+    ):
+        raise _CdpFailure()
+    ordinals = []
+    selected = []
+    for tab in tabs:
+        if not isinstance(tab, dict) or set(tab) != {"ordinal", "selected"}:
+            raise _CdpFailure()
+        ordinal = tab["ordinal"]
+        if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal not in {0, 1}:
+            raise _CdpFailure()
+        if not isinstance(tab["selected"], bool):
+            raise _CdpFailure()
+        ordinals.append(ordinal)
+        if tab["selected"]:
+            selected.append(ordinal)
+    if sorted(ordinals) != [0, 1] or len(selected) != 1:
+        raise _CdpFailure()
+    decision = {"surfaceProof": dict(SURFACE_PROOFS[surface])}
+    target = 0 if surface == "for_you" else 1
+    if selected[0] != target:
+        decision["activateOrdinal"] = target
+    return decision
+
+
 class _MechanicalCdpEvaluator:
     def __init__(self, monotonic=time.monotonic):
         self._monotonic = monotonic
@@ -388,7 +467,7 @@ class _MechanicalCdpEvaluator:
             if not isinstance(value, dict):
                 raise _CdpFailure()
             if action == "probe":
-                return {"surfaceProof": value}
+                return {"surfaceProof": decision["surfaceProof"]}
             if action == "snapshot":
                 return _snapshot_value(value)
             if "ok" not in value or not isinstance(value["ok"], bool):
@@ -408,6 +487,141 @@ class _MechanicalCdpEvaluator:
             if action == "snapshot":
                 return _snapshot_value(value)
             return {"ok": bool(value.get("ok"))} if isinstance(value, dict) else {"ok": False}
+        except _CdpFailure:
+            raise
+        except Exception:
+            raise _CdpFailure() from None
+        finally:
+            if socket is not None:
+                try:
+                    socket.close()
+                except Exception:
+                    pass
+
+
+    def _runtime_value(self, response):
+        result = response.get("result") if isinstance(response, dict) else None
+        if not isinstance(result, dict) or result.get("exceptionDetails"):
+            raise _CdpFailure()
+        inner = result.get("result")
+        if not isinstance(inner, dict) or "value" not in inner:
+            raise _CdpFailure()
+        value = inner["value"]
+        if not isinstance(value, dict):
+            raise _CdpFailure()
+        return value
+
+    def _loading_retryable(self, surface, raw_facts):
+        if not isinstance(raw_facts, dict):
+            return False
+        loading = raw_facts.get("loadingCount")
+        if isinstance(loading, bool) or not isinstance(loading, int) or loading <= 0:
+            return False
+        candidate = dict(raw_facts)
+        candidate["loadingCount"] = 0
+        try:
+            _surface_decision(surface, candidate)
+        except _CdpFailure:
+            return False
+        return True
+
+    def _activation_params(self, ordinal):
+        expression = (
+            "(() => { const activateOrdinal = " + str(ordinal) + "; "
+            "const roots = [...document.querySelectorAll('[data-testid=\"primaryColumn\"]')]; "
+            "const rootCount = roots.length; if (rootCount !== 1) return {ok:false}; "
+            "const root = roots[0]; const tablists = [...root.querySelectorAll('[role=\"tablist\"]')]; "
+            "if (tablists.length !== 1) return {ok:false}; "
+            "const tabs = [...tablists[0].querySelectorAll('[role=\"tab\"]')]; "
+            "if (tabs.length !== 2) return {ok:false}; "
+            "const ordinals = tabs.map((tab, index) => index); "
+            "if (ordinals[0] !== 0 || ordinals[1] !== 1) return {ok:false}; "
+            "const tab = tabs[activateOrdinal]; if (!tab) return {ok:false}; "
+            "tab.click(); return {ok:true}; })()"
+        )
+        return {"expression": expression, "returnByValue": True}
+
+    def evaluate(self, ws_url, action, *, surface, stable_id=None, timeout_seconds):
+        socket = None
+        try:
+            if not _valid_ws_url(ws_url):
+                raise _CdpFailure()
+            timeout = _positive_timeout(timeout_seconds)
+            action_end = self._monotonic() + timeout
+
+            def remaining():
+                value = action_end - self._monotonic()
+                if value <= 0:
+                    raise _CdpFailure()
+                return value
+
+            method, params = self._command(action, surface, stable_id)
+            socket = websocket.create_connection(ws_url, timeout=remaining())
+            socket.settimeout(remaining())
+
+            def exchange(command_id, command_method, command_params, ready=False):
+                if not ready:
+                    socket.settimeout(remaining())
+                socket.send(
+                    json.dumps(
+                        {"id": command_id, "method": command_method, "params": command_params},
+                        separators=(",", ":"),
+                    )
+                )
+                socket.settimeout(remaining())
+                response = self._read_response(socket, command_id)
+                remaining()
+                return response
+
+            response = exchange(1, method, params, ready=True)
+            if action == "navigate":
+                result = response.get("result")
+                if not isinstance(result, dict):
+                    raise _CdpFailure()
+                frame_id = result.get("frameId")
+                if not isinstance(frame_id, str) or not frame_id:
+                    raise _CdpFailure()
+                if result.get("errorText"):
+                    raise _CdpFailure()
+                command_id = 2
+                for _ in range(3):
+                    state_response = exchange(
+                        command_id,
+                        "Runtime.evaluate",
+                        {"expression": _PROBE_EXPRESSION, "returnByValue": True},
+                    )
+                    command_id += 1
+                    raw_facts = self._runtime_value(state_response)
+                    try:
+                        decision = _surface_decision(surface, raw_facts)
+                    except _CdpFailure:
+                        if self._loading_retryable(surface, raw_facts):
+                            continue
+                        raise
+                    if "activateOrdinal" not in decision:
+                        return {"url": SURFACE_TARGETS[surface], "body": ""}
+                    activated = exchange(
+                        command_id,
+                        "Runtime.evaluate",
+                        self._activation_params(decision["activateOrdinal"]),
+                    )
+                    command_id += 1
+                    if self._runtime_value(activated) != {"ok": True}:
+                        raise _CdpFailure()
+                raise _CdpFailure()
+
+            if action == "probe":
+                value = self._runtime_value(response)
+                decision = _surface_decision(surface, value)
+                if "activateOrdinal" in decision:
+                    raise _CdpFailure()
+                return {"surfaceProof": decision["surfaceProof"]}
+            value = self._runtime_value(response)
+            if action == "snapshot":
+                return _snapshot_value(value)
+            if "ok" not in value or not isinstance(value["ok"], bool):
+                raise _CdpFailure()
+            return {"ok": value["ok"]}
         except _CdpFailure:
             raise
         except Exception:

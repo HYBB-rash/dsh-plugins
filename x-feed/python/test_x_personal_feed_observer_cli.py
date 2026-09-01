@@ -43,6 +43,45 @@ if str(SOURCE_PATH.parent) not in sys.path:
     sys.path.insert(0, str(SOURCE_PATH.parent))
 
 
+def _surface_facts(surface, *, selected=None, loading=0, root_count=None,
+                   home_tablist_count=None, home_tabs=None, explore_root_count=None,
+                   outside_selected_tabs=None, pathname=None):
+    if surface in {"for_you", "following"}:
+        selected = 0 if selected is None and surface == "for_you" else selected
+        selected = 1 if selected is None else selected
+        root_count = 1 if root_count is None else root_count
+        home_tablist_count = 1 if home_tablist_count is None else home_tablist_count
+        home_tabs = (
+            [{"ordinal": 0, "selected": selected == 0},
+             {"ordinal": 1, "selected": selected == 1}]
+            if home_tabs is None else home_tabs
+        )
+        explore_root_count = 0 if explore_root_count is None else explore_root_count
+        pathname = "/home" if pathname is None else pathname
+    else:
+        root_count = 0 if root_count is None else root_count
+        home_tablist_count = 0 if home_tablist_count is None else home_tablist_count
+        home_tabs = [] if home_tabs is None else home_tabs
+        explore_root_count = 1 if explore_root_count is None else explore_root_count
+        pathname = "/explore" if pathname is None else pathname
+    return {
+        "pathname": pathname,
+        "rootCount": root_count,
+        "loadingCount": loading,
+        "homeTablistCount": home_tablist_count,
+        "homeTabs": home_tabs,
+        "exploreRootCount": explore_root_count,
+        "outsideRootSelectedTabs": [] if outside_selected_tabs is None else outside_selected_tabs,
+    }
+
+
+def _surface_decision_result(surface, activate_ordinal=None):
+    value = {"surfaceProof": dict(SURFACE_PROOFS[surface])}
+    if activate_ordinal is not None:
+        value["activateOrdinal"] = activate_ordinal
+    return value
+
+
 def _require_cli(case):
     # x_timeline_store derives its lock path at import time.  Point that
     # derivation at a non-default, non-production location and restore the
@@ -148,7 +187,7 @@ def _response_value(action, surface="for_you"):
     if action == "navigate":
         return {"url": SURFACE_TARGETS[surface], "body": ""}
     if action == "probe":
-        return dict(SURFACE_PROOFS[surface])
+        return _surface_facts(surface)
     if action == "snapshot":
         return {
             "statusCandidates": [
@@ -492,6 +531,89 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)
         self.assertIsNotNone(evaluator_type)
         evaluator = evaluator_type()
+        decision = getattr(module, "_surface_decision", None)
+        self.assertTrue(callable(decision))
+
+        for surface in ("for_you", "following", "explore"):
+            with self.subTest(surface_decision=(surface, "already_selected")):
+                facts = _surface_facts(surface)
+                result = decision(surface, facts)
+                self.assertEqual(result, _surface_decision_result(surface))
+                self.assertEqual(
+                    json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+                    '{"surfaceProof":' + json.dumps(
+                        SURFACE_PROOFS[surface], ensure_ascii=False, separators=(",", ":")
+                    ) + "}",
+                )
+
+        for surface, selected, activate in (
+            ("for_you", 1, 0),
+            ("following", 0, 1),
+        ):
+            with self.subTest(surface_decision=(surface, "activate")):
+                self.assertEqual(
+                    decision(surface, _surface_facts(surface, selected=selected)),
+                    _surface_decision_result(surface, activate),
+                )
+
+        scoped_facts = _surface_facts(
+            "for_you",
+            selected=0,
+            outside_selected_tabs=[
+                {"ordinal": 99, "selected": True},
+                {"ordinal": 100, "selected": True},
+            ],
+        )
+        self.assertEqual(decision("for_you", scoped_facts), _surface_decision_result("for_you"))
+
+        invalid_decisions = (
+            ("home_root_zero", "for_you", {"root_count": 0}),
+            ("home_root_two", "following", {"root_count": 2}),
+            ("home_tablist_zero", "for_you", {"home_tablist_count": 0}),
+            ("home_tablist_two", "following", {"home_tablist_count": 2}),
+            ("tab_count_wrong", "for_you", {"home_tabs": [{"ordinal": 0, "selected": True}]}),
+            (
+                "tab_ordinal_wrong",
+                "for_you",
+                {"home_tabs": [{"ordinal": 0, "selected": True}, {"ordinal": 2, "selected": False}]},
+            ),
+            (
+                "selected_zero",
+                "for_you",
+                {"home_tabs": [{"ordinal": 0, "selected": False}, {"ordinal": 1, "selected": False}]},
+            ),
+            (
+                "selected_two",
+                "following",
+                {"home_tabs": [{"ordinal": 0, "selected": True}, {"ordinal": 1, "selected": True}]},
+            ),
+            (
+                "selected_cannot_unique_activate",
+                "for_you",
+                {"home_tabs": [{"ordinal": 0, "selected": False}, {"ordinal": 0, "selected": True}]},
+            ),
+            ("loading", "following", {"loading": 1}),
+            ("pathname_wrong", "for_you", {"pathname": "/explore"}),
+            ("explore_root_zero", "explore", {"explore_root_count": 0}),
+            ("explore_root_two", "explore", {"explore_root_count": 2}),
+            (
+                "explore_contains_home_selected",
+                "explore",
+                {
+                    "home_tablist_count": 1,
+                    "home_tabs": [{"ordinal": 0, "selected": True}, {"ordinal": 1, "selected": False}],
+                },
+            ),
+        )
+        decision_error_type = None
+        for name, surface, changes in invalid_decisions:
+            with self.subTest(surface_decision=(name, surface)):
+                with self.assertRaises(Exception) as context:
+                    decision(surface, _surface_facts(surface, **changes))
+                if decision_error_type is None:
+                    decision_error_type = type(context.exception)
+                self.assertIs(type(context.exception), decision_error_type)
+
         ws_url = "ws://127.0.0.1:9222/devtools/page/page-1"
         stable_id = "https://x.com/alice/status/42"
         created = []
@@ -500,12 +622,214 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
 
         def create_connection(url, timeout=None, **kwargs):
             self.assertEqual(url, ws_url)
-            socket = _FakeWebSocket(_response_value(current_action[0], current_surface[0]))
+            raw_value = _response_value(current_action[0], current_surface[0])
+            if current_action[0] == "navigate":
+                raw_value = _surface_facts(current_surface[0])
+            socket = _FakeWebSocket(raw_value)
             socket.connection_kwargs = kwargs
             created.append(socket)
             self.assertGreater(timeout, 0)
             self.assertLessEqual(timeout, timeout_seconds)
             return socket
+
+        fixed_error_type = None
+
+        def assert_fixed_error(call, canary=None):
+            nonlocal fixed_error_type
+            with self.assertRaises(Exception) as context:
+                call()
+            if fixed_error_type is None:
+                fixed_error_type = type(context.exception)
+            self.assertIs(type(context.exception), fixed_error_type)
+            if canary is not None:
+                self.assertNotIn(canary, str(context.exception))
+
+        def navigate_sequence(surface, values, capture=None):
+            clock = _FakeMonotonic()
+            state_checks = [0]
+            frame_index = [0]
+
+            def frame_factory(request, response_id, _value):
+                if request["method"] == "Page.navigate":
+                    return {
+                        "id": response_id,
+                        "result": {"frameId": "frame-1", "loaderId": "loader-1"},
+                    }
+                self.assertEqual(request["method"], "Runtime.evaluate")
+                self.assertLess(frame_index[0], len(values))
+                raw_value, is_state_check = values[frame_index[0]]
+                frame_index[0] += 1
+                if is_state_check:
+                    state_checks[0] += 1
+                return {
+                    "id": response_id,
+                    "result": {
+                        "result": {"type": "object", "value": raw_value},
+                    },
+                }
+
+            sockets = []
+            passed_timeouts = []
+            if capture is not None:
+                capture["sockets"] = sockets
+                capture["state_checks"] = state_checks
+
+            def connect(url, timeout=None, **_kwargs):
+                self.assertEqual(url, ws_url)
+                self.assertGreater(timeout, 0)
+                self.assertLessEqual(timeout, timeout_seconds)
+                passed_timeouts.append(timeout)
+                clock.advance(0.01)
+                socket = _FakeWebSocket(
+                    {},
+                    frame_factory=frame_factory,
+                    on_settimeout=lambda value: passed_timeouts.append(value),
+                    on_send=lambda: clock.advance(0.01),
+                    on_recv=lambda: clock.advance(0.01),
+                )
+                sockets.append(socket)
+                return socket
+
+            evaluator_for_surface = evaluator_type(monotonic=clock)
+            with mock.patch.object(module.websocket, "create_connection", side_effect=connect) as connector:
+                result = evaluator_for_surface.evaluate(
+                    ws_url,
+                    "navigate",
+                    surface=surface,
+                    timeout_seconds=timeout_seconds,
+                )
+            self.assertEqual(connector.call_count, 1)
+            self.assertEqual(len(sockets), 1)
+            socket = sockets[0]
+            self.assertTrue(socket.closed)
+            self.assertTrue(all(value > 0 for value in passed_timeouts))
+            self.assertTrue(
+                all(left >= right for left, right in zip(passed_timeouts, passed_timeouts[1:]))
+            )
+            return result, socket, state_checks[0]
+
+        def assert_root_scoped_expression(expression, *, activation=False, explore=False):
+            self.assertIsInstance(expression, str)
+            self.assertIn("primaryColumn", expression)
+            self.assertRegex(expression, r"\[data-testid=[\"']?primaryColumn")
+            self.assertRegex(expression, r"querySelector(?:All)?\([^)]*primaryColumn")
+            self.assertIn("rootCount", expression)
+            self.assertNotIn("cellInnerDiv", expression)
+            self.assertNotRegex(
+                expression,
+                r"document\.querySelectorAll\([^)]*\[role=(?:['\"])?tab",
+            )
+            self.assertRegex(expression, r"(?:root|primary)[A-Za-z_]*\.querySelector")
+            if explore:
+                self.assertRegex(expression, r"(?:pathname|location)")
+                self.assertNotRegex(expression, r"For You|Following|Explore")
+            else:
+                self.assertRegex(expression, r"(?:tablist|role)")
+                self.assertRegex(expression, r"tablist[\s\S]{0,300}querySelectorAll")
+            if activation:
+                self.assertRegex(expression, r"(?:tablist|role)")
+                self.assertRegex(expression, r"tablist[\s\S]{0,300}querySelectorAll")
+                self.assertRegex(expression, r"(?:click|ordinal)")
+
+        for surface, opposite_selected, target_ordinal in (
+            ("for_you", 1, 0),
+            ("following", 0, 1),
+        ):
+            with self.subTest(navigate_activation=surface):
+                initial = _surface_facts(surface, selected=opposite_selected)
+                activated = {"ok": True}
+                final = _surface_facts(surface, selected=target_ordinal)
+                result, socket, state_checks = navigate_sequence(
+                    surface,
+                    [(initial, True), (activated, False), (final, True)],
+                )
+                self.assertEqual(result, {"url": SURFACE_TARGETS[surface], "body": ""})
+                self.assertEqual(state_checks, 2)
+                self.assertEqual(
+                    [message["id"] for message in socket.sent],
+                    list(range(1, len(socket.sent) + 1)),
+                )
+                self.assertEqual(sum(message["method"] == "Page.navigate" for message in socket.sent), 1)
+                self.assertEqual(
+                    [message["params"]["url"] for message in socket.sent if message["method"] == "Page.navigate"],
+                    [SURFACE_TARGETS[surface]],
+                )
+                self.assertEqual(sum(message["method"] == "Runtime.evaluate" for message in socket.sent), 3)
+                runtime_messages = [
+                    message for message in socket.sent if message["method"] == "Runtime.evaluate"
+                ]
+                assert_root_scoped_expression(
+                    runtime_messages[0]["params"]["expression"],
+                )
+                assert_root_scoped_expression(
+                    runtime_messages[1]["params"]["expression"],
+                    activation=True,
+                )
+                assert_root_scoped_expression(
+                    runtime_messages[2]["params"]["expression"],
+                )
+
+        with self.subTest(navigate_activation="explore_no_home_activation"):
+            result, socket, state_checks = navigate_sequence(
+                "explore",
+                [(_surface_facts("explore"), True)],
+            )
+            self.assertEqual(result, {"url": SURFACE_TARGETS["explore"], "body": ""})
+            self.assertEqual(state_checks, 1)
+            self.assertEqual(
+                [message["id"] for message in socket.sent],
+                list(range(1, len(socket.sent) + 1)),
+            )
+            self.assertEqual(sum(message["method"] == "Page.navigate" for message in socket.sent), 1)
+            self.assertEqual(sum(message["method"] == "Runtime.evaluate" for message in socket.sent), 1)
+            runtime_messages = [
+                message for message in socket.sent if message["method"] == "Runtime.evaluate"
+            ]
+            assert_root_scoped_expression(
+                runtime_messages[0]["params"]["expression"],
+                explore=True,
+            )
+
+        for name, facts in (
+            ("probe_wrong_path", _surface_facts("for_you", pathname="/explore")),
+            ("probe_loading", _surface_facts("for_you", loading=1)),
+        ):
+            failure = _FakeWebSocket(facts)
+            with self.subTest(probe_failure=name):
+                with mock.patch.object(module.websocket, "create_connection", return_value=failure):
+                    assert_fixed_error(
+                        lambda: evaluator.evaluate(
+                            ws_url,
+                            "probe",
+                            surface="for_you",
+                            timeout_seconds=timeout_seconds,
+                        )
+                    )
+                self.assertTrue(failure.closed)
+                self.assertEqual(failure.recv_count, 1)
+
+        for name, values in (
+            (
+                "always_loading",
+                [(_surface_facts("for_you", loading=1), True)] * 3,
+            ),
+            (
+                "never_target",
+                [
+                    (_surface_facts("for_you", selected=1), True),
+                    ({"ok": True}, False),
+                    (_surface_facts("for_you", selected=1), True),
+                ],
+            ),
+        ):
+            with self.subTest(navigate_bounded_failure=name):
+                capture = {}
+                with self.assertRaises(Exception) as context:
+                    navigate_sequence("for_you", values, capture=capture)
+                self.assertIs(type(context.exception), fixed_error_type)
+                self.assertEqual(len(capture["sockets"]), 1)
+                self.assertTrue(capture["sockets"][0].closed)
+                self.assertLessEqual(capture["state_checks"][0], 3)
 
         current_action = ["navigate"]
         for surface, target in SURFACE_TARGETS.items():
@@ -591,18 +915,6 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             )
         self.assertEqual(value, {"items": [], "cards": [], "explicitEmpty": True})
         self.assertTrue(explicit_empty.closed)
-
-        fixed_error_type = None
-
-        def assert_fixed_error(call, canary=None):
-            nonlocal fixed_error_type
-            with self.assertRaises(Exception) as context:
-                call()
-            if fixed_error_type is None:
-                fixed_error_type = type(context.exception)
-            self.assertIs(type(context.exception), fixed_error_type)
-            if canary is not None:
-                self.assertNotIn(canary, str(context.exception))
 
         def page_frame_without_frame_id(_request, response_id, _value):
             return {"id": response_id, "result": {"loaderId": "loader-1"}}
