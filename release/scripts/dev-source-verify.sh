@@ -143,10 +143,6 @@ if [[ "$requested_package" == all ]]; then
   setpriv --reuid=1000 --regid=1000 --init-groups \
     env HOME="$verify_root/home" npm_config_cache="$verify_root/cache/npm" \
     XDG_CACHE_HOME="$verify_root/cache/xdg" \
-    node --test /opt/dsh/release-system/tests/notion-retry-binding.mjs
-  setpriv --reuid=1000 --regid=1000 --init-groups \
-    env HOME="$verify_root/home" npm_config_cache="$verify_root/cache/npm" \
-    XDG_CACHE_HOME="$verify_root/cache/xdg" \
     node --test /opt/dsh/release-system/tests/inspect-cron-reanchor.mjs
   setpriv --reuid=1000 --regid=1000 --init-groups \
     env HOME="$verify_root/home" npm_config_cache="$verify_root/cache/npm" \

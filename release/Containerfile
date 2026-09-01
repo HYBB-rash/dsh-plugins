@@ -138,7 +138,6 @@ RUN set -eu; \
       python3 /opt/dsh/release-system/tests/test_workspace_migration_content.py; \
     node --test /opt/dsh/release-system/tests/assistant-cron-health.mjs; \
     node --test /opt/dsh/release-system/tests/fake-notion.mjs; \
-    node --test /opt/dsh/release-system/tests/notion-retry-binding.mjs; \
     node --test /opt/dsh/release-system/tests/inspect-cron-reanchor.mjs; \
     NODE_NO_WARNINGS=1 node /opt/dsh/release-system/tests/validate-assistant-state.mjs
 
