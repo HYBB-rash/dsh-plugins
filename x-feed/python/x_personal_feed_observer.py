@@ -225,6 +225,19 @@ def _proof_matches(surface, value):
     return isinstance(value, dict) and value == PROOFS[surface]
 
 
+def _empty_proof_matches(surface, value):
+    if surface not in PROOFS or type(value) is not dict:
+        return False
+    if set(value) != {"kind", "surface", "surfaceProof"}:
+        return False
+    return (
+        value["kind"] == "surface_empty"
+        and value["surface"] == surface
+        and type(value["surfaceProof"]) is dict
+        and value["surfaceProof"] == PROOFS[surface]
+    )
+
+
 def _face(surface, ordinal, kind, started, completed, occurrences=None):
     if kind in {"complete", "natural_zero"}:
         return {
@@ -403,9 +416,10 @@ def _surface_observe(surface, ordinal, ws_url, deadline, clock, evaluator, start
         if len(occurrences) >= MAX_OCCURRENCES:
             break
         if snapshot.get("explicitEmpty") is True and not has_values:
-            if not occurrences:
-                return "natural_zero", occurrences
-            break
+            if _empty_proof_matches(surface, snapshot.get("emptyProof")):
+                if not occurrences:
+                    return "natural_zero", occurrences
+                break
         if len(occurrences) == previous_count:
             return ("complete" if occurrences else "unknown"), occurrences
         try:

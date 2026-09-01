@@ -156,8 +156,15 @@ _PROBE_EXPRESSION = (
 )
 _SNAPSHOT_EXPRESSION = (
     "(() => { const roots = [...document.querySelectorAll('[data-testid=\"primaryColumn\"]')]; "
-    "if (roots.length !== 1) return {cells:null, explicitEmpty:false}; "
-    "const root = roots[0]; const nodes = [...root.querySelectorAll('[data-testid=\"cellInnerDiv\"]')].slice(0, 8); "
+    "if (roots.length !== 1) return {cells:null, emptyFacts:{surfaceProof:null,surfaceRootCount:roots.length,emptyMarkerCount:0,outsideRootEmptyMarkerCount:0,loadingCount:0,loginCount:0,authCount:0,errorCount:0,retryCount:0}}; "
+    "const root = roots[0]; const pathname = location.pathname; const exploreKey = 'explore' + 'Root'; "
+    "const homeTablists = pathname === '/home' ? [...root.querySelectorAll('[role=\"tablist\"]')] : []; "
+    "const homeTabs = homeTablists.length === 1 ? [...homeTablists[0].querySelectorAll('[role=\"tab\"]')] : []; "
+    "const selected = homeTabs.map((tab, ordinal) => ({ordinal, selected: tab.getAttribute('aria-selected') === 'true'})).filter(tab => tab.selected); "
+    "const surfaceProof = pathname === '/explore' ? {pathname:'/explore',selectedHomeTabOrdinal:null,[exploreKey]:true} : "
+    "pathname === '/home' && homeTablists.length === 1 && homeTabs.length === 2 && selected.length === 1 ? "
+    "{pathname:'/home',selectedHomeTabOrdinal:selected[0].ordinal,[exploreKey]:false} : null; "
+    "const nodes = [...root.querySelectorAll('[data-testid=\"cellInnerDiv\"]')].slice(0, 8); "
     "const cells = nodes.map(cell => { const candidates = "
     "[...cell.querySelectorAll('article[data-testid=\"tweet\"]')].slice(0, 8).map(article => { "
     "const owned = node => node.closest('article[data-testid=\"tweet\"]') === article; "
@@ -182,7 +189,17 @@ _SNAPSHOT_EXPRESSION = (
     "publishedAt:time ? time.getAttribute('datetime') : null, body:text ? text.innerText : null, "
     "depth, insideQuote:quote, showMoreControlCount:more.length, "
     "placeholder:!status || !time || !text}; }); return {candidates}; }); "
-    "return {cells, explicitEmpty:cells.length === 0}; })()"
+    "const visible = node => node.getClientRects().length > 0 && node.getAttribute('aria-hidden') !== 'true'; "
+    "const emptyMarkerCount = [...root.querySelectorAll('[data-testid=\"emptyState\"]')].filter(visible).length; "
+    "const outsideRootEmptyMarkerCount = document.body ? [...document.body.querySelectorAll('[data-testid=\"emptyState\"]')]"
+    ".filter(node => !root.contains(node) && visible(node)).length : 0; "
+    "const loadingCount = root.querySelectorAll('[aria-busy=\"true\"],[role=\"progressbar\"]').length; "
+    "const loginCount = root.querySelectorAll('[data-testid=\"login\"],[data-testid=\"loginButton\"]').length; "
+    "const authCount = root.querySelectorAll('[data-testid=\"authError\"],[data-testid=\"authRequired\"]').length; "
+    "const errorCount = root.querySelectorAll('[data-testid=\"error\"],[data-testid=\"errorState\"]').length; "
+    "const retryCount = root.querySelectorAll('[data-testid=\"retry\"],[data-testid=\"retryButton\"]').length; "
+    "const emptyFacts = {surfaceProof,surfaceRootCount:roots.length,emptyMarkerCount,outsideRootEmptyMarkerCount,"
+    "loadingCount,loginCount,authCount,errorCount,retryCount}; return {cells,emptyFacts}; })()"
 )
 _SCROLL_EXPRESSION = (
     "(() => { const amount = Math.max(240, Math.floor(innerHeight * 0.8)); "
@@ -397,6 +414,84 @@ def _snapshot_value(value):
         result["items"] = []
         result["cards"] = []
     return result
+
+
+def _snapshot_value(value, surface):
+    if surface not in SURFACE_TARGETS or not isinstance(value, dict):
+        raise _CdpFailure()
+    if set(value) != {"cells", "emptyFacts"}:
+        raise _CdpFailure()
+    facts = value["emptyFacts"]
+    fact_fields = {
+        "surfaceProof",
+        "surfaceRootCount",
+        "emptyMarkerCount",
+        "outsideRootEmptyMarkerCount",
+        "loadingCount",
+        "loginCount",
+        "authCount",
+        "errorCount",
+        "retryCount",
+    }
+    if not isinstance(facts, dict) or set(facts) != fact_fields:
+        raise _CdpFailure()
+    if facts["surfaceProof"] != SURFACE_PROOFS[surface]:
+        raise _CdpFailure()
+    for name in fact_fields - {"surfaceProof"}:
+        number = facts[name]
+        if isinstance(number, bool) or not isinstance(number, int) or number < 0:
+            raise _CdpFailure()
+    if facts["surfaceRootCount"] != 1 or facts["outsideRootEmptyMarkerCount"] != 0:
+        raise _CdpFailure()
+    if any(facts[name] != 0 for name in ("loadingCount", "loginCount", "authCount", "errorCount", "retryCount")):
+        raise _CdpFailure()
+    cells = value["cells"]
+    if not isinstance(cells, list):
+        raise _CdpFailure()
+    if not cells:
+        if facts["emptyMarkerCount"] != 1:
+            raise _CdpFailure()
+        return {
+            "items": [],
+            "explicitEmpty": True,
+            "emptyProof": {
+                "kind": "surface_empty",
+                "surface": surface,
+                "surfaceProof": dict(SURFACE_PROOFS[surface]),
+            },
+        }
+    if facts["emptyMarkerCount"] != 0:
+        raise _CdpFailure()
+    items = []
+    for cell in cells:
+        if not isinstance(cell, dict) or set(cell) != {"candidates"}:
+            raise _CdpFailure()
+        candidates = cell["candidates"]
+        if not isinstance(candidates, list) or not candidates:
+            raise _CdpFailure()
+        roots = []
+        for candidate in candidates:
+            normalized = _snapshot_candidate(candidate)
+            if not normalized["insideQuote"]:
+                roots.append(normalized)
+        if not roots:
+            raise _CdpFailure()
+        minimum = min(item["depth"] for item in roots)
+        selected = [item for item in roots if item["depth"] == minimum]
+        if len(selected) != 1:
+            raise _CdpFailure()
+        chosen = selected[0]
+        items.append(
+            {
+                "sourceUrl": chosen["sourceUrl"],
+                "authorHandle": chosen["authorHandle"],
+                "publishedAt": chosen["publishedAt"],
+                "body": chosen["body"],
+                "showMore": chosen["showMore"],
+                "placeholder": chosen["placeholder"],
+            }
+        )
+    return {"items": items, "explicitEmpty": False}
 
 
 def _surface_decision(surface, raw_facts):
@@ -626,7 +721,7 @@ class _MechanicalCdpEvaluator:
             if action == "probe":
                 return {"surfaceProof": decision["surfaceProof"]}
             if action == "snapshot":
-                return _snapshot_value(value)
+                return _snapshot_value(value, surface)
             if "ok" not in value or not isinstance(value["ok"], bool):
                 raise _CdpFailure()
             return {"ok": value["ok"]}
@@ -642,7 +737,7 @@ class _MechanicalCdpEvaluator:
                 proof = value.get("surfaceProof") if isinstance(value, dict) else None
                 return {"surfaceProof": proof if isinstance(proof, dict) else {}}
             if action == "snapshot":
-                return _snapshot_value(value)
+                return _snapshot_value(value, surface)
             return {"ok": bool(value.get("ok"))} if isinstance(value, dict) else {"ok": False}
         except _CdpFailure:
             raise
@@ -775,7 +870,7 @@ class _MechanicalCdpEvaluator:
                 return {"surfaceProof": decision["surfaceProof"]}
             value = self._runtime_value(response)
             if action == "snapshot":
-                return _snapshot_value(value)
+                return _snapshot_value(value, surface)
             if action == "expand":
                 return _expand_decision(value)
             if "ok" not in value or not isinstance(value["ok"], bool):

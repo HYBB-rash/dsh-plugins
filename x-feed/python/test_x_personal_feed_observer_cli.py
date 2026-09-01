@@ -82,6 +82,22 @@ def _surface_decision_result(surface, activate_ordinal=None):
     return value
 
 
+def _empty_facts(surface, **counts):
+    value = {
+        "surfaceProof": dict(SURFACE_PROOFS[surface]),
+        "surfaceRootCount": 1,
+        "emptyMarkerCount": 0,
+        "outsideRootEmptyMarkerCount": 0,
+        "loadingCount": 0,
+        "loginCount": 0,
+        "authCount": 0,
+        "errorCount": 0,
+        "retryCount": 0,
+    }
+    value.update(counts)
+    return value
+
+
 def _require_cli(case):
     # x_timeline_store derives its lock path at import time.  Point that
     # derivation at a non-default, non-production location and restore the
@@ -211,7 +227,7 @@ def _response_value(action, surface="for_you"):
         }
         return {
             "cells": [{"candidates": [root, nested_quote]}],
-            "explicitEmpty": False,
+            "emptyFacts": _empty_facts(surface),
         }
     if action == "expand":
         return {
@@ -923,13 +939,14 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
 
         explicit_empty = _FakeWebSocket({"items": [], "cards": [], "explicitEmpty": True})
         with mock.patch.object(module.websocket, "create_connection", return_value=explicit_empty):
-            value = evaluator.evaluate(
-                ws_url,
-                "snapshot",
-                surface="for_you",
-                timeout_seconds=timeout_seconds,
+            assert_fixed_error(
+                lambda: evaluator.evaluate(
+                    ws_url,
+                    "snapshot",
+                    surface="for_you",
+                    timeout_seconds=timeout_seconds,
+                )
             )
-        self.assertEqual(value, {"items": [], "cards": [], "explicitEmpty": True})
         self.assertTrue(explicit_empty.closed)
 
         def snapshot_candidate(source_url, author, published_at, body, depth, inside_quote,
@@ -961,7 +978,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             {"candidates": [alice_root, alice_quote]},
             {"candidates": [carol_root, carol_quote]},
         ]
-        snapshot_socket = _FakeWebSocket({"cells": snapshot_cells, "explicitEmpty": False})
+        snapshot_socket = _FakeWebSocket({"cells": snapshot_cells, "emptyFacts": _empty_facts("for_you")})
         with mock.patch.object(module.websocket, "create_connection", return_value=snapshot_socket):
             projected_snapshot = evaluator.evaluate(
                 ws_url,
@@ -1007,7 +1024,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         )
         show_more_socket = _FakeWebSocket({
             "cells": [{"candidates": [{**alice_root, "showMoreControlCount": 1}]}],
-            "explicitEmpty": False,
+            "emptyFacts": _empty_facts("for_you"),
         })
         with mock.patch.object(module.websocket, "create_connection", return_value=show_more_socket):
             show_more_snapshot = evaluator.evaluate(
@@ -1064,11 +1081,11 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
 
         malformed_snapshot = {
             "cells": snapshot_cells,
-            "explicitEmpty": False,
+            "emptyFacts": _empty_facts("for_you"),
         }
 
         def snapshot_failure(name, cells, *, canary=None):
-            failure = _FakeWebSocket({"cells": cells, "explicitEmpty": False})
+            failure = _FakeWebSocket({"cells": cells, "emptyFacts": _empty_facts("for_you")})
             with self.subTest(snapshot_failure=name):
                 with mock.patch.object(module.websocket, "create_connection", return_value=failure):
                     assert_fixed_error(
@@ -1544,6 +1561,184 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         self.assertEqual(result, {"ok": False})
         self.assertTrue(ambiguous.closed)
 
+    def test_snapshot_empty_facts_are_surface_scoped_and_bounded(self):
+        module = _require_cli(self)
+        evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)
+        self.assertIsNotNone(evaluator_type)
+        evaluator = evaluator_type()
+        ws_url = "ws://127.0.0.1:9222/devtools/page/page-c8"
+        timeout_seconds = 2.0
+        empty_fact_keys = {
+            "surfaceProof", "surfaceRootCount", "emptyMarkerCount",
+            "outsideRootEmptyMarkerCount", "loadingCount", "loginCount",
+            "authCount", "errorCount", "retryCount",
+        }
+        for surface in SURFACE_TARGETS:
+            facts = _empty_facts(surface, emptyMarkerCount=1)
+            self.assertEqual(set(facts), empty_fact_keys)
+            socket = _FakeWebSocket({"cells": [], "emptyFacts": facts})
+            with self.subTest(empty_surface=surface):
+                with mock.patch.object(module.websocket, "create_connection", return_value=socket):
+                    result = evaluator.evaluate(
+                        ws_url,
+                        "snapshot",
+                        surface=surface,
+                        timeout_seconds=timeout_seconds,
+                    )
+                self.assertEqual(
+                    result,
+                    {
+                        "items": [],
+                        "explicitEmpty": True,
+                        "emptyProof": {
+                            "kind": "surface_empty",
+                            "surface": surface,
+                            "surfaceProof": dict(SURFACE_PROOFS[surface]),
+                        },
+                    },
+                )
+                self.assertTrue(socket.closed)
+                if surface == "for_you":
+                    self.assertEqual(len(socket.sent), 1)
+                    request = socket.sent[0]
+                    self.assertEqual(request["method"], "Runtime.evaluate")
+                    expression = request["params"]["expression"]
+                    self.assertIsInstance(expression, str)
+                    self.assertIn("emptyFacts", expression)
+                    for field in (
+                        "surfaceProof",
+                        "surfaceRootCount",
+                        "emptyMarkerCount",
+                        "outsideRootEmptyMarkerCount",
+                        "loadingCount",
+                        "loginCount",
+                        "authCount",
+                        "errorCount",
+                        "retryCount",
+                    ):
+                        self.assertIn(field, expression)
+                    self.assertIn("roots.length !== 1", expression)
+                    self.assertIn('data-testid="emptyState"', expression)
+                    self.assertIn("root.querySelectorAll", expression)
+                    self.assertIn("!root.contains", expression)
+                    self.assertIn('[aria-busy="true"]', expression)
+                    self.assertIn('[role="progressbar"]', expression)
+                    self.assertIn("getClientRects", expression)
+                    self.assertIn("aria-hidden", expression)
+                    for field in ("loginCount", "authCount", "errorCount", "retryCount"):
+                        field_position = expression.index(field)
+                        field_context = expression[
+                            max(0, field_position - 800):field_position + 800
+                        ]
+                        self.assertIn("querySelector", field_context)
+                        self.assertTrue(
+                            any(
+                                selector in field_context
+                                for selector in ("[data-testid=", "[role=", "[aria-")
+                            )
+                        )
+                        self.assertNotIn("innerText", field_context)
+                        self.assertNotIn("textContent", field_context)
+
+        error_type = None
+
+        def assert_snapshot_failure(call, canary=None):
+            nonlocal error_type
+            with self.assertRaises(Exception) as context:
+                call()
+            if error_type is None:
+                error_type = type(context.exception)
+            self.assertIs(type(context.exception), error_type)
+            if canary is not None:
+                self.assertNotIn(canary, str(context.exception))
+
+        def evaluate_snapshot(surface, raw, *, canary=None):
+            socket = _FakeWebSocket(raw)
+            with mock.patch.object(module.websocket, "create_connection", return_value=socket):
+                assert_snapshot_failure(
+                    lambda: evaluator.evaluate(
+                        ws_url,
+                        "snapshot",
+                        surface=surface,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    canary=canary,
+                )
+            self.assertTrue(socket.closed)
+
+        for surface in SURFACE_TARGETS:
+            base = _empty_facts(surface, emptyMarkerCount=1)
+            invalid_zero = [
+                ("no_marker", {**base, "emptyMarkerCount": 0}, None),
+                ("two_markers", {**base, "emptyMarkerCount": 2}, None),
+                ("outside_marker", {**base, "outsideRootEmptyMarkerCount": 1}, None),
+                ("surface_root_zero", {**base, "surfaceRootCount": 0}, None),
+                ("surface_root_two", {**base, "surfaceRootCount": 2}, None),
+                ("wrong_surface_proof", {
+                    **base,
+                    "surfaceProof": dict(SURFACE_PROOFS["explore" if surface != "explore" else "for_you"]),
+                }, None),
+                ("surface_proof_not_dict", {**base, "surfaceProof": "wrong"}, None),
+                ("missing_fact", {key: value for key, value in base.items() if key != "retryCount"}, None),
+                ("extra_fact", {**base, "extra": "正文CANARY"}, "正文CANARY"),
+                ("bool_count", {**base, "emptyMarkerCount": True}, None),
+                ("negative_count", {**base, "surfaceRootCount": -1}, None),
+            ]
+            for blocker in ("loadingCount", "loginCount", "authCount", "errorCount", "retryCount"):
+                invalid_zero.append((blocker, {**base, blocker: 1}, None))
+            for name, facts, canary in invalid_zero:
+                with self.subTest(empty_failure=(surface, name)):
+                    evaluate_snapshot(
+                        surface,
+                        {"cells": [], "emptyFacts": facts},
+                        canary=canary,
+                    )
+
+            top_level_invalid = (
+                ("missing_empty_facts", {"cells": []}, None),
+                ("extra_top_level_key", {
+                    "cells": [], "emptyFacts": base, "extra": "正文CANARY",
+                }, "正文CANARY"),
+                ("cells_not_list", {"cells": "not-a-list", "emptyFacts": base}, None),
+                ("empty_facts_not_dict", {"cells": [], "emptyFacts": "not-a-dict"}, None),
+            )
+            for name, raw, canary in top_level_invalid:
+                with self.subTest(empty_failure=(surface, name)):
+                    evaluate_snapshot(surface, raw, canary=canary)
+
+            with self.subTest(empty_failure=(surface, "legacy_explicit_empty")):
+                evaluate_snapshot(
+                    surface,
+                    {"items": [], "cards": [], "explicitEmpty": True},
+                )
+
+        nonempty_candidate = {
+            "sourceUrl": "https://x.com/alice/status/808",
+            "authorHandle": "alice",
+            "publishedAt": TIMESTAMP,
+            "body": "nonempty",
+            "depth": 0,
+            "insideQuote": False,
+            "showMoreControlCount": 0,
+            "placeholder": False,
+        }
+        with self.subTest(nonempty_failure="empty_marker_claim"):
+            evaluate_snapshot(
+                "for_you",
+                {
+                    "cells": [{"candidates": [nonempty_candidate]}],
+                    "emptyFacts": _empty_facts("for_you", emptyMarkerCount=1),
+                },
+            )
+        with self.subTest(nonempty_failure="blocker_claim"):
+            evaluate_snapshot(
+                "for_you",
+                {
+                    "cells": [{"candidates": [nonempty_candidate]}],
+                    "emptyFacts": _empty_facts("for_you", loadingCount=1),
+                },
+            )
+
     def test_cli_static_and_persistence_boundaries(self):
         module = _require_cli(self)
         source = inspect.getsource(module)
@@ -1568,7 +1763,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             "daily_report", "insight_engine", "neighborhood", "subprocess",
             "ensure_cdp", "ensure_x_tab", "new_tab", "browser_start", "restart",
             "timeline.append", "append_unique", "history", "shown", "current_collection",
-            "session", "log", "sys.argv", "os.environ", "tempfile",
+            "session", "logging", "logger", "sys.stderr", "sys.argv", "os.environ", "tempfile",
         )
         for fragment in forbidden_fragments:
             self.assertNotIn(fragment, lowered, fragment)

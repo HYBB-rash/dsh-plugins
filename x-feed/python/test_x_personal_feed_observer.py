@@ -210,6 +210,33 @@ def _plans_for_snapshot(snapshot, surface_proof=None):
     return plans
 
 
+def _empty_snapshot(surface):
+    return {
+        "items": [],
+        "cards": [],
+        "statusCandidates": [],
+        "explicitEmpty": True,
+        "emptyProof": {
+            "kind": "surface_empty",
+            "surface": surface,
+            "surfaceProof": dict(SURFACE_PROOFS[surface]),
+        },
+    }
+
+
+def _plans_for_empty():
+    plans = {}
+    for surface in SURFACES:
+        plans[(surface, "navigate")] = [{"url": SURFACE_URLS[surface], "body": "timeline"}]
+        plans[(surface, "probe")] = [{
+            "url": SURFACE_URLS[surface],
+            "body": "timeline",
+            "surfaceProof": dict(SURFACE_PROOFS[surface]),
+        }]
+        plans[(surface, "snapshot")] = [_empty_snapshot(surface)]
+    return plans
+
+
 def _invoke(module, clock, browser, lock, evaluator, deadline=1_100_000):
     return module.observe(
         deadline,
@@ -433,7 +460,7 @@ class TestPersonalFeedObserver(unittest.TestCase):
             )
             for index in range(12)
         ]
-        twelve_plans = _plans_for_snapshot({"items": [], "cards": [], "explicitEmpty": True})
+        twelve_plans = _plans_for_empty()
         twelve_plans[("for_you", "snapshot")] = [{
             "items": twelve,
             "cards": twelve,
@@ -472,7 +499,7 @@ class TestPersonalFeedObserver(unittest.TestCase):
             placeholder=True,
             showMore=True,
         )
-        repeat_plans = _plans_for_snapshot({"items": [], "cards": [], "explicitEmpty": True})
+        repeat_plans = _plans_for_empty()
         repeat_plans[("for_you", "snapshot")] = [
             {"items": [repeat_placeholder], "cards": [repeat_placeholder], "explicitEmpty": False},
             {"items": [repeat_placeholder], "cards": [repeat_placeholder], "explicitEmpty": False},
@@ -511,7 +538,7 @@ class TestPersonalFeedObserver(unittest.TestCase):
         item = _body_item("https://x.com/alice/status/201")
         cases = (
             ("complete", {"items": [item], "cards": [item], "explicitEmpty": False}, None, None, "complete"),
-            ("natural_zero", {"items": [], "cards": [], "explicitEmpty": True}, None, None, "complete"),
+            ("natural_zero", None, None, None, "complete"),
             ("empty_without_proof", {"items": [], "cards": []}, None, None, "incomplete"),
             ("partial", {"items": [item], "cards": [item]}, {("for_you", "snapshot"): [
                 {"items": [item], "cards": [item], "explicitEmpty": False},
@@ -526,7 +553,10 @@ class TestPersonalFeedObserver(unittest.TestCase):
                 browser = _FakeBrowser(clock)
                 lock = _FakeLock()
                 mismatch = {"pathname": "/notifications", "selectedHomeTabOrdinal": 0, "exploreRoot": False}
-                plans = _plans_for_snapshot(snapshot, surface_proof=mismatch if proof_mode == "mismatch" else None)
+                if name == "natural_zero":
+                    plans = _plans_for_empty()
+                else:
+                    plans = _plans_for_snapshot(snapshot, surface_proof=mismatch if proof_mode == "mismatch" else None)
                 if errors:
                     plans.update(errors)
                 evaluator = _FakeEvaluator(clock, plans=plans)
@@ -562,8 +592,8 @@ class TestPersonalFeedObserver(unittest.TestCase):
             candidate_empty_evaluator,
         )
         candidate_empty_faces = _surface_map(self, candidate_empty_result)
-        self.assertEqual(candidate_empty_result["kind"], "complete")
-        self.assertTrue(all(candidate_empty_faces[s]["kind"] == "natural_zero" for s in SURFACES))
+        _assert_incomplete_body_free(self, candidate_empty_result)
+        self.assertTrue(all(candidate_empty_faces[s]["kind"] == "unknown" for s in SURFACES))
 
     def test_observe_deduplicates_status_per_surface_only(self):
         module = _require_observer(self)
@@ -765,7 +795,7 @@ class TestPersonalFeedObserver(unittest.TestCase):
             _body_item(f"https://x.com/alice/status/{500 + index}", body=f"item-{index}")
             for index in range(8)
         ]
-        stop_plans = _plans_for_snapshot({"items": [], "cards": [], "explicitEmpty": True})
+        stop_plans = _plans_for_empty()
         stop_plans[("for_you", "snapshot")] = [{
             "items": eight_items,
             "cards": eight_items,
@@ -803,7 +833,7 @@ class TestPersonalFeedObserver(unittest.TestCase):
             placeholder=True,
             showMore=True,
         )
-        nine_plans = _plans_for_snapshot({"items": [], "cards": [], "explicitEmpty": True})
+        nine_plans = _plans_for_empty()
         nine_plans[("for_you", "snapshot")] = [{
             "items": slot_items + [invalid_ninth],
             "cards": slot_items + [invalid_ninth],
@@ -887,7 +917,7 @@ class TestPersonalFeedObserver(unittest.TestCase):
                     "explicitEmpty": False,
                 }, surface_proof=proof_override)
                 if name == "fy_complete_following_navigation_failed":
-                    following_empty = {"items": [], "cards": [], "explicitEmpty": True}
+                    following_empty = _empty_snapshot("for_you")
                     plans[("for_you", "snapshot")] = [{"items": [item], "cards": [item], "explicitEmpty": False}, following_empty]
                     plans[("following", "navigate")] = [{"url": SURFACE_URLS["following"], "body": "timeline"}]
                 if name == "fy_canary_scroll_deadline":
@@ -924,11 +954,7 @@ class TestPersonalFeedObserver(unittest.TestCase):
                 deadline = 1_100_000
                 browser = _FakeBrowser(clock)
                 lock = _FakeLock()
-                plans = _plans_for_snapshot({
-                    "items": [],
-                    "cards": [],
-                    "explicitEmpty": True,
-                })
+                plans = _plans_for_empty()
                 if name == "expand_error_after_trusted_occurrence":
                     plans[("for_you", "snapshot")] = [
                         {
@@ -1206,6 +1232,97 @@ class TestPersonalFeedObserver(unittest.TestCase):
             remaining_ms = deadline - call["at_ms"]
             self.assertGreater(call["timeout_seconds"], 0)
             self.assertLessEqual(call["timeout_seconds"] * 1000, remaining_ms)
+
+
+    def test_natural_zero_requires_exact_surface_empty_proof(self):
+        module = _require_observer(self)
+        deadline = 1_010_000
+        clock = _FakeClock(1_000_000, advance_each_evaluation=80)
+        evaluator = _FakeEvaluator(clock, plans=_plans_for_empty())
+        browser = _FakeBrowser(clock)
+        lock = _FakeLock()
+
+        result = _invoke(module, clock, browser, lock, evaluator, deadline)
+
+        self.assertEqual(result["kind"], "complete")
+        faces = _surface_map(self, result)
+        for surface in SURFACES:
+            self.assertEqual(faces[surface]["kind"], "natural_zero")
+            self.assertEqual(faces[surface]["occurrences"], [])
+
+        def run_single_surface(snapshot, surface):
+            plans = _plans_for_empty()
+            plans[(surface, "snapshot")] = [snapshot]
+            local_clock = _FakeClock(1_000_000, advance_each_evaluation=80)
+            local_evaluator = _FakeEvaluator(local_clock, plans=plans)
+            local_result = _invoke(
+                module,
+                local_clock,
+                _FakeBrowser(local_clock),
+                _FakeLock(),
+                local_evaluator,
+                deadline,
+            )
+            return local_result
+
+        for surface in SURFACES:
+            valid = _empty_snapshot(surface)
+            invalid_proofs = []
+            missing = dict(valid)
+            missing.pop("emptyProof")
+            invalid_proofs.append(("missing", missing))
+            extra = dict(valid)
+            extra["emptyProof"] = {**valid["emptyProof"], "extra": True}
+            invalid_proofs.append(("extra", extra))
+            wrong_surface = dict(valid)
+            wrong_surface["emptyProof"] = {
+                **valid["emptyProof"],
+                "surface": "explore" if surface != "explore" else "for_you",
+            }
+            invalid_proofs.append(("wrong_surface", wrong_surface))
+            wrong_proof = dict(valid)
+            wrong_proof["emptyProof"] = {
+                **valid["emptyProof"],
+                "surfaceProof": dict(SURFACE_PROOFS["explore" if surface != "explore" else "for_you"]),
+            }
+            invalid_proofs.append(("wrong_proof", wrong_proof))
+            legacy_bool = {"items": [], "explicitEmpty": True}
+            invalid_proofs.append(("legacy_bool_only", legacy_bool))
+            non_dict = dict(valid)
+            non_dict["emptyProof"] = "surface_empty"
+            invalid_proofs.append(("non_dict", non_dict))
+
+            for name, snapshot in invalid_proofs:
+                with self.subTest(natural_zero_failure=(surface, name)):
+                    failed = run_single_surface(snapshot, surface)
+                    _assert_incomplete_body_free(self, failed)
+                    failed_faces = _surface_map(self, failed)
+                    self.assertEqual(failed_faces[surface]["kind"], "unknown")
+
+        nonempty = {
+            "items": [_body_item("https://x.com/alice/status/909", body="nonempty")],
+            "cards": [],
+            "explicitEmpty": True,
+            "emptyProof": _empty_snapshot("for_you")["emptyProof"],
+        }
+        nonempty_plans = _plans_for_empty()
+        nonempty_plans[("for_you", "snapshot")] = [nonempty]
+        nonempty_clock = _FakeClock(1_000_000, advance_each_evaluation=80)
+        nonempty_result = _invoke(
+            module,
+            nonempty_clock,
+            _FakeBrowser(nonempty_clock),
+            _FakeLock(),
+            _FakeEvaluator(nonempty_clock, plans=nonempty_plans),
+            deadline,
+        )
+        self.assertEqual(nonempty_result["kind"], "complete")
+        nonempty_faces = _surface_map(self, nonempty_result)
+        self.assertEqual(nonempty_faces["for_you"]["kind"], "complete")
+        self.assertEqual(
+            nonempty_faces["for_you"]["occurrences"][0]["body"],
+            {"kind": "sufficient", "text": "nonempty"},
+        )
 
 
 if __name__ == "__main__":
