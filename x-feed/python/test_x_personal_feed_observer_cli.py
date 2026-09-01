@@ -189,29 +189,28 @@ def _response_value(action, surface="for_you"):
     if action == "probe":
         return _surface_facts(surface)
     if action == "snapshot":
+        root = {
+            "sourceUrl": "https://x.com/alice/status/42",
+            "authorHandle": "alice",
+            "publishedAt": TIMESTAMP,
+            "body": "root",
+            "depth": 0,
+            "insideQuote": False,
+            "showMore": False,
+            "placeholder": False,
+        }
+        nested_quote = {
+            "sourceUrl": "https://x.com/bob/status/43",
+            "authorHandle": "bob",
+            "publishedAt": TIMESTAMP,
+            "body": "nested quote",
+            "depth": 1,
+            "insideQuote": True,
+            "showMore": False,
+            "placeholder": False,
+        }
         return {
-            "statusCandidates": [
-                {
-                    "sourceUrl": "https://x.com/alice/status/42",
-                    "authorHandle": "alice",
-                    "publishedAt": TIMESTAMP,
-                    "body": "root",
-                    "depth": 0,
-                    "insideQuote": False,
-                    "showMore": False,
-                    "placeholder": False,
-                },
-                {
-                    "sourceUrl": "https://x.com/bob/status/43",
-                    "authorHandle": "bob",
-                    "publishedAt": TIMESTAMP,
-                    "body": "quoted and reposted",
-                    "depth": 1,
-                    "insideQuote": True,
-                    "showMore": True,
-                    "placeholder": False,
-                },
-            ],
+            "cells": [{"candidates": [root, nested_quote]}],
             "explicitEmpty": False,
         }
     if action in {"expand", "scroll"}:
@@ -891,13 +890,23 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             if action == "probe":
                 self.assertEqual(value["surfaceProof"], SURFACE_PROOFS["for_you"])
             elif action == "snapshot":
-                self.assertFalse(value["explicitEmpty"])
-                self.assertEqual(value["statusCandidates"][1]["insideQuote"], True)
-                for field in (
-                    "sourceUrl", "authorHandle", "publishedAt", "body", "depth",
-                    "insideQuote", "showMore", "placeholder",
-                ):
-                    self.assertIn(field, value["statusCandidates"][1])
+                self.assertEqual(
+                    value,
+                    {
+                        "items": [{
+                            "sourceUrl": "https://x.com/alice/status/42",
+                            "authorHandle": "alice",
+                            "publishedAt": TIMESTAMP,
+                            "body": "root",
+                            "showMore": False,
+                            "placeholder": False,
+                        }],
+                        "explicitEmpty": False,
+                    },
+                )
+                self.assertEqual(len(value["items"]), 1)
+                self.assertNotIn("depth", value["items"][0])
+                self.assertNotIn("insideQuote", value["items"][0])
             elif action == "expand":
                 self.assertTrue(value["ok"])
                 self.assertIn(stable_id, expression)
@@ -915,6 +924,154 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             )
         self.assertEqual(value, {"items": [], "cards": [], "explicitEmpty": True})
         self.assertTrue(explicit_empty.closed)
+
+        def snapshot_candidate(source_url, author, published_at, body, depth, inside_quote,
+                               show_more=False, placeholder=False):
+            return {
+                "sourceUrl": source_url,
+                "authorHandle": author,
+                "publishedAt": published_at,
+                "body": body,
+                "depth": depth,
+                "insideQuote": inside_quote,
+                "showMore": show_more,
+                "placeholder": placeholder,
+            }
+
+        alice_root = snapshot_candidate(
+            "https://x.com/alice/status/101", "alice", TIMESTAMP, "alice root", 0, False,
+        )
+        alice_quote = snapshot_candidate(
+            "https://x.com/bob/status/102", "bob", "2026-09-01T00:00:01.000Z", "nested quote", 1, True,
+        )
+        carol_root = snapshot_candidate(
+            "https://x.com/carol/status/201", "carol", "2026-09-01T00:00:02.000Z", "carol root", 0, False,
+        )
+        carol_quote = snapshot_candidate(
+            "https://x.com/dan/status/202", "dan", "2026-09-01T00:00:03.000Z", "nested quote", 1, True,
+        )
+        snapshot_cells = [
+            {"candidates": [alice_root, alice_quote]},
+            {"candidates": [carol_root, carol_quote]},
+        ]
+        snapshot_socket = _FakeWebSocket({"cells": snapshot_cells, "explicitEmpty": False})
+        with mock.patch.object(module.websocket, "create_connection", return_value=snapshot_socket):
+            projected_snapshot = evaluator.evaluate(
+                ws_url,
+                "snapshot",
+                surface="for_you",
+                timeout_seconds=timeout_seconds,
+            )
+        expected_items = [
+            {
+                "sourceUrl": alice_root["sourceUrl"],
+                "authorHandle": alice_root["authorHandle"],
+                "publishedAt": alice_root["publishedAt"],
+                "body": alice_root["body"],
+                "showMore": False,
+                "placeholder": False,
+            },
+            {
+                "sourceUrl": carol_root["sourceUrl"],
+                "authorHandle": carol_root["authorHandle"],
+                "publishedAt": carol_root["publishedAt"],
+                "body": carol_root["body"],
+                "showMore": False,
+                "placeholder": False,
+            },
+        ]
+        self.assertEqual(
+            projected_snapshot,
+            {"items": expected_items, "explicitEmpty": False},
+        )
+        self.assertTrue(snapshot_socket.closed)
+        observer_module = getattr(module, "x_personal_feed_observer", None)
+        if observer_module is None:
+            observer_module = importlib.import_module("x_personal_feed_observer")
+        prepared = observer_module._prepared_items(projected_snapshot, set(), 8)
+        self.assertEqual(
+            [source for source, _item in prepared],
+            [item["sourceUrl"] for item in expected_items],
+        )
+        self.assertEqual(len(prepared), 2)
+        self.assertEqual(
+            observer_module._candidate_items(projected_snapshot),
+            expected_items,
+        )
+        snapshot_expression = snapshot_socket.sent[0]["params"]["expression"]
+        self.assertIn("primaryColumn", snapshot_expression)
+        self.assertRegex(snapshot_expression, r"\[data-testid=[\"']?primaryColumn")
+        self.assertRegex(snapshot_expression, r"(?:root|primary)[A-Za-z_]*\.querySelectorAll")
+        self.assertIn("cellInnerDiv", snapshot_expression)
+        self.assertIn("article", snapshot_expression)
+        self.assertIn("cells", snapshot_expression)
+        self.assertIn("candidates", snapshot_expression)
+        self.assertNotIn("statusCandidates", snapshot_expression)
+        self.assertNotRegex(
+            snapshot_expression,
+            r"\.filter\([^)]*candidates[^)]*(?:length|size)[^)]*>\s*0",
+        )
+        self.assertRegex(
+            snapshot_expression,
+            r"\.closest\([^)]*article\[data-testid[^)]*tweet[^)]*\)\s*===\s*article",
+        )
+        self.assertNotRegex(
+            snapshot_expression,
+            r"\barticle\.closest\([^)]*blockquote",
+        )
+        for hardcoded_empty in ('"sourceUrl":""', '"authorHandle":""', '"publishedAt":""', '"body":""'):
+            self.assertNotIn(hardcoded_empty, snapshot_expression)
+
+        malformed_snapshot = {
+            "cells": snapshot_cells,
+            "explicitEmpty": False,
+        }
+
+        def snapshot_failure(name, cells, *, canary=None):
+            failure = _FakeWebSocket({"cells": cells, "explicitEmpty": False})
+            with self.subTest(snapshot_failure=name):
+                with mock.patch.object(module.websocket, "create_connection", return_value=failure):
+                    assert_fixed_error(
+                        lambda: evaluator.evaluate(
+                            ws_url,
+                            "snapshot",
+                            surface="for_you",
+                            timeout_seconds=timeout_seconds,
+                        ),
+                        canary=canary,
+                    )
+                self.assertTrue(failure.closed)
+                self.assertEqual(failure.recv_count, 1)
+
+        missing_published_canary = dict(alice_root)
+        missing_published_canary.pop("publishedAt")
+        missing_published_canary["body"] = "正文CANARY"
+        invalid_snapshot_cases = (
+            ("two_same_depth_nonquote_roots", [{"candidates": [alice_root, carol_root]}], None),
+            ("nonempty_cell_without_nonquote_root", [{"candidates": [alice_quote]}], None),
+            ("cells_not_list", "not-a-list", None),
+            ("candidates_not_list", [{"candidates": "not-a-list"}], None),
+            ("empty_cell", [{"candidates": []}], None),
+            ("candidate_missing_field", [{"candidates": [missing_published_canary]}], "正文CANARY"),
+            ("candidate_extra_key", [{"candidates": [{**alice_root, "extra": True}]}], None),
+            ("url_not_canonical", [{"candidates": [{**alice_root, "sourceUrl": "https://x.com/alice/status/101?x=1"}]}], None),
+            ("author_mismatch", [{"candidates": [{**alice_root, "authorHandle": "not_alice"}]}], None),
+            ("published_not_canonical_utc", [{"candidates": [{**alice_root, "publishedAt": "2026-09-01T00:00:00Z"}]}], None),
+            ("depth_bool", [{"candidates": [{**alice_root, "depth": True}]}], None),
+            ("depth_negative", [{"candidates": [{**alice_root, "depth": -1}]}], None),
+            ("inside_quote_not_bool", [{"candidates": [{**alice_root, "insideQuote": 0}]}], None),
+            ("show_more_not_bool", [{"candidates": [{**alice_root, "showMore": 0}]}], None),
+            ("placeholder_not_bool", [{"candidates": [{**alice_root, "placeholder": None}]}], None),
+            ("body_not_string", [{"candidates": [{**alice_root, "body": 42}]}], None),
+            (
+                "valid_cell_plus_malformed_cell",
+                [{"candidates": [alice_root]}, {"candidates": []}],
+                None,
+            ),
+        )
+        for name, cells, canary in invalid_snapshot_cases:
+            snapshot_failure(name, cells, canary=canary)
+        self.assertEqual(malformed_snapshot["cells"], snapshot_cells)
 
         def page_frame_without_frame_id(_request, response_id, _value):
             return {"id": response_id, "result": {"loaderId": "loader-1"}}

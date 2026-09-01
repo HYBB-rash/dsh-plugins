@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime
 import json
 import math
 import sys
@@ -154,10 +155,32 @@ _PROBE_EXPRESSION = (
     "outsideRootSelectedTabs:outside}; })()"
 )
 _SNAPSHOT_EXPRESSION = (
-    "(() => { const nodes = [...document.querySelectorAll('[data-testid=cellInnerDiv]')]; "
-    "return {statusCandidates:nodes.map(node => ({sourceUrl:'',authorHandle:'',"
-    "publishedAt:'',body:'',depth:0,insideQuote:false,showMore:false,placeholder:true})),"
-    "explicitEmpty:nodes.length === 0}; })()"
+    "(() => { const roots = [...document.querySelectorAll('[data-testid=\"primaryColumn\"]')]; "
+    "if (roots.length !== 1) return {cells:null, explicitEmpty:false}; "
+    "const root = roots[0]; const nodes = [...root.querySelectorAll('[data-testid=\"cellInnerDiv\"]')].slice(0, 8); "
+    "const cells = nodes.map(cell => { const candidates = "
+    "[...cell.querySelectorAll('article[data-testid=\"tweet\"]')].slice(0, 8).map(article => { "
+    "const owned = node => node.closest('article[data-testid=\"tweet\"]') === article; "
+    "const links = [...article.querySelectorAll('a[href*=\"/status/\"]')].filter(owned); "
+    "const link = links.length === 1 ? links[0] : null; "
+    "const status = (() => { try { if (!link) return null; const url = new URL(link.href); "
+    "const parts = url.pathname.split('/'); const handle = parts[1]; const ident = parts[3]; "
+    "if (url.protocol !== 'https:' || !['x.com','www.x.com'].includes(url.hostname) || "
+    "parts.length !== 4 || parts[0] !== '' || parts[2] !== 'status' || "
+    "!/^[A-Za-z0-9_]{1,15}$/.test(handle) || !/^[1-9][0-9]*$/.test(ident)) return null; "
+    "return 'https://x.com/' + handle.toLowerCase() + '/status/' + ident; } catch (_) { return null; } })(); "
+    "const times = [...article.querySelectorAll('time')].filter(owned); "
+    "const texts = [...article.querySelectorAll('[data-testid=\"tweetText\"]')].filter(owned); "
+    "const time = times.length === 1 ? times[0] : null; const text = texts.length === 1 ? texts[0] : null; "
+    "let depth = 0; let ancestor = article.parentElement; while (ancestor && ancestor !== cell) { "
+    "if (ancestor.matches('article[data-testid=\"tweet\"]')) depth += 1; ancestor = ancestor.parentElement; } "
+    "const quote = depth > 0; "
+    "const more = [...article.querySelectorAll('[data-testid=\"tweet-text-show-more\"]')].filter(owned); "
+    "return {sourceUrl:status, authorHandle:status ? status.split('/')[3] : null, "
+    "publishedAt:time ? time.getAttribute('datetime') : null, body:text ? text.innerText : null, "
+    "depth, insideQuote:quote, showMore:more.length > 0, "
+    "placeholder:!status || !time || !text}; }); return {candidates}; }); "
+    "return {cells, explicitEmpty:cells.length === 0}; })()"
 )
 _SCROLL_EXPRESSION = (
     "(() => { const amount = Math.max(240, Math.floor(innerHeight * 0.8)); "
@@ -248,17 +271,107 @@ def _item_value(item):
     return result
 
 
+def _snapshot_candidate(value):
+    fields = {
+        "sourceUrl",
+        "authorHandle",
+        "publishedAt",
+        "body",
+        "depth",
+        "insideQuote",
+        "showMore",
+        "placeholder",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise _CdpFailure()
+    source = value["sourceUrl"]
+    author = value["authorHandle"]
+    published = value["publishedAt"]
+    body = value["body"]
+    depth = value["depth"]
+    if (
+        not isinstance(source, str)
+        or _canonical_status(source) != source
+        or not isinstance(author, str)
+        or not author.isascii()
+        or not 1 <= len(author) <= 15
+        or not all(char == "_" or char.isalnum() for char in author)
+        or author.casefold() != source.split("/")[3].casefold()
+        or not isinstance(published, str)
+        or not _valid_published(published)
+        or not isinstance(body, str)
+        or isinstance(depth, bool)
+        or not isinstance(depth, int)
+        or depth < 0
+        or not isinstance(value["insideQuote"], bool)
+        or not isinstance(value["showMore"], bool)
+        or not isinstance(value["placeholder"], bool)
+    ):
+        raise _CdpFailure()
+    try:
+        body.encode("utf-8")
+    except UnicodeError:
+        raise _CdpFailure() from None
+    return {
+        "sourceUrl": source,
+        "authorHandle": author,
+        "publishedAt": published,
+        "body": body,
+        "depth": depth,
+        "insideQuote": value["insideQuote"],
+        "showMore": value["showMore"],
+        "placeholder": value["placeholder"],
+    }
+
+
+def _valid_published(value):
+    try:
+        instant = datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except (TypeError, ValueError):
+        return False
+    rebuilt = instant.strftime("%Y-%m-%dT%H:%M:%S.")
+    rebuilt += f"{instant.microsecond // 1000:03d}Z"
+    return rebuilt == value
+
+
 def _snapshot_value(value):
     if not isinstance(value, dict):
         raise _CdpFailure()
-    if isinstance(value.get("statusCandidates"), list):
-        candidates = []
-        for item in value["statusCandidates"]:
-            normalized = _item_value(item)
-            if normalized is not None:
-                candidates.append(normalized)
-        return {"statusCandidates": candidates, "explicitEmpty": value.get("explicitEmpty") is True}
-    if "statusCandidates" in value:
+    if set(value) == {"cells", "explicitEmpty"}:
+        cells = value["cells"]
+        if not isinstance(cells, list) or not isinstance(value["explicitEmpty"], bool):
+            raise _CdpFailure()
+        items = []
+        for cell in cells:
+            if not isinstance(cell, dict) or set(cell) != {"candidates"}:
+                raise _CdpFailure()
+            candidates = cell["candidates"]
+            if not isinstance(candidates, list) or not candidates:
+                raise _CdpFailure()
+            roots = []
+            for candidate in candidates:
+                normalized = _snapshot_candidate(candidate)
+                if not normalized["insideQuote"]:
+                    roots.append(normalized)
+            if not roots:
+                raise _CdpFailure()
+            minimum = min(item["depth"] for item in roots)
+            selected = [item for item in roots if item["depth"] == minimum]
+            if len(selected) != 1:
+                raise _CdpFailure()
+            chosen = selected[0]
+            items.append(
+                {
+                    "sourceUrl": chosen["sourceUrl"],
+                    "authorHandle": chosen["authorHandle"],
+                    "publishedAt": chosen["publishedAt"],
+                    "body": chosen["body"],
+                    "showMore": chosen["showMore"],
+                    "placeholder": chosen["placeholder"],
+                }
+            )
+        return {"items": items, "explicitEmpty": value["explicitEmpty"]}
+    if "cells" in value or "statusCandidates" in value:
         raise _CdpFailure()
     result = {}
     for name in ("items", "cards"):
