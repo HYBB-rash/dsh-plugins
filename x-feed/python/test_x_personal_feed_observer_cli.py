@@ -196,7 +196,7 @@ def _response_value(action, surface="for_you"):
             "body": "root",
             "depth": 0,
             "insideQuote": False,
-            "showMore": False,
+            "showMoreControlCount": 0,
             "placeholder": False,
         }
         nested_quote = {
@@ -206,14 +206,21 @@ def _response_value(action, surface="for_you"):
             "body": "nested quote",
             "depth": 1,
             "insideQuote": True,
-            "showMore": False,
+            "showMoreControlCount": 0,
             "placeholder": False,
         }
         return {
             "cells": [{"candidates": [root, nested_quote]}],
             "explicitEmpty": False,
         }
-    if action in {"expand", "scroll"}:
+    if action == "expand":
+        return {
+            "matchingCellCount": 1,
+            "targetRootCount": 1,
+            "showMoreControlCount": 1,
+            "clicked": True,
+        }
+    if action == "scroll":
         return {"ok": True}
     raise AssertionError(action)
 
@@ -926,7 +933,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         self.assertTrue(explicit_empty.closed)
 
         def snapshot_candidate(source_url, author, published_at, body, depth, inside_quote,
-                               show_more=False, placeholder=False):
+                               show_more_control_count=0, placeholder=False):
             return {
                 "sourceUrl": source_url,
                 "authorHandle": author,
@@ -934,7 +941,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                 "body": body,
                 "depth": depth,
                 "insideQuote": inside_quote,
-                "showMore": show_more,
+                "showMoreControlCount": show_more_control_count,
                 "placeholder": placeholder,
             }
 
@@ -998,6 +1005,32 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             observer_module._candidate_items(projected_snapshot),
             expected_items,
         )
+        show_more_socket = _FakeWebSocket({
+            "cells": [{"candidates": [{**alice_root, "showMoreControlCount": 1}]}],
+            "explicitEmpty": False,
+        })
+        with mock.patch.object(module.websocket, "create_connection", return_value=show_more_socket):
+            show_more_snapshot = evaluator.evaluate(
+                ws_url,
+                "snapshot",
+                surface="for_you",
+                timeout_seconds=timeout_seconds,
+            )
+        self.assertEqual(
+            show_more_snapshot,
+            {
+                "items": [{
+                    "sourceUrl": alice_root["sourceUrl"],
+                    "authorHandle": alice_root["authorHandle"],
+                    "publishedAt": alice_root["publishedAt"],
+                    "body": alice_root["body"],
+                    "showMore": True,
+                    "placeholder": False,
+                }],
+                "explicitEmpty": False,
+            },
+        )
+        self.assertTrue(show_more_socket.closed)
         snapshot_expression = snapshot_socket.sent[0]["params"]["expression"]
         self.assertIn("primaryColumn", snapshot_expression)
         self.assertRegex(snapshot_expression, r"\[data-testid=[\"']?primaryColumn")
@@ -1007,6 +1040,13 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         self.assertIn("cells", snapshot_expression)
         self.assertIn("candidates", snapshot_expression)
         self.assertNotIn("statusCandidates", snapshot_expression)
+        self.assertIn("showMoreControlCount", snapshot_expression)
+        self.assertIn("tweet-text-show-more-link", snapshot_expression)
+        self.assertRegex(snapshot_expression, r"querySelectorAll\([^)]*tweet-text-show-more-link")
+        self.assertRegex(snapshot_expression, r"(?:disabled|aria-disabled)")
+        self.assertRegex(snapshot_expression, r"(?:role\s*[=:]\s*[\"']?button|<button)")
+        self.assertNotRegex(snapshot_expression, r"querySelector\([^)]*button")
+        self.assertNotRegex(snapshot_expression, r"Show more|显示更多")
         self.assertNotRegex(
             snapshot_expression,
             r"\.filter\([^)]*candidates[^)]*(?:length|size)[^)]*>\s*0",
@@ -1060,7 +1100,9 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             ("depth_bool", [{"candidates": [{**alice_root, "depth": True}]}], None),
             ("depth_negative", [{"candidates": [{**alice_root, "depth": -1}]}], None),
             ("inside_quote_not_bool", [{"candidates": [{**alice_root, "insideQuote": 0}]}], None),
-            ("show_more_not_bool", [{"candidates": [{**alice_root, "showMore": 0}]}], None),
+            ("show_more_count_gt_one", [{"candidates": [{**alice_root, "showMoreControlCount": 2}]}], None),
+            ("show_more_count_bool", [{"candidates": [{**alice_root, "showMoreControlCount": True}]}], None),
+            ("show_more_count_negative", [{"candidates": [{**alice_root, "showMoreControlCount": -1}]}], None),
             ("placeholder_not_bool", [{"candidates": [{**alice_root, "placeholder": None}]}], None),
             ("body_not_string", [{"candidates": [{**alice_root, "body": 42}]}], None),
             (
@@ -1072,6 +1114,145 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         for name, cells, canary in invalid_snapshot_cases:
             snapshot_failure(name, cells, canary=canary)
         self.assertEqual(malformed_snapshot["cells"], snapshot_cells)
+
+        expand_decision = getattr(module, "_expand_decision", None)
+        self.assertTrue(callable(expand_decision))
+        expand_success_facts = {
+            "matchingCellCount": 1,
+            "targetRootCount": 1,
+            "showMoreControlCount": 1,
+            "clicked": True,
+        }
+        self.assertEqual(expand_decision(expand_success_facts), {"ok": True})
+        for name, clicked in (
+            ("clicked_false", False),
+            ("matching_cell_zero", False),
+            ("matching_cell_two", False),
+            ("target_root_zero", False),
+            ("target_root_two", False),
+            ("show_more_control_zero", False),
+            ("show_more_control_two", False),
+        ):
+            facts = dict(expand_success_facts)
+            if name == "clicked_false":
+                facts["clicked"] = clicked
+            elif name == "matching_cell_zero":
+                facts["matchingCellCount"] = 0
+            elif name == "matching_cell_two":
+                facts["matchingCellCount"] = 2
+            elif name == "target_root_zero":
+                facts["targetRootCount"] = 0
+            elif name == "target_root_two":
+                facts["targetRootCount"] = 2
+            elif name == "show_more_control_zero":
+                facts["showMoreControlCount"] = 0
+            else:
+                facts["showMoreControlCount"] = 2
+            if name != "clicked_false":
+                facts["clicked"] = False
+            with self.subTest(expand_decision=name):
+                self.assertEqual(expand_decision(facts), {"ok": False})
+
+        malformed_expand_facts = (
+            ("missing_key", {key: value for key, value in expand_success_facts.items() if key != "clicked"}),
+            ("extra_key", {**expand_success_facts, "body": "正文CANARY"}),
+            ("matching_cell_bool", {**expand_success_facts, "matchingCellCount": True}),
+            ("target_root_string", {**expand_success_facts, "targetRootCount": "1"}),
+            ("show_more_control_negative", {**expand_success_facts, "showMoreControlCount": -1}),
+            ("count_inconsistent_clicked_true", {**expand_success_facts, "matchingCellCount": 2}),
+            ("clicked_integer", {**expand_success_facts, "clicked": 1}),
+        )
+        for name, facts in malformed_expand_facts:
+            with self.subTest(expand_decision=name):
+                assert_fixed_error(
+                    lambda facts=facts: expand_decision(facts),
+                    canary="正文CANARY" if name == "extra_key" else None,
+                )
+
+        expand_socket = _FakeWebSocket(expand_success_facts)
+        with mock.patch.object(module.websocket, "create_connection", return_value=expand_socket):
+            expanded = evaluator.evaluate(
+                ws_url,
+                "expand",
+                surface="for_you",
+                stable_id="https://x.com/alice/status/42",
+                timeout_seconds=timeout_seconds,
+            )
+        self.assertEqual(expanded, {"ok": True})
+        self.assertTrue(expand_socket.closed)
+        expand_expression = expand_socket.sent[0]["params"]["expression"]
+        self.assertIn("primaryColumn", expand_expression)
+        self.assertRegex(expand_expression, r"\[data-testid=[\"']?primaryColumn")
+        self.assertRegex(
+            expand_expression,
+            r"\.closest\([^)]*article\[data-testid[^)]*tweet[^)]*\)\s*===\s*article",
+        )
+        self.assertRegex(expand_expression, r"(?:articleDepth|ancestor[A-Za-z]*Article|parentElement|parentNode)")
+        self.assertRegex(expand_expression, r"(?:depth|insideQuote)")
+        self.assertNotRegex(expand_expression, r"\barticle\.closest\([^)]*blockquote")
+        self.assertIn("https://x.com/alice/status/42", expand_expression)
+        self.assertIn("href", expand_expression)
+        self.assertNotIn("innerText", expand_expression)
+        self.assertNotRegex(
+            expand_expression,
+            r"(?:innerText|textContent)[^;\n]*(?:includes|indexOf|contains)",
+        )
+        self.assertIn("matchingCellCount", expand_expression)
+        self.assertIn("targetRootCount", expand_expression)
+        self.assertIn("showMoreControlCount", expand_expression)
+        self.assertIn("clicked", expand_expression)
+        self.assertIn("tweet-text-show-more-link", expand_expression)
+        self.assertRegex(expand_expression, r"querySelectorAll\([^)]*tweet-text-show-more-link")
+        self.assertRegex(expand_expression, r"(?:disabled|aria-disabled)")
+        self.assertRegex(expand_expression, r"(?:role\s*[=:]\s*[\"']?button|<button)")
+        self.assertRegex(expand_expression, r"(?:click|\.click\s*\()")
+        self.assertNotRegex(expand_expression, r"querySelector\([^)]*button")
+        self.assertNotRegex(expand_expression, r"Show more|显示更多")
+
+        expand_not_ok_cases = (
+            ("matching_cell_zero", {**expand_success_facts, "matchingCellCount": 0, "clicked": False}),
+            ("matching_cell_two", {**expand_success_facts, "matchingCellCount": 2, "clicked": False}),
+            ("target_root_zero", {**expand_success_facts, "targetRootCount": 0, "clicked": False}),
+            ("target_root_two", {**expand_success_facts, "targetRootCount": 2, "clicked": False}),
+            ("ordinary_button_count_zero", {**expand_success_facts, "showMoreControlCount": 0, "clicked": False}),
+            ("show_more_control_count_two", {**expand_success_facts, "showMoreControlCount": 2, "clicked": False}),
+            ("clicked_false", {**expand_success_facts, "clicked": False}),
+        )
+        for name, facts in expand_not_ok_cases:
+            failure = _FakeWebSocket(facts)
+            with self.subTest(expand_result=name):
+                with mock.patch.object(module.websocket, "create_connection", return_value=failure):
+                    self.assertEqual(
+                        evaluator.evaluate(
+                            ws_url,
+                            "expand",
+                            surface="for_you",
+                            stable_id="https://x.com/alice/status/42",
+                            timeout_seconds=timeout_seconds,
+                        ),
+                        {"ok": False},
+                    )
+                self.assertTrue(failure.closed)
+
+        for name, facts in (
+            ("expand_malformed_missing", {"matchingCellCount": 1, "targetRootCount": 1, "clicked": True}),
+            ("expand_malformed_extra", {**expand_success_facts, "body": "正文CANARY"}),
+            ("expand_malformed_bool", {**expand_success_facts, "showMoreControlCount": True}),
+        ):
+            failure = _FakeWebSocket(facts)
+            with self.subTest(expand_result=name):
+                with mock.patch.object(module.websocket, "create_connection", return_value=failure):
+                    assert_fixed_error(
+                        lambda: evaluator.evaluate(
+                            ws_url,
+                            "expand",
+                            surface="for_you",
+                            stable_id="https://x.com/alice/status/42",
+                            timeout_seconds=timeout_seconds,
+                        ),
+                        canary="正文CANARY" if "extra" in name else None,
+                    )
+                self.assertTrue(failure.closed)
 
         def page_frame_without_frame_id(_request, response_id, _value):
             return {"id": response_id, "result": {"loaderId": "loader-1"}}
@@ -1346,7 +1527,12 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                 )
             self.assertTrue(failure.closed)
 
-        ambiguous = _FakeWebSocket({"ok": False})
+        ambiguous = _FakeWebSocket({
+            "matchingCellCount": 0,
+            "targetRootCount": 0,
+            "showMoreControlCount": 0,
+            "clicked": False,
+        })
         with mock.patch.object(module.websocket, "create_connection", return_value=ambiguous):
             result = evaluator.evaluate(
                 ws_url,

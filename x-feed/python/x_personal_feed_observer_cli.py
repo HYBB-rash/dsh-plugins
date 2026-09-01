@@ -175,10 +175,12 @@ _SNAPSHOT_EXPRESSION = (
     "let depth = 0; let ancestor = article.parentElement; while (ancestor && ancestor !== cell) { "
     "if (ancestor.matches('article[data-testid=\"tweet\"]')) depth += 1; ancestor = ancestor.parentElement; } "
     "const quote = depth > 0; "
-    "const more = [...article.querySelectorAll('[data-testid=\"tweet-text-show-more\"]')].filter(owned); "
+    "const role = 'button'; const more = [...article.querySelectorAll('[data-testid=\"tweet-text-show-more-link\"]')]"
+    ".filter(owned).filter(control => (control.tagName === 'BUTTON' || control.getAttribute('role') === role) "
+    "&& !control.disabled && control.getAttribute('aria-disabled') !== 'true'); "
     "return {sourceUrl:status, authorHandle:status ? status.split('/')[3] : null, "
     "publishedAt:time ? time.getAttribute('datetime') : null, body:text ? text.innerText : null, "
-    "depth, insideQuote:quote, showMore:more.length > 0, "
+    "depth, insideQuote:quote, showMoreControlCount:more.length, "
     "placeholder:!status || !time || !text}; }); return {candidates}; }); "
     "return {cells, explicitEmpty:cells.length === 0}; })()"
 )
@@ -279,7 +281,7 @@ def _snapshot_candidate(value):
         "body",
         "depth",
         "insideQuote",
-        "showMore",
+        "showMoreControlCount",
         "placeholder",
     }
     if not isinstance(value, dict) or set(value) != fields:
@@ -304,7 +306,9 @@ def _snapshot_candidate(value):
         or not isinstance(depth, int)
         or depth < 0
         or not isinstance(value["insideQuote"], bool)
-        or not isinstance(value["showMore"], bool)
+        or isinstance(value["showMoreControlCount"], bool)
+        or not isinstance(value["showMoreControlCount"], int)
+        or not 0 <= value["showMoreControlCount"] <= 1
         or not isinstance(value["placeholder"], bool)
     ):
         raise _CdpFailure()
@@ -319,7 +323,7 @@ def _snapshot_candidate(value):
         "body": body,
         "depth": depth,
         "insideQuote": value["insideQuote"],
-        "showMore": value["showMore"],
+        "showMore": value["showMoreControlCount"] == 1,
         "placeholder": value["placeholder"],
     }
 
@@ -463,6 +467,24 @@ def _surface_decision(surface, raw_facts):
     return decision
 
 
+def _expand_decision(raw_facts):
+    fields = {"matchingCellCount", "targetRootCount", "showMoreControlCount", "clicked"}
+    if not isinstance(raw_facts, dict) or set(raw_facts) != fields:
+        raise _CdpFailure()
+    for name in ("matchingCellCount", "targetRootCount", "showMoreControlCount"):
+        value = raw_facts[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise _CdpFailure()
+    if not isinstance(raw_facts["clicked"], bool):
+        raise _CdpFailure()
+    all_unique = all(raw_facts[name] == 1 for name in fields if name != "clicked")
+    if raw_facts["clicked"] and not all_unique:
+        raise _CdpFailure()
+    if all_unique and raw_facts["clicked"]:
+        return {"ok": True}
+    return {"ok": False}
+
+
 class _MechanicalCdpEvaluator:
     def __init__(self, monotonic=time.monotonic):
         self._monotonic = monotonic
@@ -485,10 +507,32 @@ class _MechanicalCdpEvaluator:
             raise _CdpFailure()
         expression = (
             "(() => { const target = " + json.dumps(canonical, ensure_ascii=False) + "; "
-            "const nodes = [...document.querySelectorAll('[data-testid=cellInnerDiv]')]; "
-            "const node = nodes.find(item => item.innerText.includes(target)); "
-            "if (!node) return {ok:false}; const button = node.querySelector('button'); "
-            "if (button) button.click(); return {ok:true}; })()"
+            "const roots = [...document.querySelectorAll('[data-testid=\"primaryColumn\"]')]; "
+            "const rootCount = roots.length; if (rootCount !== 1) return {matchingCellCount:0,targetRootCount:0,showMoreControlCount:0,clicked:false}; "
+            "const root = roots[0]; const ownedBy = (node, article) => node.closest('article[data-testid=\"tweet\"]') === article; "
+            "const articleDepth = (article, cell) => { let depth = 0; let ancestor = article.parentElement; "
+            "while (ancestor && ancestor !== cell) { if (ancestor.matches('article[data-testid=\"tweet\"]')) depth += 1; "
+            "ancestor = ancestor.parentElement; } return ancestor === cell ? depth : -1; }; "
+            "const canonicalOf = link => { try { const url = new URL(link.href); const parts = url.pathname.split('/'); "
+            "const handle = parts[1]; const ident = parts[3]; if (url.protocol !== 'https:' || "
+            "!['x.com','www.x.com'].includes(url.hostname) || parts.length !== 4 || parts[0] !== '' || "
+            "parts[2] !== 'status' || !/^[A-Za-z0-9_]{1,15}$/.test(handle) || !/^[1-9][0-9]*$/.test(ident)) return null; "
+            "return 'https://x.com/' + handle.toLowerCase() + '/status/' + ident; } catch (_) { return null; } }; "
+            "const cells = [...root.querySelectorAll('[data-testid=\"cellInnerDiv\"]')].slice(0, 8); "
+            "const matching = cells.map(cell => { const articles = [...cell.querySelectorAll('article[data-testid=\"tweet\"]')].slice(0, 8); "
+            "return articles.filter(article => articleDepth(article, cell) === 0 && "
+            "[...article.querySelectorAll('a[href*=\"/status/\"]')].filter(link => ownedBy(link, article))"
+            ".some(link => canonicalOf(link) === target)); }); "
+            "const matchingCellCount = matching.filter(articles => articles.length > 0).length; "
+            "const targetArticles = matching.flat(); const targetRootCount = targetArticles.length; "
+            "const role = 'button'; const controls = targetArticles.flatMap(article => "
+            "[...article.querySelectorAll('[data-testid=\"tweet-text-show-more-link\"]')].filter(control => "
+            "control.closest('article[data-testid=\"tweet\"]') === article && "
+            "(control.tagName === 'BUTTON' || control.getAttribute('role') === role) && !control.disabled && "
+            "control.getAttribute('aria-disabled') !== 'true')); "
+            "const showMoreControlCount = controls.length; let clicked = false; "
+            "if (matchingCellCount === 1 && targetRootCount === 1 && showMoreControlCount === 1) { controls[0].click(); clicked = true; } "
+            "return {matchingCellCount,targetRootCount,showMoreControlCount,clicked}; })()"
         )
         return "Runtime.evaluate", {"expression": expression, "returnByValue": True}
 
@@ -732,6 +776,8 @@ class _MechanicalCdpEvaluator:
             value = self._runtime_value(response)
             if action == "snapshot":
                 return _snapshot_value(value)
+            if action == "expand":
+                return _expand_decision(value)
             if "ok" not in value or not isinstance(value["ok"], bool):
                 raise _CdpFailure()
             return {"ok": value["ok"]}
