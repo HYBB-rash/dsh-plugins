@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { types as nodeTypes } from 'node:util'
 import { readJsonLines, appendJsonLine } from '../durable-jsonl-store.ts'
 import { encodeCanonicalJson } from '../canonical-json.ts'
 import { PersonalFeedScopeInputError, PersonalFeedScopeStoreError } from '../errors.ts'
@@ -225,6 +226,23 @@ const PERSONAL_CONTEXT_TEXT = '这次没有完成：个人语境不足或未完�
 const SOURCE_WINDOW_TEXT = '这次没有完成：X 来源或观察窗口未完成。'
 const JUDGEMENT_EXECUTION_TEXT = '这次没有完成：判断或执行未完成。'
 const BUSINESS_EMPTY_TEXT = '这次没有值得看的内容。'
+const CLEANUP_WAIT_MS = 250
+
+type CleanupAuthorityState = 'ready' | 'closing' | 'retained'
+
+interface CleanupAuthority {
+  readonly receiver: object
+  readonly close: (reason: string) => unknown
+  readonly args: readonly [string]
+  state: CleanupAuthorityState
+  promise: Promise<boolean> | undefined
+}
+
+interface ParsedR2 {
+  readonly window: unknown
+  readonly receiver: object
+  readonly close: (reason: string) => unknown
+}
 
 export function createPersonalFeedV2RequestCoordinator(
   options: CreatePersonalFeedV2RequestCoordinatorOptions,
@@ -232,6 +250,8 @@ export function createPersonalFeedV2RequestCoordinator(
   if (options.ledgerPath.trim() === '') {
     throw new PersonalFeedScopeStoreError('personal Feed v2 request ledger path must be non-empty')
   }
+
+  const cleanupRegistry = new Set<CleanupAuthority>()
 
   const readLedger = (): ParsedLedger => parseLedger(options.ledgerPath)
 
@@ -267,6 +287,7 @@ export function createPersonalFeedV2RequestCoordinator(
     if (parsedReceipt.visibleText !== state.prepared.outcome.finalText) {
       throw new PersonalFeedScopeInputError('personal Feed v2 delivery receipt text does not match prepared outcome')
     }
+    void retryCleanupAuthorities(cleanupRegistry)
     if (state.terminal !== undefined) {
       if (canonical(state.terminal.receipt) !== canonical(parsedReceipt)) {
         throw new PersonalFeedScopeStoreError(`personal Feed v2 request ${requestId} has a conflicting terminal receipt`)
@@ -316,43 +337,71 @@ export function createPersonalFeedV2RequestCoordinator(
     appendLedger(options.ledgerPath, readLedger().values, opened)
 
     let outcome: PersonalFeedV2Outcome
-    const r4 = input.signal.aborted
-      ? undefined
-      : await callPort(() => options.r4.snapshot({ request: publicRequest(opened), signal: input.signal }))
-    if (r4 === undefined || input.signal.aborted) {
-      outcome = incomplete('personal_context', PERSONAL_CONTEXT_TEXT)
+    const blockedByCleanup = await retryCleanupAuthorities(cleanupRegistry)
+    if (blockedByCleanup) {
+      outcome = incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
     } else {
-      const r4Result = parseR4(r4)
-      if (r4Result === undefined) {
+      const r4Call = input.signal.aborted
+        ? { ok: false as const }
+        : await callPort(() => options.r4.snapshot({ request: publicRequest(opened), signal: input.signal }))
+      const r4 = r4Call.ok ? r4Call.value : undefined
+      if (r4 === undefined || input.signal.aborted) {
         outcome = incomplete('personal_context', PERSONAL_CONTEXT_TEXT)
       } else {
-        const r2 = input.signal.aborted
-          ? undefined
-          : await callPort(() => options.r2.observe({ request: publicRequest(opened), signal: input.signal }))
-        if (r2 === undefined || input.signal.aborted) {
-          outcome = incomplete('source_window', SOURCE_WINDOW_TEXT)
+        const r4Result = parseR4(r4)
+        if (r4Result === undefined) {
+          outcome = incomplete('personal_context', PERSONAL_CONTEXT_TEXT)
         } else {
-          const r2Result = parseR2(r2)
-          if (r2Result === undefined) {
+          const r2Call = input.signal.aborted
+            ? { ok: false as const }
+            : await callPort(() => options.r2.observe({ request: publicRequest(opened), signal: input.signal }))
+          const r2 = r2Call.ok ? r2Call.value : undefined
+          if (r2 === undefined) {
             outcome = incomplete('source_window', SOURCE_WINDOW_TEXT)
           } else {
-            const r3 = input.signal.aborted
-              ? undefined
-              : await callPort(() => options.r3.admit({ request: publicRequest(opened), window: r2Result.window, signal: input.signal }))
-            if (r3 === undefined) {
-              outcome = incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
+            const r2Result = parseR2(r2)
+            if (r2Result === undefined) {
+              outcome = incomplete('source_window', SOURCE_WINDOW_TEXT)
             } else {
-              const r3Result = parseR3(r3)
-              if (r3Result === undefined || r3Result.kind === 'incomplete') {
-                outcome = incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
+              const r2Authority = registerCleanupAuthority(cleanupRegistry, r2Result.receiver, r2Result.close)
+              if (input.signal.aborted) {
+                await attemptCleanup(r2Authority, cleanupRegistry)
+                outcome = incomplete('source_window', SOURCE_WINDOW_TEXT)
               } else {
-                outcome = await coordinateCandidateJudgement(
-                  r3Result.cursor,
-                  publicRequest(opened),
-                  r4Result.snapshot,
-                  options.r5,
-                  input.signal,
-                )
+                const r3Call = await callPort(() => options.r3.admit({ request: publicRequest(opened), window: r2Result.window, signal: input.signal }))
+                const r3 = r3Call.ok ? r3Call.value : undefined
+                if (r3 === undefined) {
+                  const r2Closed = await attemptCleanup(r2Authority, cleanupRegistry)
+                  outcome = incomplete(r2Closed ? 'judgement_execution' : 'source_window', r2Closed ? JUDGEMENT_EXECUTION_TEXT : SOURCE_WINDOW_TEXT)
+                } else {
+                  const r3Result = parseR3(r3)
+                  if (r3Result === undefined || r3Result.kind === 'incomplete') {
+                    const r2Closed = await attemptCleanup(r2Authority, cleanupRegistry)
+                    outcome = incomplete(r2Closed ? 'judgement_execution' : 'source_window', r2Closed ? JUDGEMENT_EXECUTION_TEXT : SOURCE_WINDOW_TEXT)
+                  } else if (r3Result.kind === 'salvage') {
+                    const r3Authority = registerCleanupAuthority(cleanupRegistry, r3Result.receiver, r3Result.close)
+                    const r2Closed = await attemptCleanup(r2Authority, cleanupRegistry)
+                    const r3Closed = await attemptCleanup(r3Authority, cleanupRegistry)
+                    outcome = incomplete(r2Closed && r3Closed ? 'judgement_execution' : (r2Closed ? 'judgement_execution' : 'source_window'), JUDGEMENT_EXECUTION_TEXT)
+                  } else {
+                    const r3Authority = registerCleanupAuthority(cleanupRegistry, r3Result.cursor.owner, r3Result.cursor.close)
+                    const r2Closed = await attemptCleanup(r2Authority, cleanupRegistry)
+                    if (!r2Closed) {
+                      await attemptCleanup(r3Authority, cleanupRegistry)
+                      outcome = incomplete('source_window', SOURCE_WINDOW_TEXT)
+                    } else {
+                      outcome = await coordinateCandidateJudgement(
+                        r3Result.cursor,
+                        r3Authority,
+                        cleanupRegistry,
+                        publicRequest(opened),
+                        r4Result.snapshot,
+                        options.r5,
+                        input.signal,
+                      )
+                    }
+                  }
+                }
               }
             }
           }
@@ -504,10 +553,15 @@ function parseR4(value: unknown): { readonly snapshot: unknown } | undefined {
   return { snapshot: value.snapshot }
 }
 
-function parseR2(value: unknown): { readonly window: unknown } | undefined {
-  if (!isRecord(value)) return undefined
-  if (value.kind !== 'complete' || !hasExactlyKeys(value, ['kind', 'window'])) return undefined
-  return { window: value.window }
+function parseR2(value: unknown): ParsedR2 | undefined {
+  const record = plainRecord(value, ['kind', 'window', 'close'])
+  const close = record?.get('close')
+  if (record?.get('kind') !== 'complete' || typeof close !== 'function') return undefined
+  return {
+    window: record.get('window'),
+    receiver: value as object,
+    close: close as ParsedR2['close'],
+  }
 }
 
 type CandidateIncompleteReason = PersonalFeedV2R5CandidateIncompleteReason
@@ -572,12 +626,16 @@ type ParsedFinalization =
 function parseR3(
   value: unknown,
 ): { readonly kind: 'admitted'; readonly cursor: OwnerCandidateCursor }
+  | { readonly kind: 'salvage'; readonly receiver: object; readonly close: (reason: string) => unknown }
   | { readonly kind: 'incomplete'; readonly reason: CandidateIncompleteReason }
   | undefined {
   const record = plainRecord(value, ['kind', 'cursor'])
   if (record?.get('kind') === 'admitted') {
-    const cursor = parseOwnerCursor(record.get('cursor'))
-    return cursor === undefined ? undefined : { kind: 'admitted', cursor }
+    const rawCursor = record.get('cursor')
+    const cursor = parseOwnerCursor(rawCursor)
+    if (cursor !== undefined) return { kind: 'admitted', cursor }
+    const salvage = parseCleanupOnlyCursor(rawCursor)
+    return salvage === undefined ? undefined : { kind: 'salvage', ...salvage }
   }
   return parseOwnerIncomplete(value)
 }
@@ -597,8 +655,17 @@ function parseOwnerCursor(value: unknown): OwnerCandidateCursor | undefined {
   }
 }
 
+function parseCleanupOnlyCursor(value: unknown): { readonly receiver: object; readonly close: (reason: string) => unknown } | undefined {
+  const record = descriptorSafeRecord(value)
+  const close = record?.get('close')
+  if (record === undefined || typeof close !== 'function') return undefined
+  return { receiver: value as object, close: close as (reason: string) => unknown }
+}
+
 async function coordinateCandidateJudgement(
   ownerCursor: OwnerCandidateCursor,
+  cursorAuthority: CleanupAuthority,
+  cleanupRegistry: Set<CleanupAuthority>,
   request: PersonalFeedV2Request,
   snapshot: unknown,
   r5: PersonalFeedV2R5Port,
@@ -631,29 +698,32 @@ async function coordinateCandidateJudgement(
   try {
     rawFinalization = await Reflect.apply(ownerCursor.finalize, ownerCursor.owner, [claim])
   } catch {
-    await closeCoordinatorIncomplete(ownerCursor)
+    await attemptCleanup(cursorAuthority, cleanupRegistry)
     return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
   }
   const finalization = parseFinalization(rawFinalization)
   if (finalization === undefined) {
-    await closeCoordinatorIncomplete(ownerCursor)
+    await attemptCleanup(cursorAuthority, cleanupRegistry)
     return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
   }
   if (finalization.kind === 'incomplete') {
+    await attemptCleanup(cursorAuthority, cleanupRegistry)
     return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
   }
   if (finalization.kind === 'none') {
     if (!isProvenNone(tracker)) {
-      await closeCoordinatorIncomplete(ownerCursor)
+      await attemptCleanup(cursorAuthority, cleanupRegistry)
       return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
     }
-    return makeOutcome('business_empty', BUSINESS_EMPTY_TEXT)
+    const closed = await attemptCleanup(cursorAuthority, cleanupRegistry)
+    return closed ? makeOutcome('business_empty', BUSINESS_EMPTY_TEXT) : incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
   }
   if (!isProvenSelection(finalization.selected, tracker)) {
-    await closeCoordinatorIncomplete(ownerCursor)
+    await attemptCleanup(cursorAuthority, cleanupRegistry)
     return incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
   }
-  return makeOutcome('one_link', finalization.selected.canonicalUrl)
+  const closed = await attemptCleanup(cursorAuthority, cleanupRegistry)
+  return closed ? makeOutcome('one_link', finalization.selected.canonicalUrl) : incomplete('judgement_execution', JUDGEMENT_EXECUTION_TEXT)
 }
 
 function createCandidateTracker(
@@ -918,6 +988,68 @@ function parseFinalization(value: unknown): ParsedFinalization | undefined {
   })
 }
 
+function registerCleanupAuthority(
+  registry: Set<CleanupAuthority>,
+  receiver: object,
+  close: (reason: string) => unknown,
+): CleanupAuthority {
+  const authority: CleanupAuthority = {
+    receiver,
+    close,
+    args: ['coordinator_incomplete'],
+    state: 'ready',
+    promise: undefined,
+  }
+  registry.add(authority)
+  return authority
+}
+
+async function retryCleanupAuthorities(registry: Set<CleanupAuthority>): Promise<boolean> {
+  await Promise.all([...registry]
+    .filter(authority => authority.state !== 'ready')
+    .map(authority => attemptCleanup(authority, registry)))
+  return registry.size !== 0
+}
+
+async function attemptCleanup(authority: CleanupAuthority, registry: Set<CleanupAuthority>): Promise<boolean> {
+  if (authority.state === 'closing') {
+    if (authority.promise === undefined) return false
+    return waitForCleanup(authority.promise)
+  }
+  if (authority.state === 'retained') authority.state = 'ready'
+
+  authority.state = 'closing'
+  let result: unknown
+  try {
+    result = Reflect.apply(authority.close, authority.receiver, authority.args)
+  } catch {
+    authority.state = 'retained'
+    return false
+  }
+  const completion = Promise.resolve(result).then(
+    () => {
+      registry.delete(authority)
+      authority.promise = undefined
+      return true
+    },
+    () => {
+      authority.state = 'retained'
+      authority.promise = undefined
+      return false
+    },
+  )
+  authority.promise = completion
+  return waitForCleanup(completion)
+}
+
+async function waitForCleanup(promise: Promise<boolean>): Promise<boolean> {
+  const timeout = new Promise<'timeout'>(resolve => {
+    setTimeout(() => resolve('timeout'), CLEANUP_WAIT_MS)
+  })
+  const result = await Promise.race([promise, timeout])
+  return result === true
+}
+
 function isProvenSelection(
   selected: { readonly stableId: string; readonly canonicalUrl: string; readonly position: number },
   tracker: CandidateTracker,
@@ -941,32 +1073,31 @@ function isProvenNone(tracker: CandidateTracker): boolean {
     && tracker.receipts.every(receipt => receipt.judgment === 'not_qualified')
 }
 
-async function closeCoordinatorIncomplete(ownerCursor: OwnerCandidateCursor): Promise<void> {
-  try {
-    await Reflect.apply(ownerCursor.close, ownerCursor.owner, ['coordinator_incomplete'])
-  } catch {
-    // Finalization already failed closed; cleanup errors have no public authority.
-  }
+function plainRecord(value: unknown, expected: readonly string[]): ReadonlyMap<string, unknown> | undefined {
+  const record = descriptorSafeRecord(value)
+  if (record === undefined) return undefined
+  const sortedExpected = [...expected].sort()
+  const actual = [...record.keys()].sort()
+  if (actual.length !== sortedExpected.length
+    || !actual.every((key, index) => key === sortedExpected[index])) return undefined
+  return record
 }
 
-function plainRecord(value: unknown, expected: readonly string[]): ReadonlyMap<string, unknown> | undefined {
+function descriptorSafeRecord(value: unknown): ReadonlyMap<string, unknown> | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   let prototype: object | null
   let keys: readonly PropertyKey[]
   try {
-    if (Array.isArray(value)) return undefined
+    if (nodeTypes.isProxy(value) || Array.isArray(value)) return undefined
     prototype = Object.getPrototypeOf(value) as object | null
     keys = Reflect.ownKeys(value)
   } catch {
     return undefined
   }
   if (prototype !== Object.prototype && prototype !== null) return undefined
-  const sortedExpected = [...expected].sort()
-  const actual = keys.filter((key): key is string => typeof key === 'string').sort()
-  if (actual.length !== keys.length || actual.length !== sortedExpected.length
-    || !actual.every((key, index) => key === sortedExpected[index])) return undefined
   const result = new Map<string, unknown>()
-  for (const key of actual) {
+  for (const key of keys) {
+    if (typeof key !== 'string') return undefined
     let descriptor: PropertyDescriptor | undefined
     try {
       descriptor = Object.getOwnPropertyDescriptor(value, key)
@@ -1002,11 +1133,19 @@ function isCandidateIncompleteReason(value: unknown): value is CandidateIncomple
     || value === 'processed_query_unknown' || value === 'timeout' || value === 'unknown'
 }
 
-async function callPort(call: () => unknown | Promise<unknown>): Promise<unknown | undefined> {
+type PortCallResult =
+  | { readonly ok: true; readonly value: unknown }
+  | { readonly ok: false }
+
+async function callPort(call: () => unknown | Promise<unknown>): Promise<PortCallResult> {
   try {
-    return await call()
+    const result = call()
+    if (nodeTypes.isPromise(result)) {
+      return Object.freeze({ ok: true as const, value: await result })
+    }
+    return Object.freeze({ ok: true as const, value: result })
   } catch {
-    return undefined
+    return Object.freeze({ ok: false as const })
   }
 }
 

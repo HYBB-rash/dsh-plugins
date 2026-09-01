@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -32,7 +32,7 @@ type R4Result =
   | { readonly kind: 'failed' }
   | { readonly kind: 'unknown' }
 type R2Result =
-  | { readonly kind: 'complete'; readonly window: unknown }
+  | { readonly kind: 'complete'; readonly window: unknown; readonly close: () => unknown }
   | { readonly kind: 'partial' }
   | { readonly kind: 'failed' }
   | { readonly kind: 'unknown' }
@@ -158,6 +158,7 @@ function makePorts(overrides: Overrides = {}) {
         return resultOrThrow(overrides.r2, Object.freeze({
           kind: 'complete',
           window: Object.freeze({ source: 'r2', complete: true }),
+          close: async () => undefined,
         }) satisfies R2Result)
       },
     },
@@ -284,6 +285,67 @@ function candidateWindow(
   } as const
 }
 
+function closeAwareCandidateCapture(
+  body: string,
+  counters: CandidateCaptureCounters,
+  markers: readonly string[],
+) {
+  let available = true
+  const take = Object.assign(
+    (_input: { readonly signal: AbortSignal }) => {
+      counters.take += 1
+      if (!available) return undefined
+      available = false
+      return body
+    },
+    Object.fromEntries(markers.map(marker => [marker, true])),
+  )
+  const close = Object.assign(
+    (reason?: string) => {
+      counters.close += 1
+      available = false
+      if (reason !== undefined) counters.reasons.push(reason)
+    },
+    Object.fromEntries(markers.map(marker => [`${marker}_CLOSE`, true])),
+  )
+  return { kind: 'sufficient' as const, capture: { take, close } }
+}
+
+function closeAwareCandidateWindow(
+  request: CandidateWindowRequest,
+  counters: readonly CandidateCaptureCounters[],
+) {
+  const ids = [101, 202, 303]
+  const surfaces = ['for_you', 'following', 'explore'] as const
+  const surfaceTimes = [1, 2, 3].map(offset => new Date(Date.parse(request.cutoff) + offset).toISOString())
+  return {
+    requestId: request.requestId,
+    cutoff: request.cutoff,
+    shanghaiDay: request.shanghaiDay,
+    startedAt: request.cutoff,
+    completedAt: surfaceTimes[2],
+    surfaces: surfaces.map((surface, surfaceOrdinal) => ({
+      kind: 'complete' as const,
+      surface,
+      surfaceOrdinal,
+      startedAt: surfaceOrdinal === 0 ? request.cutoff : surfaceTimes[surfaceOrdinal - 1],
+      completedAt: surfaceTimes[surfaceOrdinal],
+      occurrences: [{
+        sourceUrl: `https://x.com/reader_${surfaceOrdinal}/status/${ids[surfaceOrdinal]}`,
+        body: closeAwareCandidateCapture(`candidate-body-${ids[surfaceOrdinal]}`, counters[surfaceOrdinal]!, [
+          `R2_RAW_WINDOW_CANARY_${surfaceOrdinal}`,
+          `R2_PROCESSED_CANARY_${surfaceOrdinal}`,
+          `R2_FAILED_CANARY_${surfaceOrdinal}`,
+        ]),
+        occurrenceOrdinal: 0,
+        capturedAt: surfaceTimes[surfaceOrdinal],
+        authorHandle: `author_${surfaceOrdinal}`,
+        publishedAt: '2026-08-30T12:34:56.000Z',
+      }],
+    })),
+  } as const
+}
+
 function hasOwnMarker(value: unknown, marker: string, seen = new Set<object>()): boolean {
   if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return false
   if (seen.has(value)) return false
@@ -324,7 +386,7 @@ function makeCandidateOwner(
     { take: 0, close: 0, reasons: [] },
     { take: 0, close: 0, reasons: [] },
   ]
-  const window = candidateWindow(request, counters)
+      const window = closeAwareCandidateWindow(request, counters)
   const owner = createPersonalFeedV2CandidateLifecycle({
     completionLedgerPath: join(directory, 'candidate-completions.jsonl'),
     clock: { now: () => new Date(now) },
@@ -496,7 +558,7 @@ async function runB3Case(testCase: B3Case): Promise<B3Observations> {
     ledgerPath: join(directory, 'requests.jsonl'),
     clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
     r4: { snapshot: async () => { calls.r4 += 1; return { kind: 'sufficient', snapshot: Object.freeze({ source: 'B3_R4' }) } } },
-    r2: { observe: async () => { calls.r2 += 1; return { kind: 'complete', window } } },
+    r2: { observe: async () => { calls.r2 += 1; return { kind: 'complete', window, close: async () => undefined } } },
     r3: {
       admit: async (input: PersonalFeedV2R3Input) => {
         calls.r3 += 1
@@ -587,7 +649,7 @@ async function runB3Case(testCase: B3Case): Promise<B3Observations> {
   let prepared: PreparedResult | undefined
   if (testCase.r3 === 'deferred_abort') {
     const pending = coordinator.prepare({ chatId: 4242, messageId: 9001, signal: controller.signal })
-    for (let index = 0; index < 4 && releaseR3 === undefined; index += 1) await Promise.resolve()
+    for (let index = 0; index < 10 && releaseR3 === undefined; index += 1) await Promise.resolve()
     expect(releaseR3, testCase.name).toBeTypeOf('function')
     controller.abort()
     releaseR3!({ kind: 'admitted', cursor: scripted.cursor })
@@ -703,7 +765,7 @@ describe('Personal Feed v2 honest request lifecycle', () => {
         observe: async (input: PersonalFeedV2R2Input) => {
           portCalls.r2 += 1
           r2Input = input
-          return Object.freeze({ kind: 'complete', window: r2Window }) satisfies R2Result
+          return Object.freeze({ kind: 'complete', window: r2Window, close: async () => undefined }) satisfies R2Result
         },
       },
       r3: {
@@ -943,7 +1005,7 @@ describe('Personal Feed v2 honest request lifecycle', () => {
         r2: {
           observe: async (input: PersonalFeedV2R2Input) => {
             r2Input = input
-            return Object.freeze({ kind: 'complete', window: fixture.window })
+            return Object.freeze({ kind: 'complete', window: fixture.window, close: async () => undefined })
           },
         },
         r3: {
@@ -1078,7 +1140,7 @@ describe('Personal Feed v2 honest request lifecycle', () => {
         ledgerPath: join(directory, 'requests.jsonl'),
         clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
         r4: { snapshot: async () => ({ kind: 'sufficient', snapshot: Object.freeze({ source: 'enemy-r4' }) }) },
-        r2: { observe: async () => ({ kind: 'complete', window: fixture.window }) },
+        r2: { observe: async () => ({ kind: 'complete', window: fixture.window, close: async () => undefined }) },
         r3: {
           admit: async (input: PersonalFeedV2R3Input) => {
             expect(input.request).toEqual(request)
@@ -1182,7 +1244,7 @@ describe('Personal Feed v2 honest request lifecycle', () => {
         ledgerPath: join(directory, 'requests.jsonl'),
         clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
         r4: { snapshot: async () => ({ kind: 'sufficient', snapshot: Object.freeze({ source: 'tracker-r4' }) }) },
-        r2: { observe: async () => ({ kind: 'complete', window: Object.freeze({ source: 'tracker-r2' }) }) },
+        r2: { observe: async () => ({ kind: 'complete', window: Object.freeze({ source: 'tracker-r2' }), close: async () => undefined }) },
         r3: {
           admit: async (input: PersonalFeedV2R3Input) => {
             expect(input.request).toEqual(request)
@@ -1228,18 +1290,18 @@ describe('Personal Feed v2 honest request lifecycle', () => {
       { name: 'A2 r3 throw', r3: 'throw', borrow: [], complete: [], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 0, borrow: 0, complete: 0, finalize: 0, close: 0, closeReasons: [], prefixLength: 0 } },
       { name: 'A3 malformed admitted cursor', r3: 'malformed', borrow: [], complete: [], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 0, borrow: 0, complete: 0, finalize: 0, close: 0, closeReasons: [], prefixLength: 0 } },
       { name: 'A4 admit abort exact incomplete', r3: 'abort_inside', borrow: [], complete: [], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 0, borrow: 0, complete: 0, finalize: 0, close: 0, closeReasons: [], prefixLength: 0 } },
-      { name: 'B1 deferred r3 abort', r3: 'deferred_abort', borrow: [], complete: [], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 0, borrow: 0, complete: 0, finalize: 1, close: 0, closeReasons: [], prefixLength: 0, finalizeReason: 'aborted' } },
-      { name: 'C1 borrow2 incomplete', r3: 'admitted', borrow: ['candidate1', 'incomplete'], complete: ['receipt1'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 1, finalize: 1, close: 0, closeReasons: [], prefixLength: 1, finalizeReason: 'failed' } },
-      { name: 'C2 borrow2 throw', r3: 'admitted', borrow: ['candidate1', 'throw'], complete: ['receipt1'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 1, finalize: 1, close: 0, closeReasons: [], prefixLength: 1, finalizeReason: 'failed' } },
-      { name: 'C3 borrow2 malformed', r3: 'admitted', borrow: ['candidate1', 'malformed'], complete: ['receipt1'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 1, finalize: 1, close: 0, closeReasons: [], prefixLength: 1, finalizeReason: 'failed' } },
-      { name: 'C4 borrow2 abort', r3: 'admitted', borrow: ['candidate1', 'abort'], complete: ['receipt1'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 1, finalize: 1, close: 0, closeReasons: [], prefixLength: 1, finalizeReason: 'aborted' } },
-      { name: 'D1 complete2 incomplete', r3: 'admitted', borrow: ['candidate1', 'candidate2'], complete: ['receipt1', 'incomplete'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 2, finalize: 1, close: 0, closeReasons: [], prefixLength: 1, finalizeReason: 'failed' } },
-      { name: 'D2 complete2 throw', r3: 'admitted', borrow: ['candidate1', 'candidate2'], complete: ['receipt1', 'throw'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 2, finalize: 1, close: 0, closeReasons: [], prefixLength: 1, finalizeReason: 'failed' } },
-      { name: 'D3 complete2 extra wrong identity', r3: 'admitted', borrow: ['candidate1', 'candidate2'], complete: ['receipt1', 'wrong_identity'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 2, finalize: 1, close: 0, closeReasons: [], prefixLength: 1, finalizeReason: 'failed' } },
-      { name: 'D4 complete2 abort', r3: 'admitted', borrow: ['candidate1', 'candidate2'], complete: ['receipt1', 'abort'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 2, finalize: 1, close: 0, closeReasons: [], prefixLength: 1, finalizeReason: 'aborted' } },
-      { name: 'E1 r5 throw after prefix replay', r3: 'admitted', borrow: ['candidate1'], complete: ['receipt1', 'receipt1'], finalize: 'exact_incomplete', r5: 'throw', expected: { outcome: 'incomplete', r5: 1, borrow: 1, complete: 2, finalize: 1, close: 0, closeReasons: [], prefixLength: 1, finalizeReason: 'failed' } },
-      { name: 'E2 r5 malformed raw after prefix', r3: 'admitted', borrow: ['candidate1'], complete: ['receipt1'], finalize: 'exact_incomplete', r5: 'malformed_raw', expected: { outcome: 'incomplete', r5: 1, borrow: 1, complete: 1, finalize: 1, close: 0, closeReasons: [], prefixLength: 1 } },
-      { name: 'E3 r5 abort after success raw', r3: 'admitted', borrow: ['candidate1'], complete: ['receipt1'], finalize: 'exact_incomplete', r5: 'abort_raw', expected: { outcome: 'incomplete', r5: 1, borrow: 1, complete: 1, finalize: 1, close: 0, closeReasons: [], prefixLength: 1, finalizeReason: 'aborted' } },
+      { name: 'B1 deferred r3 abort', r3: 'deferred_abort', borrow: [], complete: [], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 0, borrow: 0, complete: 0, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 0, finalizeReason: 'aborted' } },
+      { name: 'C1 borrow2 incomplete', r3: 'admitted', borrow: ['candidate1', 'incomplete'], complete: ['receipt1'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 1, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 1, finalizeReason: 'failed' } },
+      { name: 'C2 borrow2 throw', r3: 'admitted', borrow: ['candidate1', 'throw'], complete: ['receipt1'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 1, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 1, finalizeReason: 'failed' } },
+      { name: 'C3 borrow2 malformed', r3: 'admitted', borrow: ['candidate1', 'malformed'], complete: ['receipt1'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 1, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 1, finalizeReason: 'failed' } },
+      { name: 'C4 borrow2 abort', r3: 'admitted', borrow: ['candidate1', 'abort'], complete: ['receipt1'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 1, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 1, finalizeReason: 'aborted' } },
+      { name: 'D1 complete2 incomplete', r3: 'admitted', borrow: ['candidate1', 'candidate2'], complete: ['receipt1', 'incomplete'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 2, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 1, finalizeReason: 'failed' } },
+      { name: 'D2 complete2 throw', r3: 'admitted', borrow: ['candidate1', 'candidate2'], complete: ['receipt1', 'throw'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 2, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 1, finalizeReason: 'failed' } },
+      { name: 'D3 complete2 extra wrong identity', r3: 'admitted', borrow: ['candidate1', 'candidate2'], complete: ['receipt1', 'wrong_identity'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 2, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 1, finalizeReason: 'failed' } },
+      { name: 'D4 complete2 abort', r3: 'admitted', borrow: ['candidate1', 'candidate2'], complete: ['receipt1', 'abort'], finalize: 'exact_incomplete', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 2, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 1, finalizeReason: 'aborted' } },
+      { name: 'E1 r5 throw after prefix replay', r3: 'admitted', borrow: ['candidate1'], complete: ['receipt1', 'receipt1'], finalize: 'exact_incomplete', r5: 'throw', expected: { outcome: 'incomplete', r5: 1, borrow: 1, complete: 2, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 1, finalizeReason: 'failed' } },
+      { name: 'E2 r5 malformed raw after prefix', r3: 'admitted', borrow: ['candidate1'], complete: ['receipt1'], finalize: 'exact_incomplete', r5: 'malformed_raw', expected: { outcome: 'incomplete', r5: 1, borrow: 1, complete: 1, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 1 } },
+      { name: 'E3 r5 abort after success raw', r3: 'admitted', borrow: ['candidate1'], complete: ['receipt1'], finalize: 'exact_incomplete', r5: 'abort_raw', expected: { outcome: 'incomplete', r5: 1, borrow: 1, complete: 1, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 1, finalizeReason: 'aborted' } },
       { name: 'F1 finalize throw after done none', r3: 'admitted', borrow: ['candidate1', 'done'], complete: ['receipt1'], finalize: 'throw', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 1, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 1 } },
       { name: 'F2 finalize malformed after done none', r3: 'admitted', borrow: ['candidate1', 'done'], complete: ['receipt1'], finalize: 'malformed', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 1, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 1 } },
       { name: 'F3 finalize extra after done none', r3: 'admitted', borrow: ['candidate1', 'done'], complete: ['receipt1'], finalize: 'extra', r5: 'none', expected: { outcome: 'incomplete', r5: 1, borrow: 2, complete: 1, finalize: 1, close: 1, closeReasons: ['coordinator_incomplete'], prefixLength: 1 } },
@@ -1288,6 +1350,588 @@ describe('Personal Feed v2 honest request lifecycle', () => {
         const value = input as { readonly completed?: readonly unknown[] }
         return value.completed?.some(receipt => receipt !== observed.receipt1) === true
       }), testCase.name).toBe(false)
+    }
+  })
+
+  it('accepts only descriptor-safe R2 complete results, preserves the close receiver, and fails closed on hostile shapes', async () => {
+    const accessorState = { reads: 0 }
+    const accessorResult = Object.create(Object.prototype) as Record<string, unknown>
+    for (const [key, value] of Object.entries({ kind: 'complete', window: Object.freeze({}), close: () => undefined })) {
+      Object.defineProperty(accessorResult, key, { enumerable: true, configurable: true, get: () => { accessorState.reads += 1; return value } })
+    }
+    const proxyState = { traps: 0 }
+    const proxyTarget = { kind: 'complete', window: Object.freeze({}), close: () => undefined }
+    const proxyResult = new Proxy(proxyTarget, {
+      get: () => { proxyState.traps += 1; return undefined },
+      ownKeys: () => { proxyState.traps += 1; return Reflect.ownKeys(proxyTarget) },
+      getOwnPropertyDescriptor: () => { proxyState.traps += 1; return undefined },
+      getPrototypeOf: () => { proxyState.traps += 1; return Object.prototype },
+    })
+    const hostileResults: readonly { readonly name: string; readonly value: unknown; readonly touches: () => number }[] = [
+      { name: 'old two-key result', value: { kind: 'complete', window: Object.freeze({ old: true }) }, touches: () => 0 },
+      { name: 'extra key', value: { kind: 'complete', window: Object.freeze({}), close: () => undefined, extra: true }, touches: () => 0 },
+      {
+        name: 'symbol key',
+        value: Object.assign({ kind: 'complete', window: Object.freeze({}), close: () => undefined }, { [Symbol('extra')]: true }),
+        touches: () => 0,
+      },
+      {
+        name: 'accessor result',
+        value: accessorResult,
+        touches: () => accessorState.reads,
+      },
+      {
+        name: 'proxy result',
+        value: proxyResult,
+        touches: () => proxyState.traps,
+      },
+    ]
+
+    for (const hostile of hostileResults) {
+      const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-r2-shape-'))
+      temporaryDirectories.push(directory)
+      const calls = { r2: 0, r3: 0, r5: 0, close: 0 }
+      const coordinator = createPersonalFeedV2RequestCoordinator({
+        ledgerPath: join(directory, 'requests.jsonl'),
+        clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
+        r4: { snapshot: async () => ({ kind: 'sufficient', snapshot: Object.freeze({ safe: true }) }) },
+        r2: { observe: () => { calls.r2 += 1; return hostile.value } },
+        r3: { admit: async () => { calls.r3 += 1; return { kind: 'incomplete', reason: 'failed' } } },
+        r5: { judge: async () => { calls.r5 += 1; return { kind: 'none', completed: [] } } },
+      })
+      const prepared = await coordinator.prepare({ chatId: 42, messageId: 700 + calls.r2, signal: signal() }) as PreparedResult
+      expect(prepared.outcome.kind, hostile.name).toBe('incomplete')
+      expect(prepared.outcome.category, hostile.name).toBe('source_window')
+      expect(calls, hostile.name).toEqual({ r2: 1, r3: 0, r5: 0, close: 0 })
+      expect(hostile.touches(), hostile.name).toBe(0)
+    }
+
+    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-r2-safe-close-'))
+    temporaryDirectories.push(directory)
+    const order: string[] = []
+    let cursorReceiver: unknown
+    let cursorCloseCalls = 0
+    const cursor = Object.freeze({
+      borrowCurrent: async () => { order.push('borrow'); return { kind: 'done' as const } },
+      finalize: async (claim: unknown) => { order.push('finalize'); expect(claim).toMatchObject({ kind: 'none' }); return { kind: 'none' as const } },
+      close: async function (this: unknown) { cursorReceiver = this; cursorCloseCalls += 1; order.push('cursor-close') },
+    })
+    let r2Receiver: unknown
+    let r2CloseCalls = 0
+    const r2 = Object.freeze({
+      kind: 'complete' as const,
+      window: Object.freeze({ source: 'safe-window' }),
+      close: async function (this: unknown) { r2Receiver = this; r2CloseCalls += 1; order.push('r2-close') },
+    })
+    const coordinator = createPersonalFeedV2RequestCoordinator({
+      ledgerPath: join(directory, 'requests.jsonl'),
+      clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
+      r4: { snapshot: async () => ({ kind: 'sufficient', snapshot: Object.freeze({ safe: true }) }) },
+      r2: { observe: async () => r2 },
+      r3: { admit: async () => { order.push('r3'); return { kind: 'admitted', cursor } } },
+      r5: { judge: async (input) => { order.push('r5'); await input.candidates.borrowCurrent({ signal: input.signal }); return { kind: 'none', completed: [] } } },
+    })
+    const prepared = await coordinator.prepare({ chatId: 42, messageId: 799, signal: signal() }) as PreparedResult
+    expect(prepared.outcome.kind).toBe('business_empty')
+    expect(r2CloseCalls).toBe(1)
+    expect(r2Receiver).toBe(r2)
+    expect(cursorCloseCalls).toBe(1)
+    expect(cursorReceiver).toBe(cursor)
+    expect(order.indexOf('r3')).toBeLessThan(order.indexOf('r2-close'))
+    expect(order.indexOf('r2-close')).toBeLessThan(order.indexOf('r5'))
+  })
+
+  it('terminally attempts R2 cleanup after every incomplete, throw, malformed, pre-aborted, and deferred-abort R3 result', async () => {
+    const variants = ['incomplete', 'throw', 'malformed', 'pre', 'deferred_abort'] as const
+    for (const variant of variants) {
+      const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-r3-abort-table-'))
+      temporaryDirectories.push(directory)
+      const controller = new AbortController()
+      const requestId = `telegram:42:${810 + variants.indexOf(variant)}`
+      const request: CandidateWindowRequest = { requestId, cutoff: '2026-08-31T16:00:00.000Z', shanghaiDay: '2026-09-01' }
+      const counters: CandidateCaptureCounters[] = [
+        { take: 0, close: 0, reasons: [] }, { take: 0, close: 0, reasons: [] }, { take: 0, close: 0, reasons: [] },
+      ]
+      const window = closeAwareCandidateWindow(request, counters)
+      const body = (window.surfaces[0]!.occurrences[0]!.body as { readonly capture: { readonly take: Function } }).capture
+      const calls = { r2: 0, r3: 0, r5: 0, r2Close: 0 }
+      let release: ((value: unknown) => void) | undefined
+      const cursor = Object.freeze({
+        borrowCurrent: async () => ({ kind: 'done' as const }),
+        finalize: async () => ({ kind: 'none' as const }),
+        close: async () => undefined,
+      })
+      const r2 = Object.freeze({
+        kind: 'complete' as const,
+        window,
+        close: async () => {
+          calls.r2Close += 1
+          for (const surface of window.surfaces) for (const occurrence of surface.occurrences) {
+            const body = occurrence.body as { readonly capture?: { readonly close: () => Promise<void> }; readonly close?: () => Promise<void> }
+            if (body.capture !== undefined) await body.capture.close()
+            else if (body.close !== undefined) await body.close()
+          }
+        },
+      })
+      const coordinator = createPersonalFeedV2RequestCoordinator({
+        ledgerPath: join(directory, 'requests.jsonl'),
+        clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
+        r4: { snapshot: async () => ({ kind: 'sufficient', snapshot: Object.freeze({ source: 'r4' }) }) },
+        r2: {
+          observe: async () => {
+            calls.r2 += 1
+            if (variant === 'pre') controller.abort()
+            return r2
+          },
+        },
+        r3: {
+          admit: async () => {
+            calls.r3 += 1
+            if (variant === 'throw') throw new Error('R3 failed')
+            if (variant === 'malformed') return { kind: 'admitted', cursor: { borrowCurrent: async () => ({ kind: 'done' }) } }
+            if (variant === 'incomplete' || variant === 'pre') return { kind: 'incomplete', reason: 'failed' }
+            return new Promise(resolve => { release = resolve })
+          },
+        },
+        r5: { judge: async () => { calls.r5 += 1; return { kind: 'none', completed: [] } } },
+      })
+      const pending = coordinator.prepare({ chatId: 42, messageId: 810 + variants.indexOf(variant), signal: controller.signal })
+      if (variant === 'deferred_abort') {
+        for (let attempt = 0; attempt < 10 && release === undefined; attempt += 1) await Promise.resolve()
+        expect(release, variant).toBeTypeOf('function')
+        controller.abort()
+        release!({ kind: 'incomplete', reason: 'aborted' })
+      }
+      const prepared = await pending as PreparedResult
+      expect(prepared.outcome.kind, variant).toBe('incomplete')
+      const expectedCalls = variant === 'pre'
+        ? { r2: 1, r3: 0, r5: 0, r2Close: 1 }
+        : { r2: 1, r3: 1, r5: 0, r2Close: 1 }
+      expect(prepared.outcome.category, variant).toBe(variant === 'pre' ? 'source_window' : 'judgement_execution')
+      expect(calls, variant).toEqual(expectedCalls)
+      expect(body.take({ signal: controller.signal }), variant).toBeUndefined()
+    }
+  })
+
+  it('bounds sync, rejected, and never-settling R2 close failures after admitted R3 while retaining the cursor failure owner', async () => {
+    const variants = ['throw', 'reject', 'pending'] as const
+    for (const variant of variants) {
+      const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-r2-close-failure-'))
+      temporaryDirectories.push(directory)
+      const controller = new AbortController()
+      const calls = { r2: 0, r3: 0, r5: 0, cursorClose: 0 }
+      let releaseClose: (() => void) | undefined
+      const cursor = Object.freeze({
+        borrowCurrent: async () => ({ kind: 'done' as const }),
+        finalize: async () => ({ kind: 'none' as const }),
+        close: async () => { calls.cursorClose += 1 },
+      })
+      const r2 = Object.freeze({
+        kind: 'complete' as const,
+        window: Object.freeze({ source: 'r2-close-failure' }),
+        close: () => {
+          if (variant === 'throw') throw new Error('R2 close throw')
+          if (variant === 'reject') return Promise.reject(new Error('R2 close reject'))
+          return new Promise<void>(resolve => { releaseClose = resolve })
+        },
+      })
+      const coordinator = createPersonalFeedV2RequestCoordinator({
+        ledgerPath: join(directory, 'requests.jsonl'),
+        clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
+        r4: { snapshot: async () => ({ kind: 'sufficient', snapshot: Object.freeze({ source: 'r4' }) }) },
+        r2: { observe: async () => { calls.r2 += 1; return r2 } },
+        r3: { admit: async () => { calls.r3 += 1; return { kind: 'admitted', cursor } } },
+        r5: { judge: async () => { calls.r5 += 1; return { kind: 'none', completed: [] } } },
+      })
+      const started = Date.now()
+      const preparing = coordinator.prepare({ chatId: 42, messageId: 850 + variants.indexOf(variant), signal: controller.signal })
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      const prepared = (variant === 'pending'
+        ? await Promise.race([
+            preparing,
+            new Promise<PreparedResult>(resolve => { timeout = setTimeout(() => resolve(undefined as unknown as PreparedResult), 700) }),
+          ])
+        : await preparing) as PreparedResult
+      if (timeout !== undefined) clearTimeout(timeout)
+      expect(Date.now() - started, variant).toBeLessThan(1_500)
+      expect(prepared.outcome.kind, variant).toBe('incomplete')
+      expect(prepared.outcome.category, variant).toBe('source_window')
+      expect(calls.r5, variant).toBe(0)
+      expect(calls.cursorClose, variant).toBe(1)
+      if (variant === 'pending') releaseClose!()
+    }
+  })
+
+  it('finalizes each valid cursor at most once, closes it on every R5 outcome, and only preserves proven selected or none', async () => {
+    const cases = [
+      { name: 'selected', r5: 'selected', finalize: 'selected', outcome: 'one_link' },
+      { name: 'none', r5: 'none', finalize: 'none', outcome: 'business_empty' },
+      { name: 'incomplete', r5: 'incomplete', finalize: 'incomplete', outcome: 'incomplete' },
+      { name: 'throw', r5: 'throw', finalize: 'incomplete', outcome: 'incomplete' },
+      { name: 'malformed', r5: 'malformed', finalize: 'malformed', outcome: 'incomplete' },
+      { name: 'abort', r5: 'abort', finalize: 'selected', outcome: 'incomplete' },
+      { name: 'borrow throw', r5: 'borrow_throw', finalize: 'incomplete', outcome: 'incomplete' },
+      { name: 'complete throw', r5: 'complete_throw', finalize: 'incomplete', outcome: 'incomplete' },
+      { name: 'finalize throw', r5: 'none', finalize: 'throw', outcome: 'incomplete' },
+    ] as const
+    for (const testCase of cases) {
+      const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-r5-matrix-'))
+      temporaryDirectories.push(directory)
+      const controller = new AbortController()
+      const requestId = `telegram:42:${900 + cases.indexOf(testCase)}`
+      const receipt = Object.freeze({
+        kind: 'candidate_judgment_completed' as const,
+        stableId: 'x-status:901',
+        requestId,
+        position: 0,
+        judgment: 'not_qualified' as const,
+        completedAt: '2026-08-31T16:00:01.000Z',
+      })
+      const qualifiedReceipt = Object.freeze({ ...receipt, judgment: 'qualified' as const })
+      const lease = Object.freeze({
+        stableId: 'x-status:901', canonicalUrl: 'https://x.com/fixture/status/901', position: 0, body: 'candidate body',
+        provenance: Object.freeze({
+          capturedAt: '2026-08-31T16:00:00.000Z', surface: 'for_you' as const, surfaceOrdinal: 0,
+          occurrenceOrdinal: 0, canonicalUrl: 'https://x.com/fixture/status/901', authorHandle: 'fixture',
+          publishedAt: '2026-08-31T15:00:00.000Z',
+        }),
+        completeCurrent: async (input: { readonly judgment?: unknown }) => {
+          if (testCase.r5 === 'complete_throw') throw new Error('completion throw')
+          if (testCase.r5 === 'selected') {
+            expect(input.judgment, testCase.name).toBe('qualified')
+            return qualifiedReceipt
+          }
+          expect(input.judgment, testCase.name).toBe('not_qualified')
+          return receipt
+        },
+      })
+      const observations = { borrow: 0, complete: 0, finalize: 0, close: 0 }
+      const cursor = Object.freeze({
+        borrowCurrent: async () => {
+          observations.borrow += 1
+          if (testCase.r5 === 'borrow_throw') throw new Error('borrow throw')
+          return observations.borrow === 1 ? { kind: 'candidate' as const, lease } : { kind: 'done' as const }
+        },
+        finalize: async (claim: unknown) => {
+          observations.finalize += 1
+          expect(observations.finalize, testCase.name).toBe(1)
+          if (testCase.finalize === 'throw') throw new Error('finalize throw')
+          if (testCase.finalize === 'malformed') return { kind: 'none', extra: 'FINALIZE_EXTRA' }
+          if (testCase.finalize === 'selected') return {
+            kind: 'selected' as const,
+            selected: { stableId: receipt.stableId, canonicalUrl: lease.canonicalUrl, position: 0 },
+          }
+          if (testCase.finalize === 'none') return { kind: 'none' as const }
+          expect(claim).toMatchObject({ kind: 'incomplete' })
+          return { kind: 'incomplete' as const, reason: 'failed' as const }
+        },
+        close: async () => { observations.close += 1 },
+      })
+      const coordinator = createPersonalFeedV2RequestCoordinator({
+        ledgerPath: join(directory, 'requests.jsonl'),
+        clock: { now: () => new Date('2026-08-31T16:00:02.000Z') },
+        r4: { snapshot: async () => ({ kind: 'sufficient', snapshot: Object.freeze({ safe: true }) }) },
+        r2: { observe: async () => ({ kind: 'complete', window: Object.freeze({ source: 'r2' }), close: async () => undefined }) },
+        r3: { admit: async () => ({ kind: 'admitted', cursor }) },
+        r5: {
+          judge: async (input) => {
+            if (testCase.r5 === 'throw') throw new Error('judge throw')
+            if (testCase.r5 === 'incomplete') return { kind: 'incomplete', completed: [], reason: 'failed' }
+            const first = await input.candidates.borrowCurrent({ signal: input.signal })
+            if (testCase.r5 === 'borrow_throw') return { kind: 'none', completed: [] }
+            if (first.kind === 'candidate') {
+              observations.complete += 1
+              const completed = await first.lease.completeCurrent({
+                judgment: testCase.r5 === 'selected' ? 'qualified' : 'not_qualified',
+              })
+              if (testCase.r5 === 'abort') controller.abort()
+              await input.candidates.borrowCurrent({ signal: input.signal })
+              if (testCase.r5 === 'malformed') return { kind: 'none', completed: [completed], extra: 'R5_EXTRA' }
+              if (testCase.r5 === 'selected') return { kind: 'selected', completed: [completed], selected: completed }
+              return { kind: 'none', completed: [completed] }
+            }
+            return { kind: 'none', completed: [] }
+          },
+        },
+      })
+      const prepared = await coordinator.prepare({ chatId: 42, messageId: 900 + cases.indexOf(testCase), signal: controller.signal }) as PreparedResult
+      expect(prepared.outcome.kind, testCase.name).toBe(testCase.outcome)
+      expect(observations.finalize, testCase.name).toBe(1)
+      expect(observations.close, testCase.name).toBe(1)
+      if (testCase.name === 'selected') expect(prepared.outcome.finalText).toBe('https://x.com/fixture/status/901')
+      if (testCase.name === 'none') expect(prepared.outcome.finalText).toBe('这次没有值得看的内容。')
+      if (testCase.outcome === 'incomplete') expect(prepared.outcome.finalText).toBe('这次没有完成：判断或执行未完成。')
+    }
+  })
+
+  it('retries a rejected cursor close through synchronous settle with the same receiver and never reopens the old owner', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-close-retry-'))
+    temporaryDirectories.push(directory)
+    let closeReceiver: unknown
+    let closeCalls = 0
+    let cursor!: object
+    const close = async function (this: unknown) {
+      closeReceiver = this
+      closeCalls += 1
+      if (closeCalls === 1) throw new Error('first close reject')
+    }
+    cursor = Object.freeze({
+      borrowCurrent: async () => ({ kind: 'done' as const }),
+      finalize: async () => ({ kind: 'none' as const, extra: 'MALFORMED_FINALIZE' }),
+      close,
+    })
+    let r4Calls = 0
+    const coordinator = createPersonalFeedV2RequestCoordinator({
+      ledgerPath: join(directory, 'requests.jsonl'),
+      clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
+      r4: { snapshot: async () => { r4Calls += 1; return { kind: 'sufficient', snapshot: Object.freeze({ safe: true }) } } },
+      r2: { observe: async () => ({ kind: 'complete', window: Object.freeze({ source: 'r2' }), close: async () => undefined }) },
+      r3: { admit: async () => ({ kind: 'admitted', cursor }) },
+      r5: { judge: async () => ({ kind: 'none', completed: [] }) },
+    })
+    const prepared = await coordinator.prepare({ chatId: 42, messageId: 980, signal: signal() }) as PreparedResult
+    expect(prepared.outcome.kind).toBe('incomplete')
+    const receipt: Receipt = {
+      chatId: 42, triggerMessageId: 980, visibleText: prepared.outcome.finalText, messageIds: [1],
+    }
+    expect(() => prepared.settle(receipt)).not.toThrow()
+    expect(prepared.settle(receipt)).toBeUndefined()
+    expect(closeCalls).toBe(2)
+    expect(closeReceiver).toBe(cursor)
+    expect(await coordinator.prepare({ chatId: 42, messageId: 980, signal: signal() })).toEqual({ kind: 'duplicate_consumed' })
+    expect(r4Calls).toBe(1)
+    expect(closeCalls).toBe(2)
+  })
+
+  it('keeps one pending cursor-close attempt single-flight across settle and duplicate prepare, then permits a later request after late fulfillment', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-close-pending-'))
+    temporaryDirectories.push(directory)
+    let releaseClose!: () => void
+    let closeCalls = 0
+    let closeReceiver: unknown
+    const pendingClose = new Promise<void>(resolve => { releaseClose = resolve })
+    const cursor = Object.freeze({
+      borrowCurrent: async () => ({ kind: 'done' as const }),
+      finalize: async () => ({ kind: 'none', extra: 'MALFORMED_FINALIZE' }),
+      close: async function (this: unknown) { closeReceiver = this; closeCalls += 1; return pendingClose },
+    })
+    const calls = { r4: 0, r2: 0, r3: 0, r5: 0 }
+    const coordinator = createPersonalFeedV2RequestCoordinator({
+      ledgerPath: join(directory, 'requests.jsonl'),
+      clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
+      r4: { snapshot: async () => { calls.r4 += 1; return { kind: 'sufficient', snapshot: Object.freeze({ safe: true }) } } },
+      r2: { observe: async () => { calls.r2 += 1; return { kind: 'complete', window: Object.freeze({ source: 'r2' }), close: async () => undefined } } },
+      r3: {
+        admit: async (input) => {
+          calls.r3 += 1
+          return input.request.requestId.endsWith(':991') || input.request.requestId.endsWith(':992')
+            ? { kind: 'incomplete' as const, reason: 'failed' as const }
+            : { kind: 'admitted' as const, cursor }
+        },
+      },
+      r5: {
+        judge: async (input) => {
+          calls.r5 += 1
+          expect(await input.candidates.borrowCurrent({ signal: input.signal })).toEqual({ kind: 'done' })
+          return { kind: 'none', completed: [] }
+        },
+      },
+    })
+    const started = Date.now()
+    const preparing = coordinator.prepare({ chatId: 42, messageId: 990, signal: signal() })
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const prepared = await Promise.race([
+      preparing,
+      new Promise<PreparedResult>(resolve => { timeout = setTimeout(() => resolve(undefined as unknown as PreparedResult), 700) }),
+    ]) as PreparedResult
+    if (timeout !== undefined) clearTimeout(timeout)
+    expect(Date.now() - started).toBeLessThan(1_500)
+    expect(prepared.outcome.kind).toBe('incomplete')
+    const receipt: Receipt = { chatId: 42, triggerMessageId: 990, visibleText: prepared.outcome.finalText, messageIds: [1] }
+    expect(() => prepared.settle(receipt)).not.toThrow()
+    expect(await coordinator.prepare({ chatId: 42, messageId: 990, signal: signal() })).toEqual({ kind: 'duplicate_consumed' })
+    expect(closeCalls).toBe(1)
+    expect(closeReceiver).toBe(cursor)
+    expect(calls.r5).toBe(1)
+    const blocked = await coordinator.prepare({ chatId: 42, messageId: 991, signal: signal() }) as PreparedResult
+    expect(blocked.outcome.kind).toBe('incomplete')
+    expect(blocked.outcome.category).toBe('judgement_execution')
+    expect(blocked.outcome.finalText).not.toContain('candidate-body')
+    expect(calls).toEqual({ r4: 1, r2: 1, r3: 1, r5: 1 })
+    releaseClose()
+    await preparing
+    const later = await coordinator.prepare({ chatId: 42, messageId: 992, signal: signal() }) as PreparedResult
+    expect(later.outcome.kind).toBe('incomplete')
+    expect(calls).toEqual({ r4: 2, r2: 2, r3: 2, r5: 1 })
+    expect(closeCalls).toBe(1)
+  })
+
+  it('attempts owner terminal cleanup before an outcome ledger append, and keeps body-free delivery failures outside lifecycle ownership', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-ledger-order-'))
+    temporaryDirectories.push(directory)
+    const ledgerPath = join(directory, 'requests.jsonl')
+    const order: string[] = []
+    const cursor = Object.freeze({
+      borrowCurrent: async () => { order.push('borrow'); return { kind: 'done' as const } },
+      finalize: async () => { order.push('finalize'); return { kind: 'none' as const } },
+      close: async () => { order.push('cursor-close') },
+    })
+    const coordinator = createPersonalFeedV2RequestCoordinator({
+      ledgerPath,
+      clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
+      r4: { snapshot: async () => ({ kind: 'sufficient', snapshot: Object.freeze({ safe: true }) }) },
+      r2: { observe: async () => ({ kind: 'complete', window: Object.freeze({ source: 'r2' }), close: async () => { order.push('r2-close') } }) },
+      r3: { admit: async () => ({ kind: 'admitted', cursor }) },
+      r5: {
+        judge: async (input) => {
+          order.push('r5')
+          await input.candidates.borrowCurrent({ signal: input.signal })
+          // Force the subsequent outcome_prepared append to fail after the open record exists.
+          rmSync(ledgerPath, { force: true })
+          mkdirSync(ledgerPath)
+          return { kind: 'none', completed: [] }
+        },
+      },
+    })
+    const failure = await coordinator.prepare({ chatId: 42, messageId: 1001, signal: signal() }).catch(error => error)
+    expect(failure).toBeInstanceOf(Error)
+    expect(order.indexOf('r2-close')).toBeGreaterThanOrEqual(0)
+    expect(order.indexOf('r2-close')).toBeLessThan(order.indexOf('r5'))
+    expect(order.indexOf('cursor-close')).toBeGreaterThan(order.indexOf('r5'))
+    const diagnostic = String(failure)
+    expect(diagnostic).not.toContain('BODY_CANARY')
+    expect(diagnostic).not.toContain('candidate body')
+
+    const successDirectory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-fake-delivery-'))
+    temporaryDirectories.push(successDirectory)
+    let ownerCloseCalls = 0
+    const successCursor = Object.freeze({
+      borrowCurrent: async () => ({ kind: 'done' as const }),
+      finalize: async () => ({ kind: 'none' as const }),
+      close: async () => { ownerCloseCalls += 1 },
+    })
+    const successCoordinator = createPersonalFeedV2RequestCoordinator({
+      ledgerPath: join(successDirectory, 'requests.jsonl'),
+      clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
+      r4: { snapshot: async () => ({ kind: 'sufficient', snapshot: Object.freeze({ safe: true }) }) },
+      r2: { observe: async () => ({ kind: 'complete', window: Object.freeze({ source: 'r2' }), close: async () => undefined }) },
+      r3: { admit: async () => ({ kind: 'admitted', cursor: successCursor }) },
+      r5: { judge: async (input) => { await input.candidates.borrowCurrent({ signal: input.signal }); return { kind: 'none', completed: [] } } },
+    })
+    const prepared = await successCoordinator.prepare({ chatId: 42, messageId: 1002, signal: signal() }) as PreparedResult
+    const beforeDelivery = ownerCloseCalls
+    const fakeDelivery = (outcome: unknown): never => {
+      expect(JSON.stringify(outcome)).not.toContain('candidate body')
+      expect(JSON.stringify(outcome)).not.toContain('BODY_CANARY')
+      throw new Error('fake delivery failed')
+    }
+    expect(() => fakeDelivery(prepared.outcome)).toThrow('fake delivery failed')
+    expect(ownerCloseCalls).toBe(beforeDelivery)
+  })
+
+  it('salvages only a cleanup-only close from a malformed admitted cursor after R3 has taken an R2 capture', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-salvage-close-'))
+    temporaryDirectories.push(directory)
+    const request: CandidateWindowRequest = { requestId: 'telegram:42:1010', cutoff: '2026-08-31T16:00:00.000Z', shanghaiDay: '2026-09-01' }
+    const counters: CandidateCaptureCounters[] = [
+      { take: 0, close: 0, reasons: [] }, { take: 0, close: 0, reasons: [] }, { take: 0, close: 0, reasons: [] },
+    ]
+    const window = closeAwareCandidateWindow(request, counters)
+    const capture = (window.surfaces[0]!.occurrences[0]!.body as { readonly capture: { readonly take: Function } }).capture
+    const order: string[] = []
+    let malformedCursor!: Record<string, unknown>
+    malformedCursor = {
+      borrowCurrent: 'not callable',
+      finalize: 'not callable',
+      close: function (this: Record<string, unknown>) { expect(this).toBe(malformedCursor); order.push('cursor-close') },
+    }
+    const coordinator = createPersonalFeedV2RequestCoordinator({
+      ledgerPath: join(directory, 'requests.jsonl'),
+      clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
+      r4: { snapshot: async () => ({ kind: 'sufficient', snapshot: Object.freeze({ safe: true }) }) },
+      r2: {
+        observe: async () => ({
+          kind: 'complete', window,
+          close: async () => { order.push('r2-close'); for (const surface of window.surfaces) for (const occurrence of surface.occurrences) {
+            const body = occurrence.body as { readonly capture?: { readonly close: () => Promise<void> }; readonly close?: () => Promise<void> }
+            if (body.capture !== undefined) await body.capture.close()
+            else if (body.close !== undefined) await body.close()
+          } },
+        }),
+      },
+      r3: {
+        admit: async (input) => {
+          const taken = capture.take({ signal: input.signal })
+          expect(taken).toBe('candidate-body-101')
+          expect(counters[0]!.take).toBe(1)
+          return { kind: 'admitted', cursor: malformedCursor }
+        },
+      },
+      r5: { judge: async () => { throw new Error('R5 must not run') } },
+    })
+    const prepared = await coordinator.prepare({ chatId: 42, messageId: 1010, signal: signal() }) as PreparedResult
+    expect(prepared.outcome.kind).toBe('incomplete')
+    expect(prepared.outcome.category).toBe('judgement_execution')
+    expect(order).toEqual(['r2-close', 'cursor-close'])
+    expect(counters.every(counter => counter.take <= 1)).toBe(true)
+    expect(counters.every(counter => counter.close === 1)).toBe(true)
+  })
+
+  it('rejects every admitted cursor shape without a safe close while closing only R2 and never taking a body', async () => {
+    const variants = ['no close', 'accessor', 'inherited', 'nonfunction', 'symbol', 'nonenumerable', 'wrong prototype', 'proxy'] as const
+    for (const variant of variants) {
+      const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-no-safe-close-'))
+      temporaryDirectories.push(directory)
+      const request: CandidateWindowRequest = { requestId: `telegram:42:${1030 + variants.indexOf(variant)}`, cutoff: '2026-08-31T16:00:00.000Z', shanghaiDay: '2026-09-01' }
+      const counters: CandidateCaptureCounters[] = [
+        { take: 0, close: 0, reasons: [] }, { take: 0, close: 0, reasons: [] }, { take: 0, close: 0, reasons: [] },
+      ]
+      const window = closeAwareCandidateWindow(request, counters)
+      const capture = (window.surfaces[0]!.occurrences[0]!.body as { readonly capture: { readonly take: Function; readonly close: Function } }).capture
+      let touches = 0
+      const base = { borrowCurrent: async () => ({ kind: 'done' }), finalize: async () => ({ kind: 'none' }) }
+      let cursor: unknown
+      if (variant === 'no close') cursor = base
+      else if (variant === 'accessor') cursor = Object.defineProperty({ ...base }, 'close', { enumerable: true, get: () => { touches += 1; return async () => undefined } })
+      else if (variant === 'inherited') cursor = Object.assign(Object.create({ close: async () => undefined }), base)
+      else if (variant === 'nonfunction') cursor = { ...base, close: 'bad' }
+      else if (variant === 'symbol') cursor = Object.assign({ ...base, close: async () => undefined }, { [Symbol('extra')]: true })
+      else if (variant === 'nonenumerable') {
+        cursor = { ...base }
+        Object.defineProperty(cursor, 'close', { value: async () => undefined, enumerable: false })
+      } else if (variant === 'wrong prototype') cursor = Object.assign(Object.create({ wrong: true }), { ...base, close: async () => undefined })
+      else {
+        const target = { ...base, close: async () => undefined }
+        cursor = new Proxy(target, {
+          get: () => { touches += 1; return undefined }, ownKeys: () => { touches += 1; return Reflect.ownKeys(target) },
+          getOwnPropertyDescriptor: () => { touches += 1; return undefined }, getPrototypeOf: () => { touches += 1; return Object.prototype },
+        })
+      }
+      let r2Close = 0
+      const coordinator = createPersonalFeedV2RequestCoordinator({
+        ledgerPath: join(directory, 'requests.jsonl'),
+        clock: { now: () => new Date('2026-08-31T16:00:00.000Z') },
+        r4: { snapshot: async () => ({ kind: 'sufficient', snapshot: Object.freeze({ safe: true }) }) },
+        r2: {
+          observe: async () => ({ kind: 'complete', window, close: async () => {
+            r2Close += 1
+            for (const surface of window.surfaces) for (const occurrence of surface.occurrences) {
+              const body = occurrence.body as { readonly capture?: { readonly close: () => Promise<void> }; readonly close?: () => Promise<void> }
+              if (body.capture !== undefined) await body.capture.close()
+              else if (body.close !== undefined) await body.close()
+            }
+          } }),
+        },
+        r3: { admit: async () => ({ kind: 'admitted', cursor }) },
+        r5: { judge: async () => { throw new Error('R5 must not run') } },
+      })
+      const prepared = await coordinator.prepare({ chatId: 42, messageId: 1030 + variants.indexOf(variant), signal: signal() }) as PreparedResult
+      expect(prepared.outcome.kind, variant).toBe('incomplete')
+      expect(prepared.outcome.category, variant).toBe('judgement_execution')
+      expect(r2Close, variant).toBe(1)
+      expect(counters[0]!.take, variant).toBe(0)
+      expect(capture.take({ signal: signal() }), variant).toBeUndefined()
+      expect(touches, variant).toBe(0)
     }
   })
 })

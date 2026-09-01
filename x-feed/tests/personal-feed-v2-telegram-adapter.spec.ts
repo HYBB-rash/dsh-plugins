@@ -76,6 +76,7 @@ function realCoordinator(directory: string) {
         return Object.freeze({
           kind: 'complete',
           window: Object.freeze({ source: 'x', complete: true }),
+          close: async () => undefined,
         })
       },
     },
