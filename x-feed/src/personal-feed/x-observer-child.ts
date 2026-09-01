@@ -555,6 +555,18 @@ function validSafePositiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
 }
 
+function readOwnSpawnPid(value: unknown): number | undefined {
+  if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return undefined
+  try {
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, 'pid')
+    if (descriptor === undefined || descriptor.enumerable !== true || !('value' in descriptor)
+      || !validSafePositiveInteger(descriptor.value)) return undefined
+    return descriptor.value
+  } catch {
+    return undefined
+  }
+}
+
 function isNowEpochMs(value: unknown): value is () => number {
   return typeof value === 'function'
 }
@@ -693,16 +705,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     return Promise.resolve(frozenError('observer_failed'))
   }
 
-  let capturedPid: number | undefined
-  try {
-    if ((typeof child === 'object' || typeof child === 'function') && child !== null) {
-      const descriptor = Reflect.getOwnPropertyDescriptor(child, 'pid')
-      if (descriptor !== undefined && descriptor.enumerable === true && 'value' in descriptor
-        && validSafePositiveInteger(descriptor.value)) capturedPid = descriptor.value
-    }
-  } catch {
-    // Descriptor lookup failure is an invalid spawn identity and must not invoke a pid getter.
-  }
+  const capturedPid = readOwnSpawnPid(child)
 
   return new Promise<ObserverResult>((resolve) => {
     type TimerSlot = {
@@ -967,14 +970,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
 
     const onSpawn = (): void => {
       if (stdioClosed || settled || spawnState !== 'running') return
-      let matchingPid = false
-      try {
-        const descriptor = Reflect.getOwnPropertyDescriptor(child, 'pid')
-        matchingPid = descriptor !== undefined && descriptor.enumerable === true && 'value' in descriptor
-          && validSafePositiveInteger(descriptor.value) && descriptor.value === capturedPid
-      } catch {
-        // Descriptor lookup failure is an invalid late spawn identity.
-      }
+      const matchingPid = readOwnSpawnPid(child) === capturedPid
       if (matchingPid) return
       spawnState = 'failed'
       processExited = true
