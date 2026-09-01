@@ -2015,6 +2015,13 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             "outsideRootEmptyMarkerCount", "loadingCount", "loginCount",
             "authCount", "errorCount", "retryCount",
         }
+        blocker_selectors = {
+            "loadingCount": '[aria-busy="true"],[role="progressbar"]',
+            "loginCount": '[data-testid="login"],[data-testid="loginButton"]',
+            "authCount": '[data-testid="authError"],[data-testid="authRequired"]',
+            "errorCount": '[data-testid="error"],[data-testid="errorState"]',
+            "retryCount": '[data-testid="retry"],[data-testid="retryButton"]',
+        }
         for surface in SURFACE_TARGETS:
             facts = _empty_facts(surface, emptyMarkerCount=1)
             self.assertEqual(set(facts), empty_fact_keys)
@@ -2067,7 +2074,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                     self.assertIn('[role="progressbar"]', expression)
                     self.assertIn("getClientRects", expression)
                     self.assertIn("aria-hidden", expression)
-                    for field in ("loginCount", "authCount", "errorCount", "retryCount"):
+                    for field, selector in blocker_selectors.items():
                         field_position = expression.index(field)
                         field_context = expression[
                             max(0, field_position - 800):field_position + 800
@@ -2079,6 +2086,11 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                                 for selector in ("[data-testid=", "[role=", "[aria-")
                             )
                         )
+                        outside_needle = f"document.body.querySelectorAll('{selector}')"
+                        outside_position = expression.index(outside_needle)
+                        outside_context = expression[outside_position:outside_position + 500]
+                        self.assertIn("!root.contains(node)", outside_context)
+                        self.assertIn("visible(node)", outside_context)
                         self.assertNotIn("innerText", field_context)
                         self.assertNotIn("textContent", field_context)
 
