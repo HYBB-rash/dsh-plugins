@@ -16,7 +16,142 @@ const INPUT_KEYS = Object.freeze(['request', 'signal'] as const)
 const REQUEST_KEYS = Object.freeze(['requestId', 'cutoff', 'shanghaiDay'] as const)
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1_000
 const DAY_MS = 24 * 60 * 60 * 1_000
+const STDOUT_MAX_BYTES = 1_048_576
+const STDERR_MAX_BYTES = 4_096
 const OBSERVER_FAILED_LINE = '{"schemaVersion":1,"kind":"observer_failed"}\n'
+
+type StrictByteChunk = Readonly<
+  | { readonly kind: 'snapshot'; readonly bytes: Uint8Array; readonly byteLength: number }
+  | { readonly kind: 'overflow' }
+  | { readonly kind: 'failed' }
+>
+
+type IntrinsicGetter = (target: object) => unknown
+type IntrinsicSet = (target: object, source: object) => unknown
+
+const BYTE_CHUNK_INTRINSICS = (() => {
+  let localUint8Array: typeof Uint8Array | undefined
+  let reflectApply: typeof Reflect.apply | undefined
+  let typedArrayByteLengthGetter: IntrinsicGetter | undefined
+  let typedArrayBufferGetter: IntrinsicGetter | undefined
+  let typedArraySet: IntrinsicSet | undefined
+  let arrayBufferByteLengthGetter: IntrinsicGetter | undefined
+  let arrayBufferResizableGetter: IntrinsicGetter | undefined
+  let arrayBufferDetachedGetter: IntrinsicGetter | undefined
+  try {
+    localUint8Array = typeof Uint8Array === 'function' ? Uint8Array : undefined
+    reflectApply = typeof Reflect === 'object' && typeof Reflect.apply === 'function' ? Reflect.apply : undefined
+    if (localUint8Array !== undefined) {
+      const typedArrayPrototype = Object.getPrototypeOf(localUint8Array.prototype)
+      typedArrayByteLengthGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteLength')?.get
+      typedArrayBufferGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'buffer')?.get
+      typedArraySet = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'set')?.value
+    }
+    if (typeof ArrayBuffer === 'function') {
+      const arrayBufferPrototype = ArrayBuffer.prototype
+      arrayBufferByteLengthGetter = Object.getOwnPropertyDescriptor(arrayBufferPrototype, 'byteLength')?.get
+      arrayBufferResizableGetter = Object.getOwnPropertyDescriptor(arrayBufferPrototype, 'resizable')?.get
+      arrayBufferDetachedGetter = Object.getOwnPropertyDescriptor(arrayBufferPrototype, 'detached')?.get
+    }
+  } catch {
+    // Missing or malformed intrinsics make strictByteChunk fail closed.
+  }
+  return Object.freeze({
+    localUint8Array,
+    reflectApply,
+    typedArrayByteLengthGetter,
+    typedArrayBufferGetter,
+    typedArraySet,
+    arrayBufferByteLengthGetter,
+    arrayBufferResizableGetter,
+    arrayBufferDetachedGetter,
+  })
+})()
+
+function strictByteChunk(value: unknown, maxByteLength: number): StrictByteChunk {
+  if (!Number.isSafeInteger(maxByteLength) || maxByteLength < 0) return { kind: 'failed' }
+
+  const {
+    localUint8Array,
+    reflectApply,
+    typedArrayByteLengthGetter,
+    typedArrayBufferGetter,
+    typedArraySet,
+    arrayBufferByteLengthGetter,
+    arrayBufferResizableGetter,
+    arrayBufferDetachedGetter,
+  } = BYTE_CHUNK_INTRINSICS
+  if (localUint8Array === undefined || reflectApply === undefined
+    || typedArrayByteLengthGetter === undefined || typedArrayBufferGetter === undefined || typedArraySet === undefined
+    || arrayBufferByteLengthGetter === undefined || arrayBufferResizableGetter === undefined
+    || arrayBufferDetachedGetter === undefined) return { kind: 'failed' }
+
+  let branded = false
+  try {
+    branded = nodeTypes.isUint8Array(value)
+  } catch {
+    return { kind: 'failed' }
+  }
+  if (!branded || (typeof value !== 'object' && typeof value !== 'function') || value === null) {
+    return { kind: 'failed' }
+  }
+
+  let byteLength: unknown
+  let owner: unknown
+  try {
+    byteLength = reflectApply(typedArrayByteLengthGetter, value, [])
+    owner = reflectApply(typedArrayBufferGetter, value, [])
+  } catch {
+    return { kind: 'failed' }
+  }
+  if (typeof byteLength !== 'number' || !Number.isSafeInteger(byteLength) || byteLength < 0) {
+    return { kind: 'failed' }
+  }
+
+  let ownerIsArrayBuffer = false
+  try {
+    ownerIsArrayBuffer = nodeTypes.isArrayBuffer(owner)
+  } catch {
+    return { kind: 'failed' }
+  }
+  if (!ownerIsArrayBuffer || owner === null || (typeof owner !== 'object' && typeof owner !== 'function')) {
+    return { kind: 'failed' }
+  }
+
+  let ownerByteLength: unknown
+  let ownerResizable: unknown
+  let ownerDetached: unknown
+  try {
+    ownerByteLength = reflectApply(arrayBufferByteLengthGetter, owner, [])
+    ownerResizable = reflectApply(arrayBufferResizableGetter, owner, [])
+    ownerDetached = reflectApply(arrayBufferDetachedGetter, owner, [])
+  } catch {
+    return { kind: 'failed' }
+  }
+  if (typeof ownerByteLength !== 'number' || !Number.isSafeInteger(ownerByteLength) || ownerByteLength < 0
+    || ownerResizable !== false || ownerDetached !== false || byteLength > ownerByteLength) {
+    return { kind: 'failed' }
+  }
+
+  if (byteLength > maxByteLength) return { kind: 'overflow' }
+
+  let snapshot: Uint8Array
+  try {
+    snapshot = new localUint8Array(byteLength)
+    reflectApply(typedArraySet, snapshot, [value])
+  } catch {
+    return { kind: 'failed' }
+  }
+
+  let snapshotByteLength: unknown
+  try {
+    snapshotByteLength = reflectApply(typedArrayByteLengthGetter, snapshot, [])
+  } catch {
+    return { kind: 'failed' }
+  }
+  if (snapshotByteLength !== byteLength) return { kind: 'failed' }
+  return { kind: 'snapshot', bytes: snapshot, byteLength }
+}
 
 type ErrorCode = 'aborted' | 'invalid_request' | 'child_invalid_input' | 'insufficient_budget' | 'observer_failed' | 'protocol_invalid' | 'timed_out'
 
@@ -98,7 +233,6 @@ type ObserverResult = ObserverError | ObserverComplete | ObserverIncomplete
 
 type ChildStream = Readonly<{
   readonly on: (event: string, listener: (...args: unknown[]) => void) => unknown
-  readonly setEncoding?: (encoding: string) => unknown
 }>
 
 type ChildProcess = Readonly<{
@@ -567,6 +701,13 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     let closed = false
     let firstReason: ErrorCode | undefined
     let stdout = ''
+    const stdoutDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+    const stderrDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+    let stdoutRawBytes = 0
+    let stderrRawBytes = 0
+    let stdoutFirstByteSeen = false
+    let stdoutSawLf = false
+    let stdoutLastByte: number | undefined
     const deadlineSlot: TimerSlot = { generation: 0, active: false, handle: undefined }
     const budgetSlot: TimerSlot = { generation: 0, active: false, handle: undefined }
     const graceSlot: TimerSlot = { generation: 0, active: false, handle: undefined }
@@ -674,15 +815,73 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
 
     const collectStdout = (chunk: unknown): void => {
       if (closed || firstReason !== undefined) return
-      if (typeof chunk === 'string') {
-        stdout += chunk
-      } else if (chunk instanceof Uint8Array) {
-        try {
-          stdout += new TextDecoder().decode(chunk)
-        } catch {
-          lockFirstReason('observer_failed')
+
+      const byteChunk = strictByteChunk(chunk, STDOUT_MAX_BYTES - stdoutRawBytes)
+      if (byteChunk.kind === 'failed') {
+        lockFirstReason('observer_failed')
+        return
+      }
+      if (byteChunk.kind === 'overflow') {
+        lockFirstReason('protocol_invalid')
+        return
+      }
+      const { bytes, byteLength } = byteChunk
+
+      try {
+        for (let index = 0; index < byteLength; index += 1) {
+          const byte = bytes[index]
+          if (byte === undefined || !Number.isInteger(byte) || byte < 0 || byte > 0xff) throw new Error()
+          if (!stdoutFirstByteSeen) {
+            stdoutFirstByteSeen = true
+            if (byte !== 0x7b) {
+              lockFirstReason('protocol_invalid')
+              return
+            }
+          }
+          if (stdoutSawLf || byte === 0x0d) {
+            lockFirstReason('protocol_invalid')
+            return
+          }
+          if (byte === 0x0a) {
+            if (stdoutLastByte !== 0x7d) {
+              lockFirstReason('protocol_invalid')
+              return
+            }
+            stdoutSawLf = true
+            if (index !== byteLength - 1) {
+              lockFirstReason('protocol_invalid')
+              return
+            }
+          }
+          stdoutLastByte = byte
         }
-      } else {
+        stdoutRawBytes += byteLength
+      } catch {
+        lockFirstReason('observer_failed')
+        return
+      }
+
+      try {
+        stdout += stdoutDecoder.decode(bytes, { stream: true })
+      } catch {
+        lockFirstReason('protocol_invalid')
+      }
+    }
+
+    const collectStderr = (chunk: unknown): void => {
+      if (closed || firstReason !== undefined) return
+
+      const byteChunk = strictByteChunk(chunk, STDERR_MAX_BYTES - stderrRawBytes)
+      if (byteChunk.kind === 'failed' || byteChunk.kind === 'overflow') {
+        lockFirstReason('observer_failed')
+        return
+      }
+      const { bytes, byteLength } = byteChunk
+
+      try {
+        stderrDecoder.decode(bytes, { stream: true })
+        stderrRawBytes += byteLength
+      } catch {
         lockFirstReason('observer_failed')
       }
     }
@@ -690,10 +889,6 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       if (closed) return
       lockFirstReason('observer_failed')
     }
-    const ignoreStderr = (): void => {
-      if (closed) return
-    }
-
     const consumeGraceForBudget = (): void => {
       cancelTimer(graceSlot)
       graceConsumed = true
@@ -751,14 +946,32 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       let result: ObserverResult
       if (firstReason !== undefined) {
         result = frozenError(firstReason)
-      } else if (code === 0 && signalToReport === null) {
-        try {
-          result = parseObserverResult(stdout, cutoffEpochMs, deadlineEpochMs, budgetEnd)
-        } catch {
-          result = frozenError('observer_failed')
-        }
       } else {
-        result = frozenError('observer_failed')
+        let finalizationReason: ErrorCode | undefined
+        try {
+          stdout += stdoutDecoder.decode()
+        } catch {
+          finalizationReason = 'protocol_invalid'
+        }
+        try {
+          stderrDecoder.decode()
+        } catch {
+          if (finalizationReason === undefined) finalizationReason = 'observer_failed'
+        }
+
+        if (finalizationReason !== undefined) {
+          result = frozenError(finalizationReason)
+        } else if (code !== 0 || signalToReport !== null) {
+          result = frozenError('observer_failed')
+        } else if (!stdoutFirstByteSeen || stdoutRawBytes <= 1 || !stdoutSawLf) {
+          result = frozenError('protocol_invalid')
+        } else {
+          try {
+            result = parseObserverResult(stdout, cutoffEpochMs, deadlineEpochMs, budgetEnd)
+          } catch {
+            result = frozenError('observer_failed')
+          }
+        }
       }
       cleanup()
       resolve(result)
@@ -818,10 +1031,8 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       if (abortedAfterRegistration) onAbort()
 
       if (!closed) {
-        child.stdout.setEncoding?.('utf8')
-        child.stderr.setEncoding?.('utf8')
         child.stdout.on('data', collectStdout)
-        child.stderr.on('data', ignoreStderr)
+        child.stderr.on('data', collectStderr)
         child.stdout.on('error', markStreamFailure)
         child.stderr.on('error', markStreamFailure)
         child.on('error', markStreamFailure)

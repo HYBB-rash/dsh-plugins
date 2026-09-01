@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { runInNewContext } from 'node:vm'
 import { describe, expect, it, vi } from 'vitest'
 
 type FakeStreamEnd = (...args: unknown[]) => void
@@ -19,15 +20,7 @@ class FakeWritable extends EventEmitter {
 }
 
 class FakeReadable extends EventEmitter {
-  readonly setEncodingCalls: string[] = []
-  setEncodingError: unknown = undefined
   throwOnOn = false
-
-  setEncoding(_encoding: string): this {
-    this.setEncodingCalls.push(_encoding)
-    if (this.setEncodingError !== undefined) throw this.setEncodingError
-    return this
-  }
 
   override on(event: string | symbol, listener: (...args: any[]) => void): this {
     if (this.throwOnOn) throw new Error('STREAM_ON_CANARY')
@@ -237,7 +230,7 @@ function validChild(spawnEvents: string[]): { readonly child: FakeChild; readonl
   })
   child.stdin.onEnd = () => {
     queueMicrotask(() => {
-      child.stdout.emit('data', '{"schemaVersion":1,"kind":"observer_failed"}\n')
+      child.stdout.emit('data', Buffer.from('{"schemaVersion":1,"kind":"observer_failed"}\n'))
       child.emit('close', 0, null)
     })
   }
@@ -398,6 +391,10 @@ function jsonLine(value: unknown): string {
   return `${encoded}\n`
 }
 
+function utf8Buffer(value: string): Buffer {
+  return Buffer.from(value, 'utf8')
+}
+
 function rawChild(line: string): { readonly child: FakeChild; readonly spawn: ReturnType<typeof vi.fn> } {
   const child = new FakeChild()
   const spawn = vi.fn((...args: unknown[]) => {
@@ -406,7 +403,7 @@ function rawChild(line: string): { readonly child: FakeChild; readonly spawn: Re
   })
   child.stdin.onEnd = () => {
     queueMicrotask(() => {
-      child.stdout.emit('data', line)
+      child.stdout.emit('data', utf8Buffer(line))
       child.emit('close', 0, null)
     })
   }
@@ -863,7 +860,7 @@ describe('Personal Feed X observer child Group3 bounded termination contract', (
       readonly expected: unknown
     }[] = [
       { label: 'valid raw tuple', line: jsonLine(completeFixture()), closeArgs: [0, null], expected: completeFixture() },
-      { label: 'invalid wire', line: 'RAW_CANARY\n', closeArgs: [0, null], expected: { kind: 'error', code: 'protocol_invalid' } },
+      { label: 'envelope-valid semantic-invalid wire', line: '{"schemaVersion":1,"kind":"unknown"}\n', closeArgs: [0, null], expected: { kind: 'error', code: 'protocol_invalid' } },
       { label: 'nonzero exit', closeArgs: [1, null], expected: { kind: 'error', code: 'observer_failed' } },
       { label: 'signal close', closeArgs: [null, 'SIGTERM'], expected: { kind: 'error', code: 'observer_failed' } },
       { label: 'zero plus signal', closeArgs: [0, 'SIGTERM'], expected: { kind: 'error', code: 'observer_failed' } },
@@ -878,7 +875,7 @@ describe('Personal Feed X observer child Group3 bounded termination contract', (
         signal: new AbortController().signal,
       })
       await expectStillPending(promise)
-      if (testCase.line !== undefined) child.stdout.emit('data', testCase.line)
+      if (testCase.line !== undefined) child.stdout.emit('data', utf8Buffer(testCase.line))
       child.emit('close', ...testCase.closeArgs)
       const result = await promise
       expect(result, testCase.label).toEqual(Object.freeze(testCase.expected))
@@ -1175,9 +1172,9 @@ describe('Personal Feed X observer child Group3 bounded termination contract', (
       { label: 'child error then abort', setup: (child, _scheduler, controller) => { child.emit('error', new Error('EXCEPTION_CANARY')); controller.abort() }, expected: 'observer_failed' },
       { label: 'timeout then legal post-D incomplete', setup: (child, scheduler) => {
         scheduler.advanceTo(CLEANUP_DEADLINE_EPOCH_MS)
-        child.stdout.emit('data', jsonLine(incompleteFixture('2026-08-31T10:00:08.000Z', '2026-08-31T10:00:08.124Z')))
+        child.stdout.emit('data', utf8Buffer(jsonLine(incompleteFixture('2026-08-31T10:00:08.000Z', '2026-08-31T10:00:08.124Z'))))
       }, expected: 'timed_out' },
-      { label: 'invalid wire plus bad close tuple', setup: (child) => child.stdout.emit('data', 'RAW_CANARY\n'), expected: 'observer_failed', closeArgs: [1, null], expectedKills: [], earlyClose: true },
+      { label: 'semantic-invalid wire plus bad close tuple', setup: (child) => child.stdout.emit('data', utf8Buffer('{"schemaVersion":1,"kind":"unknown"}\n')), expected: 'observer_failed', closeArgs: [1, null], expectedKills: [], earlyClose: true },
       { label: 'abort plus signal close', setup: (_child, _scheduler, controller) => controller.abort(), expected: 'aborted', closeArgs: [0, 'SIGTERM'] },
       { label: 'late events after successful close', successfulClose: true, expected: 'observer_failed' },
     ]
@@ -1190,12 +1187,12 @@ describe('Personal Feed X observer child Group3 bounded termination contract', (
       if (scenario.label === 'child error first') child.killError = new Error('TERM_CANARY')
       const { promise } = startControlledObservation(factory, child, scheduler, controller)
       if (scenario.successfulClose) {
-        child.stdout.emit('data', jsonLine(completeFixture()))
+        child.stdout.emit('data', utf8Buffer(jsonLine(completeFixture())))
         child.emit('close', 0, null)
         expect(await promise).toEqual(completeFixture())
         controller.abort()
         child.emit('error', new Error('EXCEPTION_CANARY'))
-        child.stdout.emit('data', 'RAW_CANARY\n')
+        child.stdout.emit('data', utf8Buffer('RAW_CANARY\n'))
         child.emit('close', 1, null)
         scheduler.forceClearedCallbacks()
         expect(child.kill).not.toHaveBeenCalled()
@@ -1241,12 +1238,12 @@ describe('Personal Feed X observer child Group3 bounded termination contract', (
       thenCount += 1
       return result
     })
-    child.stdout.emit('data', jsonLine(completeFixture()))
+    child.stdout.emit('data', utf8Buffer(jsonLine(completeFixture())))
     child.emit('close', 0, null)
     expect(await observed).toEqual(completeFixture())
     controller.abort()
     child.emit('error', new Error('EXCEPTION_CANARY'))
-    child.stdout.emit('data', 'RAW_CANARY\n')
+    child.stdout.emit('data', utf8Buffer('RAW_CANARY\n'))
     child.emit('close', 1, null)
     scheduler.forceClearedCallbacks()
     expect(thenCount).toBe(1)
@@ -1277,7 +1274,7 @@ describe('Personal Feed X observer child Group3 bounded termination contract', (
     }[] = [
       {
         label: 'normal close',
-        trigger: (child) => child.stdout.emit('data', jsonLine(completeFixture())),
+        trigger: (child) => child.stdout.emit('data', utf8Buffer(jsonLine(completeFixture()))),
         expected: 'complete',
       },
       {
@@ -1329,8 +1326,6 @@ describe('Personal Feed X observer child Group3 bounded termination contract', (
       readonly expectedRemoves: number
     }[] = [
       { label: 'addEventListener throw', configure: (_child, trace) => { trace.throwOnAdd = true }, expectedAdds: 1, expectedRemoves: 1 },
-      { label: 'stdout setEncoding throw', configure: (child) => { child.stdout.setEncodingError = new Error('SET_ENCODING_CANARY') }, expectedAdds: 1, expectedRemoves: 1 },
-      { label: 'stderr setEncoding throw', configure: (child) => { child.stderr.setEncodingError = new Error('SET_ENCODING_CANARY') }, expectedAdds: 1, expectedRemoves: 1 },
       { label: 'stdout on throw', configure: (child) => { child.stdout.throwOnOn = true }, expectedAdds: 1, expectedRemoves: 1 },
       { label: 'stderr on throw', configure: (child) => { child.stderr.throwOnOn = true }, expectedAdds: 1, expectedRemoves: 1 },
       { label: 'child error on throw', configure: (child) => { child.throwOnOnEvent = 'error' }, expectedAdds: 1, expectedRemoves: 1 },
@@ -1391,6 +1386,523 @@ describe('Personal Feed X observer child Group3 bounded termination contract', (
         signal: new AbortController().signal,
       }, optionSpawn)
       expect(optionScheduler.records).toHaveLength(0)
+    }
+  })
+})
+
+const STDOUT_RAW_LIMIT = 1_048_576
+const STDERR_RAW_LIMIT = 4_096
+const OBSERVER_FAILED_LINE = '{"schemaVersion":1,"kind":"observer_failed"}\n'
+
+function completeWithText(text: string): RawObject {
+  const raw = completeFixture()
+  const occurrences = (raw.surfaces as RawObject[])[0]?.occurrences as RawObject[]
+  const occurrenceValue = occurrences[0]
+  if (occurrenceValue === undefined) throw new Error('fixture missing occurrence')
+  occurrenceValue.body = { kind: 'sufficient', text }
+  return raw
+}
+
+function observeChunks(
+  factory: ObserverFactory,
+  stdoutChunks: readonly unknown[],
+  stderrChunks: readonly unknown[] = [],
+): { readonly promise: Promise<unknown>; readonly child: FakeChild; readonly scheduler: ManualScheduler } {
+  const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+  const { child } = controlledChild()
+  const { promise } = startControlledObservation(factory, child, scheduler)
+  for (const chunk of stdoutChunks) child.stdout.emit('data', chunk)
+  for (const chunk of stderrChunks) child.stderr.emit('data', chunk)
+  return { promise, child, scheduler }
+}
+
+function crossRealmBytes(bytes: readonly number[]): Uint8Array {
+  return runInNewContext(`new Uint8Array([${bytes.join(',')}])`) as Uint8Array
+}
+
+function paddedObserverFailedLine(targetBytes: number): string {
+  const compact = OBSERVER_FAILED_LINE.slice(0, -1)
+  const spaces = targetBytes - Buffer.byteLength(compact) - 1
+  if (spaces < 0) throw new Error('target too small')
+  return `{${' '.repeat(spaces)}${compact.slice(1)}\n`
+}
+
+function paddedUnknownEmojiLine(targetBytes: number): string {
+  const prefix = '{"schemaVersion":1,"kind":"unknown","filler":"🙂'
+  const suffix = '"}\n'
+  const fillerBytes = targetBytes - Buffer.byteLength(prefix) - Buffer.byteLength(suffix)
+  if (fillerBytes < 0) throw new Error('target too small')
+  return `${prefix}${'x'.repeat(fillerBytes)}${suffix}`
+}
+
+function lineWithInvalidUtf8(replacement: readonly number[]): Buffer {
+  const source = utf8Buffer(jsonLine(completeWithText('post 0')))
+  const needle = utf8Buffer('post 0')
+  const start = source.indexOf(needle)
+  if (start < 0) throw new Error('fixture needle missing')
+  return Buffer.concat([source.subarray(0, start), Buffer.from(replacement), source.subarray(start + 1)])
+}
+
+function splitInsideEmoji(bytes: Uint8Array): readonly Uint8Array[] {
+  const emoji = utf8Buffer('🙂')
+  const start = Buffer.from(bytes).indexOf(emoji)
+  if (start < 0) throw new Error('emoji missing')
+  return [bytes.subarray(0, start + 1), bytes.subarray(start + 1)]
+}
+
+function expectFrozenError(value: unknown, code: string): void {
+  expect(value).toEqual(Object.freeze({ kind: 'error', code }))
+  expect(Object.keys(value as object)).toEqual(['kind', 'code'])
+  expect(Object.isFrozen(value)).toBe(true)
+}
+
+describe('Personal Feed X observer child Group4 strict stream contract', () => {
+  it('enforces raw byte caps with inclusive exact boundaries and close-only settlement', async () => {
+    const factory = await loadFactory()
+
+    {
+      const line = paddedObserverFailedLine(STDOUT_RAW_LIMIT)
+      expect(Buffer.byteLength(line)).toBe(STDOUT_RAW_LIMIT)
+      const { promise, child } = observeChunks(factory, [utf8Buffer(line)])
+      expect(child.kill).not.toHaveBeenCalled()
+      await expectStillPending(promise)
+      child.emit('close', 0, null)
+      expectFrozenError(await promise, 'observer_failed')
+      expect(child.kill).not.toHaveBeenCalled()
+    }
+
+    {
+      const line = paddedUnknownEmojiLine(STDOUT_RAW_LIMIT)
+      expect(Buffer.byteLength(line)).toBe(STDOUT_RAW_LIMIT)
+      expect(line.length).not.toBe(STDOUT_RAW_LIMIT)
+      const { promise, child } = observeChunks(factory, [utf8Buffer(line), utf8Buffer('x')])
+      expect(child.kill).toHaveBeenCalledTimes(1)
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+      await expectStillPending(promise)
+      child.emit('close', 0, null)
+      expectFrozenError(await promise, 'protocol_invalid')
+      expect(child.kill).toHaveBeenCalledTimes(1)
+    }
+
+    {
+      const valid = utf8Buffer(jsonLine(completeFixture()))
+      const { promise, child } = observeChunks(factory, [valid], [utf8Buffer('s'.repeat(STDERR_RAW_LIMIT))])
+      expect(child.kill).not.toHaveBeenCalled()
+      child.emit('close', 0, null)
+      const result = await promise
+      expect(result).toEqual(completeFixture())
+      expect(JSON.stringify(result)).not.toContain('s'.repeat(32))
+      expect(child.kill).not.toHaveBeenCalled()
+    }
+
+    {
+      const { promise, child } = observeChunks(factory, [utf8Buffer(jsonLine(completeFixture()))], [utf8Buffer('e'.repeat(STDERR_RAW_LIMIT + 1))])
+      expect(child.kill).toHaveBeenCalledTimes(1)
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+      await expectStillPending(promise)
+      child.emit('close', 0, null)
+      expectFrozenError(await promise, 'observer_failed')
+      expect(child.kill).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it('accepts only Buffer and real or cross-realm Uint8Array data chunks', async () => {
+    const factory = await loadFactory()
+    const line = utf8Buffer(jsonLine(completeFixture()))
+    const accepted: readonly Uint8Array[] = [
+      Buffer.from(line),
+      new Uint8Array(line),
+      crossRealmBytes(Array.from(line)),
+    ]
+    for (const chunk of accepted) {
+      const { promise, child } = observeChunks(factory, [chunk])
+      child.emit('close', 0, null)
+      expect(await promise).toEqual(completeFixture())
+    }
+
+    const wrongTypeCases: readonly unknown[] = [
+      jsonLine(completeFixture()),
+      new DataView(new ArrayBuffer(1)),
+      new Uint16Array([0x7b, 0x7d]),
+      new ArrayBuffer(1),
+      { 0: 0x7b, 1: 0x7d, CANARY: 'wrong-type' },
+      new Proxy({ 0: 0x7b, 1: 0x7d, CANARY: 'wrong-type' }, {}),
+    ]
+    for (const chunk of wrongTypeCases) {
+      const { promise, child } = observeChunks(factory, [chunk])
+      expect(child.kill).toHaveBeenCalledTimes(1)
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+      child.emit('close', 0, null)
+      const result = await promise
+      expectFrozenError(result, 'observer_failed')
+      expect(JSON.stringify(result)).not.toContain('CANARY')
+    }
+  })
+
+  it('uses independent strict streaming UTF-8 decoders for stdout and stderr', async () => {
+    const factory = await loadFactory()
+    const raw = completeWithText('冻结中文🙂')
+    const stdout = utf8Buffer(jsonLine(raw))
+    const stderr = utf8Buffer('stderr canary 中文🙂')
+    const chunkings: readonly ((bytes: Uint8Array) => readonly Uint8Array[])[] = [
+      (bytes) => [bytes],
+      (bytes) => splitInsideEmoji(bytes),
+      (bytes) => Array.from(bytes, (byte) => new Uint8Array([byte])),
+    ]
+    for (const chunking of chunkings) {
+      const { promise, child } = observeChunks(factory, chunking(stdout), chunking(stderr))
+      child.emit('close', 0, null)
+      const result = await promise
+      expect(result).toEqual(raw)
+      expect(JSON.stringify(result)).not.toContain('stderr canary')
+    }
+  })
+
+  it.each([
+    ['invalid continuation', [0xe2, 0x28, 0xa1]],
+    ['overlong sequence', [0xc0, 0x80]],
+    ['lone continuation', [0x80]],
+  ] as const)('maps stdout %s to protocol_invalid under strict UTF-8', async (_label, invalidBytes) => {
+    const factory = await loadFactory()
+    const { promise, child } = observeChunks(factory, [lineWithInvalidUtf8(invalidBytes)])
+    child.emit('close', 0, null)
+    const result = await promise
+    expectFrozenError(result, 'protocol_invalid')
+    expect(child.kill).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(result)).not.toContain('canary')
+  })
+
+  it('maps stderr invalid UTF-8 and dangling prefixes to observer_failed, while stdout maps dangling to protocol_invalid', async () => {
+    const factory = await loadFactory()
+    const valid = utf8Buffer(jsonLine(completeFixture()))
+    const stdoutDangling = Buffer.concat([
+      utf8Buffer(OBSERVER_FAILED_LINE.slice(0, -1)),
+      Buffer.from([0xe2]),
+    ])
+    const stdoutCase = observeChunks(factory, [stdoutDangling])
+    expect(stdoutCase.child.kill).not.toHaveBeenCalled()
+    await expectStillPending(stdoutCase.promise)
+    stdoutCase.child.emit('close', 0, null)
+    const stdoutResult = await stdoutCase.promise
+    expectFrozenError(stdoutResult, 'protocol_invalid')
+    expect(stdoutCase.child.kill).not.toHaveBeenCalled()
+
+    for (const stderrBytes of [Buffer.from([0xe2]), Buffer.from([0xc0, 0x80]), Buffer.from([0x80])] as const) {
+      const { promise, child } = observeChunks(factory, [valid], [stderrBytes])
+      child.emit('close', 0, null)
+      expectFrozenError(await promise, 'observer_failed')
+    }
+  })
+
+  it('rejects BOM and every non-exact single-line framing variant, while accepting internal whitespace and escaped breaks', async () => {
+    const factory = await loadFactory()
+    const compact = OBSERVER_FAILED_LINE
+    const internalWhitespace = '{  "schemaVersion" : 1 , "kind" : "observer_failed"  }\n'
+    const escapedBreaks = completeWithText('first\r\nsecond')
+    const accepted: readonly { readonly line: string; readonly expected: unknown }[] = [
+      { line: compact, expected: { kind: 'error', code: 'observer_failed' } },
+      { line: internalWhitespace, expected: { kind: 'error', code: 'observer_failed' } },
+      { line: jsonLine(escapedBreaks), expected: escapedBreaks },
+    ]
+    for (const testCase of accepted) {
+      const result = await observeRaw(factory, testCase.line)
+      expect(result).toEqual(testCase.expected)
+    }
+
+    const invalidLines: readonly [string, string][] = [
+      ['empty', ''],
+      ['LF-only', '\n'],
+      ['missing LF', compact.slice(0, -1)],
+      ['extra LF', `${compact}\n`],
+      ['CRLF', compact.slice(0, -1) + '\r\n'],
+      ['leading space', ` ${compact}`],
+      ['leading tab', `\t${compact}`],
+      ['leading BOM', `\uFEFF${compact}`],
+      ['leading garbage', `garbage${compact}`],
+      ['trailing space', compact.slice(0, -1) + ' \n'],
+      ['trailing tab', compact.slice(0, -1) + '\t\n'],
+      ['trailing garbage', compact.slice(0, -1) + 'garbage\n'],
+    ]
+    for (const [label, line] of invalidLines) await expectProtocolInvalid(factory, line, label)
+
+    const rawCanary = observeChunks(factory, [utf8Buffer('RAW_CANARY\n')])
+    expect(rawCanary.child.kill).toHaveBeenCalledTimes(1)
+    expect(rawCanary.child.kill).toHaveBeenCalledWith('SIGTERM')
+    await expectStillPending(rawCanary.promise)
+    rawCanary.child.emit('close', 0, null)
+    expectFrozenError(await rawCanary.promise, 'protocol_invalid')
+
+    const split = observeChunks(factory, [utf8Buffer(compact), utf8Buffer('garbage')])
+    expect(split.child.kill).toHaveBeenCalledTimes(1)
+    expect(split.child.kill).toHaveBeenCalledWith('SIGTERM')
+    await expectStillPending(split.promise)
+    split.child.emit('close', 0, null)
+    expectFrozenError(await split.promise, 'protocol_invalid')
+  })
+
+  it('preserves firstReason across protocol, stderr, abort, timeout, close, and late-event races', async () => {
+    const factory = await loadFactory()
+
+    {
+      const controller = new AbortController()
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const { child } = controlledChild()
+      const { promise } = startControlledObservation(factory, child, scheduler, controller)
+      child.stdout.emit('data', utf8Buffer(paddedObserverFailedLine(STDOUT_RAW_LIMIT)))
+      child.stdout.emit('data', utf8Buffer('x'))
+      expect(child.kill).toHaveBeenCalledTimes(1)
+      controller.abort()
+      scheduler.advanceTo(KILL_GRACE_EPOCH_MS)
+      scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL', 'SIGKILL'])
+      await expectStillPending(promise)
+      child.emit('close', 0, null)
+      expectFrozenError(await promise, 'protocol_invalid')
+    }
+
+    {
+      const { promise, child, scheduler } = observeChunks(factory, [utf8Buffer(jsonLine(completeFixture()))], [utf8Buffer('e'.repeat(STDERR_RAW_LIMIT + 1))])
+      expect(child.kill).toHaveBeenCalledTimes(1)
+      scheduler.advanceTo(KILL_GRACE_EPOCH_MS)
+      scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL', 'SIGKILL'])
+      await expectStillPending(promise)
+      child.emit('close', 0, null)
+      expectFrozenError(await promise, 'observer_failed')
+    }
+
+    {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const controller = new AbortController()
+      const { child } = controlledChild()
+      const { promise } = startControlledObservation(factory, child, scheduler, controller)
+      controller.abort()
+      child.stdout.emit('data', 'wrong type after abort')
+      child.stdout.emit('data', utf8Buffer(paddedObserverFailedLine(STDOUT_RAW_LIMIT)))
+      child.stdout.emit('data', utf8Buffer('x'))
+      scheduler.advanceTo(KILL_GRACE_EPOCH_MS)
+      scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+      child.emit('close', 0, null)
+      expectFrozenError(await promise, 'aborted')
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL', 'SIGKILL'])
+    }
+
+    {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const { child } = controlledChild()
+      const { promise } = startControlledObservation(factory, child, scheduler)
+      scheduler.advanceTo(CLEANUP_DEADLINE_EPOCH_MS)
+      child.stdout.emit('data', lineWithInvalidUtf8([0xc0, 0x80]))
+      child.stdout.emit('data', 'wrong type after timeout')
+      child.emit('close', 0, null)
+      expectFrozenError(await promise, 'timed_out')
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM'])
+    }
+
+    {
+      const { promise, child } = observeChunks(factory, [utf8Buffer(jsonLine(completeFixture()))])
+      child.emit('close', 0, null)
+      expect(await promise).toEqual(completeFixture())
+      child.stdout.emit('data', utf8Buffer('LATE_CANARY'))
+      child.stderr.emit('data', utf8Buffer('LATE_CANARY'))
+      child.emit('error', new Error('LATE_CANARY'))
+      child.emit('close', 1, null)
+      expect(child.kill).not.toHaveBeenCalled()
+      expect(JSON.stringify(await promise)).not.toContain('LATE_CANARY')
+    }
+  })
+
+  it('uses intrinsic stdout byte length and rejects a real 1 MiB plus one byte view despite a lying own getter', async () => {
+    const factory = await loadFactory()
+    const exact = utf8Buffer(paddedObserverFailedLine(STDOUT_RAW_LIMIT))
+    const oversized = new Uint8Array(STDOUT_RAW_LIMIT + 1)
+    oversized.set(exact, 0)
+    oversized[STDOUT_RAW_LIMIT] = 0x78
+    let byteLengthReads = 0
+    Object.defineProperty(oversized, 'byteLength', {
+      configurable: true,
+      get: () => {
+        byteLengthReads += 1
+        return STDOUT_RAW_LIMIT
+      },
+    })
+
+    const { promise, child } = observeChunks(factory, [oversized])
+    expect(byteLengthReads).toBe(0)
+    expect(child.kill).toHaveBeenCalledTimes(1)
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+    await expectStillPending(promise)
+    child.emit('close', 0, null)
+    const result = await promise
+    expectFrozenError(result, 'protocol_invalid')
+    expect(byteLengthReads).toBe(0)
+  })
+
+  it('uses intrinsic stderr byte length and fail-closes a real 4097-byte view despite a lying own getter', async () => {
+    const factory = await loadFactory()
+    const valid = utf8Buffer(jsonLine(completeFixture()))
+    const oversized = new Uint8Array(STDERR_RAW_LIMIT + 1)
+    oversized.fill(0x65)
+    let byteLengthReads = 0
+    Object.defineProperty(oversized, 'byteLength', {
+      configurable: true,
+      get: () => {
+        byteLengthReads += 1
+        return STDERR_RAW_LIMIT
+      },
+    })
+
+    const { promise, child } = observeChunks(factory, [valid], [oversized])
+    expect(byteLengthReads).toBe(0)
+    expect(child.kill).toHaveBeenCalledTimes(1)
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+    await expectStillPending(promise)
+    child.emit('close', 0, null)
+    const result = await promise
+    expectFrozenError(result, 'observer_failed')
+    expect(JSON.stringify(result)).not.toContain('business')
+    expect(byteLengthReads).toBe(0)
+  })
+
+  it('rejects a proxied Uint8Array without touching any Proxy trap', async () => {
+    const factory = await loadFactory()
+    const valid = utf8Buffer(jsonLine(completeFixture()))
+    const target = new Uint8Array(valid)
+    let trapCount = 0
+    const trap = (..._args: unknown[]): never => {
+      trapCount += 1
+      throw new Error('PROXY_TRAP_CANARY')
+    }
+    const proxied = new Proxy(target, {
+      get: trap,
+      getPrototypeOf: trap,
+      ownKeys: trap,
+      getOwnPropertyDescriptor: trap,
+      has: trap,
+      set: trap,
+      defineProperty: trap,
+      deleteProperty: trap,
+      isExtensible: trap,
+      preventExtensions: trap,
+      setPrototypeOf: trap,
+    } as ProxyHandler<Uint8Array>)
+
+    const { promise, child } = observeChunks(factory, [proxied])
+    expect(trapCount).toBe(0)
+    expect(child.kill).toHaveBeenCalledTimes(1)
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+    await expectStillPending(promise)
+    child.emit('close', 0, null)
+    const result = await promise
+    expectFrozenError(result, 'observer_failed')
+    expect(trapCount).toBe(0)
+    expect(JSON.stringify(result)).not.toContain('PROXY_TRAP_CANARY')
+  })
+
+  it('snapshots stdout bytes before decoder execution and does not read adversarial own accessors', async () => {
+    const factory = await loadFactory()
+    const expected = completeWithText('snapshot DTO 中文🙂')
+    const source = new Uint8Array(utf8Buffer(jsonLine(expected)))
+    const sourceLength = source.length
+    const accessorReads: Array<{ readonly key: PropertyKey; calls: number }> = []
+    const nativeIterator = Uint8Array.prototype[Symbol.iterator]
+    const accessorSpecs: readonly [PropertyKey, unknown][] = [
+      ['byteLength', sourceLength],
+      ['length', sourceLength],
+      ['constructor', Uint8Array],
+      [Symbol.iterator, nativeIterator],
+    ]
+    const unavailable: PropertyKey[] = []
+    for (const [key, value] of accessorSpecs) {
+      const record = { key, calls: 0 }
+      try {
+        Object.defineProperty(source, key, {
+          configurable: true,
+          get: () => {
+            record.calls += 1
+            return value
+          },
+        })
+        accessorReads.push(record)
+      } catch {
+        unavailable.push(key)
+      }
+    }
+    expect(unavailable, 'source own accessors unavailable').toEqual([])
+
+    const decodeDescriptor = Object.getOwnPropertyDescriptor(TextDecoder.prototype, 'decode')
+    const nativeDecode = decodeDescriptor?.value as TextDecoder['decode'] | undefined
+    if (typeof nativeDecode !== 'function') throw new Error('TextDecoder.decode is not callable')
+    let mutated = false
+    const wrappedDecode = function (this: TextDecoder, input?: AllowSharedBufferSource, options?: TextDecoderOptions): string {
+      if (input !== undefined && !mutated) {
+        mutated = true
+        Reflect.apply(Uint8Array.prototype.fill, source, [0x78, 0, sourceLength])
+      }
+      return nativeDecode.call(this, input, options)
+    }
+    Object.defineProperty(TextDecoder.prototype, 'decode', {
+      configurable: true,
+      writable: true,
+      value: wrappedDecode,
+    })
+
+    try {
+      const { promise, child } = observeChunks(factory, [source])
+      child.emit('close', 0, null)
+      expect(await promise).toEqual(expected)
+      expect(mutated).toBe(true)
+      for (const record of accessorReads) expect(record.calls, String(record.key)).toBe(0)
+    } finally {
+      if (decodeDescriptor === undefined) delete (TextDecoder.prototype as { decode?: unknown }).decode
+      else Object.defineProperty(TextDecoder.prototype, 'decode', decodeDescriptor)
+    }
+  })
+
+  it('fail-closes SharedArrayBuffer, Resizable ArrayBuffer, and detached ArrayBuffer views', async () => {
+    const factory = await loadFactory()
+    const source = utf8Buffer(jsonLine(completeWithText('OWNER_CANARY')))
+    const ownerCases: readonly { readonly label: string; readonly make: () => Uint8Array }[] = [
+      {
+        label: 'SharedArrayBuffer view',
+        make: () => {
+          const shared = new SharedArrayBuffer(source.length)
+          const view = new Uint8Array(shared)
+          view.set(source)
+          return view
+        },
+      },
+      {
+        label: 'Resizable ArrayBuffer view',
+        make: () => {
+          const resizable = new ArrayBuffer(source.length, { maxByteLength: source.length + 16 })
+          const view = new Uint8Array(resizable)
+          view.set(source)
+          return view
+        },
+      },
+      {
+        label: 'detached ArrayBuffer view',
+        make: () => {
+          const ordinary = new ArrayBuffer(source.length)
+          const view = new Uint8Array(ordinary)
+          view.set(source)
+          structuredClone(ordinary, { transfer: [ordinary] })
+          return view
+        },
+      },
+    ]
+
+    for (const testCase of ownerCases) {
+      const view = testCase.make()
+      const { promise, child } = observeChunks(factory, [view])
+      expect(child.kill, testCase.label).toHaveBeenCalledTimes(1)
+      expect(child.kill, testCase.label).toHaveBeenCalledWith('SIGTERM')
+      await expectStillPending(promise)
+      child.emit('close', 0, null)
+      const result = await promise
+      expectFrozenError(result, 'observer_failed')
+      expect(JSON.stringify(result)).not.toContain('OWNER_CANARY')
     }
   })
 })
