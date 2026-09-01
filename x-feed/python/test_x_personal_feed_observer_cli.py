@@ -226,7 +226,7 @@ class _FakeHTTPResponse:
         self.read_sizes.append(size)
         if size < 0:
             raise AssertionError("CDP response must be read with a finite byte cap")
-        return self.payload
+        return self.payload[:size]
 
 
 class TestPersonalFeedObserverCli(unittest.TestCase):
@@ -374,7 +374,33 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             self.assertGreater(timeout, 0)
             self.assertLessEqual(timeout, remaining)
         self.assertTrue(read_sizes)
-        self.assertTrue(all(0 < size <= 1024 * 1024 for size in read_sizes))
+        self.assertTrue(all(size > 0 for size in read_sizes))
+
+        max_http_bytes = getattr(module, "MAX_HTTP_BYTES", None)
+        self.assertIsInstance(max_http_bytes, int)
+        self.assertGreater(max_http_bytes, 0)
+        legal_exact = b"{}" + b" " * (max_http_bytes - len(b"{}"))
+        self.assertEqual(len(legal_exact), max_http_bytes)
+        exact_reads = []
+
+        def exact_urlopen(request, timeout=None):
+            self.assertEqual(request.full_url, "http://127.0.0.1:9222/json/version")
+            return _FakeHTTPResponse(legal_exact, exact_reads)
+
+        with mock.patch.object(urllib.request, "urlopen", side_effect=exact_urlopen):
+            self.assertTrue(browser.cdp_ready(remaining))
+        self.assertEqual(exact_reads, [max_http_bytes + 1])
+
+        overflow_reads = []
+        overflow = legal_exact + b"x"
+
+        def overflow_urlopen(request, timeout=None):
+            self.assertEqual(request.full_url, "http://127.0.0.1:9222/json/version")
+            return _FakeHTTPResponse(overflow, overflow_reads)
+
+        with mock.patch.object(urllib.request, "urlopen", side_effect=overflow_urlopen):
+            self.assertFalse(browser.cdp_ready(remaining))
+        self.assertEqual(overflow_reads, [max_http_bytes + 1])
 
         lock_calls = []
 

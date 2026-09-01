@@ -102,7 +102,7 @@ class _ExistingCdpBrowser:
                 method="GET",
             )
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                raw = response.read(MAX_HTTP_BYTES)
+                raw = response.read(MAX_HTTP_BYTES + 1)
             if len(raw) > MAX_HTTP_BYTES:
                 return None
             return json.loads(raw.decode("utf-8"))
