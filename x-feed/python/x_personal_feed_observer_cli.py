@@ -22,6 +22,8 @@ MAX_INPUT_BYTES = 4096
 MAX_HTTP_BYTES = 1024 * 1024
 MAX_CDP_BYTES = 1024 * 1024
 MAX_CDP_EVENTS_PER_EXCHANGE = 8
+MAX_NAVIGATION_POLLS = 3
+NAVIGATION_POLL_INTERVAL_SECONDS = 0.1
 MAX_URL_BYTES = 512
 MAX_BODY_BYTES = 6144
 
@@ -489,9 +491,98 @@ def _expand_decision(raw_facts):
     return {"ok": False}
 
 
+def _surface_transition(surface, raw_facts, activated=False):
+    fields = {
+        "pathname",
+        "rootCount",
+        "loadingCount",
+        "homeTablistCount",
+        "homeTabs",
+        EXPLORE_ROOT_COUNT,
+        "outsideRootSelectedTabs",
+    }
+    if surface not in SURFACE_TARGETS or not isinstance(raw_facts, dict) or set(raw_facts) != fields:
+        raise _CdpFailure()
+    pathname = raw_facts["pathname"]
+    if pathname not in {"/home", "/explore"}:
+        raise _CdpFailure()
+    for name in ("rootCount", "loadingCount", "homeTablistCount", EXPLORE_ROOT_COUNT):
+        value = raw_facts[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise _CdpFailure()
+    tabs = raw_facts["homeTabs"]
+    if not isinstance(tabs, list) or not isinstance(raw_facts["outsideRootSelectedTabs"], list):
+        raise _CdpFailure()
+    root_count = raw_facts["rootCount"]
+    explore_count = raw_facts[EXPLORE_ROOT_COUNT]
+    tablist_count = raw_facts["homeTablistCount"]
+    loading_count = raw_facts["loadingCount"]
+    if root_count > 1 or explore_count > 1 or tablist_count > 1:
+        raise _CdpFailure()
+
+    if pathname == "/explore":
+        if root_count != 0 or tablist_count != 0 or tabs:
+            raise _CdpFailure()
+        if explore_count == 0:
+            return {"kind": "wait"}
+        if loading_count != 0:
+            return {"kind": "wait"}
+        if surface != "explore":
+            return {"kind": "wait"}
+        decision = _surface_decision(surface, raw_facts)
+        if "activateOrdinal" in decision:
+            raise _CdpFailure()
+        return {"kind": "ready", "surfaceProof": decision["surfaceProof"]}
+
+    if explore_count != 0:
+        raise _CdpFailure()
+    if root_count == 0:
+        if tablist_count != 0 or tabs:
+            raise _CdpFailure()
+        return {"kind": "wait"}
+    if tablist_count == 0:
+        if tabs:
+            raise _CdpFailure()
+        return {"kind": "wait"}
+    if len(tabs) > 2:
+        raise _CdpFailure()
+    ordinals = []
+    selected = []
+    for tab in tabs:
+        if not isinstance(tab, dict) or set(tab) != {"ordinal", "selected"}:
+            raise _CdpFailure()
+        ordinal = tab["ordinal"]
+        if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal not in {0, 1}:
+            raise _CdpFailure()
+        if not isinstance(tab["selected"], bool):
+            raise _CdpFailure()
+        ordinals.append(ordinal)
+        if tab["selected"]:
+            selected.append(ordinal)
+    if len(tabs) < 2:
+        return {"kind": "wait"}
+    if sorted(ordinals) != [0, 1] or len(selected) > 1:
+        raise _CdpFailure()
+    if len(selected) == 0 or loading_count != 0:
+        return {"kind": "wait"}
+    if surface == "explore":
+        return {"kind": "wait"}
+    decision = _surface_decision(surface, raw_facts)
+    if "activateOrdinal" in decision:
+        if activated:
+            return {"kind": "wait"}
+        return {
+            "kind": "activate",
+            "surfaceProof": decision["surfaceProof"],
+            "activateOrdinal": decision["activateOrdinal"],
+        }
+    return {"kind": "ready", "surfaceProof": decision["surfaceProof"]}
+
+
 class _MechanicalCdpEvaluator:
-    def __init__(self, monotonic=time.monotonic):
+    def __init__(self, monotonic=time.monotonic, sleeper=time.sleep):
         self._monotonic = monotonic
+        self._sleeper = sleeper
 
     def _command(self, action, surface, stable_id):
         if surface not in SURFACE_TARGETS or action not in {"navigate", "probe", "snapshot", "expand", "scroll"}:
@@ -665,7 +756,9 @@ class _MechanicalCdpEvaluator:
                 if result.get("errorText"):
                     raise _CdpFailure()
                 command_id = 2
-                for _ in range(3):
+                activated_once = False
+                sleeps = 0
+                for poll in range(MAX_NAVIGATION_POLLS):
                     state_response = exchange(
                         command_id,
                         "Runtime.evaluate",
@@ -673,22 +766,27 @@ class _MechanicalCdpEvaluator:
                     )
                     command_id += 1
                     raw_facts = self._runtime_value(state_response)
-                    try:
-                        decision = _surface_decision(surface, raw_facts)
-                    except _CdpFailure:
-                        if self._loading_retryable(surface, raw_facts):
-                            continue
-                        raise
-                    if "activateOrdinal" not in decision:
+                    transition = _surface_transition(surface, raw_facts, activated_once)
+                    if transition["kind"] == "ready":
                         return {"url": SURFACE_TARGETS[surface], "body": ""}
-                    activated = exchange(
-                        command_id,
-                        "Runtime.evaluate",
-                        self._activation_params(decision["activateOrdinal"]),
-                    )
-                    command_id += 1
-                    if self._runtime_value(activated) != {"ok": True}:
+                    if transition["kind"] == "activate":
+                        activated = exchange(
+                            command_id,
+                            "Runtime.evaluate",
+                            self._activation_params(transition["activateOrdinal"]),
+                        )
+                        command_id += 1
+                        if self._runtime_value(activated) != {"ok": True}:
+                            raise _CdpFailure()
+                        activated_once = True
+                    if poll + 1 >= MAX_NAVIGATION_POLLS:
+                        break
+                    if sleeps >= MAX_NAVIGATION_POLLS - 1:
                         raise _CdpFailure()
+                    delay = min(NAVIGATION_POLL_INTERVAL_SECONDS, remaining())
+                    self._sleeper(delay)
+                    remaining()
+                    sleeps += 1
                 raise _CdpFailure()
 
             if action == "probe":

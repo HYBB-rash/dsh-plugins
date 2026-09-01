@@ -336,6 +336,7 @@ class _FakeMonotonic:
     def __init__(self):
         self.value = 0.0
         self.calls = []
+        self.sleeps = []
 
     def __call__(self):
         self.calls.append(self.value)
@@ -343,6 +344,10 @@ class _FakeMonotonic:
 
     def advance(self, seconds):
         self.value += seconds
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.advance(seconds)
 
 
 class TestPersonalFeedObserverCli(unittest.TestCase):
@@ -1753,6 +1758,250 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             )
         self.assertEqual(result, {"ok": False})
         self.assertTrue(ambiguous.closed)
+
+    def test_navigation_waits_for_surface_transition_with_bounded_sleep(self):
+        module = _require_cli(self)
+        evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)
+        self.assertIsNotNone(evaluator_type)
+        ws_url = "ws://127.0.0.1:9222/devtools/page/page-f2"
+        timeout_seconds = 2.0
+
+        def run_navigation(surface, values, *, expected_result=None, expected_probes,
+                           expected_activation, expected_sleeps, should_fail=False):
+            clock = _FakeMonotonic()
+            frame_index = [0]
+            sockets = []
+            passed_timeouts = []
+
+            def frame_factory(request, response_id, _value):
+                if request["method"] == "Page.navigate":
+                    return {
+                        "id": response_id,
+                        "result": {"frameId": "frame-1", "loaderId": "loader-1"},
+                    }
+                self.assertEqual(request["method"], "Runtime.evaluate")
+                self.assertLess(frame_index[0], len(values))
+                value = values[frame_index[0]]
+                frame_index[0] += 1
+                return {
+                    "id": response_id,
+                    "result": {
+                        "result": {"type": "object", "value": value},
+                    },
+                }
+
+            def connect(url, timeout=None, **_kwargs):
+                self.assertEqual(url, ws_url)
+                self.assertGreater(timeout, 0)
+                self.assertLessEqual(timeout, timeout_seconds)
+                passed_timeouts.append(timeout)
+                socket = _FakeWebSocket(
+                    {},
+                    frame_factory=frame_factory,
+                    on_settimeout=lambda value: passed_timeouts.append(value),
+                    on_send=lambda: clock.advance(0.01),
+                    on_recv=lambda: clock.advance(0.01),
+                )
+                sockets.append(socket)
+                return socket
+
+            evaluator = evaluator_type(monotonic=clock, sleeper=clock.sleep)
+            forbidden = (
+                "ensure_cdp",
+                "ensure_x_tab",
+                "new_tab",
+                "run_browser_start",
+            )
+            with contextlib.ExitStack() as stack:
+                for name in forbidden:
+                    stack.enter_context(
+                        mock.patch.object(
+                            module,
+                            name,
+                            mock.Mock(side_effect=AssertionError(name + " was called")),
+                            create=True,
+                        )
+                    )
+                stack.enter_context(
+                    mock.patch.object(module.websocket, "create_connection", side_effect=connect)
+                )
+                if should_fail:
+                    with self.assertRaises(Exception):
+                        evaluator.evaluate(
+                            ws_url,
+                            "navigate",
+                            surface=surface,
+                            timeout_seconds=timeout_seconds,
+                        )
+                else:
+                    result = evaluator.evaluate(
+                        ws_url,
+                        "navigate",
+                        surface=surface,
+                        timeout_seconds=timeout_seconds,
+                    )
+
+            self.assertEqual(len(sockets), 1)
+            socket = sockets[0]
+            self.assertTrue(socket.closed)
+            self.assertEqual(frame_index[0], expected_probes + expected_activation)
+            runtime_messages = [
+                message for message in socket.sent if message["method"] == "Runtime.evaluate"
+            ]
+            self.assertEqual(len(runtime_messages), expected_probes + expected_activation)
+            self.assertEqual(
+                sum("activateOrdinal" in message["params"]["expression"] for message in runtime_messages),
+                expected_activation,
+            )
+            self.assertEqual(len(clock.sleeps), expected_sleeps)
+            self.assertTrue(all(value > 0 for value in clock.sleeps))
+            self.assertTrue(all(value > 0 for value in passed_timeouts))
+            self.assertTrue(
+                all(left >= right for left, right in zip(passed_timeouts, passed_timeouts[1:]))
+            )
+            self.assertEqual(
+                [message["id"] for message in socket.sent],
+                list(range(1, len(socket.sent) + 1)),
+            )
+            if expected_result is not None:
+                self.assertEqual(result, expected_result)
+            return clock, socket
+
+        with self.subTest(navigate_transition="explore_old_home_then_exact_explore"):
+            run_navigation(
+                "explore",
+                [
+                    _surface_facts("for_you"),
+                    _surface_facts("explore"),
+                ],
+                expected_result={"url": SURFACE_TARGETS["explore"], "body": ""},
+                expected_probes=2,
+                expected_activation=0,
+                expected_sleeps=1,
+            )
+
+        with self.subTest(navigate_transition="following_activate_loading_then_following"):
+            run_navigation(
+                "following",
+                [
+                    _surface_facts("following", selected=0),
+                    {"ok": True},
+                    _surface_facts(
+                        "following",
+                        home_tabs=[
+                            {"ordinal": 0, "selected": False},
+                            {"ordinal": 1, "selected": False},
+                        ],
+                    ),
+                    _surface_facts("following", selected=1),
+                ],
+                expected_result={"url": SURFACE_TARGETS["following"], "body": ""},
+                expected_probes=3,
+                expected_activation=1,
+                expected_sleeps=2,
+            )
+
+        with self.subTest(navigate_transition="following_path_root_tablist_mount"):
+            run_navigation(
+                "following",
+                [
+                    _surface_facts(
+                        "following",
+                        root_count=0,
+                        home_tablist_count=0,
+                        home_tabs=[],
+                        explore_root_count=0,
+                    ),
+                    _surface_facts(
+                        "following",
+                        home_tablist_count=0,
+                        home_tabs=[],
+                        explore_root_count=0,
+                    ),
+                    _surface_facts("following", selected=1),
+                ],
+                expected_result={"url": SURFACE_TARGETS["following"], "body": ""},
+                expected_probes=3,
+                expected_activation=0,
+                expected_sleeps=2,
+            )
+
+        with self.subTest(navigate_transition="always_loading_bounded"):
+            run_navigation(
+                "following",
+                [_surface_facts("following", loading=1)] * 3,
+                expected_probes=3,
+                expected_activation=0,
+                expected_sleeps=2,
+                should_fail=True,
+            )
+
+        invalid_cases = (
+            ("unknown_pathname", _surface_facts("for_you", pathname="/unknown")),
+            ("duplicate_root", _surface_facts("for_you", root_count=2)),
+            ("duplicate_tablist", _surface_facts("for_you", home_tablist_count=2)),
+            (
+                "duplicate_ordinal",
+                _surface_facts(
+                    "for_you",
+                    home_tabs=[
+                        {"ordinal": 0, "selected": True},
+                        {"ordinal": 0, "selected": False},
+                    ],
+                ),
+            ),
+            (
+                "illegal_ordinal",
+                _surface_facts(
+                    "for_you",
+                    home_tabs=[
+                        {"ordinal": 0, "selected": True},
+                        {"ordinal": 2, "selected": False},
+                    ],
+                ),
+            ),
+            (
+                "two_selected",
+                _surface_facts(
+                    "for_you",
+                    home_tabs=[
+                        {"ordinal": 0, "selected": True},
+                        {"ordinal": 1, "selected": True},
+                    ],
+                ),
+            ),
+            (
+                "missing_field",
+                {
+                    key: value
+                    for key, value in _surface_facts("for_you").items()
+                    if key != "pathname"
+                },
+            ),
+            (
+                "extra_field",
+                {**_surface_facts("for_you"), "canary": "正文CANARY"},
+            ),
+            (
+                "wrong_type",
+                {**_surface_facts("for_you"), "homeTabs": "not-a-list"},
+            ),
+            ("negative_count", _surface_facts("for_you", root_count=-1)),
+            (
+                "pathname_root_contradiction",
+                _surface_facts("for_you", explore_root_count=1),
+            ),
+        )
+        for name, facts in invalid_cases:
+            with self.subTest(navigate_invalid_first_probe=name):
+                run_navigation(
+                    "for_you",
+                    [facts],
+                    expected_probes=1,
+                    expected_activation=0,
+                    expected_sleeps=0,
+                    should_fail=True,
+                )
 
     def test_snapshot_empty_facts_are_surface_scoped_and_bounded(self):
         module = _require_cli(self)
