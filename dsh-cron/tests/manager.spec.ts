@@ -182,6 +182,35 @@ describe('cron_delete', () => {
     expect(new JobStore(dir).fold().active).toEqual([])
   })
 
+  it('cannot delete a manager-owned command binding', async () => {
+    const dir = tempDir()
+    const store = new JobStore(dir)
+    store.append({
+      op: 'create',
+      kind: 'command',
+      id: 'cron-managed',
+      externalRef: 'dsh:notion-task-inbox:retry:v1',
+      schedule: { kind: 'interval', minutes: 5 },
+      command: {
+        argv: ['/usr/bin/python3', '/home/herman/.dsh/workspace/automations/notion/notion_inbox_sync.py', '--retry-pending', '--json'],
+        timeoutSeconds: 120,
+        outputMaxBytes: 4096,
+      },
+      deliver: 'silent',
+      cwd: '/home/herman/.dsh/workspace',
+      createdAt: '2026-08-14T00:00:00.000Z',
+    })
+    const { tools, toolCtx, rootCtx } = fakeScope()
+    registerCronTools(rootCtx as never, toolCtx as never, store)
+
+    const result = await tools.get('cron_delete')!.execute({ id: 'cron-managed' }, execSession)
+
+    expect(result).toEqual({ id: 'cron-managed', deleted: false, code: 'job_not_found' })
+    expect(new JobStore(dir).fold().active).toEqual([
+      expect.objectContaining({ id: 'cron-managed', kind: 'command' }),
+    ])
+  })
+
   it('rejects ids with surrounding whitespace', async () => {
     const { tools, toolCtx, rootCtx } = fakeScope()
     registerCronTools(rootCtx as never, toolCtx as never, new JobStore(tempDir()))

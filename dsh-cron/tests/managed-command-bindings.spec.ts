@@ -77,6 +77,27 @@ describe('manager-owned command bindings', () => {
     expect(rowsAfter).toEqual(rowsBefore)
   })
 
+  it('recreates a configured binding after an earlier tombstone', async () => {
+    const storeDir = tempDir()
+    const first = await startManager(storeDir)
+    await first.fiber.dispose()
+    const service = createControlService({ storeDir })
+    await service.deleteBound(RETRY_BINDING.externalRef)
+
+    const second = await startManager(storeDir)
+    try {
+      const response = await createControlService({ storeDir })
+        .getBoundCommand(RETRY_BINDING.externalRef)
+      expect(response).toMatchObject({
+        ok: true,
+        operation: 'get-bound-command',
+        snapshot: { activeJob: RETRY_BINDING },
+      })
+    } finally {
+      await second.fiber.dispose()
+    }
+  })
+
   it('fails startup closed when the external ref already has a different spec', async () => {
     const storeDir = tempDir()
     const service = createControlService({ storeDir })

@@ -344,8 +344,10 @@ export function registerCronTools(rootCtx: Context, toolCtx: Context, store: Job
         if (typeof id !== 'string' || id.trim() === '' || id.trim() !== id) {
           return { code: 'invalid_schedule', message: 'cron_delete id must be a non-empty string without surrounding whitespace.' }
         }
-        const existing = store.fold().active.some(job => job.id === id)
-        if (!existing) return { id, deleted: false, code: 'job_not_found' }
+        const existing = store.fold().active.find(job => job.id === id)
+        if (existing === undefined || existing.kind === 'command') {
+          return { id, deleted: false, code: 'job_not_found' }
+        }
         const uncertain = await commit(rootCtx, exec.agent.session, 'delete', () => {
           store.append({ op: 'delete', id, deletedAt: new Date().toISOString() })
           return id
