@@ -42,6 +42,14 @@ export {
   type PersonalFeedV2ProcessedQueryResult,
 } from './v2/candidate-lifecycle.ts'
 
+export type {
+  PersonalFeedV2CandidateCompletionInput,
+  PersonalFeedV2CandidateCompletionReceipt,
+  PersonalFeedV2CandidateCompletionResult,
+  PersonalFeedV2CandidateFinalizeResult,
+  PersonalFeedV2CandidateJudgment,
+} from './v2/candidate-lifecycle.ts'
+
 export {
   createSessionUserHistoryAdapter,
   type SessionUserHistoryAdapter,

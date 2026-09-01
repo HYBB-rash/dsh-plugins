@@ -1,4 +1,57 @@
-import { readFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
+import { encodeCanonicalJson } from '../canonical-json.ts'
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  try {
+    return (
+      typeof value === 'object' &&
+      value !== null &&
+      !Array.isArray(value) &&
+      Object.getPrototypeOf(value) === Object.prototype
+    )
+  } catch {
+    return false
+  }
+}
+
+function isPlainExactRecord(
+  value: unknown,
+  expectedKeys: readonly string[],
+): value is Record<string, unknown> {
+  if (!isPlainRecord(value)) {
+    return false
+  }
+
+  let ownKeys: readonly PropertyKey[]
+  try {
+    ownKeys = Reflect.ownKeys(value)
+  } catch {
+    return false
+  }
+
+  if (
+    ownKeys.length !== expectedKeys.length ||
+    ownKeys.some(
+      (key) => typeof key !== 'string' || !expectedKeys.includes(key),
+    )
+  ) {
+    return false
+  }
+
+  try {
+    return expectedKeys.every((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      return (
+        descriptor !== undefined &&
+        descriptor.enumerable === true &&
+        'value' in descriptor
+      )
+    })
+  } catch {
+    return false
+  }
+}
 import { PersonalFeedScopeInputError } from '../errors.ts'
 import type { PersonalFeedV2Clock, PersonalFeedV2Request } from './request-coordinator.ts'
 
@@ -46,6 +99,24 @@ export interface PersonalFeedV2CandidateLease {
   readonly position: number
   readonly body: string
   readonly provenance: PersonalFeedV2CandidateProvenance
+  readonly completeCurrent: (
+    input: PersonalFeedV2CandidateCompletionInput,
+  ) => Promise<PersonalFeedV2CandidateCompletionResult>
+}
+
+export interface PersonalFeedV2CandidateCompletionInput {
+  readonly judgment: PersonalFeedV2CandidateJudgment
+}
+
+export type PersonalFeedV2CandidateJudgment = 'qualified' | 'not_qualified'
+
+export interface PersonalFeedV2CandidateCompletionReceipt {
+  readonly kind: 'candidate_judgment_completed'
+  readonly stableId: string
+  readonly requestId: string
+  readonly position: number
+  readonly judgment: PersonalFeedV2CandidateJudgment
+  readonly completedAt: string
 }
 
 export type PersonalFeedV2CandidateIncompleteReason =
@@ -55,16 +126,39 @@ export type PersonalFeedV2CandidateIncompleteReason =
   | 'body_unknown'
   | 'capture_failed'
   | 'clock_failed'
+  | 'completion_claim_invalid'
+  | 'completion_conflict'
+  | 'completion_store_failed'
+  | 'concurrent_reservation'
   | 'expired'
+  | 'failed'
   | 'invalid_input'
   | 'processed_query_aborted'
   | 'processed_query_failed'
   | 'processed_query_unknown'
+  | 'timeout'
+  | 'unknown'
 
 export interface PersonalFeedV2CandidateIncomplete {
   readonly kind: 'incomplete'
   readonly reason: PersonalFeedV2CandidateIncompleteReason
 }
+
+export type PersonalFeedV2CandidateCompletionResult =
+  | PersonalFeedV2CandidateCompletionReceipt
+  | PersonalFeedV2CandidateIncomplete
+
+export type PersonalFeedV2CandidateFinalizeResult =
+  | {
+      readonly kind: 'selected'
+      readonly selected: {
+        readonly stableId: string
+        readonly canonicalUrl: string
+        readonly position: number
+      }
+    }
+  | { readonly kind: 'none' }
+  | PersonalFeedV2CandidateIncomplete
 
 export type PersonalFeedV2CandidateBorrowResult =
   | { readonly kind: 'candidate'; readonly lease: PersonalFeedV2CandidateLease }
@@ -73,6 +167,7 @@ export type PersonalFeedV2CandidateBorrowResult =
 
 export interface PersonalFeedV2CandidateCursor {
   readonly borrowCurrent: (input: { readonly signal: AbortSignal }) => Promise<PersonalFeedV2CandidateBorrowResult>
+  readonly finalize: (claim: unknown) => Promise<PersonalFeedV2CandidateFinalizeResult>
   readonly close: (reason: string) => Promise<void>
 }
 
@@ -89,7 +184,9 @@ type SurfaceName = PersonalFeedV2CandidateProvenance['surface']
 interface CaptureCloseHandle {
   readonly owner: object
   readonly close: (reason: string) => unknown
-  closed: boolean
+  state: 'open' | 'closing' | 'closed'
+  firstReason: string | undefined
+  attempt: Promise<boolean> | undefined
 }
 
 interface ParsedBodyCapture {
@@ -121,16 +218,42 @@ interface SelectedCapture {
 }
 
 interface CursorCandidate {
-  readonly lease: PersonalFeedV2CandidateLease
+  readonly stableId: string
+  readonly canonicalUrl: string
+  readonly position: number
+  readonly body: string
+  readonly provenance: PersonalFeedV2CandidateProvenance
   readonly handle: CaptureCloseHandle
   readonly deadlineExclusive: number
+}
+
+interface CompletionRecord {
+  readonly schemaVersion: 1
+  readonly event: 'candidate_judgment_completed'
+  readonly stableId: string
+  readonly requestId: string
+  readonly position: number
+  readonly judgment: PersonalFeedV2CandidateJudgment
+  readonly completedAt: string
+}
+
+interface CompletionLedger {
+  readonly bytes: string
+  readonly records: readonly CompletionRecord[]
+}
+
+interface CandidateReservation {
+  readonly token: object
+  readonly stableIds: readonly string[]
 }
 
 const SURFACES = ['for_you', 'following', 'explore'] as const
 const ALLOWED_X_HOSTS = new Set(['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com'])
 const SHANGHAI_OFFSET_MILLISECONDS = 8 * 60 * 60 * 1000
 const DONE_RESULT: PersonalFeedV2CandidateBorrowResult = Object.freeze({ kind: 'done' })
+const DEFAULT_PROCESSED_RESULT: PersonalFeedV2ProcessedQueryResult = Object.freeze({ kind: 'processed' })
 const DEFAULT_UNPROCESSED_RESULT: PersonalFeedV2ProcessedQueryResult = Object.freeze({ kind: 'unprocessed' })
+let completionTemporarySequence = 0
 
 export function createPersonalFeedV2CandidateLifecycle(
   options: CreatePersonalFeedV2CandidateLifecycleOptions,
@@ -148,10 +271,13 @@ export function createPersonalFeedV2CandidateLifecycle(
   const completionLedgerPath = options.completionLedgerPath
   const clock = options.clock
   const processedQuery = options.processedQuery
+  const reservations = new Map<string, object>()
 
   const admit = async (input: PersonalFeedV2CandidateAdmitInput): Promise<PersonalFeedV2CandidateAdmitResult> => {
     const handles = collectCloseHandles(isRecord(input) ? input.window : undefined)
+    let activeReservation: CandidateReservation | undefined
     const fail = async (reason: PersonalFeedV2CandidateIncompleteReason): Promise<PersonalFeedV2CandidateIncomplete> => {
+      if (activeReservation !== undefined) releaseReservation(reservations, activeReservation)
       await closeHandles(handles, reason)
       return incomplete(reason)
     }
@@ -162,7 +288,10 @@ export function createPersonalFeedV2CandidateLifecycle(
     }
     if (input.signal.aborted) return fail('aborted')
 
-    const request = parseRequest(input.request)
+      const request = parseRequest(input.request)
+      if (request === undefined) {
+        return fail('invalid_input')
+      }
     const now = readClock(clock)
     if (now === undefined) return fail('clock_failed')
     const parsed = request === undefined
@@ -177,17 +306,18 @@ export function createPersonalFeedV2CandidateLifecycle(
       else grouped.push(occurrence)
     }
 
-    const defaultQueryResult = processedQuery === undefined
-      ? readDefaultProcessedState(completionLedgerPath)
-      : DEFAULT_UNPROCESSED_RESULT
-    if (defaultQueryResult === undefined) return fail('processed_query_failed')
+    const completionLedger = readCompletionLedger(completionLedgerPath)
+    if (completionLedger === undefined) return fail('completion_store_failed')
+    const completedStableIds = new Set(completionLedger.records.map(record => record.stableId))
 
     const selected: SelectedCapture[] = []
     for (const [stableId, occurrences] of occurrencesByIdentity) {
       if (input.signal.aborted) return fail('aborted')
       let queried: PersonalFeedV2ProcessedQueryResult
-      if (processedQuery === undefined) {
-        queried = defaultQueryResult
+      if (completedStableIds.has(stableId)) {
+        queried = DEFAULT_PROCESSED_RESULT
+      } else if (processedQuery === undefined) {
+        queried = DEFAULT_UNPROCESSED_RESULT
       } else {
         const queryInput: PersonalFeedV2ProcessedQueryInput = Object.freeze({ stableId })
         let parsedQuery: PersonalFeedV2ProcessedQueryResult | undefined
@@ -219,11 +349,16 @@ export function createPersonalFeedV2CandidateLifecycle(
       if (!await closeHandles(duplicateHandles, 'duplicate')) return fail('capture_failed')
       selected.push({ position: selected.length, occurrence: firstSufficient })
     }
+
+    activeReservation = tryReserveCandidates(
+      reservations,
+      selected.map(capture => capture.occurrence.stableId),
+    )
+    if (activeReservation === undefined) return fail('concurrent_reservation')
     const selectedHandles = new Set(selected.map(capture => capture.occurrence.body.handle))
     const unusedHandles = handles.filter(handle => !selectedHandles.has(handle))
     if (!await closeHandles(unusedHandles, 'not_selected')) {
-      await closeHandles(handles, 'capture_failed')
-      return incomplete('capture_failed')
+      return fail('capture_failed')
     }
     if (input.signal.aborted) return fail('aborted')
 
@@ -241,28 +376,134 @@ export function createPersonalFeedV2CandidateLifecycle(
         const body = await take({ signal: input.signal })
         if (input.signal.aborted) return fail('aborted')
         if (typeof body !== 'string' || body.trim() === '') return fail('capture_failed')
-        candidates.push({
-          lease: candidateLease(capture, body),
-          handle: capture.occurrence.body.handle,
-          deadlineExclusive,
-        })
+        candidates.push(cursorCandidate(capture, body, deadlineExclusive))
       }
     } catch {
       return fail(input.signal.aborted ? 'aborted' : 'capture_failed')
     }
 
-    const cursor = createCursor(candidates, clock)
+    const cursor = createCursor(
+      candidates,
+      clock,
+      request.requestId,
+      completionLedgerPath,
+      reservations,
+      activeReservation,
+    )
     return Object.freeze({ kind: 'admitted', cursor })
   }
 
   return Object.freeze({ admit })
 }
 
-function readDefaultProcessedState(path: string): PersonalFeedV2ProcessedQueryResult | undefined {
+function readCompletionLedger(path: string): CompletionLedger | undefined {
+  let bytes: string
   try {
-    return readFileSync(path, 'utf8') === '' ? DEFAULT_UNPROCESSED_RESULT : undefined
+    bytes = readFileSync(path, 'utf8')
   } catch (cause) {
-    return hasErrorCode(cause, 'ENOENT') ? DEFAULT_UNPROCESSED_RESULT : undefined
+    return hasErrorCode(cause, 'ENOENT') ? { bytes: '', records: [] } : undefined
+  }
+  if (bytes === '') return { bytes, records: [] }
+  if (!bytes.endsWith('\n')) return undefined
+
+  const records: CompletionRecord[] = []
+  const stableIds = new Set<string>()
+  for (const line of bytes.slice(0, -1).split('\n')) {
+    let decoded: unknown
+    try {
+      decoded = JSON.parse(line) as unknown
+    } catch {
+      return undefined
+    }
+    const record = parseCompletionRecord(decoded)
+    if (record === undefined || stableIds.has(record.stableId)) return undefined
+    const canonical = encodeCanonicalJson(record)
+    if (canonical === undefined || canonical !== line) return undefined
+    stableIds.add(record.stableId)
+    records.push(record)
+  }
+  return { bytes, records }
+}
+
+function parseCompletionRecord(value: unknown): CompletionRecord | undefined {
+  if (!isRecord(value) || !hasExactlyKeys(value, [
+    'schemaVersion', 'event', 'stableId', 'requestId', 'position', 'judgment', 'completedAt',
+  ]) || value.schemaVersion !== 1 || value.event !== 'candidate_judgment_completed'
+    || typeof value.stableId !== 'string' || !/^x-status:[1-9][0-9]*$/.test(value.stableId)
+    || typeof value.requestId !== 'string' || !isCanonicalTelegramRequestId(value.requestId)
+    || typeof value.position !== 'number' || !Number.isSafeInteger(value.position)
+    || value.position < 0 || Object.is(value.position, -0)
+    || (value.judgment !== 'qualified' && value.judgment !== 'not_qualified')
+    || !isCanonicalIsoInstant(value.completedAt)) return undefined
+  return Object.freeze(value as unknown as CompletionRecord)
+}
+
+function appendCompletionRecord(path: string, record: CompletionRecord): boolean {
+  const before = readCompletionLedger(path)
+  if (before === undefined || before.records.some(existing => existing.stableId === record.stableId)) return false
+  const encoded = encodeCanonicalJson(record)
+  if (encoded === undefined) return false
+  const expectedBytes = `${before.bytes}${encoded}\n`
+  const directory = dirname(path)
+  completionTemporarySequence += 1
+  const temporaryPath = `${path}.${process.pid}.${Date.now()}.${completionTemporarySequence}.tmp`
+  let renamed = false
+  try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    chmodSync(directory, 0o700)
+    writeFileSync(temporaryPath, expectedBytes, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+    renameSync(temporaryPath, path)
+    renamed = true
+    chmodSync(path, 0o600)
+    const readback = readCompletionLedger(path)
+    const last = readback?.records.at(-1)
+    return readback !== undefined && readback.bytes === expectedBytes
+      && readback.records.length === before.records.length + 1
+      && last !== undefined && sameCompletionRecord(last, record)
+  } catch {
+    return false
+  } finally {
+    if (!renamed) {
+      try {
+        unlinkSync(temporaryPath)
+      } catch {
+        // A missing or already-renamed temporary is not an alternate authority.
+      }
+    }
+  }
+}
+
+function sameCompletionRecord(left: CompletionRecord, right: CompletionRecord): boolean {
+  return left.schemaVersion === right.schemaVersion && left.event === right.event
+    && left.stableId === right.stableId && left.requestId === right.requestId
+    && left.position === right.position && left.judgment === right.judgment
+    && left.completedAt === right.completedAt
+}
+
+function tryReserveCandidates(
+  reservations: Map<string, object>,
+  stableIds: readonly string[],
+): CandidateReservation | undefined {
+  if (stableIds.some(stableId => reservations.has(stableId))) return undefined
+  const reservation: CandidateReservation = {
+    token: Object.freeze({}),
+    stableIds: Object.freeze([...stableIds]),
+  }
+  for (const stableId of stableIds) reservations.set(stableId, reservation.token)
+  return reservation
+}
+
+function releaseReservedCandidate(
+  reservations: Map<string, object>,
+  reservation: CandidateReservation,
+  stableId: string,
+): void {
+  if (reservations.get(stableId) === reservation.token) reservations.delete(stableId)
+}
+
+function releaseReservation(reservations: Map<string, object>, reservation: CandidateReservation): void {
+  for (const stableId of reservation.stableIds) {
+    releaseReservedCandidate(reservations, reservation, stableId)
   }
 }
 
@@ -281,63 +522,289 @@ function hasErrorCode(value: unknown, expected: string): boolean {
 function createCursor(
   candidates: readonly CursorCandidate[],
   clock: PersonalFeedV2Clock,
+  requestId: string,
+  completionLedgerPath: string,
+  reservations: Map<string, object>,
+  reservation: CandidateReservation,
 ): PersonalFeedV2CandidateCursor {
   let closed = false
+  let terminal = false
+  let currentIndex = 0
+  let qualifiedReceipt: PersonalFeedV2CandidateCompletionReceipt | undefined
+  let finalizedResult: PersonalFeedV2CandidateFinalizeResult | undefined
+  let businessFailure: PersonalFeedV2CandidateIncomplete | undefined
+  let cleanupAttempt: Promise<void> | undefined
+  let cleanupComplete = false
+  const receipts: PersonalFeedV2CandidateCompletionReceipt[] = []
 
-  const close = async (reason: string): Promise<void> => {
-    if (closed) return
-    closed = true
-    const safeReason = reason === 'consumed' || reason === 'expired' ? reason : 'cursor_closed'
-    await closeHandles(candidates.map(candidate => candidate.handle), safeReason)
+  const freezeCaptureFailure = (): PersonalFeedV2CandidateIncomplete => {
+    if (businessFailure === undefined) businessFailure = incomplete('capture_failed')
+    return businessFailure
   }
+
+  const closeResources = (reason: string): Promise<void> => {
+    releaseReservation(reservations, reservation)
+    if (cleanupComplete) return Promise.resolve()
+    if (cleanupAttempt !== undefined) return cleanupAttempt
+    const safeReason = reason === 'consumed' || reason === 'expired' ? reason : 'cursor_closed'
+    const attempt = (async (): Promise<void> => {
+      if (!await closeHandles(candidates.map(candidate => candidate.handle), safeReason)) {
+        throw new Error('personal Feed v2 candidate capture close failed')
+      }
+      cleanupComplete = true
+    })()
+    cleanupAttempt = attempt
+    const clearAttempt = (): void => {
+      if (cleanupAttempt === attempt) cleanupAttempt = undefined
+    }
+    void attempt.then(clearAttempt, clearAttempt)
+    return attempt
+  }
+
+  const close = (reason: string): Promise<void> => {
+    closed = true
+    return closeResources(reason).catch((cause: unknown) => {
+      freezeCaptureFailure()
+      throw cause
+    })
+  }
+
+  const failCompletion = async (
+    reason: PersonalFeedV2CandidateIncompleteReason,
+  ): Promise<PersonalFeedV2CandidateIncomplete> => {
+    const result = incomplete(reason)
+    try {
+      await close(reason)
+    } catch {
+      // The current operation keeps its original failure; later observations
+      // expose the frozen capture failure and explicit close can retry cleanup.
+    }
+    return result
+  }
+
+  const failCaptureClosure = async (): Promise<PersonalFeedV2CandidateIncomplete> => {
+    const result = freezeCaptureFailure()
+    closed = true
+    releaseReservation(reservations, reservation)
+    const unattempted = candidates
+      .map(candidate => candidate.handle)
+      .filter(handle => handle.firstReason === undefined)
+    await closeHandles(unattempted, 'capture_failed')
+    return result
+  }
+
+  const completeAt = async (
+    index: number,
+    input: PersonalFeedV2CandidateCompletionInput,
+  ): Promise<PersonalFeedV2CandidateCompletionResult> => {
+    if (businessFailure !== undefined && receipts[index] === undefined) return businessFailure
+    if (!isPlainExactRecord(input, ['judgment'])
+      || (input.judgment !== 'qualified' && input.judgment !== 'not_qualified')) {
+      return failCompletion('invalid_input')
+    }
+
+    const replay = receipts[index]
+    if (replay !== undefined) {
+      return replay.judgment === input.judgment
+        ? replay
+        : failCompletion('completion_conflict')
+    }
+    if (closed || terminal || finalizedResult !== undefined || index !== currentIndex) {
+      return failCompletion('completion_conflict')
+    }
+    const candidate = candidates[index]
+    if (candidate === undefined) return failCompletion('completion_conflict')
+    const now = readClock(clock)
+    if (now === undefined || now.getTime() < Date.parse(candidate.provenance.capturedAt)) {
+      return failCompletion('clock_failed')
+    }
+    if (now.getTime() >= candidate.deadlineExclusive) return failCompletion('expired')
+
+    const record: CompletionRecord = Object.freeze({
+      schemaVersion: 1,
+      event: 'candidate_judgment_completed',
+      stableId: candidate.stableId,
+      requestId,
+      position: candidate.position,
+      judgment: input.judgment,
+      completedAt: now.toISOString(),
+    })
+    if (!appendCompletionRecord(completionLedgerPath, record)) {
+      return failCompletion('completion_store_failed')
+    }
+
+    const receipt: PersonalFeedV2CandidateCompletionReceipt = Object.freeze({
+      kind: 'candidate_judgment_completed',
+      stableId: record.stableId,
+      requestId: record.requestId,
+      position: record.position,
+      judgment: record.judgment,
+      completedAt: record.completedAt,
+    })
+    const handlesToClose = input.judgment === 'qualified'
+      ? candidates.map(item => item.handle)
+      : [candidate.handle]
+    const closedCaptures = await closeHandles(handlesToClose, input.judgment)
+    if (!closedCaptures) return failCaptureClosure()
+    if (input.judgment === 'qualified') releaseReservation(reservations, reservation)
+    else releaseReservedCandidate(reservations, reservation, candidate.stableId)
+
+    receipts.push(receipt)
+    if (input.judgment === 'qualified') {
+      qualifiedReceipt = receipt
+      terminal = true
+      currentIndex = candidates.length
+    } else {
+      currentIndex += 1
+    }
+    return receipt
+  }
+
+  const leases = candidates.map((candidate, index) => candidateLease(
+    candidate,
+    input => completeAt(index, input),
+  ))
 
   const borrowCurrent = async (
     input: { readonly signal: AbortSignal },
   ): Promise<PersonalFeedV2CandidateBorrowResult> => {
-    if (closed) return DONE_RESULT
+    if (businessFailure !== undefined) return businessFailure
+    if (closed || terminal || finalizedResult !== undefined) return DONE_RESULT
     if (!isRecord(input) || !hasExactlyKeys(input, ['signal']) || !isAbortSignal(input.signal)) {
-      await close('invalid_input')
-      return incomplete('invalid_input')
+      return failCompletion('invalid_input')
     }
     if (input.signal.aborted) {
-      await close('aborted')
-      return incomplete('aborted')
+      return failCompletion('aborted')
     }
     const now = readClock(clock)
     if (now === undefined) {
-      await close('clock_failed')
-      return incomplete('clock_failed')
+      return failCompletion('clock_failed')
     }
-    const candidate = candidates[0]
-    if (candidate === undefined) return DONE_RESULT
+    const candidate = candidates[currentIndex]
+    const lease = leases[currentIndex]
+    if (candidate === undefined || lease === undefined) return DONE_RESULT
     if (now.getTime() >= candidate.deadlineExclusive) {
-      await close('expired')
-      return incomplete('expired')
+      return failCompletion('expired')
     }
-    return Object.freeze({ kind: 'candidate', lease: candidate.lease })
+    return Object.freeze({ kind: 'candidate', lease })
   }
 
-  return Object.freeze({ borrowCurrent, close })
+  const finalize = async (claim: unknown): Promise<PersonalFeedV2CandidateFinalizeResult> => {
+    if (businessFailure !== undefined) return businessFailure
+    if (finalizedResult !== undefined) return finalizedResult
+    const finish = async (
+      result: PersonalFeedV2CandidateFinalizeResult,
+      reason: string,
+    ): Promise<PersonalFeedV2CandidateFinalizeResult> => {
+      try {
+        await close(reason)
+        finalizedResult = result
+        return result
+      } catch {
+        const failure = freezeCaptureFailure()
+        finalizedResult = failure
+        return failure
+      }
+    }
+    const reject = async (): Promise<PersonalFeedV2CandidateFinalizeResult> => {
+      const result = incomplete('completion_claim_invalid')
+      return finish(result, 'completion_claim_invalid')
+    }
+    if (!isPlainRecord(claim) || typeof claim.kind !== 'string') return reject()
+
+    if (claim.kind === 'selected') {
+      if (!isPlainExactRecord(claim, ['kind', 'completed', 'selected'])
+        || !hasExactReceiptPrefix(claim.completed, receipts)) return reject()
+      const lastReceipt = receipts.at(-1)
+      if (lastReceipt === undefined || claim.selected !== lastReceipt
+        || qualifiedReceipt !== lastReceipt || lastReceipt.judgment !== 'qualified') return reject()
+      const candidate = candidates[lastReceipt.position]
+      if (candidate === undefined || candidate.stableId !== lastReceipt.stableId) return reject()
+      const selected = Object.freeze({
+        stableId: candidate.stableId,
+        canonicalUrl: candidate.canonicalUrl,
+        position: candidate.position,
+      })
+      const result: PersonalFeedV2CandidateFinalizeResult = Object.freeze({ kind: 'selected', selected })
+      return finish(result, 'finalized')
+    }
+
+    if (claim.kind === 'none') {
+      if (!isPlainExactRecord(claim, ['kind', 'completed'])
+        || !hasExactReceiptPrefix(claim.completed, receipts)
+        || currentIndex !== candidates.length || receipts.length !== candidates.length
+      || qualifiedReceipt !== undefined
+        || receipts.some(receipt => receipt.judgment !== 'not_qualified')) return reject()
+      const result: PersonalFeedV2CandidateFinalizeResult = Object.freeze({ kind: 'none' })
+      return finish(result, 'finalized')
+    }
+
+    if (claim.kind === 'incomplete') {
+      if (!isPlainExactRecord(claim, ['kind', 'completed', 'reason'])
+        || !hasExactReceiptPrefix(claim.completed, receipts)
+        || !isFinalIncompleteReason(claim.reason)
+        || qualifiedReceipt !== undefined
+        || receipts.some(receipt => receipt.judgment !== 'not_qualified')) return reject()
+      const result = incomplete(claim.reason)
+      return finish(result, 'finalized')
+    }
+    return reject()
+  }
+
+  return Object.freeze({ borrowCurrent, finalize, close })
 }
 
-function candidateLease(capture: SelectedCapture, body: string): PersonalFeedV2CandidateLease {
-  const occurrence = capture.occurrence
-  const provenance: PersonalFeedV2CandidateProvenance = Object.freeze({
-    capturedAt: occurrence.capturedAt,
-    surface: occurrence.surface,
-    surfaceOrdinal: occurrence.surfaceOrdinal,
-    occurrenceOrdinal: occurrence.occurrenceOrdinal,
-    canonicalUrl: occurrence.canonicalUrl,
-    authorHandle: occurrence.authorHandle,
-    publishedAt: occurrence.publishedAt,
-  })
+function candidateLease(
+  candidate: CursorCandidate,
+  completeCurrent: (
+    input: PersonalFeedV2CandidateCompletionInput,
+  ) => Promise<PersonalFeedV2CandidateCompletionResult>,
+): PersonalFeedV2CandidateLease {
   return Object.freeze({
+    stableId: candidate.stableId,
+    canonicalUrl: candidate.canonicalUrl,
+    position: candidate.position,
+    body: candidate.body,
+    provenance: candidate.provenance,
+    completeCurrent,
+  })
+}
+
+function cursorCandidate(capture: SelectedCapture, body: string, deadlineExclusive: number): CursorCandidate {
+  const occurrence = capture.occurrence
+  return {
     stableId: occurrence.stableId,
     canonicalUrl: occurrence.canonicalUrl,
     position: capture.position,
     body,
-    provenance,
+    provenance: Object.freeze({
+      capturedAt: occurrence.capturedAt,
+      surface: occurrence.surface,
+      surfaceOrdinal: occurrence.surfaceOrdinal,
+      occurrenceOrdinal: occurrence.occurrenceOrdinal,
+      canonicalUrl: occurrence.canonicalUrl,
+      authorHandle: occurrence.authorHandle,
+      publishedAt: occurrence.publishedAt,
+    }),
+    handle: occurrence.body.handle,
+    deadlineExclusive,
+  }
+}
+
+function hasExactReceiptPrefix(
+  value: unknown,
+  receipts: readonly PersonalFeedV2CandidateCompletionReceipt[],
+): boolean {
+  if (!hasDenseArray(value) || value.length !== receipts.length) return false
+  return receipts.every((receipt, index) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+    return descriptor !== undefined && descriptor.enumerable && 'value' in descriptor
+      && descriptor.value === receipt
   })
+}
+
+function isFinalIncompleteReason(value: unknown): value is 'failed' | 'aborted' | 'timeout' | 'unknown' {
+  return value === 'failed' || value === 'aborted' || value === 'timeout' || value === 'unknown'
 }
 
 function parseRequest(value: unknown): PersonalFeedV2Request | undefined {
@@ -465,21 +932,46 @@ function addCloseHandle(
 ): void {
   if (owners.has(owner)) return
   owners.add(owner)
-  handles.push({ owner, close: reason => close.call(owner, reason), closed: false })
+  handles.push({
+    owner,
+    close: reason => close.call(owner, reason),
+    state: 'open',
+    firstReason: undefined,
+    attempt: undefined,
+  })
 }
 
 async function closeHandles(handles: readonly CaptureCloseHandle[], reason: string): Promise<boolean> {
   let succeeded = true
   for (const handle of handles) {
-    if (handle.closed) continue
-    handle.closed = true
-    try {
-      await handle.close(reason)
-    } catch {
-      succeeded = false
-    }
+    if (!await closeCaptureHandle(handle, reason)) succeeded = false
   }
   return succeeded
+}
+
+function closeCaptureHandle(handle: CaptureCloseHandle, reason: string): Promise<boolean> {
+  if (handle.state === 'closed') return Promise.resolve(true)
+  if (handle.state === 'closing' && handle.attempt !== undefined) return handle.attempt
+
+  const firstReason = handle.firstReason ?? reason
+  handle.firstReason = firstReason
+  handle.state = 'closing'
+  const attempt = (async (): Promise<boolean> => {
+    // Yield once so re-entrant and concurrent close calls can observe this attempt.
+    await Promise.resolve()
+    try {
+      await handle.close(firstReason)
+      handle.state = 'closed'
+      return true
+    } catch {
+      handle.state = 'open'
+      return false
+    } finally {
+      handle.attempt = undefined
+    }
+  })()
+  handle.attempt = attempt
+  return attempt
 }
 
 function parseXStatusUrl(value: unknown): { readonly stableId: string; readonly canonicalUrl: string } | undefined {
