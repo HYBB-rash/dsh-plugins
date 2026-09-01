@@ -272,6 +272,9 @@ def _snapshot_value(value):
 
 
 class _MechanicalCdpEvaluator:
+    def __init__(self, monotonic=time.monotonic):
+        self._monotonic = monotonic
+
     def _command(self, action, surface, stable_id):
         if surface not in SURFACE_TARGETS or action not in {"navigate", "probe", "snapshot", "expand", "scroll"}:
             raise _CdpFailure()
@@ -346,12 +349,22 @@ class _MechanicalCdpEvaluator:
             if not _valid_ws_url(ws_url):
                 raise _CdpFailure()
             timeout = _positive_timeout(timeout_seconds)
+            action_end = self._monotonic() + timeout
+
+            def remaining():
+                value = action_end - self._monotonic()
+                if value <= 0:
+                    raise _CdpFailure()
+                return value
+
             method, params = self._command(action, surface, stable_id)
-            socket = websocket.create_connection(ws_url, timeout=timeout)
-            socket.settimeout(timeout)
+            socket = websocket.create_connection(ws_url, timeout=remaining())
+            socket.settimeout(remaining())
             request_id = 1
             socket.send(json.dumps({"id": request_id, "method": method, "params": params}, separators=(",", ":")))
+            socket.settimeout(remaining())
             response = self._read_response(socket, request_id)
+            remaining()
             if action == "navigate":
                 result = response.get("result")
                 if not isinstance(result, dict):

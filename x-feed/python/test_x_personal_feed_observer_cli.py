@@ -190,6 +190,9 @@ class _FakeWebSocket:
         oversize=False,
         frame_factory=None,
         raw_frame=None,
+        on_settimeout=None,
+        on_send=None,
+        on_recv=None,
     ):
         self.value = value
         self.response_id = response_id
@@ -197,19 +200,30 @@ class _FakeWebSocket:
         self.oversize = oversize
         self.frame_factory = frame_factory
         self.raw_frame = raw_frame
+        self.on_settimeout = on_settimeout
+        self.on_send = on_send
+        self.on_recv = on_recv
         self.sent = []
         self.closed = False
         self.timeouts = []
         self.recv_count = 0
+        self.send_count = 0
 
     def settimeout(self, value):
         self.timeouts.append(value)
+        if self.on_settimeout is not None:
+            self.on_settimeout(value)
 
     def send(self, message):
+        self.send_count += 1
         self.sent.append(json.loads(message))
+        if self.on_send is not None:
+            self.on_send()
 
     def recv(self):
         self.recv_count += 1
+        if self.on_recv is not None:
+            self.on_recv()
         if self.recv_error is not None:
             raise self.recv_error
         if self.raw_frame is not None:
@@ -255,6 +269,19 @@ class _FakeHTTPResponse:
         if size < 0:
             raise AssertionError("CDP response must be read with a finite byte cap")
         return self.payload[:size]
+
+
+class _FakeMonotonic:
+    def __init__(self):
+        self.value = 0.0
+        self.calls = []
+
+    def __call__(self):
+        self.calls.append(self.value)
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
 
 
 class TestPersonalFeedObserverCli(unittest.TestCase):
@@ -687,6 +714,126 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                     )
                 self.assertTrue(failure.closed)
                 self.assertEqual(failure.recv_count, 1)
+
+        action_budget = 1.0
+        timing_clock = _FakeMonotonic()
+        timing_evaluator = evaluator_type(monotonic=timing_clock)
+        timing_sockets = []
+        timing_timeouts = []
+        send_finished = [False]
+
+        def timing_settimeout(value):
+            timing_timeouts.append(value)
+            self.assertGreater(value, 0)
+            if send_finished[0]:
+                self.assertLessEqual(value, 0.3 + 1e-9)
+            else:
+                self.assertLessEqual(value, 0.6 + 1e-9)
+
+        def timing_send():
+            timing_clock.advance(0.3)
+            send_finished[0] = True
+
+        def timing_recv():
+            timing_clock.advance(0.2)
+
+        def timing_create_connection(url, timeout=None, **_kwargs):
+            self.assertEqual(url, ws_url)
+            timing_timeouts.append(timeout)
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, action_budget)
+            timing_clock.advance(0.4)
+            socket = _FakeWebSocket(
+                _response_value("probe", "for_you"),
+                on_settimeout=timing_settimeout,
+                on_send=timing_send,
+                on_recv=timing_recv,
+            )
+            timing_sockets.append(socket)
+            return socket
+
+        with mock.patch.object(module.websocket, "create_connection", side_effect=timing_create_connection):
+            timing_result = timing_evaluator.evaluate(
+                ws_url,
+                "probe",
+                surface="for_you",
+                timeout_seconds=action_budget,
+            )
+        self.assertEqual(timing_result["surfaceProof"], SURFACE_PROOFS["for_you"])
+        self.assertEqual(len(timing_sockets), 1)
+        self.assertTrue(timing_sockets[0].closed)
+        self.assertEqual(timing_sockets[0].send_count, 1)
+        self.assertEqual(timing_sockets[0].recv_count, 1)
+        self.assertGreaterEqual(len(timing_sockets[0].timeouts), 2)
+        self.assertLessEqual(timing_sockets[0].timeouts[0], 0.6 + 1e-9)
+        self.assertLessEqual(timing_sockets[0].timeouts[1], 0.3 + 1e-9)
+        self.assertTrue(all(value > 0 for value in timing_timeouts))
+        self.assertTrue(
+            all(left >= right for left, right in zip(timing_timeouts, timing_timeouts[1:]))
+        )
+
+        timing_cases = (
+            (
+                "connect_exhausted",
+                1.0,
+                0.3,
+                0.2,
+                0,
+                0,
+            ),
+            (
+                "send_exhausted",
+                0.4,
+                0.7,
+                0.2,
+                1,
+                0,
+            ),
+            (
+                "recv_exhausted",
+                0.4,
+                0.3,
+                0.4,
+                1,
+                1,
+            ),
+        )
+        for name, connect_advance, send_advance, recv_advance, expected_sends, expected_recvs in timing_cases:
+            with self.subTest(deadline_case=name):
+                clock = _FakeMonotonic()
+                deadline_sockets = []
+
+                def deadline_create_connection(url, timeout=None, **_kwargs):
+                    self.assertEqual(url, ws_url)
+                    self.assertGreater(timeout, 0)
+                    self.assertLessEqual(timeout, action_budget)
+                    clock.advance(connect_advance)
+                    socket = _FakeWebSocket(
+                        _response_value("probe", "for_you"),
+                        on_send=lambda: clock.advance(send_advance),
+                        on_recv=lambda: clock.advance(recv_advance),
+                    )
+                    deadline_sockets.append(socket)
+                    return socket
+
+                deadline_evaluator = evaluator_type(monotonic=clock)
+                with mock.patch.object(
+                    module.websocket,
+                    "create_connection",
+                    side_effect=deadline_create_connection,
+                ):
+                    assert_fixed_error(
+                        lambda: deadline_evaluator.evaluate(
+                            ws_url,
+                            "probe",
+                            surface="for_you",
+                            timeout_seconds=action_budget,
+                        )
+                    )
+                self.assertEqual(len(deadline_sockets), 1)
+                self.assertTrue(deadline_sockets[0].closed)
+                self.assertEqual(deadline_sockets[0].send_count, expected_sends)
+                self.assertEqual(deadline_sockets[0].recv_count, expected_recvs)
 
         for invalid_url in (
             "ws://user:pass@127.0.0.1:9222/devtools/page/1",
