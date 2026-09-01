@@ -14,6 +14,7 @@ const OPTION_KEYS = Object.freeze([
 
 const INPUT_KEYS = Object.freeze(['request', 'signal'] as const)
 const REQUEST_KEYS = Object.freeze(['requestId', 'cutoff', 'shanghaiDay'] as const)
+const RESULT_KEYS = Object.freeze(['schemaVersion', 'kind', 'requestId', 'cutoff', 'shanghaiDay', 'startedAt', 'completedAt', 'surfaces'] as const)
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1_000
 const DAY_MS = 24 * 60 * 60 * 1_000
 const STDOUT_MAX_BYTES = 1_048_576
@@ -218,6 +219,9 @@ type IncompleteSurface = Readonly<{
 type ObserverComplete = Readonly<{
   readonly schemaVersion: 1
   readonly kind: 'complete'
+  readonly requestId: string
+  readonly cutoff: string
+  readonly shanghaiDay: string
   readonly startedAt: string
   readonly completedAt: string
   readonly surfaces: readonly CompleteSurface[]
@@ -226,6 +230,9 @@ type ObserverComplete = Readonly<{
 type ObserverIncomplete = Readonly<{
   readonly schemaVersion: 1
   readonly kind: 'incomplete'
+  readonly requestId: string
+  readonly cutoff: string
+  readonly shanghaiDay: string
   readonly startedAt: string
   readonly completedAt: string
   readonly surfaces: readonly IncompleteSurface[]
@@ -405,10 +412,12 @@ const INCOMPLETE_KINDS = Object.freeze(['complete', 'natural_zero', 'partial', '
 
 function parseCompleteResult(
   value: DataRecord,
+  request: ObserverRequest,
   cutoffEpochMs: number,
   deadlineEpochMs: number,
 ): ObserverComplete | undefined {
-  if (value.schemaVersion !== 1 || value.kind !== 'complete') return undefined
+  if (value.schemaVersion !== 1 || value.kind !== 'complete'
+    || value.requestId !== request.requestId || value.cutoff !== request.cutoff || value.shanghaiDay !== request.shanghaiDay) return undefined
   const startedAt = value.startedAt
   const completedAt = value.completedAt
   if (typeof startedAt !== 'string' || typeof completedAt !== 'string') return undefined
@@ -473,6 +482,9 @@ function parseCompleteResult(
   return Object.freeze({
     schemaVersion: 1,
     kind: 'complete',
+    requestId: request.requestId,
+    cutoff: request.cutoff,
+    shanghaiDay: request.shanghaiDay,
     startedAt,
     completedAt,
     surfaces: Object.freeze(surfaces),
@@ -481,11 +493,13 @@ function parseCompleteResult(
 
 function parseIncompleteResult(
   value: DataRecord,
+  request: ObserverRequest,
   cutoffEpochMs: number,
   deadlineEpochMs: number,
   budgetEndEpochMs: number,
 ): ObserverIncomplete | undefined {
-  if (value.schemaVersion !== 1 || value.kind !== 'incomplete') return undefined
+  if (value.schemaVersion !== 1 || value.kind !== 'incomplete'
+    || value.requestId !== request.requestId || value.cutoff !== request.cutoff || value.shanghaiDay !== request.shanghaiDay) return undefined
   const startedAt = value.startedAt
   const completedAt = value.completedAt
   if (typeof startedAt !== 'string' || typeof completedAt !== 'string') return undefined
@@ -512,6 +526,9 @@ function parseIncompleteResult(
   return Object.freeze({
     schemaVersion: 1,
     kind: 'incomplete',
+    requestId: request.requestId,
+    cutoff: request.cutoff,
+    shanghaiDay: request.shanghaiDay,
     startedAt,
     completedAt,
     surfaces: Object.freeze(surfaces),
@@ -520,6 +537,7 @@ function parseIncompleteResult(
 
 function parseObserverResult(
   stdout: string,
+  request: ObserverRequest,
   cutoffEpochMs: number,
   deadlineEpochMs: number,
   budgetEndEpochMs: number,
@@ -538,11 +556,11 @@ function parseObserverResult(
   if (record !== undefined && record.schemaVersion === 1 && record.kind === 'observer_failed') {
     return frozenError('observer_failed')
   }
-  const resultRecord = exactDataRecord(decoded, ['schemaVersion', 'kind', 'startedAt', 'completedAt', 'surfaces'])
+  const resultRecord = exactDataRecord(decoded, RESULT_KEYS)
   if (resultRecord === undefined) return frozenError('protocol_invalid')
-  const complete = parseCompleteResult(resultRecord, cutoffEpochMs, deadlineEpochMs)
+  const complete = parseCompleteResult(resultRecord, request, cutoffEpochMs, deadlineEpochMs)
   if (complete !== undefined) return complete
-  const incomplete = parseIncompleteResult(resultRecord, cutoffEpochMs, deadlineEpochMs, budgetEndEpochMs)
+  const incomplete = parseIncompleteResult(resultRecord, request, cutoffEpochMs, deadlineEpochMs, budgetEndEpochMs)
   if (incomplete !== undefined) return incomplete
   return frozenError('protocol_invalid')
 }
@@ -584,8 +602,13 @@ function isClearTimeout(value: unknown): value is (handle: unknown) => void {
 }
 
 function validRequestId(value: unknown): value is string {
-  return typeof value === 'string'
-    && /^telegram:(?:0|-[1-9]\d*|[1-9]\d*):(?:0|-[1-9]\d*|[1-9]\d*)$/.test(value)
+  if (typeof value !== 'string') return false
+  const match = /^telegram:(-[1-9][0-9]*|[1-9][0-9]*):([1-9][0-9]*)$/.exec(value)
+  if (match === null) return false
+  const chatId = Number(match[1])
+  const messageId = Number(match[2])
+  return Number.isSafeInteger(chatId) && String(chatId) === match[1]
+    && Number.isSafeInteger(messageId) && messageId > 0 && String(messageId) === match[2]
 }
 
 function parseRequest(value: unknown): { readonly request: ObserverRequest; readonly cutoffEpochMs: number } | undefined {
@@ -693,7 +716,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     return Promise.resolve(frozenError('insufficient_budget'))
   }
 
-  const payload = `{"schemaVersion":1,"deadlineEpochMs":${deadlineEpochMs}}`
+  const payload = `{"schemaVersion":1,"requestId":${JSON.stringify(parsed.request.requestId)},"cutoff":${JSON.stringify(parsed.request.cutoff)},"shanghaiDay":${JSON.stringify(parsed.request.shanghaiDay)},"deadlineEpochMs":${deadlineEpochMs}}`
   let child: ChildProcess
   try {
     child = options.spawn(
@@ -1017,7 +1040,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
           result = frozenError('protocol_invalid')
         } else {
           try {
-            result = parseObserverResult(stdout, cutoffEpochMs, deadlineEpochMs, budgetEnd)
+            result = parseObserverResult(stdout, parsed.request, cutoffEpochMs, deadlineEpochMs, budgetEnd)
           } catch {
             result = frozenError('observer_failed')
           }

@@ -6,6 +6,7 @@ collection fail before any contract is reported.
 """
 
 import ast
+import contextlib
 import importlib
 import io
 import inspect
@@ -30,6 +31,22 @@ SURFACE_PROOFS = {
     "explore": {"pathname": "/explore", "selectedHomeTabOrdinal": None, "exploreRoot": True},
 }
 TIMESTAMP = "2026-09-01T00:00:00.000Z"
+REQUEST_ID = "telegram:7:11"
+SHANGHAI_DAY = "2026-09-01"
+
+
+def _request_wire(deadline=1_100_000, request_id=REQUEST_ID):
+    return json.dumps(
+        {
+            "schemaVersion": 1,
+            "requestId": request_id,
+            "cutoff": TIMESTAMP,
+            "shanghaiDay": SHANGHAI_DAY,
+            "deadlineEpochMs": deadline,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
 
 
 def _body_item(source_url, author="alice", body="hello", published_at=TIMESTAMP, **extra):
@@ -999,11 +1016,13 @@ class TestPersonalFeedObserver(unittest.TestCase):
                     set(),
                 )
 
-    def test_run_cli_encodes_injected_observer_results_and_bad_input(self):
+    def test_run_cli_binds_verified_request_identity_and_fails_closed(self):
         module = _require_observer(self)
         observer_parameter = inspect.signature(module.run_cli).parameters["observer"]
         self.assertEqual(observer_parameter.kind, inspect.Parameter.KEYWORD_ONLY)
         self.assertIs(observer_parameter.default, inspect.Signature.empty)
+        with self.assertRaises(TypeError):
+            module.run_cli(_request_wire(), stdout=io.StringIO())
         success = {
             "schemaVersion": 1,
             "kind": "complete",
@@ -1018,29 +1037,107 @@ class TestPersonalFeedObserver(unittest.TestCase):
             "completedAt": TIMESTAMP,
             "surfaces": [{"surface": "for_you", "surfaceOrdinal": 0, "kind": "failed"}],
         }
-        valid_raw = json.dumps({"schemaVersion": 1, "deadlineEpochMs": 1_100_000}, separators=(",", ":")).encode()
-        with self.assertRaises(TypeError):
-            module.run_cli(valid_raw, stdout=io.StringIO())
-        for name, raw, observer, expected_kind in (
-            ("success", valid_raw, lambda *args, **kwargs: success, "complete"),
-            ("incomplete", valid_raw, lambda *args, **kwargs: incomplete, "incomplete"),
-            ("malformed", b"not-json", lambda *args, **kwargs: self.fail("observer must not run"), "invalid_input"),
-            ("wrong_schema", b'{"schemaVersion":2,"deadlineEpochMs":1100000}', lambda *args, **kwargs: self.fail("observer must not run"), "invalid_input"),
-            ("zero_deadline", b'{"schemaVersion":1,"deadlineEpochMs":0}', lambda *args, **kwargs: self.fail("observer must not run"), "invalid_input"),
-            ("oversize", b"{" + b"a" * 4097 + b"}", lambda *args, **kwargs: self.fail("observer must not run"), "invalid_input"),
-            ("observer_throw", valid_raw, lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")), "observer_failed"),
-        ):
+        for request_id in (REQUEST_ID, "telegram:-7:11"):
+            identity = {
+                "requestId": request_id,
+                "cutoff": TIMESTAMP,
+                "shanghaiDay": SHANGHAI_DAY,
+            }
+            valid_raw = _request_wire(request_id=request_id)
+            for name, result in (("complete", success), ("incomplete", incomplete)):
+                with self.subTest(request_id=request_id, case=name):
+                    observed_deadlines = []
+
+                    def observer(deadline):
+                        observed_deadlines.append(deadline)
+                        return result
+
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stderr(stderr):
+                        rc = module.run_cli(valid_raw, stdout=stdout, observer=observer)
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(observed_deadlines, [1_100_000])
+                    value = _assert_compact_json_line(self, stdout)
+                    self.assertEqual(value, {**result, **identity})
+                    self.assertEqual(stderr.getvalue(), "")
+
+        with self.subTest(case="observer_throw"):
+            def throwing_observer(_deadline):
+                raise RuntimeError("identity-canary-observer-error")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                rc = module.run_cli(valid_raw, stdout=stdout, observer=throwing_observer)
+            self.assertEqual(rc, 0)
+            value = _assert_compact_json_line(self, stdout)
+            self.assertEqual(value, {"schemaVersion": 1, "kind": "observer_failed"})
+            self.assertNotIn("identity-canary", stdout.getvalue() + stderr.getvalue())
+
+        invalid_inputs = (
+            ("extra", {"extra": True}),
+            ("missing requestId", {"requestId": None}),
+            ("malformed requestId", {"requestId": "identity-canary"}),
+            ("zero chat id", {"requestId": "telegram:0:11"}),
+            ("zero message id", {"requestId": "telegram:7:0"}),
+            ("negative message id", {"requestId": "telegram:7:-11"}),
+            ("chat id above JavaScript safe integer", {"requestId": "telegram:9007199254740992:11"}),
+            ("message id above JavaScript safe integer", {"requestId": "telegram:7:9007199254740992"}),
+            ("malformed cutoff", {"cutoff": "not-a-canonical-cutoff"}),
+            ("mismatched Shanghai day", {"shanghaiDay": "2026-09-02"}),
+        )
+        for name, change in invalid_inputs:
+            with self.subTest(case=name):
+                request = {
+                    "schemaVersion": 1,
+                    "requestId": REQUEST_ID,
+                    "cutoff": TIMESTAMP,
+                    "shanghaiDay": SHANGHAI_DAY,
+                    "deadlineEpochMs": 1_100_000,
+                }
+                if name == "extra":
+                    request.update(change)
+                elif name == "missing requestId":
+                    request.pop("requestId")
+                else:
+                    request.update(change)
+                raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+
+                def must_not_run(_deadline):
+                    raise AssertionError("observer must not run")
+
+                with contextlib.redirect_stderr(stderr):
+                    rc = module.run_cli(raw, stdout=stdout, observer=must_not_run)
+                self.assertEqual(rc, 0)
+                self.assertEqual(_assert_compact_json_line(self, stdout), {"schemaVersion": 1, "kind": "invalid_input"})
+                serialized = stdout.getvalue() + stderr.getvalue()
+                self.assertEqual(stderr.getvalue(), "")
+                self.assertNotIn("body", serialized)
+                self.assertNotIn("canary", serialized)
+
+        legacy_invalid_inputs = (
+            ("malformed", b"not-json"),
+            ("wrong_schema", b'{"schemaVersion":2,"requestId":"telegram:7:11","cutoff":"2026-09-01T00:00:00.000Z","shanghaiDay":"2026-09-01","deadlineEpochMs":1100000}'),
+            ("zero_deadline", b'{"schemaVersion":1,"requestId":"telegram:7:11","cutoff":"2026-09-01T00:00:00.000Z","shanghaiDay":"2026-09-01","deadlineEpochMs":0}'),
+            ("oversize", b"{" + b"a" * 4097 + b"}"),
+        )
+        for name, raw in legacy_invalid_inputs:
             with self.subTest(case=name):
                 stdout = io.StringIO()
-                rc = module.run_cli(raw, stdout=stdout, observer=observer)
+                stderr = io.StringIO()
+
+                def must_not_run(_deadline):
+                    raise AssertionError("observer must not run")
+
+                with contextlib.redirect_stderr(stderr):
+                    rc = module.run_cli(raw, stdout=stdout, observer=must_not_run)
                 self.assertEqual(rc, 0)
-                value = _assert_compact_json_line(self, stdout)
-                self.assertEqual(value["kind"], expected_kind)
-                if name == "observer_throw":
-                    self.assertEqual(value, {"schemaVersion": 1, "kind": "observer_failed"})
-                    self.assertNotIn("boom", stdout.getvalue())
-                if name in {"malformed", "wrong_schema", "zero_deadline", "oversize"}:
-                    self.assertNotIn("body", stdout.getvalue())
+                self.assertEqual(_assert_compact_json_line(self, stdout), {"schemaVersion": 1, "kind": "invalid_input"})
+                self.assertNotIn("body", stdout.getvalue())
+                self.assertEqual(stderr.getvalue(), "")
 
     def test_observer_static_and_persistence_boundaries(self):
         module = _require_observer(self)

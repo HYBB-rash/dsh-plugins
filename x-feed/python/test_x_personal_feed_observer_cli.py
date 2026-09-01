@@ -25,9 +25,19 @@ MODULE_NAME = "x_personal_feed_observer_cli"
 SOURCE_PATH = Path(__file__).with_name(MODULE_NAME + ".py")
 MISSING_CAPABILITY = "personal Feed X observer production CLI capability is missing"
 INVALID_LINE = '{"schemaVersion":1,"kind":"invalid_input"}\n'
-VALID_REQUEST = b'{"schemaVersion":1,"deadlineEpochMs":2000000000000}'
-EXPIRED_REQUEST = b'{"schemaVersion":1,"deadlineEpochMs":1}'
 TIMESTAMP = "2026-09-01T00:00:00.000Z"
+REQUEST_ID = "telegram:7:11"
+SHANGHAI_DAY = "2026-09-01"
+VALID_REQUEST = (
+    b'{"schemaVersion":1,"requestId":"telegram:7:11",'
+    b'"cutoff":"2026-09-01T00:00:00.000Z","shanghaiDay":"2026-09-01",'
+    b'"deadlineEpochMs":2000000000000}'
+)
+EXPIRED_REQUEST = (
+    b'{"schemaVersion":1,"requestId":"telegram:7:11",'
+    b'"cutoff":"2026-09-01T00:00:00.000Z","shanghaiDay":"2026-09-01",'
+    b'"deadlineEpochMs":1}'
+)
 SURFACE_TARGETS = {
     "for_you": "https://x.com/home",
     "following": "https://x.com/home",
@@ -381,9 +391,14 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             "completedAt": TIMESTAMP,
             "surfaces": [],
         }
-        for expected in (success, incomplete):
+        identity = {
+            "requestId": REQUEST_ID,
+            "cutoff": TIMESTAMP,
+            "shanghaiDay": SHANGHAI_DAY,
+        }
+        for base, expected in ((success, {**success, **identity}), (incomplete, {**incomplete, **identity})):
             with self.subTest(kind=expected["kind"]):
-                returncode, stdout, stderr = _run_bootstrap(SOURCE_PATH, expected)
+                returncode, stdout, stderr = _run_bootstrap(SOURCE_PATH, base)
                 self.assertEqual(returncode, 0)
                 self.assertEqual(stderr, b"")
                 self.assertEqual(json.loads(stdout), expected)
@@ -391,6 +406,77 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                     stdout.decode("utf-8"),
                     json.dumps(expected, ensure_ascii=False, separators=(",", ":")) + "\n",
                 )
+
+    def test_main_requires_exact_request_identity_without_echoing_invalid_identity(self):
+        module = _require_cli(self)
+        identity = {
+            "requestId": REQUEST_ID,
+            "cutoff": TIMESTAMP,
+            "shanghaiDay": SHANGHAI_DAY,
+        }
+        result = {
+            "schemaVersion": 1,
+            "kind": "complete",
+            "startedAt": TIMESTAMP,
+            "completedAt": TIMESTAMP,
+            "surfaces": [],
+        }
+        observed_deadlines = []
+        stdout = io.StringIO()
+        rc = module.main(
+            io.BytesIO(VALID_REQUEST),
+            stdout,
+            observer=lambda deadline: (observed_deadlines.append(deadline), result)[1],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(observed_deadlines, [2_000_000_000_000])
+        self.assertEqual(_compact_line(self, stdout), {**result, **identity})
+
+        invalid_inputs = (
+            ("extra", {"extra": True}),
+            ("missing requestId", {"requestId": None}),
+            ("malformed requestId", {"requestId": "identity-canary"}),
+            ("zero chat id", {"requestId": "telegram:0:11"}),
+            ("zero message id", {"requestId": "telegram:7:0"}),
+            ("negative message id", {"requestId": "telegram:7:-11"}),
+            ("chat id above JavaScript safe integer", {"requestId": "telegram:9007199254740992:11"}),
+            ("message id above JavaScript safe integer", {"requestId": "telegram:7:9007199254740992"}),
+            ("malformed cutoff", {"cutoff": "not-a-canonical-cutoff"}),
+            ("mismatched Shanghai day", {"shanghaiDay": "2026-09-02"}),
+        )
+        for name, change in invalid_inputs:
+            with self.subTest(case=name):
+                request = {
+                    "schemaVersion": 1,
+                    "requestId": REQUEST_ID,
+                    "cutoff": TIMESTAMP,
+                    "shanghaiDay": SHANGHAI_DAY,
+                    "deadlineEpochMs": 2_000_000_000_000,
+                }
+                if name == "extra":
+                    request.update(change)
+                elif name == "missing requestId":
+                    request.pop("requestId")
+                else:
+                    request.update(change)
+                invalid_stdout = io.StringIO()
+                invalid_stderr = io.StringIO()
+
+                def must_not_run(_deadline):
+                    raise AssertionError("observer must not run")
+
+                with contextlib.redirect_stderr(invalid_stderr):
+                    rc = module.main(
+                        io.BytesIO(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()),
+                        invalid_stdout,
+                        observer=must_not_run,
+                    )
+                self.assertEqual(rc, 0)
+                self.assertEqual(_compact_line(self, invalid_stdout), {"schemaVersion": 1, "kind": "invalid_input"})
+                serialized = invalid_stdout.getvalue() + invalid_stderr.getvalue()
+                self.assertEqual(invalid_stderr.getvalue(), "")
+                self.assertNotIn("body", serialized)
+                self.assertNotIn("canary", serialized)
 
     def test_default_main_composes_production_observer(self):
         module = _require_cli(self)
@@ -411,6 +497,9 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             "startedAt": TIMESTAMP,
             "completedAt": TIMESTAMP,
             "surfaces": [],
+            "requestId": REQUEST_ID,
+            "cutoff": TIMESTAMP,
+            "shanghaiDay": SHANGHAI_DAY,
         }
         observe_owner = getattr(module, "x_personal_feed_observer", None)
         patches = []

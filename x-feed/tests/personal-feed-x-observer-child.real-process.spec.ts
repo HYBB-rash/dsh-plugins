@@ -20,7 +20,9 @@ type ObserverFactory = (options: unknown) => {
 
 type Case = {
   readonly deadline: number
+  readonly requestId: string
   readonly cutoff: string
+  readonly shanghaiDay: string
   readonly marker: string
   readonly controller: AbortController
   readonly records: EventRecord[]
@@ -154,10 +156,16 @@ function assertBodyFreeFrozenObserverError(result: unknown, code: string): void 
   expect(JSON.stringify(result)).not.toContain('CANARY')
 }
 
-function expectedComplete(deadline: number): Record<string, unknown> {
+function expectedComplete(
+  deadline: number,
+  identity: { readonly requestId: string; readonly cutoff: string; readonly shanghaiDay: string },
+): Record<string, unknown> {
   return {
     schemaVersion: 1,
     kind: 'complete',
+    requestId: identity.requestId,
+    cutoff: identity.cutoff,
+    shanghaiDay: identity.shanghaiDay,
     startedAt: new Date(deadline - 90).toISOString(),
     completedAt: new Date(deadline - 10).toISOString(),
     surfaces: [
@@ -179,6 +187,8 @@ async function startCase(factory: ObserverFactory, mode: number, pythonFile = pr
   const deadline = deadlineFor(mode)
   const cutoffEpochMs = deadline - (TOTAL_BUDGET_MS - CLEANUP_RESERVE_MS)
   const cutoff = new Date(cutoffEpochMs).toISOString()
+  const requestId = `telegram:1:${nextRealRequestOrdinal++}`
+  const shanghaiDay = shanghaiDayForEpoch(cutoffEpochMs)
   const controller = new AbortController()
   const records: EventRecord[] = []
   const kills: KillRecord[] = []
@@ -282,14 +292,16 @@ async function startCase(factory: ObserverFactory, mode: number, pythonFile = pr
     },
   }
   const promise = factory(options).observe({
-    request: { requestId: `telegram:1:${nextRealRequestOrdinal++}`, cutoff, shanghaiDay: shanghaiDayForEpoch(cutoffEpochMs) },
+    request: { requestId, cutoff, shanghaiDay },
     signal: controller.signal,
   })
   const spawned = await waitFor(() => child, 'spawn')
   if (nativeKill === undefined) throw new Error('missing native kill binding')
   return {
     deadline,
+    requestId,
     cutoff,
+    shanghaiDay,
     marker: `${tmpdir()}/personal-feed-x-observer-child-holder-${deadline}.release`,
     controller,
     records,
@@ -387,7 +399,7 @@ describe('Personal Feed X observer child real-process lifecycle contract', () =>
           identity: record.identity,
           calledNative: record.calledNative,
         })),
-      })).toEqual(expectedComplete(testCase.deadline))
+      })).toEqual(expectedComplete(testCase.deadline, testCase))
       expect(testCase.records).toContainEqual({
         kind: 'stdin-end-callback',
         callbackCalls: 1,
@@ -443,7 +455,7 @@ describe('Personal Feed X observer child real-process lifecycle contract', () =>
       await waitFor(() => testCase.records.some((record) => record.kind === 'close') ? true : undefined, 'fast-race close')
       testCase.controller.abort()
     }, (testCase, result) => {
-      expect(result).toEqual(expectedComplete(testCase.deadline))
+      expect(result).toEqual(expectedComplete(testCase.deadline, testCase))
       expect(testCase.kills).toEqual([])
     })
 
@@ -571,6 +583,11 @@ describe('Personal Feed X observer child real-process lifecycle contract', () =>
         },
       }
       const callbackChild = makeFake(7011, false)
+      const request = {
+        requestId: `telegram:5:${callbackCaseOrdinal++}`,
+        cutoff: '1970-01-01T00:00:00.000Z',
+        shanghaiDay: shanghaiDayForEpoch(0),
+      }
       let savedCallback: ((...args: unknown[]) => unknown) | undefined
       let endArgs: unknown[] = []
       callbackChild.stdin = {
@@ -586,11 +603,12 @@ describe('Personal Feed X observer child real-process lifecycle contract', () =>
         cleanupReserveMs: 700, killGraceMs: 300, nowEpochMs: () => 601,
         spawn: () => callbackChild, setTimeout: callbackScheduler.setTimeout.bind(callbackScheduler), clearTimeout: callbackScheduler.clearTimeout.bind(callbackScheduler),
       }).observe({
-        request: { requestId: `telegram:5:${callbackCaseOrdinal++}`, cutoff: '1970-01-01T00:00:00.000Z', shanghaiDay: shanghaiDayForEpoch(0) },
+        request,
         signal: controller.signal,
       })
       return {
         child: callbackChild,
+        request,
         scheduler: callbackScheduler,
         controller,
         promise: callbackPromise,
@@ -598,26 +616,26 @@ describe('Personal Feed X observer child real-process lifecycle contract', () =>
         invokeCallback: (...args: unknown[]) => savedCallback?.(...args),
       }
     }
-    const legalStdout = Buffer.from(`${JSON.stringify(expectedComplete(3_400))}\n`, 'utf8')
-    const assertLegalStdinWire = (endArgs: readonly unknown[]): void => {
+    const legalStdout = (request: { readonly requestId: string; readonly cutoff: string; readonly shanghaiDay: string }): Buffer => Buffer.from(`${JSON.stringify(expectedComplete(3_400, request))}\n`, 'utf8')
+    const assertLegalStdinWire = (endArgs: readonly unknown[], request: { readonly requestId: string; readonly cutoff: string; readonly shanghaiDay: string }): void => {
       expect(endArgs).toHaveLength(3)
-      expect(endArgs[0]).toBe('{"schemaVersion":1,"deadlineEpochMs":3400}')
+      expect(endArgs[0]).toBe(`{"schemaVersion":1,"requestId":"${request.requestId}","cutoff":"${request.cutoff}","shanghaiDay":"${request.shanghaiDay}","deadlineEpochMs":3400}`)
       expect(endArgs[1]).toBe('utf8')
       expect(endArgs[2]).toEqual(expect.any(Function))
     }
     for (const callbackValue of [undefined, null] as const) {
       const callbackCase = makeCallbackCase()
-      assertLegalStdinWire(callbackCase.getEndArgs())
-      callbackCase.child.stdout.emit('data', legalStdout)
+      assertLegalStdinWire(callbackCase.getEndArgs(), callbackCase.request)
+      callbackCase.child.stdout.emit('data', legalStdout(callbackCase.request))
       callbackCase.invokeCallback(callbackValue)
       callbackCase.child.emit('close', 0, null)
-      expect(await callbackCase.promise).toEqual(expectedComplete(3_400))
+      expect(await callbackCase.promise).toEqual(expectedComplete(3_400, callbackCase.request))
       expect(callbackCase.child.killCalls).toEqual([])
     }
     const callbackErrorValues: readonly unknown[] = [false, 0, '', Object.freeze({ canary: 'CALLBACK_CANARY' }), new Error('CALLBACK_ERROR_MESSAGE')]
     for (const callbackValue of callbackErrorValues) {
       const callbackCase = makeCallbackCase()
-      assertLegalStdinWire(callbackCase.getEndArgs())
+      assertLegalStdinWire(callbackCase.getEndArgs(), callbackCase.request)
       callbackCase.invokeCallback(callbackValue)
       let settled = false
       void callbackCase.promise.then(() => { settled = true })
@@ -631,8 +649,8 @@ describe('Personal Feed X observer child real-process lifecycle contract', () =>
     }
     for (const callbackValues of [[null, undefined], [null, new Error('CALLBACK_ERROR_MESSAGE')], [new Error('CALLBACK_ERROR_MESSAGE'), null]] as const) {
       const callbackCase = makeCallbackCase()
-      assertLegalStdinWire(callbackCase.getEndArgs())
-      if (callbackValues[0] === null && callbackValues[1] === undefined) callbackCase.child.stdout.emit('data', legalStdout)
+      assertLegalStdinWire(callbackCase.getEndArgs(), callbackCase.request)
+      if (callbackValues[0] === null && callbackValues[1] === undefined) callbackCase.child.stdout.emit('data', legalStdout(callbackCase.request))
       callbackCase.invokeCallback(...callbackValues)
       let settled = false
       void callbackCase.promise.then(() => { settled = true })
@@ -640,13 +658,13 @@ describe('Personal Feed X observer child real-process lifecycle contract', () =>
       expect(settled).toBe(false)
       callbackCase.child.emit('close', 0, null)
       const result = await callbackCase.promise
-      if (callbackValues[1] === undefined) expect(result).toEqual(expectedComplete(3_400))
+      if (callbackValues[1] === undefined) expect(result).toEqual(expectedComplete(3_400, callbackCase.request))
       else assertBodyFreeFrozenObserverError(result, 'observer_failed')
       expect(JSON.stringify(result)).not.toContain('CALLBACK_ERROR_MESSAGE')
     }
     for (const terminal of ['aborted', 'timed_out'] as const) {
       const callbackCase = makeCallbackCase()
-      assertLegalStdinWire(callbackCase.getEndArgs())
+      assertLegalStdinWire(callbackCase.getEndArgs(), callbackCase.request)
       if (terminal === 'aborted') callbackCase.controller.abort()
       else callbackCase.scheduler.advance(3_400)
       const killCallsBeforeCallback = [...callbackCase.child.killCalls]
@@ -658,8 +676,8 @@ describe('Personal Feed X observer child real-process lifecycle contract', () =>
     }
     {
       const callbackCase = makeCallbackCase()
-      assertLegalStdinWire(callbackCase.getEndArgs())
-      callbackCase.child.stdout.emit('data', legalStdout)
+      assertLegalStdinWire(callbackCase.getEndArgs(), callbackCase.request)
+      callbackCase.child.stdout.emit('data', legalStdout(callbackCase.request))
       callbackCase.invokeCallback(undefined)
       callbackCase.child.emit('close', 0, null)
       const settledResult = await callbackCase.promise

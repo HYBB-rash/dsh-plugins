@@ -9,9 +9,22 @@ const input = await new Promise((resolve) => {
 })
 
 let deadlineEpochMs
+let requestId
+let cutoff
+let shanghaiDay
 try {
   const decoded = JSON.parse(input)
-  deadlineEpochMs = decoded?.deadlineEpochMs
+  const keys = ['schemaVersion', 'requestId', 'cutoff', 'shanghaiDay', 'deadlineEpochMs']
+  if (decoded === null || typeof decoded !== 'object' || Array.isArray(decoded)
+    || JSON.stringify(Object.keys(decoded)) !== JSON.stringify(keys)
+    || decoded.schemaVersion !== 1
+    || typeof decoded.requestId !== 'string'
+    || typeof decoded.cutoff !== 'string'
+    || typeof decoded.shanghaiDay !== 'string') throw new Error('invalid envelope')
+  requestId = decoded.requestId
+  cutoff = decoded.cutoff
+  shanghaiDay = decoded.shanghaiDay
+  deadlineEpochMs = decoded.deadlineEpochMs
 } catch {
   process.exitCode = 2
 }
@@ -22,6 +35,9 @@ const iso = (offset) => new Date(deadlineEpochMs + offset).toISOString()
 const complete = JSON.stringify({
   schemaVersion: 1,
   kind: 'complete',
+  requestId,
+  cutoff,
+  shanghaiDay,
   startedAt: iso(-90),
   completedAt: iso(-10),
   surfaces: [

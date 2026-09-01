@@ -821,23 +821,8 @@ class _MechanicalCdpEvaluator:
 
 
 def _deadline_from(raw):
-    try:
-        if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_INPUT_BYTES:
-            return None
-        value = json.loads(bytes(raw).decode("utf-8"))
-        deadline = value.get("deadlineEpochMs") if isinstance(value, dict) else None
-        if (
-            not isinstance(value, dict)
-            or set(value) != {"schemaVersion", "deadlineEpochMs"}
-            or value.get("schemaVersion") != 1
-            or isinstance(deadline, bool)
-            or not isinstance(deadline, int)
-            or deadline <= 0
-        ):
-            return None
-        return deadline
-    except Exception:
-        return None
+    request = x_personal_feed_observer._parse_request(raw)
+    return None if request is None else request["deadlineEpochMs"]
 
 
 observe = x_personal_feed_observer.observe

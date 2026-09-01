@@ -280,7 +280,7 @@ describe('Personal Feed X observer child Group1 contract', () => {
     )
     expect(child.stdin.endCalls).toHaveLength(1)
     expect(child.stdin.endCalls[0]).toEqual([
-      `{"schemaVersion":1,"deadlineEpochMs":${DEADLINE_EPOCH_MS}}`,
+      `{"schemaVersion":1,"requestId":"${REQUEST.requestId}","cutoff":"${REQUEST.cutoff}","shanghaiDay":"${REQUEST.shanghaiDay}","deadlineEpochMs":${DEADLINE_EPOCH_MS}}`,
       'utf8',
       expect.any(Function),
     ])
@@ -290,6 +290,24 @@ describe('Personal Feed X observer child Group1 contract', () => {
       expect(payload).not.toContain('\n')
       expect(new TextEncoder().encode(payload).byteLength).toBeLessThanOrEqual(4_096)
     }
+
+    const negativeRequest = { ...REQUEST, requestId: 'telegram:-7:11' }
+    const negativeSpawnEvents: string[] = []
+    const { child: negativeChild, spawn: negativeSpawn } = validChild(negativeSpawnEvents)
+    const negativeNow = vi.fn(() => CUTOFF_EPOCH_MS + 1_000)
+    const negativeResult = await factory(options(negativeSpawn, negativeNow)).observe({
+      request: negativeRequest,
+      signal: new AbortController().signal,
+    })
+    expect(negativeResult).not.toEqual(Object.freeze({ kind: 'error', code: 'invalid_request' }))
+    expect(negativeResult).not.toEqual(Object.freeze({ kind: 'error', code: 'insufficient_budget' }))
+    expect(negativeNow).toHaveBeenCalledTimes(1)
+    expect(negativeSpawn).toHaveBeenCalledTimes(1)
+    expect(negativeChild.stdin.endCalls[0]).toEqual([
+      `{"schemaVersion":1,"requestId":"${negativeRequest.requestId}","cutoff":"${negativeRequest.cutoff}","shanghaiDay":"${negativeRequest.shanghaiDay}","deadlineEpochMs":${DEADLINE_EPOCH_MS}}`,
+      'utf8',
+      expect.any(Function),
+    ])
   })
 
   it.each([
@@ -317,7 +335,7 @@ describe('Personal Feed X observer child Group1 contract', () => {
       expect(result).not.toEqual({ kind: 'error', code: 'invalid_request' })
       expect(result).not.toEqual({ kind: 'error', code: 'insufficient_budget' })
       expect(child.stdin.endCalls[0]?.[0]).toBe(
-        `{"schemaVersion":1,"deadlineEpochMs":${SHANGHAI_MIDNIGHT_EPOCH_MS - 1 - 2_000}}`,
+        `{"schemaVersion":1,"requestId":"${REQUEST.requestId}","cutoff":"${REQUEST.cutoff}","shanghaiDay":"${REQUEST.shanghaiDay}","deadlineEpochMs":${SHANGHAI_MIDNIGHT_EPOCH_MS - 1 - 2_000}}`,
       )
       expect(spawn).toHaveBeenCalledTimes(1)
     } else {
@@ -336,6 +354,11 @@ describe('Personal Feed X observer child Group1 contract', () => {
       signal: new AbortController().signal,
     }],
     ['request Proxy', { request: new Proxy({ ...REQUEST }, { ownKeys: () => { throw new Error('proxy') } }), signal: new AbortController().signal }],
+    ['requestId zero chat id', { request: { ...REQUEST, requestId: 'telegram:0:11' }, signal: new AbortController().signal }],
+    ['requestId zero message id', { request: { ...REQUEST, requestId: 'telegram:7:0' }, signal: new AbortController().signal }],
+    ['requestId negative message id', { request: { ...REQUEST, requestId: 'telegram:7:-11' }, signal: new AbortController().signal }],
+    ['requestId chat id above JavaScript safe integer', { request: { ...REQUEST, requestId: 'telegram:9007199254740992:11' }, signal: new AbortController().signal }],
+    ['requestId message id above JavaScript safe integer', { request: { ...REQUEST, requestId: 'telegram:7:9007199254740992' }, signal: new AbortController().signal }],
     ['malformed request', { request: { requestId: REQUEST.requestId, cutoff: 'not-canonical', shanghaiDay: REQUEST.shanghaiDay }, signal: new AbortController().signal }],
     ['non-AbortSignal input', { request: REQUEST, signal: { aborted: false } }],
     ['forbidden options key', { request: REQUEST, optionKey: 'file' }],
@@ -461,6 +484,9 @@ function completeFixture(): RawObject {
   return {
     schemaVersion: 1,
     kind: 'complete',
+    requestId: REQUEST.requestId,
+    cutoff: REQUEST.cutoff,
+    shanghaiDay: REQUEST.shanghaiDay,
     startedAt: '2026-08-31T10:00:00.500Z',
     completedAt: '2026-08-31T10:00:06.000Z',
     surfaces: [
@@ -493,6 +519,9 @@ function allNaturalZeroFixture(): RawObject {
   return {
     schemaVersion: 1,
     kind: 'complete',
+    requestId: REQUEST.requestId,
+    cutoff: REQUEST.cutoff,
+    shanghaiDay: REQUEST.shanghaiDay,
     startedAt: '2026-08-31T10:00:00.500Z',
     completedAt: '2026-08-31T10:00:04.000Z',
     surfaces: [
@@ -532,6 +561,9 @@ function boundaryCompleteFixture(): RawObject {
   return {
     schemaVersion: 1,
     kind: 'complete',
+    requestId: REQUEST.requestId,
+    cutoff: REQUEST.cutoff,
+    shanghaiDay: REQUEST.shanghaiDay,
     startedAt: '2026-08-31T10:00:00.500Z',
     completedAt: '2026-08-31T10:00:07.500Z',
     surfaces,
@@ -546,6 +578,9 @@ function incompleteFixture(
   return {
     schemaVersion: 1,
     kind: 'incomplete',
+    requestId: REQUEST.requestId,
+    cutoff: REQUEST.cutoff,
+    shanghaiDay: REQUEST.shanghaiDay,
     startedAt,
     completedAt,
     surfaces: [
@@ -571,6 +606,19 @@ async function observeRaw(factory: ObserverFactory, line: string): Promise<unkno
     request: REQUEST,
     signal: new AbortController().signal,
   })
+}
+
+async function observeParsed(factory: ObserverFactory, parsed: unknown): Promise<unknown> {
+  const { spawn } = rawChild(jsonLine(completeFixture()))
+  const parse = vi.spyOn(JSON, 'parse').mockImplementation(() => parsed)
+  try {
+    return await factory(options(spawn)).observe({
+      request: REQUEST,
+      signal: new AbortController().signal,
+    })
+  } finally {
+    parse.mockRestore()
+  }
 }
 
 async function expectProtocolInvalid(factory: ObserverFactory, line: string, message?: string): Promise<void> {
@@ -771,6 +819,82 @@ describe('Personal Feed X observer child Group2 raw DTO contract', () => {
       const result = await observeRaw(factory, line)
       expect(result).toEqual(Object.freeze({ kind: 'error', code }))
       expect(Object.isFrozen(result)).toBe(true)
+    }
+  })
+
+})
+
+describe('Personal Feed X observer child Group3C request identity contract', () => {
+  it('requires raw complete identity to be ordinary exact data matching the request', async () => {
+    const factory = await loadFactory()
+    for (const raw of [
+      completeFixture(),
+      incompleteFixture('2026-08-31T10:00:08.000Z', '2026-08-31T10:00:08.124Z'),
+    ]) {
+      const result = await observeParsed(factory, raw)
+      expect(result).toEqual(raw)
+    }
+    const cases: readonly { readonly label: string; readonly raw: unknown }[] = [
+      {
+        label: 'requestId mismatch',
+        raw: { ...completeFixture(), requestId: 'telegram:8:11' },
+      },
+      {
+        label: 'cutoff mismatch',
+        raw: { ...completeFixture(), cutoff: '2026-08-31T10:00:00.124Z' },
+      },
+      {
+        label: 'Shanghai day mismatch',
+        raw: { ...completeFixture(), shanghaiDay: '2026-09-02' },
+      },
+      {
+        label: 'identity extra',
+        raw: { ...completeFixture(), identityExtra: true },
+      },
+      {
+        label: 'identity missing',
+        raw: (() => {
+          const raw = completeFixture()
+          delete raw.requestId
+          return raw
+        })(),
+      },
+      {
+        label: 'identity wrong type',
+        raw: { ...completeFixture(), requestId: 7 },
+      },
+      {
+        label: 'identity symbol',
+        raw: Object.assign(completeFixture(), { [Symbol('identity-canary')]: true }),
+      },
+      {
+        label: 'identity accessor',
+        raw: Object.defineProperty(completeFixture(), 'requestId', {
+          enumerable: true,
+          get: () => { throw new Error('identity-accessor-canary') },
+        }),
+      },
+      {
+        label: 'identity proxy',
+        raw: new Proxy(completeFixture(), {
+          ownKeys: () => { throw new Error('identity-proxy-canary') },
+        }),
+      },
+      {
+        label: 'identity non-enumerable descriptor',
+        raw: Object.defineProperty(completeFixture(), 'shanghaiDay', {
+          configurable: true,
+          enumerable: false,
+          value: REQUEST.shanghaiDay,
+          writable: true,
+        }),
+      },
+    ]
+    for (const { label, raw } of cases) {
+      const result = await observeParsed(factory, raw)
+      expect(result, label).toEqual(Object.freeze({ kind: 'error', code: 'protocol_invalid' }))
+      expect(Object.keys(result), label).toEqual(['kind', 'code'])
+      expect(JSON.stringify(result), label).not.toMatch(/identity-(?:accessor|proxy|canary)/)
     }
   })
 })

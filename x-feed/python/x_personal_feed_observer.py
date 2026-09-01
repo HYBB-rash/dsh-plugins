@@ -26,6 +26,10 @@ MAX_URL_BYTES = 512
 MAX_SNAPSHOTS = 3
 MAX_SCROLLS = 3
 MAX_OCCURRENCES = 8
+MAX_SAFE_INTEGER = 2**53 - 1
+REQUEST_ID_RE = re.compile(
+    r"^telegram:(-[1-9][0-9]*|[1-9][0-9]*):([1-9][0-9]*)$"
+)
 
 
 class _Deadline(Exception):
@@ -531,29 +535,88 @@ def observe(deadline_epoch_ms, *, clock, browser, lock, evaluator):
     return _complete_result(started, clock, completed_faces)
 
 
+def _parse_request(raw_input):
+    if not isinstance(raw_input, (bytes, bytearray)) or len(raw_input) > 4096:
+        return None
+    try:
+        value = json.loads(bytes(raw_input).decode("utf-8"))
+        if not isinstance(value, dict) or set(value) != {
+            "schemaVersion",
+            "requestId",
+            "cutoff",
+            "shanghaiDay",
+            "deadlineEpochMs",
+        }:
+            return None
+        if value.get("schemaVersion") != 1:
+            return None
+        request_id = value.get("requestId")
+        cutoff = value.get("cutoff")
+        shanghai_day = value.get("shanghaiDay")
+        deadline = value.get("deadlineEpochMs")
+        request_id_match = (
+            REQUEST_ID_RE.fullmatch(request_id) if isinstance(request_id, str) else None
+        )
+        if (
+            request_id_match is None
+            or abs(int(request_id_match.group(1))) > MAX_SAFE_INTEGER
+            or int(request_id_match.group(2)) > MAX_SAFE_INTEGER
+            or not isinstance(cutoff, str)
+            or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z", cutoff) is None
+            or not isinstance(shanghai_day, str)
+            or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", shanghai_day) is None
+            or isinstance(deadline, bool)
+            or not isinstance(deadline, int)
+            or not 0 < deadline <= MAX_SAFE_INTEGER
+        ):
+            return None
+        instant = datetime.datetime.strptime(cutoff, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=datetime.timezone.utc
+        )
+        if instant.isoformat(timespec="milliseconds").replace("+00:00", "Z") != cutoff:
+            return None
+        if (instant + datetime.timedelta(hours=8)).date().isoformat() != shanghai_day:
+            return None
+        return {
+            "requestId": request_id,
+            "cutoff": cutoff,
+            "shanghaiDay": shanghai_day,
+            "deadlineEpochMs": deadline,
+        }
+    except (OverflowError, TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+        return None
+
+
+def _result_with_identity(result, request):
+    if not isinstance(result, dict) or result.get("schemaVersion") != 1:
+        raise ValueError()
+    kind = result.get("kind")
+    if kind not in {"complete", "incomplete"}:
+        raise ValueError()
+    base_keys = {"schemaVersion", "kind", "startedAt", "completedAt", "surfaces"}
+    identity_keys = {"requestId", "cutoff", "shanghaiDay"}
+    if set(result) == base_keys:
+        pass
+    elif set(result) == base_keys | identity_keys and all(
+        result.get(key) == request[key] for key in identity_keys
+    ):
+        pass
+    else:
+        raise ValueError()
+    enriched = dict(result)
+    enriched.update({key: request[key] for key in ("requestId", "cutoff", "shanghaiDay")})
+    return enriched
+
+
 def run_cli(raw_input: bytes, *, stdout, observer):
     """Decode one bounded request and print exactly one compact response line."""
     invalid = {"schemaVersion": 1, "kind": "invalid_input"}
-    try:
-        if not isinstance(raw_input, (bytes, bytearray)) or len(raw_input) > 4096:
-            raise ValueError()
-        value = json.loads(bytes(raw_input).decode("utf-8"))
-        if (
-            not isinstance(value, dict)
-            or set(value) != {"schemaVersion", "deadlineEpochMs"}
-            or value.get("schemaVersion") != 1
-            or isinstance(value.get("deadlineEpochMs"), bool)
-            or not isinstance(value.get("deadlineEpochMs"), int)
-            or value.get("deadlineEpochMs") <= 0
-        ):
-            raise ValueError()
-    except Exception:
+    request = _parse_request(raw_input)
+    if request is None:
         print(json.dumps(invalid, ensure_ascii=False, separators=(",", ":")), file=stdout)
         return 0
     try:
-        result = observer(value["deadlineEpochMs"])
-        if not isinstance(result, dict):
-            raise ValueError()
+        result = _result_with_identity(observer(request["deadlineEpochMs"]), request)
     except Exception:
         result = {"schemaVersion": 1, "kind": "observer_failed"}
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")), file=stdout)
