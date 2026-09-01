@@ -410,6 +410,12 @@ function validSafeNonNegativeInteger(value: unknown): value is number {
 const SURFACES = Object.freeze(['for_you', 'following', 'explore'] as const)
 const INCOMPLETE_KINDS = Object.freeze(['complete', 'natural_zero', 'partial', 'failed', 'unknown'] as const)
 
+function matchesRequestIdentity(value: DataRecord, request: ObserverRequest): boolean {
+  return value.requestId === request.requestId
+    && value.cutoff === request.cutoff
+    && value.shanghaiDay === request.shanghaiDay
+}
+
 function parseCompleteResult(
   value: DataRecord,
   request: ObserverRequest,
@@ -417,7 +423,7 @@ function parseCompleteResult(
   deadlineEpochMs: number,
 ): ObserverComplete | undefined {
   if (value.schemaVersion !== 1 || value.kind !== 'complete'
-    || value.requestId !== request.requestId || value.cutoff !== request.cutoff || value.shanghaiDay !== request.shanghaiDay) return undefined
+    || !matchesRequestIdentity(value, request)) return undefined
   const startedAt = value.startedAt
   const completedAt = value.completedAt
   if (typeof startedAt !== 'string' || typeof completedAt !== 'string') return undefined
@@ -499,7 +505,7 @@ function parseIncompleteResult(
   budgetEndEpochMs: number,
 ): ObserverIncomplete | undefined {
   if (value.schemaVersion !== 1 || value.kind !== 'incomplete'
-    || value.requestId !== request.requestId || value.cutoff !== request.cutoff || value.shanghaiDay !== request.shanghaiDay) return undefined
+    || !matchesRequestIdentity(value, request)) return undefined
   const startedAt = value.startedAt
   const completedAt = value.completedAt
   if (typeof startedAt !== 'string' || typeof completedAt !== 'string') return undefined
