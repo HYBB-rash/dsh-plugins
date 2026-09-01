@@ -8,6 +8,8 @@ const OPTION_KEYS = Object.freeze([
   'killGraceMs',
   'nowEpochMs',
   'spawn',
+  'setTimeout',
+  'clearTimeout',
 ] as const)
 
 const INPUT_KEYS = Object.freeze(['request', 'signal'] as const)
@@ -16,7 +18,7 @@ const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1_000
 const DAY_MS = 24 * 60 * 60 * 1_000
 const OBSERVER_FAILED_LINE = '{"schemaVersion":1,"kind":"observer_failed"}\n'
 
-type ErrorCode = 'aborted' | 'invalid_request' | 'child_invalid_input' | 'insufficient_budget' | 'observer_failed' | 'protocol_invalid'
+type ErrorCode = 'aborted' | 'invalid_request' | 'child_invalid_input' | 'insufficient_budget' | 'observer_failed' | 'protocol_invalid' | 'timed_out'
 
 type ObserverError = Readonly<{
   readonly kind: 'error'
@@ -37,6 +39,8 @@ type ObserverOptions = Readonly<{
   readonly killGraceMs: number
   readonly nowEpochMs: () => number
   readonly spawn: (...args: unknown[]) => unknown
+  readonly setTimeout: (callback: () => void, delayMs: number) => unknown
+  readonly clearTimeout: (handle: unknown) => void
 }>
 
 type ObserverChild = Readonly<{
@@ -104,6 +108,7 @@ type ChildProcess = Readonly<{
   readonly stdout: ChildStream
   readonly stderr: ChildStream
   readonly on: (event: string, listener: (...args: unknown[]) => void) => unknown
+  readonly kill: (signal: 'SIGTERM' | 'SIGKILL') => unknown
 }>
 
 function frozenError(code: ErrorCode): ObserverError {
@@ -421,6 +426,14 @@ function isSpawn(value: unknown): value is (...args: unknown[]) => unknown {
   return typeof value === 'function'
 }
 
+function isSetTimeout(value: unknown): value is (callback: () => void, delayMs: number) => unknown {
+  return typeof value === 'function'
+}
+
+function isClearTimeout(value: unknown): value is (handle: unknown) => void {
+  return typeof value === 'function'
+}
+
 function validRequestId(value: unknown): value is string {
   return typeof value === 'string'
     && /^telegram:(?:0|-[1-9]\d*|[1-9]\d*):(?:0|-[1-9]\d*|[1-9]\d*)$/.test(value)
@@ -464,12 +477,15 @@ function parseOptions(value: unknown): ObserverOptions {
   const killGraceMs = record.killGraceMs
   const nowEpochMs = record.nowEpochMs
   const spawn = record.spawn
+  const setTimeout = record.setTimeout
+  const clearTimeout = record.clearTimeout
   if (!validPath(pythonFile) || !validPath(observerCliPath)) throw new TypeError()
   if (!validSafePositiveInteger(totalBudgetMs)
     || !validSafePositiveInteger(cleanupReserveMs)
     || !validSafePositiveInteger(killGraceMs)
     || !(totalBudgetMs > cleanupReserveMs && cleanupReserveMs > killGraceMs)) throw new TypeError()
-  if (!isNowEpochMs(nowEpochMs) || !isSpawn(spawn)) throw new TypeError()
+  if (!isNowEpochMs(nowEpochMs) || !isSpawn(spawn)
+    || !isSetTimeout(setTimeout) || !isClearTimeout(clearTimeout)) throw new TypeError()
 
   return {
     pythonFile,
@@ -479,6 +495,8 @@ function parseOptions(value: unknown): ObserverOptions {
     killGraceMs,
     nowEpochMs,
     spawn,
+    setTimeout,
+    clearTimeout,
   }
 }
 
@@ -539,45 +557,281 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
   }
 
   return new Promise<ObserverResult>((resolve) => {
+    type TimerSlot = {
+      generation: number
+      active: boolean
+      handle: unknown
+    }
+
     let settled = false
-    let streamFailed = false
+    let closed = false
+    let firstReason: ErrorCode | undefined
     let stdout = ''
-    const finish = (): void => {
-      if (settled) return
-      settled = true
-      if (streamFailed) {
-        resolve(frozenError('observer_failed'))
-      } else {
-        resolve(parseObserverResult(stdout, cutoffEpochMs, deadlineEpochMs, budgetEnd))
+    const deadlineSlot: TimerSlot = { generation: 0, active: false, handle: undefined }
+    const budgetSlot: TimerSlot = { generation: 0, active: false, handle: undefined }
+    const graceSlot: TimerSlot = { generation: 0, active: false, handle: undefined }
+    let abortOwnership: 'none' | 'adding' | 'installed' | 'removed' = 'none'
+    let termAttempted = false
+    let graceKillAttempted = false
+    let graceConsumed = false
+    let budgetKillAttempted = false
+
+    const safeKill = (signalToSend: 'SIGTERM' | 'SIGKILL'): void => {
+      try {
+        child.kill(signalToSend)
+      } catch {
+        // A kill failure cannot prove that the child exited; close remains authoritative.
       }
     }
+
+    const cancelTimer = (slot: TimerSlot): void => {
+      const wasActive = slot.active
+      const handle = slot.handle
+      slot.generation += 1
+      slot.active = false
+      slot.handle = undefined
+      if (!wasActive) return
+      try {
+        options.clearTimeout(handle)
+      } catch {
+        // Logical cancellation remains in force when clearTimeout throws.
+      }
+    }
+
+    const armTimer = (slot: TimerSlot, callback: () => void, delayMs: number): boolean => {
+      cancelTimer(slot)
+      const token = slot.generation + 1
+      slot.generation = token
+      slot.active = true
+      slot.handle = undefined
+      let callbackEntered = false
+      try {
+        const handle = options.setTimeout(() => {
+          callbackEntered = true
+          if (slot.generation !== token || !slot.active) return
+          slot.active = false
+          slot.handle = undefined
+          if (closed || settled) return
+          callback()
+        }, delayMs)
+        if (callbackEntered || closed || !slot.active || slot.generation !== token) {
+          try {
+            options.clearTimeout(handle)
+          } catch {
+            // Best-effort cleanup only.
+          }
+          return true
+        }
+        slot.handle = handle
+        return true
+      } catch {
+        if (callbackEntered || closed || !slot.active || slot.generation !== token) return true
+        slot.generation += 1
+        slot.active = false
+        slot.handle = undefined
+        return false
+      }
+    }
+
+    const attemptTerm = (): void => {
+      if (closed || termAttempted) return
+      termAttempted = true
+      safeKill('SIGTERM')
+    }
+
+    const attemptGraceKill = (): void => {
+      if (closed || graceKillAttempted || graceConsumed) return
+      graceConsumed = true
+      graceKillAttempted = true
+      safeKill('SIGKILL')
+    }
+
+    const scheduleGrace = (): void => {
+      if (closed || graceConsumed || graceKillAttempted || graceSlot.active) return
+      const registered = armTimer(graceSlot, onGrace, options.killGraceMs)
+      if (!registered && !closed && !graceConsumed && !graceKillAttempted) attemptGraceKill()
+    }
+
+    const attemptBudgetKill = (): void => {
+      if (closed || budgetKillAttempted) return
+      budgetKillAttempted = true
+      safeKill('SIGKILL')
+    }
+
+    const lockFirstReason = (reason: ErrorCode): void => {
+      if (closed || firstReason !== undefined) return
+      firstReason = reason
+      stdout = ''
+      cancelTimer(deadlineSlot)
+      attemptTerm()
+      if (!closed) scheduleGrace()
+    }
+
+    function onAbort(): void {
+      if (closed) return
+      lockFirstReason('aborted')
+    }
+
     const collectStdout = (chunk: unknown): void => {
+      if (closed || firstReason !== undefined) return
       if (typeof chunk === 'string') {
         stdout += chunk
       } else if (chunk instanceof Uint8Array) {
-        stdout += new TextDecoder().decode(chunk)
+        try {
+          stdout += new TextDecoder().decode(chunk)
+        } catch {
+          lockFirstReason('observer_failed')
+        }
       } else {
-        streamFailed = true
+        lockFirstReason('observer_failed')
       }
     }
     const markStreamFailure = (): void => {
-      streamFailed = true
+      if (closed) return
+      lockFirstReason('observer_failed')
+    }
+    const ignoreStderr = (): void => {
+      if (closed) return
     }
 
+    const consumeGraceForBudget = (): void => {
+      cancelTimer(graceSlot)
+      graceConsumed = true
+    }
+
+    const failWithoutBudgetTimer = (): void => {
+      if (!closed && firstReason === undefined) {
+        firstReason = 'observer_failed'
+        stdout = ''
+      }
+      cancelTimer(deadlineSlot)
+      cancelTimer(graceSlot)
+      cancelTimer(budgetSlot)
+      attemptTerm()
+      if (!closed) attemptBudgetKill()
+    }
+
+    function onGrace(): void {
+      if (closed) return
+      attemptGraceKill()
+    }
+
+    const onDeadline = (): void => {
+      if (closed) return
+      lockFirstReason('timed_out')
+    }
+
+    const onBudget = (): void => {
+      if (closed) return
+      budgetKillAttempted = true
+      consumeGraceForBudget()
+      if (firstReason === undefined) lockFirstReason('timed_out')
+      else attemptTerm()
+      if (!closed) safeKill('SIGKILL')
+    }
+
+    const cleanup = (): void => {
+      cancelTimer(deadlineSlot)
+      cancelTimer(graceSlot)
+      cancelTimer(budgetSlot)
+      if (abortOwnership === 'adding' || abortOwnership === 'installed') {
+        abortOwnership = 'removed'
+        try {
+          realAbortSignal.removeEventListener('abort', onAbort)
+        } catch {
+          // Marked removed before the call so a throwing removal cannot leak ownership.
+        }
+      }
+    }
+
+    const onClose = (code?: unknown, signalToReport?: unknown): void => {
+      if (closed || settled) return
+      closed = true
+      settled = true
+      let result: ObserverResult
+      if (firstReason !== undefined) {
+        result = frozenError(firstReason)
+      } else if (code === 0 && signalToReport === null) {
+        try {
+          result = parseObserverResult(stdout, cutoffEpochMs, deadlineEpochMs, budgetEnd)
+        } catch {
+          result = frozenError('observer_failed')
+        }
+      } else {
+        result = frozenError('observer_failed')
+      }
+      cleanup()
+      resolve(result)
+    }
+
+    let closeGateInstalled = false
     try {
-      child.stdout.setEncoding?.('utf8')
-      child.stderr.setEncoding?.('utf8')
-      child.stdout.on('data', collectStdout)
-      child.stderr.on('data', () => undefined)
-      child.stdout.on('error', markStreamFailure)
-      child.stderr.on('error', markStreamFailure)
-      child.on('error', markStreamFailure)
-      child.on('close', finish)
-      child.stdin.end(payload, 'utf8', (error?: unknown) => {
-        if (error !== undefined) streamFailed = true
+      // Install close first so every post-spawn failure still has a close gate.
+      child.on('close', onClose)
+      closeGateInstalled = true
+    } catch {
+      if (firstReason === undefined) {
+        firstReason = 'observer_failed'
+        stdout = ''
+      }
+      attemptTerm()
+      if (!closed) attemptBudgetKill()
+      return
+    }
+
+    if (!closeGateInstalled) return
+
+    try {
+
+      if (!closed) {
+        const budgetArmed = armTimer(budgetSlot, onBudget, budgetEnd - snapshot)
+        if (!budgetArmed) {
+          failWithoutBudgetTimer()
+          return
+        }
+      }
+
+      if (!closed && firstReason === undefined) {
+        const deadlineArmed = armTimer(deadlineSlot, onDeadline, deadlineEpochMs - snapshot)
+        if (!deadlineArmed) lockFirstReason('observer_failed')
+      }
+
+      if (!closed) {
+        abortOwnership = 'adding'
+        try {
+          realAbortSignal.addEventListener('abort', onAbort, { once: true })
+          if (abortOwnership === 'adding') abortOwnership = 'installed'
+        } catch {
+          lockFirstReason('observer_failed')
+        }
+      }
+
+      // The child can abort synchronously inside spawn, before the listener existed.
+      let abortedAfterRegistration = false
+      if (!closed) {
+        try {
+          abortedAfterRegistration = realAbortSignal.aborted
+        } catch {
+          lockFirstReason('observer_failed')
+        }
+      }
+      if (abortedAfterRegistration) onAbort()
+
+      if (!closed) {
+        child.stdout.setEncoding?.('utf8')
+        child.stderr.setEncoding?.('utf8')
+        child.stdout.on('data', collectStdout)
+        child.stderr.on('data', ignoreStderr)
+        child.stdout.on('error', markStreamFailure)
+        child.stderr.on('error', markStreamFailure)
+        child.on('error', markStreamFailure)
+      }
+
+      if (!closed) child.stdin.end(payload, 'utf8', (error?: unknown) => {
+        if (error !== undefined) lockFirstReason('observer_failed')
       })
     } catch {
-      streamFailed = true
+      lockFirstReason('observer_failed')
     }
   })
 }

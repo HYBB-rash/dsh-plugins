@@ -6,18 +6,32 @@ type FakeStreamEnd = (...args: unknown[]) => void
 class FakeWritable extends EventEmitter {
   readonly endCalls: unknown[][] = []
   onEnd: FakeStreamEnd | undefined
+  callbackError: unknown = undefined
+  endError: unknown = undefined
 
   end(...args: unknown[]): void {
     this.endCalls.push(args)
+    if (this.endError !== undefined) throw this.endError
     const callback = args.at(-1)
-    if (typeof callback === 'function') callback()
+    if (typeof callback === 'function') callback(this.callbackError)
     this.onEnd?.(...args)
   }
 }
 
 class FakeReadable extends EventEmitter {
+  readonly setEncodingCalls: string[] = []
+  setEncodingError: unknown = undefined
+  throwOnOn = false
+
   setEncoding(_encoding: string): this {
+    this.setEncodingCalls.push(_encoding)
+    if (this.setEncodingError !== undefined) throw this.setEncodingError
     return this
+  }
+
+  override on(event: string | symbol, listener: (...args: any[]) => void): this {
+    if (this.throwOnOn) throw new Error('STREAM_ON_CANARY')
+    return super.on(event, listener)
   }
 }
 
@@ -25,8 +39,127 @@ class FakeChild extends EventEmitter {
   readonly stdin = new FakeWritable()
   readonly stdout = new FakeReadable()
   readonly stderr = new FakeReadable()
-  readonly kill = vi.fn((_signal?: string) => true)
+  killResult = true
+  killError: unknown = undefined
+  emitCloseOnKillOrdinal: number | undefined
+  readonly onCalls: string[] = []
+  throwOnOnEvent: string | undefined
+  readonly kill = vi.fn((signal?: string) => {
+    if (this.killError !== undefined) throw this.killError
+    if (this.emitCloseOnKillOrdinal === this.kill.mock.calls.length) this.emit('close', 0, null)
+    return this.killResult
+  })
   readonly pid = 7011
+
+  override on(event: string | symbol, listener: (...args: any[]) => void): this {
+    const eventName = typeof event === 'symbol' ? event.toString() : event
+    this.onCalls.push(eventName)
+    if (eventName === this.throwOnOnEvent) throw new Error(`CHILD_ON_${eventName}_CANARY`)
+    return super.on(event, listener)
+  }
+}
+
+type TimerRecord = {
+  readonly handle: object
+  readonly callback: () => void
+  readonly dueAt: number
+  readonly insertOrder: number
+  readonly registerMode: 'normal' | 'throwBeforeRegister' | 'invokeSynchronouslyThenThrow'
+  fired: boolean
+  cleared: boolean
+  clearCalls: number
+}
+
+class ManualScheduler {
+  nowEpochMs: number
+  readonly records: TimerRecord[] = []
+  readonly registerCalls: Array<{ readonly delayMs: number; readonly mode: TimerRecord['registerMode'] }> = []
+  private nextInsertOrder = 0
+  readonly registerModes: TimerRecord['registerMode'][] = []
+  readonly throwBeforeRegisterDelays = new Set<number>()
+  readonly invokeSynchronouslyThenThrowDelays = new Set<number>()
+  throwOnClearHandle: object | undefined
+  throwOnClearDueAt: number | undefined
+
+  constructor(nowEpochMs = 0) {
+    this.nowEpochMs = nowEpochMs
+  }
+
+  readonly setTimeout = vi.fn((callback: () => void, delayMs: number): object => {
+    const mode = this.registerModes.shift()
+      ?? (this.throwBeforeRegisterDelays.has(delayMs)
+        ? 'throwBeforeRegister'
+        : this.invokeSynchronouslyThenThrowDelays.has(delayMs)
+          ? 'invokeSynchronouslyThenThrow'
+          : 'normal')
+    this.registerCalls.push({ delayMs, mode })
+    if (mode === 'throwBeforeRegister') throw new Error('SET_TIMEOUT_CANARY')
+    const record: TimerRecord = {
+      handle: Object.freeze({}),
+      callback,
+      dueAt: this.nowEpochMs + delayMs,
+      insertOrder: this.nextInsertOrder,
+      registerMode: mode,
+      fired: false,
+      cleared: false,
+      clearCalls: 0,
+    }
+    this.nextInsertOrder += 1
+    this.records.push(record)
+    if (mode === 'invokeSynchronouslyThenThrow') {
+      record.fired = true
+      callback()
+      throw new Error('SET_TIMEOUT_AFTER_CALLBACK_CANARY')
+    }
+    return record.handle
+  })
+
+  readonly clearTimeout = vi.fn((handle: unknown): void => {
+    const record = this.records.find((candidate) => candidate.handle === handle)
+    if (record !== undefined) {
+      record.clearCalls += 1
+      record.cleared = true
+      if (record.handle === this.throwOnClearHandle || record.dueAt === this.throwOnClearDueAt) {
+        this.throwOnClearHandle = undefined
+        this.throwOnClearDueAt = undefined
+        throw new Error('CLEAR_TIMEOUT_CANARY')
+      }
+    }
+  })
+
+  advanceTo(epochMs: number): void {
+    if (epochMs < this.nowEpochMs) throw new Error('ManualScheduler cannot move backwards')
+    this.runReadyBatch(epochMs)
+  }
+
+  runReadyBatch(epochMs = this.nowEpochMs): void {
+    if (epochMs < this.nowEpochMs) throw new Error('ManualScheduler cannot move backwards')
+    const ready = this.records
+      .filter((record) => !record.fired && !record.cleared && record.dueAt <= epochMs)
+      .sort((left, right) => left.dueAt - right.dueAt || left.insertOrder - right.insertOrder)
+    for (const next of ready) {
+      if (next.fired || next.cleared) continue
+      this.nowEpochMs = next.dueAt
+      next.fired = true
+      next.callback()
+    }
+    this.nowEpochMs = epochMs
+  }
+
+  advance(deltaMs: number): void {
+    this.advanceTo(this.nowEpochMs + deltaMs)
+  }
+
+  forceFire(): void {
+    for (const record of this.records.filter((candidate) => candidate.cleared && !candidate.fired)) {
+      record.fired = true
+      record.callback()
+    }
+  }
+
+  forceClearedCallbacks(): void {
+    this.forceFire()
+  }
 }
 
 type ObserverRequest = {
@@ -43,6 +176,8 @@ type ObserverOptions = {
   readonly killGraceMs: number
   readonly nowEpochMs: () => number
   readonly spawn: (...args: unknown[]) => FakeChild
+  readonly setTimeout: (callback: () => void, delayMs: number) => unknown
+  readonly clearTimeout: (handle: unknown) => void
 }
 
 type ObserverChild = {
@@ -60,6 +195,9 @@ const REQUEST: ObserverRequest = Object.freeze({
 const CUTOFF_EPOCH_MS = Date.parse(REQUEST.cutoff)
 const DEADLINE_EPOCH_MS = CUTOFF_EPOCH_MS + 8_000
 const SHANGHAI_MIDNIGHT_EPOCH_MS = Date.parse('2026-08-31T16:00:00.000Z')
+const BUDGET_END_EPOCH_MS = Math.min(CUTOFF_EPOCH_MS + 10_000, SHANGHAI_MIDNIGHT_EPOCH_MS - 1)
+const CLEANUP_DEADLINE_EPOCH_MS = BUDGET_END_EPOCH_MS - 2_000
+const KILL_GRACE_EPOCH_MS = CLEANUP_DEADLINE_EPOCH_MS + 500
 
 async function loadFactory(): Promise<ObserverFactory> {
   const moduleUrl = new URL('../src/personal-feed/x-observer-child.ts', import.meta.url).href
@@ -75,6 +213,7 @@ async function loadFactory(): Promise<ObserverFactory> {
 function options(
   spawn: (...args: unknown[]) => FakeChild,
   nowEpochMs: number | (() => number) = CUTOFF_EPOCH_MS + 1_000,
+  scheduler = new ManualScheduler(typeof nowEpochMs === 'number' ? nowEpochMs : CUTOFF_EPOCH_MS + 1_000),
 ): ObserverOptions {
   return {
     pythonFile: '/usr/bin/python3',
@@ -84,6 +223,8 @@ function options(
     killGraceMs: 500,
     nowEpochMs: typeof nowEpochMs === 'function' ? nowEpochMs : () => nowEpochMs,
     spawn,
+    setTimeout: scheduler.setTimeout,
+    clearTimeout: scheduler.clearTimeout,
   }
 }
 
@@ -633,6 +774,623 @@ describe('Personal Feed X observer child Group2 raw DTO contract', () => {
       const result = await observeRaw(factory, line)
       expect(result).toEqual(Object.freeze({ kind: 'error', code }))
       expect(Object.isFrozen(result)).toBe(true)
+    }
+  })
+})
+
+function controlledChild(): { readonly child: FakeChild; readonly spawn: ReturnType<typeof vi.fn> } {
+  const child = new FakeChild()
+  const spawn = vi.fn((...args: unknown[]) => {
+    expect(args).toHaveLength(3)
+    return child
+  })
+  return { child, spawn }
+}
+
+type AbortTrace = {
+  readonly controller: AbortController
+  readonly signal: AbortSignal
+  readonly adds: unknown[]
+  readonly removes: unknown[]
+  throwOnAdd: boolean
+}
+
+function tracedAbortController(): AbortTrace {
+  const controller = new AbortController()
+  const signal = controller.signal
+  const adds: unknown[] = []
+  const removes: unknown[] = []
+  const originalAdd = signal.addEventListener.bind(signal)
+  const originalRemove = signal.removeEventListener.bind(signal)
+  const trace: AbortTrace = { controller, signal, adds, removes, throwOnAdd: false }
+  Object.defineProperty(signal, 'addEventListener', {
+    configurable: true,
+    value: ((type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+      adds.push(listener)
+      if (trace.throwOnAdd) throw new Error('ABORT_ADD_CANARY')
+      return originalAdd(type, listener, options)
+    }) as AbortSignal['addEventListener'],
+  })
+  Object.defineProperty(signal, 'removeEventListener', {
+    configurable: true,
+    value: ((type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions) => {
+      removes.push(listener)
+      return originalRemove(type, listener, options)
+    }) as AbortSignal['removeEventListener'],
+  })
+  return trace
+}
+
+async function expectStillPending(promise: Promise<unknown>): Promise<void> {
+  let settled = false
+  void promise.then(
+    () => { settled = true },
+    () => { settled = true },
+  )
+  await Promise.resolve()
+  expect(settled).toBe(false)
+}
+
+function expectTimerCleanup(scheduler: ManualScheduler): void {
+  for (const record of scheduler.records) {
+    expect(record.clearCalls).toBeLessThanOrEqual(1)
+    if (!record.fired) expect(record.clearCalls).toBe(1)
+  }
+}
+
+function startControlledObservation(
+  factory: ObserverFactory,
+  child: FakeChild,
+  scheduler: ManualScheduler,
+  controller = new AbortController(),
+  nowEpochMs = CUTOFF_EPOCH_MS + 1_000,
+): { readonly promise: Promise<unknown>; readonly spawn: ReturnType<typeof vi.fn>; readonly controller: AbortController } {
+  const spawn = vi.fn((...args: unknown[]) => {
+    expect(args).toHaveLength(3)
+    return child
+  })
+  const promise = factory(options(spawn, nowEpochMs, scheduler)).observe({ request: REQUEST, signal: controller.signal })
+  return { promise, spawn, controller }
+}
+
+describe('Personal Feed X observer child Group3 bounded termination contract', () => {
+  it('settles only from close and parses wire only for close(0, null)', async () => {
+    const factory = await loadFactory()
+    const cases: readonly {
+      readonly label: string
+      readonly line?: string
+      readonly closeArgs: readonly unknown[]
+      readonly expected: unknown
+    }[] = [
+      { label: 'valid raw tuple', line: jsonLine(completeFixture()), closeArgs: [0, null], expected: completeFixture() },
+      { label: 'invalid wire', line: 'RAW_CANARY\n', closeArgs: [0, null], expected: { kind: 'error', code: 'protocol_invalid' } },
+      { label: 'nonzero exit', closeArgs: [1, null], expected: { kind: 'error', code: 'observer_failed' } },
+      { label: 'signal close', closeArgs: [null, 'SIGTERM'], expected: { kind: 'error', code: 'observer_failed' } },
+      { label: 'zero plus signal', closeArgs: [0, 'SIGTERM'], expected: { kind: 'error', code: 'observer_failed' } },
+      { label: 'missing close tuple', closeArgs: [], expected: { kind: 'error', code: 'observer_failed' } },
+    ]
+
+    for (const testCase of cases) {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const { child, spawn } = controlledChild()
+      const promise = factory(options(spawn, CUTOFF_EPOCH_MS + 1_000, scheduler)).observe({
+        request: REQUEST,
+        signal: new AbortController().signal,
+      })
+      await expectStillPending(promise)
+      if (testCase.line !== undefined) child.stdout.emit('data', testCase.line)
+      child.emit('close', ...testCase.closeArgs)
+      const result = await promise
+      expect(result, testCase.label).toEqual(Object.freeze(testCase.expected))
+      if (result !== null && typeof result === 'object' && 'code' in result) {
+        expect(Object.keys(result)).toEqual(['kind', 'code'])
+        expect(Object.isFrozen(result)).toBe(true)
+      }
+      expect(child.kill).not.toHaveBeenCalled()
+      expect(scheduler.records.every((record) => record.cleared || record.fired)).toBe(true)
+      expect(JSON.stringify(result)).not.toContain('RAW_CANARY')
+    }
+  })
+
+  it('preserves abort as the first reason across registration and grace races', async () => {
+    const factory = await loadFactory()
+
+    {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const { child, spawn } = controlledChild()
+      const controller = new AbortController()
+      controller.abort()
+      const result = await factory(options(spawn, CUTOFF_EPOCH_MS + 1_000, scheduler)).observe({ request: REQUEST, signal: controller.signal })
+      expect(result).toEqual(Object.freeze({ kind: 'error', code: 'aborted' }))
+      expect(spawn).not.toHaveBeenCalled()
+      expect(child.kill).not.toHaveBeenCalled()
+      expect(scheduler.records).toHaveLength(0)
+    }
+
+    {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const child = new FakeChild()
+      const controller = new AbortController()
+      const spawn = vi.fn((...args: unknown[]) => {
+        expect(args).toHaveLength(3)
+        controller.abort()
+        return child
+      })
+      const promise = factory(options(spawn, CUTOFF_EPOCH_MS + 1_000, scheduler)).observe({ request: REQUEST, signal: controller.signal })
+      expect(child.kill).toHaveBeenCalledTimes(1)
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+      expect(child.stdin.endCalls).toHaveLength(1)
+      await expectStillPending(promise)
+      child.emit('close', 0, null)
+      expect(await promise).toEqual(Object.freeze({ kind: 'error', code: 'aborted' }))
+    }
+
+    const raceCases: readonly { readonly label: string; readonly advanceToGrace: boolean; readonly closeAt: number }[] = [
+      { label: 'close before grace', advanceToGrace: false, closeAt: CUTOFF_EPOCH_MS + 1_000 + 499 },
+      { label: 'close after grace', advanceToGrace: true, closeAt: CUTOFF_EPOCH_MS + 1_000 + 501 },
+      { label: 'close after B', advanceToGrace: true, closeAt: BUDGET_END_EPOCH_MS + 1 },
+    ]
+    for (const testCase of raceCases) {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const { child } = controlledChild()
+      const { promise, controller } = startControlledObservation(factory, child, scheduler)
+      controller.abort()
+      expect(child.kill).toHaveBeenNthCalledWith(1, 'SIGTERM')
+      if (testCase.advanceToGrace) scheduler.advanceTo(CUTOFF_EPOCH_MS + 1_000 + 500)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(
+        testCase.advanceToGrace ? ['SIGTERM', 'SIGKILL'] : ['SIGTERM'],
+      )
+      if (testCase.label === 'close after B') scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+      else scheduler.advanceTo(testCase.closeAt)
+      if (testCase.label === 'close after B') {
+        expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL', 'SIGKILL'])
+        await expectStillPending(promise)
+      }
+      child.emit('close', 0, null)
+      expect(await promise).toEqual(Object.freeze({ kind: 'error', code: 'aborted' }))
+    }
+  })
+
+  it('runs the timeout TERM, grace KILL, and B KILL ladder for every kill outcome', async () => {
+    const factory = await loadFactory()
+    for (const mode of ['true', 'false', 'throw'] as const) {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const { child } = controlledChild()
+      if (mode === 'false') child.killResult = false
+      if (mode === 'throw') child.killError = new Error('KILL_CANARY')
+      const { promise } = startControlledObservation(factory, child, scheduler)
+
+      scheduler.advanceTo(CLEANUP_DEADLINE_EPOCH_MS)
+      expect(child.kill).toHaveBeenNthCalledWith(1, 'SIGTERM')
+      await expectStillPending(promise)
+      scheduler.advanceTo(KILL_GRACE_EPOCH_MS)
+      expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL')
+      await expectStillPending(promise)
+      scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+      expect(child.kill).toHaveBeenNthCalledWith(3, 'SIGKILL')
+      await expectStillPending(promise)
+      child.emit('close', 1, null)
+      const result = await promise
+      expect(result).toEqual(Object.freeze({ kind: 'error', code: 'timed_out' }))
+      expect(child.kill).toHaveBeenCalledTimes(3)
+      expect(JSON.stringify(result)).not.toContain('KILL_CANARY')
+    }
+
+    for (const closeAt of [CLEANUP_DEADLINE_EPOCH_MS + 499, KILL_GRACE_EPOCH_MS + 1] as const) {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const { child } = controlledChild()
+      const { promise } = startControlledObservation(factory, child, scheduler)
+      scheduler.advanceTo(CLEANUP_DEADLINE_EPOCH_MS)
+      scheduler.advanceTo(closeAt)
+      child.emit('close', 1, null)
+      expect(await promise).toEqual(Object.freeze({ kind: 'error', code: 'timed_out' }))
+      const killsAtClose = closeAt < KILL_GRACE_EPOCH_MS ? 1 : 2
+      expect(child.kill).toHaveBeenCalledTimes(killsAtClose)
+      scheduler.advanceTo(BUDGET_END_EPOCH_MS + 1)
+      expect(child.kill).toHaveBeenCalledTimes(killsAtClose)
+    }
+
+    {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const { child } = controlledChild()
+      const { promise } = startControlledObservation(factory, child, scheduler)
+      scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+      await expectStillPending(promise)
+      scheduler.forceFire()
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+      child.emit('close', 1, null)
+      expect(await promise).toEqual(Object.freeze({ kind: 'error', code: 'timed_out' }))
+    }
+
+    {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      scheduler.throwOnClearDueAt = KILL_GRACE_EPOCH_MS
+      const { child } = controlledChild()
+      const { promise } = startControlledObservation(factory, child, scheduler)
+      scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+      const grace = scheduler.records.find((record) => record.dueAt === KILL_GRACE_EPOCH_MS)
+      expect(grace).toBeDefined()
+      expect(grace?.clearCalls).toBe(1)
+      scheduler.forceFire()
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+      await expectStillPending(promise)
+      child.emit('close', 1, null)
+      expect(await promise).toEqual(Object.freeze({ kind: 'error', code: 'timed_out' }))
+    }
+
+    for (const closeOnGraceKill of [false, true] as const) {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      scheduler.invokeSynchronouslyThenThrowDelays.add(500)
+      const { child } = controlledChild()
+      if (closeOnGraceKill) child.emitCloseOnKillOrdinal = 2
+      const { promise } = startControlledObservation(factory, child, scheduler)
+      scheduler.advanceTo(CLEANUP_DEADLINE_EPOCH_MS)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+      if (closeOnGraceKill) {
+        expect(await promise).toEqual(Object.freeze({ kind: 'error', code: 'timed_out' }))
+        scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+        expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+      } else {
+        await expectStillPending(promise)
+        scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+        expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL', 'SIGKILL'])
+        child.emit('close', 1, null)
+        expect(await promise).toEqual(Object.freeze({ kind: 'error', code: 'timed_out' }))
+      }
+    }
+
+    {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      scheduler.throwBeforeRegisterDelays.add(BUDGET_END_EPOCH_MS - (CUTOFF_EPOCH_MS + 1_000))
+      const { child } = controlledChild()
+      const { promise } = startControlledObservation(factory, child, scheduler)
+      expect(scheduler.nowEpochMs).toBe(CUTOFF_EPOCH_MS + 1_000)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+      await expectStillPending(promise)
+      child.emit('close', 1, null)
+      expect(await promise).toEqual(Object.freeze({ kind: 'error', code: 'observer_failed' }))
+      scheduler.advanceTo(BUDGET_END_EPOCH_MS + 1)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+    }
+
+    {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      scheduler.invokeSynchronouslyThenThrowDelays.add(BUDGET_END_EPOCH_MS - (CUTOFF_EPOCH_MS + 1_000))
+      const { child } = controlledChild()
+      const { promise } = startControlledObservation(factory, child, scheduler)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+      await expectStillPending(promise)
+      child.emit('close', 0, null)
+      expect(await promise).toEqual(Object.freeze({ kind: 'error', code: 'timed_out' }))
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+    }
+
+    {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      scheduler.throwBeforeRegisterDelays.add(CLEANUP_DEADLINE_EPOCH_MS - (CUTOFF_EPOCH_MS + 1_000))
+      const { child } = controlledChild()
+      const { promise } = startControlledObservation(factory, child, scheduler)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM'])
+      await expectStillPending(promise)
+      scheduler.advanceTo(CUTOFF_EPOCH_MS + 1_000 + 500)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+      scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL', 'SIGKILL'])
+      child.emit('close', 1, null)
+      expect(await promise).toEqual(Object.freeze({ kind: 'error', code: 'observer_failed' }))
+    }
+
+    {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      scheduler.throwBeforeRegisterDelays.add(500)
+      const { child } = controlledChild()
+      const { promise } = startControlledObservation(factory, child, scheduler)
+      scheduler.advanceTo(CLEANUP_DEADLINE_EPOCH_MS)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+      await expectStillPending(promise)
+      scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL', 'SIGKILL'])
+      child.emit('close', 1, null)
+      expect(await promise).toEqual(Object.freeze({ kind: 'error', code: 'timed_out' }))
+    }
+  })
+
+  it('keeps the promise pending after final KILL and settles once on synchronous close', async () => {
+    const factory = await loadFactory()
+    for (const mode of ['true', 'false', 'throw'] as const) {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const { child } = controlledChild()
+      if (mode === 'false') child.killResult = false
+      if (mode === 'throw') child.killError = new Error('KILL_CANARY')
+      const { promise } = startControlledObservation(factory, child, scheduler)
+      scheduler.advanceTo(CLEANUP_DEADLINE_EPOCH_MS)
+      scheduler.advanceTo(KILL_GRACE_EPOCH_MS)
+      scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL', 'SIGKILL'])
+      await expectStillPending(promise)
+      child.emit('close', 1, 'SIGTERM')
+      expect(await promise).toEqual(Object.freeze({ kind: 'error', code: 'timed_out' }))
+    }
+
+    const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+    const { child } = controlledChild()
+    child.emitCloseOnKillOrdinal = 3
+    const { promise } = startControlledObservation(factory, child, scheduler)
+    scheduler.advanceTo(CLEANUP_DEADLINE_EPOCH_MS)
+    scheduler.advanceTo(KILL_GRACE_EPOCH_MS)
+    scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+    expect(await promise).toEqual(Object.freeze({ kind: 'error', code: 'timed_out' }))
+    expect(child.kill).toHaveBeenCalledTimes(3)
+    child.emit('close', 0, null)
+    expect(child.kill).toHaveBeenCalledTimes(3)
+
+    const synchronousCloseCases: readonly {
+      readonly label: string
+      readonly advanceTo: number
+      readonly closeOrdinal: number
+      readonly expectedKills: readonly string[]
+    }[] = [
+      { label: 'TERM close', advanceTo: CLEANUP_DEADLINE_EPOCH_MS, closeOrdinal: 1, expectedKills: ['SIGTERM'] },
+      { label: 'grace KILL close', advanceTo: KILL_GRACE_EPOCH_MS, closeOrdinal: 2, expectedKills: ['SIGTERM', 'SIGKILL'] },
+      { label: 'B KILL close', advanceTo: BUDGET_END_EPOCH_MS, closeOrdinal: 3, expectedKills: ['SIGTERM', 'SIGKILL', 'SIGKILL'] },
+    ]
+    for (const testCase of synchronousCloseCases) {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const { child } = controlledChild()
+      child.emitCloseOnKillOrdinal = testCase.closeOrdinal
+      const { promise } = startControlledObservation(factory, child, scheduler)
+      scheduler.advanceTo(CLEANUP_DEADLINE_EPOCH_MS)
+      if (testCase.closeOrdinal >= 2) scheduler.advanceTo(KILL_GRACE_EPOCH_MS)
+      if (testCase.closeOrdinal >= 3) scheduler.advanceTo(testCase.advanceTo)
+      expect(await promise, testCase.label).toEqual(Object.freeze({ kind: 'error', code: 'timed_out' }))
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(testCase.expectedKills)
+      scheduler.forceFire()
+      scheduler.advanceTo(BUDGET_END_EPOCH_MS + 1)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(testCase.expectedKills)
+      expectTimerCleanup(scheduler)
+    }
+  })
+
+  it('applies first-reason priority to stream, abort, timeout, and late event races', async () => {
+    const factory = await loadFactory()
+    type Scenario = {
+      readonly label: string
+      readonly setup?: (child: FakeChild, scheduler: ManualScheduler, controller: AbortController) => void
+      readonly expected: 'aborted' | 'observer_failed' | 'timed_out'
+      readonly closeArgs?: readonly unknown[]
+      readonly successfulClose?: boolean
+      readonly expectedKills?: readonly string[]
+      readonly earlyClose?: boolean
+    }
+    const scenarios: readonly Scenario[] = [
+      { label: 'child error first', setup: (child) => child.emit('error', new Error('EXCEPTION_CANARY')), expected: 'observer_failed' },
+      { label: 'stdout error first', setup: (child) => child.stdout.emit('error', new Error('EXCEPTION_CANARY')), expected: 'observer_failed' },
+      { label: 'stderr error first', setup: (child) => child.stderr.emit('error', new Error('EXCEPTION_CANARY')), expected: 'observer_failed' },
+      { label: 'stdin callback error first', expected: 'observer_failed' },
+      { label: 'abort first', setup: (_child, _scheduler, controller) => controller.abort(), expected: 'aborted' },
+      { label: 'timeout first', setup: (_child, scheduler) => scheduler.advanceTo(CLEANUP_DEADLINE_EPOCH_MS), expected: 'timed_out' },
+      { label: 'abort then child error', setup: (child, _scheduler, controller) => { controller.abort(); child.emit('error', new Error('EXCEPTION_CANARY')) }, expected: 'aborted' },
+      { label: 'child error then abort', setup: (child, _scheduler, controller) => { child.emit('error', new Error('EXCEPTION_CANARY')); controller.abort() }, expected: 'observer_failed' },
+      { label: 'timeout then legal post-D incomplete', setup: (child, scheduler) => {
+        scheduler.advanceTo(CLEANUP_DEADLINE_EPOCH_MS)
+        child.stdout.emit('data', jsonLine(incompleteFixture('2026-08-31T10:00:08.000Z', '2026-08-31T10:00:08.124Z')))
+      }, expected: 'timed_out' },
+      { label: 'invalid wire plus bad close tuple', setup: (child) => child.stdout.emit('data', 'RAW_CANARY\n'), expected: 'observer_failed', closeArgs: [1, null], expectedKills: [], earlyClose: true },
+      { label: 'abort plus signal close', setup: (_child, _scheduler, controller) => controller.abort(), expected: 'aborted', closeArgs: [0, 'SIGTERM'] },
+      { label: 'late events after successful close', successfulClose: true, expected: 'observer_failed' },
+    ]
+
+    for (const scenario of scenarios) {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const { child } = controlledChild()
+      const controller = new AbortController()
+      if (scenario.label === 'stdin callback error first') child.stdin.callbackError = new Error('EXCEPTION_CANARY')
+      if (scenario.label === 'child error first') child.killError = new Error('TERM_CANARY')
+      const { promise } = startControlledObservation(factory, child, scheduler, controller)
+      if (scenario.successfulClose) {
+        child.stdout.emit('data', jsonLine(completeFixture()))
+        child.emit('close', 0, null)
+        expect(await promise).toEqual(completeFixture())
+        controller.abort()
+        child.emit('error', new Error('EXCEPTION_CANARY'))
+        child.stdout.emit('data', 'RAW_CANARY\n')
+        child.emit('close', 1, null)
+        scheduler.forceClearedCallbacks()
+        expect(child.kill).not.toHaveBeenCalled()
+        continue
+      }
+      scenario.setup?.(child, scheduler, controller)
+      if (scenario.earlyClose) {
+        child.emit('close', ...(scenario.closeArgs ?? [1, null]))
+        const result = await promise
+        expect(result).toEqual(Object.freeze({ kind: 'error', code: scenario.expected }))
+        expect(Object.keys(result)).toEqual(['kind', 'code'])
+        expect(Object.isFrozen(result)).toBe(true)
+        scheduler.advanceTo(BUDGET_END_EPOCH_MS + 1)
+        expect(child.kill).not.toHaveBeenCalled()
+        for (const canary of ['RAW_CANARY', 'TERM_CANARY', 'KILL_CANARY', 'EXCEPTION_CANARY']) {
+          expect(JSON.stringify(result), scenario.label).not.toContain(canary)
+        }
+        continue
+      }
+      scheduler.advanceTo(KILL_GRACE_EPOCH_MS)
+      scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+      await expectStillPending(promise)
+      child.emit('close', ...(scenario.closeArgs ?? [0, null]))
+      const result = await promise
+      expect(result).toEqual(Object.freeze({ kind: 'error', code: scenario.expected }))
+      expect(Object.keys(result)).toEqual(['kind', 'code'])
+      expect(Object.isFrozen(result)).toBe(true)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(scenario.expectedKills ?? ['SIGTERM', 'SIGKILL', 'SIGKILL'])
+      for (const canary of ['RAW_CANARY', 'TERM_CANARY', 'KILL_CANARY', 'EXCEPTION_CANARY']) {
+        expect(JSON.stringify(result), scenario.label).not.toContain(canary)
+      }
+    }
+  })
+
+  it('cleans timers and listeners on every terminal path and enforces exact options shape', async () => {
+    const factory = await loadFactory()
+    const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+    const { child, spawn } = controlledChild()
+    const controller = new AbortController()
+    const promise = factory(options(spawn, CUTOFF_EPOCH_MS + 1_000, scheduler)).observe({ request: REQUEST, signal: controller.signal })
+    let thenCount = 0
+    const observed = promise.then((result) => {
+      thenCount += 1
+      return result
+    })
+    child.stdout.emit('data', jsonLine(completeFixture()))
+    child.emit('close', 0, null)
+    expect(await observed).toEqual(completeFixture())
+    controller.abort()
+    child.emit('error', new Error('EXCEPTION_CANARY'))
+    child.stdout.emit('data', 'RAW_CANARY\n')
+    child.emit('close', 1, null)
+    scheduler.forceClearedCallbacks()
+    expect(thenCount).toBe(1)
+    expect(child.kill).not.toHaveBeenCalled()
+    expect(scheduler.records.every((record) => record.cleared || record.fired)).toBe(true)
+
+    const preabortScheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+    const preabortSpawn = vi.fn(() => new FakeChild())
+    const preabort = new AbortController()
+    preabort.abort()
+    expect(await factory(options(preabortSpawn, CUTOFF_EPOCH_MS + 1_000, preabortScheduler)).observe({ request: REQUEST, signal: preabort.signal }))
+      .toEqual(Object.freeze({ kind: 'error', code: 'aborted' }))
+    expect(preabortScheduler.records).toHaveLength(0)
+
+    const throwingScheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+    const throwingSpawn = vi.fn(() => { throw new Error('SPAWN_CANARY') })
+    expect(await factory(options(throwingSpawn, CUTOFF_EPOCH_MS + 1_000, throwingScheduler)).observe({
+      request: REQUEST,
+      signal: new AbortController().signal,
+    })).toEqual(Object.freeze({ kind: 'error', code: 'observer_failed' }))
+    expect(throwingScheduler.records).toHaveLength(0)
+
+    const listenerCases: readonly {
+      readonly label: string
+      readonly trigger: (child: FakeChild, scheduler: ManualScheduler, trace: AbortTrace) => void
+      readonly expected: 'aborted' | 'observer_failed' | 'timed_out' | 'complete'
+      readonly closeArgs?: readonly unknown[]
+    }[] = [
+      {
+        label: 'normal close',
+        trigger: (child) => child.stdout.emit('data', jsonLine(completeFixture())),
+        expected: 'complete',
+      },
+      {
+        label: 'abort',
+        trigger: (_child, _scheduler, trace) => trace.controller.abort(),
+        expected: 'aborted',
+      },
+      {
+        label: 'timeout',
+        trigger: (_child, scheduler) => scheduler.advanceTo(CLEANUP_DEADLINE_EPOCH_MS),
+        expected: 'timed_out',
+      },
+      {
+        label: 'stream error',
+        trigger: (child) => child.stdout.emit('error', new Error('EXCEPTION_CANARY')),
+        expected: 'observer_failed',
+      },
+      {
+        label: 'bad close tuple',
+        trigger: () => undefined,
+        expected: 'observer_failed',
+        closeArgs: [1, null],
+      },
+    ]
+    for (const testCase of listenerCases) {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const { child } = controlledChild()
+      const trace = tracedAbortController()
+      const { promise } = startControlledObservation(factory, child, scheduler, trace.controller)
+      testCase.trigger(child, scheduler, trace)
+      if (testCase.expected !== 'complete' && testCase.label !== 'bad close tuple') {
+        scheduler.advanceTo(KILL_GRACE_EPOCH_MS)
+        scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+      }
+      child.emit('close', ...(testCase.closeArgs ?? [0, null]))
+      const result = await promise
+      if (testCase.expected === 'complete') expect(result).toEqual(completeFixture())
+      else expect(result).toEqual(Object.freeze({ kind: 'error', code: testCase.expected }))
+      expect(trace.adds).toHaveLength(1)
+      expect(trace.removes).toHaveLength(1)
+      expect(trace.removes[0]).toBe(trace.adds[0])
+      expectTimerCleanup(scheduler)
+    }
+
+    const setupErrorCases: readonly {
+      readonly label: string
+      readonly configure: (child: FakeChild, trace: AbortTrace) => void
+      readonly expectedAdds: number
+      readonly expectedRemoves: number
+    }[] = [
+      { label: 'addEventListener throw', configure: (_child, trace) => { trace.throwOnAdd = true }, expectedAdds: 1, expectedRemoves: 1 },
+      { label: 'stdout setEncoding throw', configure: (child) => { child.stdout.setEncodingError = new Error('SET_ENCODING_CANARY') }, expectedAdds: 1, expectedRemoves: 1 },
+      { label: 'stderr setEncoding throw', configure: (child) => { child.stderr.setEncodingError = new Error('SET_ENCODING_CANARY') }, expectedAdds: 1, expectedRemoves: 1 },
+      { label: 'stdout on throw', configure: (child) => { child.stdout.throwOnOn = true }, expectedAdds: 1, expectedRemoves: 1 },
+      { label: 'stderr on throw', configure: (child) => { child.stderr.throwOnOn = true }, expectedAdds: 1, expectedRemoves: 1 },
+      { label: 'child error on throw', configure: (child) => { child.throwOnOnEvent = 'error' }, expectedAdds: 1, expectedRemoves: 1 },
+      { label: 'stdin end throw', configure: (child) => { child.stdin.endError = new Error('STDIN_END_CANARY') }, expectedAdds: 1, expectedRemoves: 1 },
+    ]
+    for (const testCase of setupErrorCases) {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const { child } = controlledChild()
+      const trace = tracedAbortController()
+      testCase.configure(child, trace)
+      const { promise } = startControlledObservation(factory, child, scheduler, trace.controller)
+      expect(child.kill.mock.calls.map(([signal]) => signal), testCase.label).toEqual(['SIGTERM'])
+      await expectStillPending(promise)
+      child.emit('close', 1, null)
+      const result = await promise
+      expect(result, testCase.label).toEqual(Object.freeze({ kind: 'error', code: 'observer_failed' }))
+      expect(Object.keys(result)).toEqual(['kind', 'code'])
+      expect(Object.isFrozen(result)).toBe(true)
+      expect(trace.adds).toHaveLength(testCase.expectedAdds)
+      expect(trace.removes).toHaveLength(testCase.expectedRemoves)
+      if (testCase.expectedRemoves === 1) expect(trace.removes[0]).toBe(trace.adds[0])
+      expectTimerCleanup(scheduler)
+      expect(JSON.stringify(result)).not.toContain('CANARY')
+    }
+
+    {
+      const scheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const { child } = controlledChild()
+      const trace = tracedAbortController()
+      child.throwOnOnEvent = 'close'
+      const { promise } = startControlledObservation(factory, child, scheduler, trace.controller)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+      expect(scheduler.records).toHaveLength(0)
+      await expectStillPending(promise)
+      scheduler.advanceTo(CUTOFF_EPOCH_MS + 1_000 + 500)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+      scheduler.advanceTo(BUDGET_END_EPOCH_MS)
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL'])
+      child.emit('close', 1, null)
+      await expectStillPending(promise)
+    }
+
+    const optionCases: readonly { readonly label: string; readonly mutate: (base: Record<string, unknown>) => unknown }[] = [
+      { label: 'missing setTimeout', mutate: (base) => { delete base.setTimeout; return base } },
+      { label: 'missing clearTimeout', mutate: (base) => { delete base.clearTimeout; return base } },
+      { label: 'non-function setTimeout', mutate: (base) => ({ ...base, setTimeout: 1 }) },
+      { label: 'non-function clearTimeout', mutate: (base) => ({ ...base, clearTimeout: 1 }) },
+      { label: 'extra scheduler key', mutate: (base) => ({ ...base, timer: true }) },
+      { label: 'scheduler accessor', mutate: (base) => Object.defineProperty(base, 'setTimeout', { enumerable: true, get: () => { throw new Error('accessor') } }) },
+      { label: 'scheduler proxy', mutate: (base) => new Proxy(base, { ownKeys: () => { throw new Error('proxy') } }) },
+    ]
+    for (const testCase of optionCases) {
+      const optionScheduler = new ManualScheduler(CUTOFF_EPOCH_MS + 1_000)
+      const optionSpawn = vi.fn(() => new FakeChild())
+      const base = { ...options(optionSpawn, CUTOFF_EPOCH_MS + 1_000, optionScheduler) } as Record<string, unknown>
+      await expectInvalidWithoutSpawn(factory, testCase.mutate(base), {
+        request: REQUEST,
+        signal: new AbortController().signal,
+      }, optionSpawn)
+      expect(optionScheduler.records).toHaveLength(0)
     }
   })
 })
