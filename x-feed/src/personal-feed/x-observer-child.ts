@@ -29,7 +29,7 @@ type StrictByteChunk = Readonly<
 type IntrinsicGetter = (target: object) => unknown
 type IntrinsicSet = (target: object, source: object) => unknown
 
-const BYTE_CHUNK_INTRINSICS = (() => {
+function captureByteChunkIntrinsics() {
   let localUint8Array: typeof Uint8Array | undefined
   let reflectApply: typeof Reflect.apply | undefined
   let typedArrayByteLengthGetter: IntrinsicGetter | undefined
@@ -66,7 +66,9 @@ const BYTE_CHUNK_INTRINSICS = (() => {
     arrayBufferResizableGetter,
     arrayBufferDetachedGetter,
   })
-})()
+}
+
+const BYTE_CHUNK_INTRINSICS = captureByteChunkIntrinsics()
 
 function strictByteChunk(value: unknown, maxByteLength: number): StrictByteChunk {
   if (!Number.isSafeInteger(maxByteLength) || maxByteLength < 0) return { kind: 'failed' }
