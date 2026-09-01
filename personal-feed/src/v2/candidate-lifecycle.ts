@@ -1,10 +1,28 @@
+import { readFileSync } from 'node:fs'
 import { PersonalFeedScopeInputError } from '../errors.ts'
 import type { PersonalFeedV2Clock, PersonalFeedV2Request } from './request-coordinator.ts'
 
 export interface CreatePersonalFeedV2CandidateLifecycleOptions {
   readonly completionLedgerPath: string
   readonly clock: PersonalFeedV2Clock
+  readonly processedQuery?: PersonalFeedV2ProcessedQuery
 }
+
+export interface PersonalFeedV2ProcessedQueryInput {
+  readonly stableId: string
+}
+
+export type PersonalFeedV2ProcessedQueryResult =
+  | { readonly kind: 'processed' }
+  | { readonly kind: 'unprocessed' }
+  | { readonly kind: 'failed' }
+  | { readonly kind: 'unknown' }
+  | { readonly kind: 'aborted' }
+
+export type PersonalFeedV2ProcessedQuery = (
+  input: PersonalFeedV2ProcessedQueryInput,
+  signal: AbortSignal,
+) => PersonalFeedV2ProcessedQueryResult | Promise<PersonalFeedV2ProcessedQueryResult>
 
 export interface PersonalFeedV2CandidateAdmitInput {
   readonly request: PersonalFeedV2Request
@@ -32,10 +50,16 @@ export interface PersonalFeedV2CandidateLease {
 
 export type PersonalFeedV2CandidateIncompleteReason =
   | 'aborted'
+  | 'body_failed'
+  | 'body_insufficient'
+  | 'body_unknown'
   | 'capture_failed'
   | 'clock_failed'
   | 'expired'
   | 'invalid_input'
+  | 'processed_query_aborted'
+  | 'processed_query_failed'
+  | 'processed_query_unknown'
 
 export interface PersonalFeedV2CandidateIncomplete {
   readonly kind: 'incomplete'
@@ -69,7 +93,7 @@ interface CaptureCloseHandle {
 }
 
 interface ParsedBodyCapture {
-  readonly kind: 'sufficient' | 'unavailable'
+  readonly kind: 'sufficient' | 'insufficient' | 'failed' | 'unknown'
   readonly handle: CaptureCloseHandle
   readonly take?: (input: { readonly signal: AbortSignal }) => unknown
 }
@@ -106,16 +130,24 @@ const SURFACES = ['for_you', 'following', 'explore'] as const
 const ALLOWED_X_HOSTS = new Set(['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com'])
 const SHANGHAI_OFFSET_MILLISECONDS = 8 * 60 * 60 * 1000
 const DONE_RESULT: PersonalFeedV2CandidateBorrowResult = Object.freeze({ kind: 'done' })
+const DEFAULT_UNPROCESSED_RESULT: PersonalFeedV2ProcessedQueryResult = Object.freeze({ kind: 'unprocessed' })
 
 export function createPersonalFeedV2CandidateLifecycle(
   options: CreatePersonalFeedV2CandidateLifecycleOptions,
 ): PersonalFeedV2CandidateLifecycle {
-  if (!isRecord(options) || !hasExactlyKeys(options, ['completionLedgerPath', 'clock'])
+  if (!isRecord(options)
+    || (!hasExactlyKeys(options, ['completionLedgerPath', 'clock'])
+      && !hasExactlyKeys(options, ['completionLedgerPath', 'clock', 'processedQuery']))
     || typeof options.completionLedgerPath !== 'string' || options.completionLedgerPath.trim() === ''
     || !isRecord(options.clock) || !hasExactlyKeys(options.clock, ['now'])
-    || typeof options.clock.now !== 'function') {
+    || typeof options.clock.now !== 'function'
+    || (Object.prototype.hasOwnProperty.call(options, 'processedQuery')
+      && typeof options.processedQuery !== 'function')) {
     throw new PersonalFeedScopeInputError('personal Feed v2 candidate lifecycle options are invalid')
   }
+  const completionLedgerPath = options.completionLedgerPath
+  const clock = options.clock
+  const processedQuery = options.processedQuery
 
   const admit = async (input: PersonalFeedV2CandidateAdmitInput): Promise<PersonalFeedV2CandidateAdmitResult> => {
     const handles = collectCloseHandles(isRecord(input) ? input.window : undefined)
@@ -131,24 +163,61 @@ export function createPersonalFeedV2CandidateLifecycle(
     if (input.signal.aborted) return fail('aborted')
 
     const request = parseRequest(input.request)
-    const now = readClock(options.clock)
+    const now = readClock(clock)
     if (now === undefined) return fail('clock_failed')
     const parsed = request === undefined
       ? undefined
       : parseWindow(input.window, request, now, handles)
     if (parsed === undefined) return fail('invalid_input')
 
-    const selectedByIdentity = new Map<string, SelectedCapture | undefined>()
+    const occurrencesByIdentity = new Map<string, ParsedOccurrence[]>()
     for (const occurrence of parsed.occurrences) {
-      if (!selectedByIdentity.has(occurrence.stableId)) selectedByIdentity.set(occurrence.stableId, undefined)
-      if (occurrence.body.kind === 'sufficient' && selectedByIdentity.get(occurrence.stableId) === undefined) {
-        selectedByIdentity.set(occurrence.stableId, { position: -1, occurrence })
-      }
+      const grouped = occurrencesByIdentity.get(occurrence.stableId)
+      if (grouped === undefined) occurrencesByIdentity.set(occurrence.stableId, [occurrence])
+      else grouped.push(occurrence)
     }
 
+    const defaultQueryResult = processedQuery === undefined
+      ? readDefaultProcessedState(completionLedgerPath)
+      : DEFAULT_UNPROCESSED_RESULT
+    if (defaultQueryResult === undefined) return fail('processed_query_failed')
+
     const selected: SelectedCapture[] = []
-    for (const capture of selectedByIdentity.values()) {
-      if (capture !== undefined) selected.push({ position: selected.length, occurrence: capture.occurrence })
+    for (const [stableId, occurrences] of occurrencesByIdentity) {
+      if (input.signal.aborted) return fail('aborted')
+      let queried: PersonalFeedV2ProcessedQueryResult
+      if (processedQuery === undefined) {
+        queried = defaultQueryResult
+      } else {
+        const queryInput: PersonalFeedV2ProcessedQueryInput = Object.freeze({ stableId })
+        let parsedQuery: PersonalFeedV2ProcessedQueryResult | undefined
+        try {
+          const raw = await processedQuery(queryInput, input.signal)
+          parsedQuery = parseProcessedQueryResult(raw)
+        } catch {
+          return fail('processed_query_failed')
+        }
+        if (parsedQuery === undefined) return fail('processed_query_failed')
+        queried = parsedQuery
+      }
+
+      if (queried.kind === 'failed') return fail('processed_query_failed')
+      if (queried.kind === 'unknown') return fail('processed_query_unknown')
+      if (queried.kind === 'aborted') return fail('processed_query_aborted')
+      if (input.signal.aborted) return fail('aborted')
+      if (queried.kind === 'processed') {
+        if (!await closeHandles(occurrences.map(occurrence => occurrence.body.handle), 'processed')) {
+          return fail('capture_failed')
+        }
+        continue
+      }
+      const firstSufficient = occurrences.find(occurrence => occurrence.body.kind === 'sufficient')
+      if (firstSufficient === undefined) return fail(bodyUnavailableReason(occurrences))
+      const duplicateHandles = occurrences
+        .filter(occurrence => occurrence !== firstSufficient)
+        .map(occurrence => occurrence.body.handle)
+      if (!await closeHandles(duplicateHandles, 'duplicate')) return fail('capture_failed')
+      selected.push({ position: selected.length, occurrence: firstSufficient })
     }
     const selectedHandles = new Set(selected.map(capture => capture.occurrence.body.handle))
     const unusedHandles = handles.filter(handle => !selectedHandles.has(handle))
@@ -159,7 +228,9 @@ export function createPersonalFeedV2CandidateLifecycle(
     if (input.signal.aborted) return fail('aborted')
 
     const deadlineExclusive = deadlineExclusiveForShanghaiDay(parsed.shanghaiDay)
-    if (now.getTime() >= deadlineExclusive) return fail('expired')
+    const beforeTake = readClock(clock)
+    if (beforeTake === undefined) return fail('clock_failed')
+    if (beforeTake.getTime() >= deadlineExclusive) return fail('expired')
 
     const candidates: CursorCandidate[] = []
     try {
@@ -177,14 +248,34 @@ export function createPersonalFeedV2CandidateLifecycle(
         })
       }
     } catch {
-      return fail('capture_failed')
+      return fail(input.signal.aborted ? 'aborted' : 'capture_failed')
     }
 
-    const cursor = createCursor(candidates, options.clock)
+    const cursor = createCursor(candidates, clock)
     return Object.freeze({ kind: 'admitted', cursor })
   }
 
   return Object.freeze({ admit })
+}
+
+function readDefaultProcessedState(path: string): PersonalFeedV2ProcessedQueryResult | undefined {
+  try {
+    return readFileSync(path, 'utf8') === '' ? DEFAULT_UNPROCESSED_RESULT : undefined
+  } catch (cause) {
+    return hasErrorCode(cause, 'ENOENT') ? DEFAULT_UNPROCESSED_RESULT : undefined
+  }
+}
+
+function parseProcessedQueryResult(value: unknown): PersonalFeedV2ProcessedQueryResult | undefined {
+  if (!isRecord(value) || !hasExactlyKeys(value, ['kind'])) return undefined
+  if (value.kind !== 'processed' && value.kind !== 'unprocessed' && value.kind !== 'failed'
+    && value.kind !== 'unknown' && value.kind !== 'aborted') return undefined
+  return Object.freeze({ kind: value.kind }) as PersonalFeedV2ProcessedQueryResult
+}
+
+function hasErrorCode(value: unknown, expected: string): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  return (value as { readonly code?: unknown }).code === expected
 }
 
 function createCursor(
@@ -330,7 +421,15 @@ function parseBodyCapture(
   if (value.kind !== 'insufficient' && value.kind !== 'failed' && value.kind !== 'unknown') return undefined
   if (!hasExactlyKeys(value, ['kind', 'close']) || typeof value.close !== 'function') return undefined
   const handle = handleByOwner.get(value)
-  return handle === undefined ? undefined : { kind: 'unavailable', handle }
+  return handle === undefined ? undefined : { kind: value.kind, handle }
+}
+
+function bodyUnavailableReason(
+  occurrences: readonly ParsedOccurrence[],
+): 'body_failed' | 'body_unknown' | 'body_insufficient' {
+  if (occurrences.some(occurrence => occurrence.body.kind === 'failed')) return 'body_failed'
+  if (occurrences.some(occurrence => occurrence.body.kind === 'unknown')) return 'body_unknown'
+  return 'body_insufficient'
 }
 
 function collectCloseHandles(window: unknown): CaptureCloseHandle[] {

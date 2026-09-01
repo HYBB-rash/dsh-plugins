@@ -37,6 +37,9 @@ export {
   type PersonalFeedV2CandidateLease,
   type PersonalFeedV2CandidateLifecycle,
   type PersonalFeedV2CandidateProvenance,
+  type PersonalFeedV2ProcessedQuery,
+  type PersonalFeedV2ProcessedQueryInput,
+  type PersonalFeedV2ProcessedQueryResult,
 } from './v2/candidate-lifecycle.ts'
 
 export {

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -174,6 +174,87 @@ function replaceFirstCapturedAt(window: ReturnType<typeof completeWindow>, captu
   } as const
 }
 
+function replaceFirstBody(window: ReturnType<typeof completeWindow>, body: BodyCapture) {
+  return {
+    ...window,
+    surfaces: [
+      {
+        ...window.surfaces[0],
+        occurrences: [{ ...window.surfaces[0].occurrences[0], body }],
+      },
+      window.surfaces[1],
+      window.surfaces[2],
+    ],
+  } as const
+}
+
+function replaceAllBodies(window: ReturnType<typeof completeWindow>, bodies: readonly BodyCapture[]) {
+  return {
+    ...window,
+    surfaces: [
+      {
+        ...window.surfaces[0],
+        occurrences: [{ ...window.surfaces[0].occurrences[0], body: bodies[0] }],
+      },
+      {
+        ...window.surfaces[1],
+        occurrences: [{ ...window.surfaces[1].occurrences[0], body: bodies[1] }],
+      },
+      {
+        ...window.surfaces[2],
+        occurrences: [{ ...window.surfaces[2].occurrences[0], body: bodies[2] }],
+      },
+    ],
+  } as const
+}
+
+function observedSufficientBody(body: string, counters: CaptureCounters, onTake: () => void): BodyCapture {
+  return {
+    kind: 'sufficient',
+    capture: {
+      take: () => {
+        counters.take += 1
+        onTake()
+        return body
+      },
+      close: () => {
+        counters.close += 1
+      },
+    },
+  }
+}
+
+function unavailableBody(kind: 'insufficient' | 'failed' | 'unknown', counters: CaptureCounters): BodyCapture {
+  return {
+    kind,
+    close: () => {
+      counters.close += 1
+    },
+  }
+}
+
+function malformedTakenBody(value: unknown, counters: CaptureCounters, onTake: () => void = () => {}): BodyCapture {
+  return {
+    kind: 'sufficient',
+    capture: {
+      take: () => {
+        counters.take += 1
+        onTake()
+        return value as string
+      },
+      close: () => {
+        counters.close += 1
+      },
+    },
+  }
+}
+
+type FirstBodyFactory = (
+  counters: CaptureCounters,
+  requestController: AbortController,
+  querySettled: () => boolean,
+) => BodyCapture
+
 interface InvalidFixture {
   readonly window: unknown
   readonly ownedCounters: readonly CaptureCounters[]
@@ -311,5 +392,165 @@ describe('Personal Feed v2 candidate lifecycle contract', () => {
 
     const completionLedger = existsSync(completionLedgerPath) ? readFileSync(completionLedgerPath, 'utf8') : ''
     expect(completionLedger.trim()).toBe('')
+  })
+
+  it('queries processed state before body capture and fails closed for processed/query/body failures', async () => {
+    const R4_MARKER = 'R4_PRIVATE_MARKER_2a7f9c4e'
+    const queryCases: readonly {
+      readonly name: string
+      readonly queryResult?: unknown
+      readonly queryThrows?: boolean
+      readonly deferred?: boolean
+      readonly expected: 'processed' | 'candidate' | 'incomplete'
+      readonly unavailableBodyKind?: 'insufficient' | 'failed' | 'unknown'
+      readonly firstBody?: FirstBodyFactory
+    }[] = [
+      { name: 'processed', queryResult: { kind: 'processed' }, expected: 'processed' },
+      { name: 'unprocessed sufficient', queryResult: { kind: 'unprocessed' }, deferred: true, expected: 'candidate' },
+      { name: 'unprocessed insufficient', queryResult: { kind: 'unprocessed' }, expected: 'incomplete', unavailableBodyKind: 'insufficient' },
+      { name: 'unprocessed failed body', queryResult: { kind: 'unprocessed' }, expected: 'incomplete', unavailableBodyKind: 'failed' },
+      { name: 'unprocessed unknown body', queryResult: { kind: 'unprocessed' }, expected: 'incomplete', unavailableBodyKind: 'unknown' },
+      { name: 'query failed', queryResult: { kind: 'failed' }, expected: 'incomplete' },
+      { name: 'query unknown', queryResult: { kind: 'unknown' }, expected: 'incomplete' },
+      { name: 'query aborted', queryResult: { kind: 'aborted' }, expected: 'incomplete' },
+      { name: 'query throw', queryThrows: true, expected: 'incomplete' },
+      { name: 'query malformed', queryResult: { kind: 'processed', extra: R4_MARKER }, expected: 'incomplete' },
+      {
+        name: 'capture take throw',
+        queryResult: { kind: 'unprocessed' },
+        expected: 'incomplete',
+        firstBody: (counters, _requestController, querySettled) => ({
+          kind: 'sufficient',
+          capture: {
+            take: () => {
+              counters.take += 1
+              expect(querySettled()).toBe(true)
+              throw new Error('capture take failed')
+            },
+            close: () => {
+              counters.close += 1
+            },
+          },
+        }),
+      },
+      {
+        name: 'capture take abort',
+        queryResult: { kind: 'unprocessed' },
+        expected: 'incomplete',
+        firstBody: (counters, requestController, querySettled) => ({
+          kind: 'sufficient',
+          capture: {
+            take: () => {
+              counters.take += 1
+              expect(querySettled()).toBe(true)
+              requestController.abort()
+              throw new Error('capture take aborted')
+            },
+            close: () => {
+              counters.close += 1
+            },
+          },
+        }),
+      },
+      { name: 'capture take empty', queryResult: { kind: 'unprocessed' }, expected: 'incomplete', firstBody: (counters, _requestController, querySettled) => malformedTakenBody('', counters, () => expect(querySettled()).toBe(true)) },
+      { name: 'capture take non-string', queryResult: { kind: 'unprocessed' }, expected: 'incomplete', firstBody: (counters, _requestController, querySettled) => malformedTakenBody({ [R4_MARKER]: true }, counters, () => expect(querySettled()).toBe(true)) },
+    ]
+
+    for (const queryCase of queryCases) {
+      const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-processed-query-'))
+      temporaryDirectories.push(directory)
+      const completionLedgerPath = join(directory, 'completion.jsonl')
+      const requestController = new AbortController()
+      const counters: CaptureCounters[] = [{ take: 0, close: 0 }, { take: 0, close: 0 }, { take: 0, close: 0 }]
+      let queryInput: { readonly stableId: string } | undefined
+      let querySignal: AbortSignal | undefined
+      let queryCalls = 0
+      let querySettled = false
+      let releaseDeferredQuery: (() => void) | undefined
+      const owner = createPersonalFeedV2CandidateLifecycle({
+        completionLedgerPath,
+        clock: { now: () => new Date(CAPTURE_AT_DAY_ONE_END) },
+        processedQuery: (input, signal) => {
+          queryCalls += 1
+          queryInput = input
+          querySignal = signal
+          if (queryCase.deferred) {
+            return new Promise<unknown>(resolve => {
+              releaseDeferredQuery = () => {
+                querySettled = true
+                resolve(queryCase.queryResult as never)
+              }
+            })
+          }
+          querySettled = true
+          if (queryCase.queryThrows) throw new Error('processed query failed')
+          return queryCase.queryResult as never
+        },
+      })
+      const complete = completeWindow(counters)
+      const firstBody = queryCase.firstBody?.(counters[0], requestController, () => querySettled)
+      const window = queryCase.unavailableBodyKind !== undefined
+        ? replaceAllBodies(complete, counters.map(counter => unavailableBody(queryCase.unavailableBodyKind!, counter)))
+        : firstBody === undefined
+          ? replaceFirstBody(complete, observedSufficientBody(FIRST_BODY, counters[0], () => {
+            expect(querySettled, queryCase.name).toBe(true)
+          }))
+          : replaceFirstBody(complete, firstBody)
+      const admissionPromise = owner.admit({ request: request(), window: window as never, signal: requestController.signal })
+      if (queryCase.deferred) {
+        await Promise.resolve()
+        expect(querySettled, queryCase.name).toBe(false)
+        expect(counters.every(counter => counter.take === 0), queryCase.name).toBe(true)
+        expect(releaseDeferredQuery, queryCase.name).toBeTypeOf('function')
+        releaseDeferredQuery?.()
+      }
+      const result = await admissionPromise
+
+      expect(queryInput, queryCase.name).toEqual({ stableId: 'x-status:123' })
+      expect(Object.keys(queryInput ?? {}), queryCase.name).toEqual(['stableId'])
+      expect(JSON.stringify(queryInput), queryCase.name).not.toContain(R4_MARKER)
+      expect(querySignal, queryCase.name).toBe(requestController.signal)
+      expect(queryCalls, queryCase.name).toBe(1)
+
+      if (queryCase.expected === 'processed') {
+        expect(result, queryCase.name).toMatchObject({ kind: 'admitted' })
+        if (result.kind !== 'admitted') throw new Error('processed result was not admitted')
+        const borrowed = await result.cursor.borrowCurrent({ signal: requestController.signal })
+        expect(borrowed, queryCase.name).toEqual({ kind: 'done' })
+        expect(JSON.stringify(borrowed), queryCase.name).not.toContain(FIRST_BODY)
+        expect(JSON.stringify(borrowed), queryCase.name).not.toContain(RICHER_DUPLICATE_BODY)
+        await result.cursor.close('processed')
+        expect(counters).toEqual([{ take: 0, close: 1 }, { take: 0, close: 1 }, { take: 0, close: 1 }])
+      } else if (queryCase.expected === 'candidate') {
+        expect(result, queryCase.name).toMatchObject({ kind: 'admitted' })
+        if (result.kind !== 'admitted') throw new Error('unprocessed result was not admitted')
+        const borrowed = await result.cursor.borrowCurrent({ signal: requestController.signal })
+        expect(borrowed, queryCase.name).toMatchObject({ kind: 'candidate' })
+        if (borrowed.kind !== 'candidate') throw new Error('unprocessed sufficient result was not a candidate')
+        expect(borrowed.lease.body, queryCase.name).toBe(FIRST_BODY)
+        expect(JSON.stringify(borrowed), queryCase.name).not.toContain(RICHER_DUPLICATE_BODY)
+        await result.cursor.close('candidate')
+        expect(counters).toEqual([{ take: 1, close: 1 }, { take: 0, close: 1 }, { take: 0, close: 1 }])
+      } else {
+        expect(result, queryCase.name).toMatchObject({ kind: 'incomplete' })
+        expect(JSON.stringify(result), queryCase.name).not.toContain(FIRST_BODY)
+        expect(JSON.stringify(result), queryCase.name).not.toContain(RICHER_DUPLICATE_BODY)
+        expect(JSON.stringify(result), queryCase.name).not.toContain(R4_MARKER)
+      }
+
+      for (const counter of counters) {
+        expect(counter.close, queryCase.name).toBe(1)
+        expect(counter.take, queryCase.name).toBeLessThanOrEqual(1)
+      }
+      if (queryCase.name === 'processed') {
+        expect(counters).toEqual([{ take: 0, close: 1 }, { take: 0, close: 1 }, { take: 0, close: 1 }])
+      }
+      const persisted = readdirSync(directory).map(file => readFileSync(join(directory, file), 'utf8')).join('\n')
+      expect(persisted, queryCase.name).not.toContain(FIRST_BODY)
+      expect(persisted, queryCase.name).not.toContain(RICHER_DUPLICATE_BODY)
+      expect(persisted, queryCase.name).not.toContain(R4_MARKER)
+      const completionLedger = existsSync(completionLedgerPath) ? readFileSync(completionLedgerPath, 'utf8') : ''
+      expect(completionLedger, queryCase.name).toBe('')
+    }
   })
 })
