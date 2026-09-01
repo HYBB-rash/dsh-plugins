@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 const packageDirectory = resolve(import.meta.dirname, '..')
 const workspaceDirectory = resolve(packageDirectory, '..')
+const personalFeedDirectory = join(workspaceDirectory, 'personal-feed')
 const temporaryDirectories: string[] = []
 const harnessDirectory = process.env.DSH_HARNESS_ROOT!
 const harnessDependencies = join(harnessDirectory, 'node_modules/.pnpm/node_modules')
@@ -32,6 +33,23 @@ function allTypeScriptSources(directory: string): string[] {
     else if (entry.isFile() && entry.name.endsWith('.ts')) result.push(path)
   }
   return result
+}
+
+function allFiles(directory: string): string[] {
+  const result: string[] = []
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name)
+    if (entry.isDirectory()) result.push(...allFiles(path))
+    else if (entry.isFile()) result.push(path)
+  }
+  return result
+}
+
+function assertNoCrossPackageSubpathImports(directory: string, packageName: string): void {
+  const pattern = new RegExp(`${packageName.replace('/', '\\/')}\\/(?:src|lib|dist)(?:\\/|$)`)
+  for (const path of allFiles(directory)) {
+    expect(readFileSync(path, 'utf8'), `forbidden cross-package import in ${path}`).not.toMatch(pattern)
+  }
 }
 
 function pack(packagePath: string, destination: string): string {
@@ -72,6 +90,10 @@ describe('x-feed cron environment package root contract', () => {
       .map(path => readFileSync(path, 'utf8'))
       .join('\n')
     expect(allSources).not.toMatch(/@deepseek-ai\/dsh-cron\/(?:src|lib|dist)/u)
+    expect(allSources).toContain('@herman/personal-feed')
+    expect(allSources).not.toMatch(/@herman\/personal-feed\/(?:src|lib|dist)/u)
+    expect(readFileSync(join(packageDirectory, 'lib/index.js'), 'utf8'))
+      .toMatch(/from ["']@herman\/personal-feed["']/u)
 
     const xPackage = JSON.parse(readFileSync(join(packageDirectory, 'package.json'), 'utf8')) as {
       exports?: Record<string, unknown>
@@ -81,9 +103,9 @@ describe('x-feed cron environment package root contract', () => {
     const cronPackage = JSON.parse(readFileSync(join(workspaceDirectory, 'dsh-cron/package.json'), 'utf8')) as {
       exports?: Record<string, unknown>
     }
-    expect(xPackage.exports?.['.']).toBeDefined()
-    expect(xPackage.peerDependencies?.['@herman/personal-feed']).toBeUndefined()
-    expect(xPackage.devDependencies?.['@herman/personal-feed']).toBeUndefined()
+    expect(Object.keys(xPackage.exports ?? {}).sort()).toEqual(['.', './package.json'])
+    expect(xPackage.peerDependencies?.['@herman/personal-feed']).toBeDefined()
+    expect(xPackage.devDependencies?.['@herman/personal-feed']).toBeDefined()
     expect(cronPackage.exports?.['.']).toBeDefined()
     expect(readFileSync(join(packageDirectory, 'src/index.ts'), 'utf8')).toContain('createXFeedCronEnvironmentProvider')
   })
@@ -96,8 +118,10 @@ describe('x-feed cron environment package root contract', () => {
     mkdirSync(tarballs)
     mkdirSync(join(consumer, 'node_modules'), { recursive: true })
     const cronTarball = pack(join(workspaceDirectory, 'dsh-cron'), tarballs)
+    const personalFeedTarball = pack(personalFeedDirectory, tarballs)
     const xFeedTarball = pack(packageDirectory, tarballs)
     unpack(cronTarball, join(consumer, 'node_modules/@deepseek-ai/dsh-cron'))
+    unpack(personalFeedTarball, join(consumer, 'node_modules/@herman/personal-feed'))
     unpack(xFeedTarball, join(consumer, 'node_modules/@herman/x-feed'))
     linkExistingDependencies(join(consumer, 'node_modules'))
 
@@ -110,6 +134,9 @@ import {
   createXFeedCronEnvironmentProvider,
   X_CRON_AGENT_ENVIRONMENT_MARKER,
 } from '@herman/x-feed'
+import { canonicalizeXStatusIdentity } from '@herman/personal-feed'
+
+if (canonicalizeXStatusIdentity('https://x.com/alice/status/123') !== 'https://x.com/alice/status/123') throw new Error('Personal Feed root import failed')
 
 const provider: CronAgentEnvironmentProvider = createXFeedCronEnvironmentProvider({
   ctx: {} as never,
@@ -133,6 +160,9 @@ if (X_CRON_AGENT_ENVIRONMENT_MARKER !== provider.marker) throw new Error('marker
       },
       files: ['consumer.ts'],
     }, null, 2))
+
+    assertNoCrossPackageSubpathImports(consumer, '@herman/personal-feed')
+    assertNoCrossPackageSubpathImports(consumer, '@herman/x-feed')
 
     try {
       execFileSync(typeScript, ['--project', join(consumer, 'tsconfig.json'), '--pretty', 'false'], {

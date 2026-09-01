@@ -419,16 +419,8 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
     const telegramSource = readFileSync(new URL('../src/telegram-extension.ts', import.meta.url), 'utf8')
     expect(telegramSource.match(/\bcreatePersonalFeedV2CandidateLifecycle\s*\(/g) ?? []).toHaveLength(1)
     const nonCreationSources = [
-      '../src/cron-extension.ts',
       '../src/personal-feed/personal-context-telegram-runtime.ts',
       '../src/personal-feed/telegram-adapter.ts',
-      '../src/personal-feed/candidate-local-state.ts',
-      '../src/personal-feed/ordinary-feed-editing-proposal.ts',
-      '../src/personal-feed/ordinary-feed-editor-adapter.ts',
-      '../src/personal-feed/ordinary-feed-run-lifecycle.ts',
-      '../src/x-cron/candidate-editing-input.ts',
-      '../src/x-cron/source-candidate-material-snapshot.ts',
-      '../src/x-cron/source-candidate-report.ts',
       '../../../local-profiles/telegram/cordis.patch.yml',
       '../../../local-profiles/web/cordis.patch.yml',
       '../../telegram-gateway/src/extensions.ts',

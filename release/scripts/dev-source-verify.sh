@@ -3,12 +3,12 @@ set -Eeuo pipefail
 
 source_root=/workspace/dsh-plugins
 harness_root=/opt/dsh/harness
-packages=(telegram-gateway dsh-cron dsh-assistant personal-feed-selector x-feed)
+packages=(telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed x-feed)
 requested_package="${1:-all}"
 
 case "$requested_package" in
   all) selected_packages=("${packages[@]}") ;;
-  telegram-gateway|dsh-cron|dsh-assistant|personal-feed-selector|x-feed)
+  telegram-gateway|dsh-cron|dsh-assistant|personal-feed-selector|personal-feed|x-feed)
     selected_packages=("$requested_package")
     ;;
   *)

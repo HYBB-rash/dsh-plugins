@@ -70,17 +70,27 @@ describe('X runtime configuration', () => {
       dataDir: '/custom/data',
       pythonBin: '/custom/python3',
       pipelinePath: '/custom/x_insight_pipeline.py',
-      personalFeedDataDir: '/obsolete/personal-feed',
+      personalFeedDataDir: '/custom/personal-feed',
       personalFeedRequiredSources: ['x'],
       candidateReportingWindowMs: 300_000,
     })
     expect(config).toEqual({
       dataDir: '/custom/data',
+      personalFeedDataDir: '/custom/personal-feed',
       telegramSessionId: 'session-telegram',
       feedbackPendingTtlMs: 600_000,
       feedbackTurnTimeoutMs: 30_000,
     })
     expect(resolvePipelinePath({}).endsWith('python/x_insight_pipeline.py')).toBe(true)
+  })
+
+  it('resolves the Personal Feed directory separately, including its default and type boundary', () => {
+    process.env.DSH_HOME = '/tmp/dsh-home'
+    expect(parseXFeedRuntimeConfig({}).personalFeedDataDir)
+      .toBe('/tmp/dsh-home/storages/personal-feed')
+    expect(parseXFeedRuntimeConfig({ personalFeedDataDir: '/custom/personal-feed' }).personalFeedDataDir)
+      .toBe('/custom/personal-feed')
+    expect(() => parseXFeedRuntimeConfig({ personalFeedDataDir: 42 })).toThrow('personalFeedDataDir')
   })
 
   it('rejects invalid fields that remain part of the X runtime contract', () => {

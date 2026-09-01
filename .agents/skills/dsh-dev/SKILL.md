@@ -11,7 +11,7 @@ Prepare one isolated, editable-source Docker environment before changing anythin
 
 Use it when the task may change any of these runtime inputs:
 
-- `telegram-gateway`, `dsh-cron`, `dsh-assistant`, `personal-feed-selector`, or `x-feed`;
+- `telegram-gateway`, `dsh-cron`, `dsh-assistant`, `personal-feed-selector`, `personal-feed`, or `x-feed`;
 - product Skills, Profiles, runtime package topology, or code under `release/scripts` that is present in the image;
 - tests or configuration needed to prove those runtime changes.
 
@@ -35,7 +35,7 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
    ./release/dsh build --purpose development --harness-ref <locked-harness-commit> --plugins-ref <origin-main-commit>
    ```
 
-   The command is safe to repeat. Under one repository-managed engine lock it reuses the already-tested image when the full main commit is unchanged; only the first request after main advances performs a real build and the full five-package TypeScript/Python test gate. Development bases do not create or reload Docker archives and cannot be published as release candidates.
+   The command is safe to repeat. Under one repository-managed engine lock it reuses the already-tested image when the full main commit is unchanged; only the first request after main advances performs a real build and the full six-package TypeScript/Python test gate. Development bases do not create or reload Docker archives and cannot be published as release candidates.
 3. Run:
 
    ```bash
@@ -43,13 +43,13 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
    ```
 
 4. Let the command download the latest existing consistent production snapshot. It must not stop production or create a new online snapshot. If no valid snapshot exists, report and stop; never silently substitute synthetic data.
-5. Let the deterministic command create one worktree-owned environment: a fixed toolbox plus Web, Telegram, fake Telegram, an internal network, an isolated data copy, and a Web port. Every container carries the same worktree identity. It mounts the five packages, product Skills, Profiles, runtime topology, materializer, and image runtime scripts as editable worktree inputs, plus an isolated snapshot copy. The image root stays read-only. The command must replace credentials, empty cron work, remove production Telegram offsets and locks, block real Telegram egress, and leave production directories unmounted. Other worktrees may prepare and run at the same time.
-6. Do not claim readiness until the command reports `dev-source-ready`. Editable mounts hide the image's prebuilt `lib`, so preparation recompiles the five mounted packages, but it does not repeat their test suites. The receipt means that compilation, Web health, fake Telegram polling and delivery, empty cron verification, real Telegram blocking, and common image identity checks passed. The full TypeScript/Python baseline belongs to the shared main image's build receipt.
+5. Let the deterministic command create one worktree-owned environment: a fixed toolbox plus Web, Telegram, fake Telegram, an internal network, an isolated data copy, and a Web port. Every container carries the same worktree identity. It mounts the six packages, product Skills, Profiles, runtime topology, materializer, and image runtime scripts as editable worktree inputs, plus an isolated snapshot copy. `personal-feed` is mounted read-write at its package directory and read-only at the package-context resolver path used by `x-feed`; it is not mounted into the Harness global resolver or either profile. The image root stays read-only. The command must replace credentials, empty cron work, remove production Telegram offsets and locks, block real Telegram egress, and leave production directories unmounted. Other worktrees may prepare and run at the same time.
+6. Do not claim readiness until the command reports `dev-source-ready`. Editable mounts hide the image's prebuilt `lib`, so preparation recompiles the six mounted packages, but it does not repeat their test suites. The receipt means that compilation, Web health, fake Telegram polling and delivery, empty cron verification, real Telegram blocking, and common image identity checks passed. The full TypeScript/Python baseline belongs to the shared main image's build receipt.
 
 ## Develop inside the boundary
 
 - Use `./release/dsh dev shell` for commands that must run with the fixed Harness and image dependencies. It only execs Bash inside this worktree's already-running fixed toolbox; it does not create a shell container or maintain shell-specific state. Multiple terminals may enter the same toolbox. Do not replace it with a direct container-engine command.
-- To formally validate mounted, including dirty, source, use `./release/dsh dev verify --source <task-worktree>`. It only execs the same fixed toolbox, repeats type/build/bundle and the full mounted TypeScript/Python gate, and prints a separate editable-source receipt beside the shared-main image receipt. It does not turn `dev prepare` back into a full test gate or create verification lifecycle state. Use `--package <one-mounted-package>` only for a focused inner loop; `x-feed` includes its Python tests.
+- To formally validate mounted, including dirty, source, use `./release/dsh dev verify --source <task-worktree>`. It only execs the same fixed toolbox, repeats type/build/bundle and the full mounted TypeScript/Python gate, and prints a separate editable-source receipt beside the shared-main image receipt. It does not turn `dev prepare` back into a full test gate or create verification lifecycle state. Use `--package <one-mounted-package>` only for a focused inner loop; `personal-feed` and `x-feed` are both valid focused scopes, and `x-feed` includes its Python tests.
 - Do not hand-assemble `setpriv`, `HOME`, `NODE_PATH`, cache directories, dependency symlinks, or a direct engine command for this verification. The command keeps type/build/bundle in the local rootless toolbox identity, then runs TypeScript/Python tests as the Containerfile's 1000:1000 with per-run tmpfs HOME/npm/XDG/data directories; its default Node resolution intentionally matches the Containerfile gate.
 - Keep editable source in the task worktree. Generated `lib`, caches, and test output remain ignored and outside the image identity.
 - Use focused tests during the inner loop when the affected boundary is known. Before declaring development complete, rerun the affected integration tests and any wider tests required by the change.

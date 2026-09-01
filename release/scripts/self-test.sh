@@ -13,11 +13,18 @@ ssh_known_hosts="$(ssh -G git@github.com 2>/dev/null \
 test "$ssh_known_hosts" = /home/herman/.ssh/known_hosts
 
 test -f /opt/dsh/harness/apps/cli/lib/bin.js
-for package in dsh-assistant dsh-cron telegram-gateway x-feed personal-feed-selector; do
+for package in dsh-assistant dsh-cron telegram-gateway x-feed personal-feed-selector personal-feed; do
   test -d "/opt/dsh/harness/local-plugins/$package/lib"
 done
+test -f /opt/dsh/harness/local-plugins/personal-feed/lib/index.js
 bash /opt/dsh/release-system/scripts/check-runtime-module-identity.sh /opt/dsh/harness
-test ! -e /opt/dsh/harness/local-plugins/personal-feed
+node - <<'NODE'
+const { createRequire } = require('node:module')
+const resolved = createRequire('/opt/dsh/harness/local-plugins/x-feed/package.json').resolve('@herman/personal-feed')
+if (resolved !== '/opt/dsh/harness/local-plugins/personal-feed/lib/index.js') {
+  throw new Error(`x-feed resolved @herman/personal-feed to ${resolved}`)
+}
+NODE
 test ! -e /opt/dsh/harness/local-plugins/dsh-assistant/lib/migrate-cli.js
 test ! -e /opt/dsh/harness/local-plugins/dsh-assistant/lib/historical-recovery.js
 test ! -e /opt/dsh/harness/local-plugins/ui-context-compactor

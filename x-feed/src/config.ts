@@ -9,6 +9,7 @@ export interface XFeedRuntimeConfig {
   readonly telegramSessionId?: string
   readonly feedbackPendingTtlMs?: number
   readonly feedbackTurnTimeoutMs?: number
+  readonly personalFeedDataDir?: string
 }
 
 export interface ResolvedXFeedRuntimeConfig {
@@ -16,6 +17,7 @@ export interface ResolvedXFeedRuntimeConfig {
   readonly telegramSessionId: string
   readonly feedbackPendingTtlMs: number
   readonly feedbackTurnTimeoutMs: number
+  readonly personalFeedDataDir: string
 }
 
 const DEFAULT_FEEDBACK_PENDING_TTL_MS = 600_000
@@ -29,11 +31,13 @@ export function parseXFeedRuntimeConfig(
   const telegramSessionId = optionalString(input, 'telegramSessionId')
   const feedbackPendingTtlMs = optionalInteger(input, 'feedbackPendingTtlMs', 1, 86_400_000)
   const feedbackTurnTimeoutMs = optionalInteger(input, 'feedbackTurnTimeoutMs', 1, 120_000)
+  const personalFeedDataDir = optionalString(input, 'personalFeedDataDir')
   return Object.freeze({
     dataDir: resolveDataDir(dataDir === undefined ? {} : { dataDir }),
     telegramSessionId: telegramSessionId ?? 'session-telegram',
     feedbackPendingTtlMs: feedbackPendingTtlMs ?? DEFAULT_FEEDBACK_PENDING_TTL_MS,
     feedbackTurnTimeoutMs: feedbackTurnTimeoutMs ?? DEFAULT_FEEDBACK_TURN_TIMEOUT_MS,
+    personalFeedDataDir: personalFeedDataDir ?? join(resolveDshHome(), 'storages', 'personal-feed'),
   })
 }
 

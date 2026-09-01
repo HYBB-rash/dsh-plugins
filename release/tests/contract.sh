@@ -645,18 +645,33 @@ grep -q 'vitest/vitest.mjs' "$repo_root/release/Containerfile"
 grep -q "unittest discover" "$repo_root/release/Containerfile"
 grep -Fq 'check-runtime-module-identity.sh /opt/dsh/harness' "$repo_root/release/Containerfile"
 grep -Fq 'check-runtime-module-identity.sh /opt/dsh/harness' "$repo_root/release/scripts/self-test.sh"
-! grep -Fq '/opt/dsh/harness/local-plugins/personal-feed' "$repo_root/release/Containerfile"
-! grep -Fq 'personal-feed"' "$repo_root/release/profiles/telegram/package.json"
-! grep -Fq 'personal-feed"' "$repo_root/release/profiles/telegram-test/package.json"
-! grep -Fq 'cron-af33aa98' "$repo_root/release/profiles/telegram/cordis.patch.yml"
-! grep -Fq 'personalFeedDataDir' "$repo_root/release/profiles/telegram/cordis.patch.yml"
-! grep -Fq 'personalFeedRequiredSources' "$repo_root/release/profiles/telegram/cordis.patch.yml"
-! grep -Fq 'candidateReportingWindowMs' "$repo_root/release/profiles/telegram/cordis.patch.yml"
+grep -Fq '/opt/dsh/harness/local-plugins/personal-feed' "$repo_root/release/Containerfile"
+grep -Fq 'plugins/personal-feed/package.json' "$repo_root/release/Containerfile"
+grep -Fq '"@herman/personal-feed"' "$repo_root/release/profiles/telegram/package.json"
+grep -Fq '"@herman/personal-feed"' "$repo_root/release/profiles/telegram-test/package.json"
+! grep -Fq '"@herman/personal-feed"' "$repo_root/release/profiles/web/package.json"
+grep -Fq 'personal-feed' "$repo_root/release/scripts/self-test.sh"
+! grep -Eq '(^|[^[:alnum:]_-])personal-feed([^[:alnum:]_-]|$)' "$repo_root/release/scripts/check-runtime-module-identity.sh"
+! rg -Fq 'createCronEnvironmentExtension' "$repo_root/x-feed/src"
+! grep -Eq '(^|[^[:alnum:]_-])personal-feed([^[:alnum:]_-]|$)' "$repo_root/dsh-cron/src/environment-modules.ts"
+python3 - "$repo_root/release/profiles/telegram/cordis.patch.yml" "$repo_root/release/profiles/telegram-test/cordis.patch.yml" <<'PY'
+import pathlib, sys
+
+for path_string in sys.argv[1:]:
+    text = pathlib.Path(path_string).read_text(encoding='utf-8')
+    for legacy in ('cronJobId', 'personalFeedRequiredSources', 'candidateReportingWindowMs',
+                   'sourceCandidateReport', 'periodBusinessFinalizer', 'createCrossSourceEditor',
+                   'createCurrentContextProjection', 'createMechanicalAdmission',
+                   'createCandidateMaterialProjection', 'createDeliveryAndReceipt'):
+        assert legacy not in text, (path_string, legacy)
+PY
 python3 - "$repo_root/runtime-package-topology.json" "$repo_root/release/profiles/telegram/cordis.patch.yml" <<'PY'
 import json, pathlib, sys
 topology = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert all(target['name'] != '@herman/personal-feed' for target in topology['targets'])
-assert all('@herman/personal-feed' not in target.get('requiredBy', []) for target in topology['targets'])
+personal_feed = next(target for target in topology['targets'] if target['name'] == '@herman/personal-feed')
+assert personal_feed['kind'] == 'release'
+assert personal_feed['releaseDirectory'] == 'personal-feed'
+assert '@herman/x-feed' in personal_feed.get('requiredBy', [])
 profile = pathlib.Path(sys.argv[2]).read_text()
 cron = profile.split('    - id: dsh-cron\n', 1)[1].split('\n    - id:', 1)[0]
 gateway = profile.split('    - id: telegram-gateway\n', 1)[1].split('\n    - id:', 1)[0]

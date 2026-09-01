@@ -2568,6 +2568,7 @@ const developmentPackages = Object.freeze([
   'dsh-cron',
   'dsh-assistant',
   'personal-feed-selector',
+  'personal-feed',
   'x-feed',
 ])
 
@@ -2657,6 +2658,10 @@ function developmentSourceArgs(sourcePath) {
     }
     args.push('--volume', `${join(sourcePath, packageName)}:/opt/dsh/harness/local-plugins/${packageName}:rw`)
   }
+  args.push(
+    '--volume',
+    `${join(sourcePath, 'personal-feed')}:/opt/dsh/harness/local-plugins/node_modules/@herman/personal-feed:ro`,
+  )
   for (const profile of ['web', 'telegram', 'telegram-test']) {
     args.push(
       '--volume',
