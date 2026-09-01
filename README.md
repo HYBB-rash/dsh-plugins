@@ -25,14 +25,14 @@
 | **Telegram 随身入口 / Telegram On-the-Go** | [`telegram-gateway`](telegram-gateway) / `@deepseek-ai/dsh-telegram-gateway` | 出门后还想用 Telegram 发一句话继续和家里的 Harness 对话。 | Bot 把话送进固定会话，用 Telegram MarkdownV2 转换后的普通消息回复，保留局部引用和 reaction；不会把流式半句话反复改来改去。 | 仅文本；需要 Telegram 凭据和允许的 chat ID；不是多 bot 或媒体网关。 |
 | **私人助理责任台 / Assistant Responsibility Desk** | [`dsh-assistant`](dsh-assistant) / `@deepseek-ai/dsh-assistant` | 想让助手长期盯一件事，同时又不丢掉自己正在做或刚委派的事。 | 它能分别记住焦点、委派和监控；重启后仍知道该向谁回报，并在有结果时送回来。 | 不是完整待办清单或通用工作流平台。 |
 | **定时 Agent / Scheduled Agent** | [`dsh-cron`](dsh-cron) / `@deepseek-ai/dsh-cron` | 想让 Agent 每小时看一次信息、每天做一次整理，而不必一直开网页等着。 | 到点会唤醒独立会话完成工作，并可把结果送到 Telegram。 | 会启动无人值守 Agent；副作用、成本和重复执行边界要自行承担。 |
-| **X 洞察筛选器 / X Insight Filter** | [`x-feed`](x-feed) 私有业务运行时 + [`skills/x-feed`](skills/x-feed) Skill | 想从 X/Twitter 时间线挑几条值得看，而不是整条信息流搬进 Telegram。 | `dsh-cron` 定时运行 Python 筛选并可靠投递；Skill 与 Telegram 业务扩展处理反馈和收藏。 | 它不是插件；依赖宿主的通用扩展口、`dsh-cron` 与 Python，不提供账号、cookie 或通用爬虫。 |
+| **X 洞察筛选器 / X Insight Filter** | [`x-feed`](x-feed) 私有业务运行时 + [`skills/x-feed`](skills/x-feed) Skill | 想从 X/Twitter 时间线挑几条值得看，而不是整条信息流搬进 Telegram。 | 本版本保留 selector，以及 x-feed 的 Telegram 反馈/收藏扩展；旧 V1 的 `dsh-cron` 自动 Feed 接线已退休，仓库仍保留未正式接线的 legacy direct/Python 路线。 | 它不是插件；依赖宿主的通用扩展口和 Python，不提供账号、cookie 或通用爬虫。 |
 | **探索机会 / Exploration Opportunity** | [`skills/explore-opportunity`](skills/explore-opportunity) / Skill | 你丢来一句话或链接，想先听懂背后最有意思的机制；真的感兴趣时再留到以后。 | Agent 用宿主已有的搜索、网页、文件或 Shell 能力做初步查证，先给一个“还想再听一点”的钩子；只有你明确表态才更新 `EXPLORE.md`。 | 不自带浏览器、网络隔离或后台任务；普通追问次数不会自动入池。 |
 
 ```mermaid
 flowchart LR
   TG[Telegram Bridge] --> A[Responsibility Ledger]
   TG --> C[Agent Clock]
-  C --> X[X Insight Loop]
+  TG --> X[X Insight Feedback]
   TG --> E[Exploration Opportunity Skill]
   E --> DSH
   A --> DSH[DeepSeek Harness / Cordis host]
@@ -40,7 +40,7 @@ flowchart LR
   X --> DSH
 ```
 
-图只表示代码中存在的协作关系，不表示必须一次安装全部组件。探索机会由宿主的 Skill 机制按语义发现，再协调这个 Agent 原本就有的搜索、网页、文件或 Shell 工具；它不依赖另一个探索插件，也不让其他插件因为发现它存在就偷偷改变行为。`x-feed` 不是 Cordis 插件：`dsh-cron` 通过通用任务环境口加载它的定时业务，`telegram-gateway` 通过通用 Telegram 扩展口加载反馈业务。
+图只表示代码中存在的协作关系，不表示必须一次安装全部组件。探索机会由宿主的 Skill 机制按语义发现，再协调这个 Agent 原本就有的搜索、网页、文件或 Shell 工具；它不依赖另一个探索插件，也不让其他插件因为发现它存在就偷偷改变行为。`x-feed` 不是 Cordis 插件：本版本由 `telegram-gateway` 通过通用 Telegram 扩展口加载反馈和收藏；旧 V1 的 `dsh-cron` 自动 Feed 接线已退休。
 
 ## 公开范围与前置条件
 
@@ -52,7 +52,7 @@ flowchart LR
 - 使用 X Insight Loop 时，Python 3 和你自己依法、合规配置的浏览器/X 访问环境；本仓库不附带 cookie、登录态、账号或抓取结果。
 - 使用 Exploration Opportunity 时，宿主必须支持发现和加载 Skill，并允许 Agent 在当前工作区维护 `EXPLORE.md`；Skill 本身不会增加新的网页或浏览器工具。
 
-因此没有可靠的“一行安装命令”。Cordis 插件请先在隔离环境中接入；Skill 放入宿主可发现的目录。`x-feed` 要构建后由 `dsh-cron.environmentModules` 与 `telegram-gateway.extensions` 加载，不能再按插件安装。这里没有声称 `dsh plugin add`、npm 安装或任意 DSH 版本可以直接工作。
+因此没有可靠的“一行安装命令”。Cordis 插件请先在隔离环境中接入；Skill 放入宿主可发现的目录。`x-feed` 要构建后由 `telegram-gateway.extensions` 加载，不能再按插件安装。旧 V1 的 `dsh-cron.environmentModules` 接线已从正式 Telegram profile 删除；仓库保留的 legacy direct/Python 路线未正式接线。这里没有声称 `dsh plugin add`、npm 安装或任意 DSH 版本可以直接工作。
 
 ### 最小配置形状
 
@@ -72,10 +72,7 @@ flowchart LR
   mode: 'scheduler',
   pollIntervalMs: 10_000,
   maxConcurrent: 3,
-  environmentModules: [{
-    modulePath: '<x-feed>/lib/index.js',
-    configJson: '{"cronJobId":"<dsh-cron-job-id>","pythonBin":"/usr/bin/python3"}'
-  }]
+  // 本版本正式 Telegram profile 不再接入 x-feed environment module。
 }
 
 // Telegram Bridge 可加载同一业务包的反馈适配器；x-feed 本身没有 apply()。
@@ -121,11 +118,10 @@ flowchart LR
 
 ### X 洞察筛选器 / X Insight Filter
 
-每小时从 X/Twitter 时间线里挑几条真正值得看的内容，比把整条信息流搬进 Telegram 更有用。这里不再提供 `dsh-x-feed` 插件：[`x-feed`](x-feed) 是业务运行时，[`skills/x-feed`](skills/x-feed) 是 Agent 行为说明，时钟和可靠交付由 `dsh-cron` 持有。
+每小时从 X/Twitter 时间线里挑几条真正值得看的内容，比把整条信息流搬进 Telegram 更有用。这里不再提供 `dsh-x-feed` 插件：[`x-feed`](x-feed) 是业务运行时，[`skills/x-feed`](skills/x-feed) 是 Agent 行为说明。旧 V1 的正式 `dsh-cron` 自动 Feed 已退休；selector 和 x-feed Telegram 反馈/收藏仍保留，仓库中的 legacy direct/Python 路线明确保留但未正式接线。本版本不把 V2 写成已上线。
 
 公开范围只包括 Python 收集/投递准备管线、`dsh-cron` receipt 接口和本地 feedback/store；**不包含作者个人的排序或选稿 prompt**。使用者需要按自己的目标、来源和边界编写 cron prompt。
 
-- `dsh-cron` 的通用任务环境先运行 X Python 管线并校验最终文本；只有运行终态已落盘且 Telegram 最终确认后，才调用 X 的 `confirm-prepared`。
 - `telegram-gateway` 的通用扩展口把 X URL、喜欢/不喜欢、收藏/取消收藏能力限制在指定 Telegram root。
 - `skills/x-feed` 只负责何时使用这些能力，不保存第二份状态，也不模拟定时器或交付事务。
 - 本地反馈、收藏和 shown 数据沿用原目录；重构不删除或自动迁移用户数据。

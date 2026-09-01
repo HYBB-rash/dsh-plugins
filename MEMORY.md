@@ -65,7 +65,7 @@
 - 2026-08-27：Docker 首次切换完成真实验收后，旧 DSH systemd units、旧远端发布树、本地 `deployment/herman-hermes` 与第一次切换兼容代码均已退役；随后完成一次真实 Docker→Docker 发布与显式回退演练，证明发布、健康检查和数据恢复不再依赖旧系统。A12 完整 UI 回归所需的 `context-manager-telegram-canary` 只作为已提交构建验证 fixture 保留，不是生产发布运行时。
 - 2026-08-28：rootless Podman 的容器 UID 1000 会映射到宿主 subordinate UID；对大型镜像使用 `keep-id` 会触发昂贵的递归改属主。源码开发应以容器 root 完成宿主挂载编译，再用 `setpriv` 降权运行权限敏感测试，并把 npm/XDG 缓存放进隔离 `/tmp`，避免读取快照 Home 中不可写的用户缓存。
 - 2026-08-28：开发镜像不能按 worktree 重复构建。`release/dsh build --purpose development` 对完整 `origin/main` 只保留一份共享镜像，同一 main 直接复用且不生成归档；main 前进时新镜像自检通过后清除全部旧开发环境与旧开发镜像。每个 worktree 只拥有独立容器、网络、Web 端口和数据；共享 Podman 的 build、正式 save/load 验证及镜像清理由入口全局锁自动排队，不再人工抢窗口。
-- 2026-08-28：全量产品测试属于共享 main 开发镜像的构建回执，不属于每个 worktree 的容器准备。`dev prepare` 只重新编译被可编辑挂载遮住的六包产物，并验证快照隔离、Web、假 Telegram、空 cron、真实 Telegram 阻断和镜像身份；不要让环境创建重复执行 Vitest/Python unittest，也不要把长命令回执提前结束误判为准备失败。
+- 2026-08-28：全量产品测试属于共享 main 开发镜像的构建回执，不属于每个 worktree 的容器准备。`dev prepare` 只重新编译被可编辑挂载遮住的当前正式包集合，并验证快照隔离、Web、假 Telegram、空 cron、真实 Telegram 阻断和镜像身份；不要让环境创建重复执行 Vitest/Python unittest，也不要把长命令回执提前结束误判为准备失败。
 - 2026-08-28：可编辑源码的正式 verify 应分开身份：rootless toolbox 的 uid 0 只写入挂载源码的 type/build/bundle；Vitest/Python 要以 Containerfile 的 `1000:1000` 运行，并在每次创建、该 uid 可写、结束清理的临时 HOME/npm/XDG/data 中执行且清空 `NODE_PATH`。否则会污染宿主输出所有权、让 chmod 权限测试失真，或让镜像预装依赖越过 runtime-package-topology 的模块边界。
 - 2026-08-28：共享 development candidate 的 `tested` 不能只信候选字段；消费时须验证镜像测试回执文件存在、摘要匹配且回执 `imageId` 绑定该 candidate。editable verify 还须在前后对全部 tracked 与非忽略 untracked 输入的路径和字节取同一指纹；变化或显式取消时不签 verify 回执，并保留既有 toolbox 与租约。
 - 2026-08-28：盘点 OpenClaw 依赖时不能只查任务声明或同名脚本；应同时核对实际状态库、启用任务的调用链、systemd、插件和跨主机入口。历史 `jobs.json` 路径可能已不存在，而现役状态已迁到 SQLite；文件存在或名称相同也不能证明仍在运行或内容一致。
@@ -97,3 +97,4 @@
 - 2026-08-31：accepted release 缺少 schedule reanchor evidence 时，只能在停机快照摘要门之后，从最小 `jobs.jsonl`/`runs.jsonl` 隔离副本精确恢复；job projection、migration input、逐任务 schedule hash、next-run 和记录数任一不符都保持 conflict，只有完整不存在才可新建 migration。`dev prepare` 会清空隔离 cron 定义，不能据此判断生产快照漂移。
 - 2026-08-31：Schemastery 可能把省略的嵌套 object 配置实体化为 `{}`；直接把 TypeScript 对象传给启动函数的测试无法发现这种运行时漂移。可选嵌套对象必须在 schema 中显式保留 `undefined`，并让回归测试先经过真实导出的 `Config(...)` 解析器；下游控制合同仍需独立严格验证，不能只信 schema。
 - 2026-09-01：profile 启动时 `ensure` 受管 command binding，并由普通 Agent 的 `cron_list` 隐藏、`cron_delete` 按不存在处理，才能同时建立启动恢复和运行期所有权；必须用真实配置解析、隔离候选启动和 tombstone 后重启测试覆盖这条链。上述证据齐全后，生产发布只需等待通用 cron 控制面就绪并做真实业务验收，不应再复制一套绑定 argv、入口哈希和回执结构的 Notion 专用发布闸门。
+- 2026-09-01：退休未上线的运行包时，先从仍需保留的真实入口切断它的源码依赖，再删除整包和正式接线；镜像包清单、开发挂载、profile manifest、runtime topology、发布夹具与自检必须同步收缩，并保留旧包目录不得出现的负向门。已删除的 cron job 和不再读取的旧账本保持原状，不应为了“清理干净”增加数据迁移或物理删除。
