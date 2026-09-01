@@ -394,6 +394,9 @@ def _surface_observe(surface, ordinal, ws_url, deadline, clock, evaluator, start
             if len(occurrences) >= MAX_OCCURRENCES:
                 break
 
+        if resnapshot_done and expansion_successes and expansion_successes <= expansion_failures:
+            return ("complete" if occurrences else "unknown"), occurrences
+
         values = snapshot.get("items")
         cards = snapshot.get("cards")
         has_values = bool(values or cards or snapshot.get("statusCandidates"))
@@ -403,8 +406,6 @@ def _surface_observe(surface, ordinal, ws_url, deadline, clock, evaluator, start
             if not occurrences:
                 return "natural_zero", occurrences
             break
-        if resnapshot_done:
-            return ("complete" if occurrences else "unknown"), occurrences
         if len(occurrences) == previous_count:
             return ("complete" if occurrences else "unknown"), occurrences
         try:

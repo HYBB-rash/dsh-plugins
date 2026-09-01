@@ -1081,5 +1081,132 @@ class TestPersonalFeedObserver(unittest.TestCase):
             self.assertIsInstance(result, dict)
 
 
+    def test_observe_expansion_resnapshot_scrolls_and_collects_new_root(self):
+        module = _require_observer(self)
+        clock = _FakeClock(1_000_000, advance_each_evaluation=80)
+        deadline = 1_010_000
+        canary = "UNCONFIRMED_PLACEHOLDER_BODY_CANARY"
+        source_a = "https://x.com/alice/status/101"
+        source_b = "https://x.com/bob/status/202"
+
+        snapshot_one = {
+            "items": [
+                _candidate(
+                    source_a,
+                    "alice",
+                    TIMESTAMP,
+                    canary,
+                    0,
+                    False,
+                    showMore=True,
+                    placeholder=True,
+                )
+            ],
+            "cards": [],
+            "explicitEmpty": False,
+        }
+        snapshot_two = {
+            "items": [
+                _candidate(
+                    source_a,
+                    "alice",
+                    TIMESTAMP,
+                    "expanded A",
+                    0,
+                    False,
+                    showMore=False,
+                    placeholder=False,
+                )
+            ],
+            "cards": [],
+            "explicitEmpty": False,
+        }
+        snapshot_three = {
+            "items": [
+                _candidate(
+                    source_b,
+                    "bob",
+                    "2026-09-01T00:00:01.000Z",
+                    "B",
+                    0,
+                    False,
+                    showMore=False,
+                    placeholder=False,
+                )
+            ],
+            "cards": [],
+            "explicitEmpty": False,
+        }
+        ordinary_snapshot = {
+            "items": [_body_item("https://x.com/carol/status/303", author="carol", body="ordinary")],
+            "cards": [],
+            "explicitEmpty": False,
+        }
+        plans = _plans_for_snapshot(ordinary_snapshot)
+        plans[("for_you", "snapshot")] = [
+            snapshot_one,
+            snapshot_two,
+            snapshot_three,
+            RuntimeError(canary),
+        ]
+        plans[("for_you", "expand")] = [{"ok": True}]
+        evaluator = _FakeEvaluator(clock, plans=plans)
+        browser = _FakeBrowser(clock)
+        lock = _FakeLock()
+
+        result = _invoke(module, clock, browser, lock, evaluator, deadline)
+
+        self.assertEqual(result["kind"], "complete")
+        self.assertNotIn(canary, json.dumps(result, ensure_ascii=False))
+        faces = _surface_map(self, result)
+        for surface in ("following", "explore"):
+            self.assertIn(faces[surface]["kind"], {"complete", "natural_zero"})
+
+        for_you = faces["for_you"]
+        self.assertEqual(for_you["kind"], "complete")
+        occurrences = for_you["occurrences"]
+        self.assertEqual([item["sourceUrl"] for item in occurrences], [source_a, source_b])
+        self.assertEqual([item["occurrenceOrdinal"] for item in occurrences], [0, 1])
+        self.assertEqual(
+            [item["body"] for item in occurrences],
+            [
+                {"kind": "sufficient", "text": "expanded A"},
+                {"kind": "sufficient", "text": "B"},
+            ],
+        )
+        for item in occurrences:
+            _assert_utc_z(self, item["capturedAt"])
+
+        for_you_calls = [call for call in evaluator.calls if call["surface"] == "for_you"]
+        snapshot_calls = [call for call in for_you_calls if call["action"] == "snapshot"]
+        expand_calls = [call for call in for_you_calls if call["action"] == "expand"]
+        scroll_calls = [call for call in for_you_calls if call["action"] == "scroll"]
+        self.assertEqual(len(snapshot_calls), 3)
+        self.assertEqual(len(expand_calls), 1)
+        self.assertEqual(expand_calls[0]["stable_id"], source_a)
+        self.assertEqual(len(scroll_calls), 1)
+        snapshot_indexes = [index for index, call in enumerate(for_you_calls) if call["action"] == "snapshot"]
+        expand_indexes = [index for index, call in enumerate(for_you_calls) if call["action"] == "expand"]
+        scroll_indexes = [index for index, call in enumerate(for_you_calls) if call["action"] == "scroll"]
+        self.assertEqual(len(snapshot_indexes), 3)
+        self.assertEqual(len(expand_indexes), 1)
+        self.assertTrue(snapshot_indexes[0] < expand_indexes[0] < snapshot_indexes[1])
+        self.assertTrue(snapshot_indexes[1] < scroll_indexes[0] < snapshot_indexes[2])
+        self.assertEqual(
+            [call["action"] for call in for_you_calls],
+            ["navigate", "probe", "snapshot", "expand", "snapshot", "scroll", "snapshot"],
+        )
+
+        self.assertEqual(lock.entered, 1)
+        self.assertEqual(lock.exited, 1)
+        for timeout in lock.calls:
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout * 1000, deadline - 1_000_000)
+        for call in evaluator.calls:
+            remaining_ms = deadline - call["at_ms"]
+            self.assertGreater(call["timeout_seconds"], 0)
+            self.assertLessEqual(call["timeout_seconds"] * 1000, remaining_ms)
+
+
 if __name__ == "__main__":
     unittest.main()
