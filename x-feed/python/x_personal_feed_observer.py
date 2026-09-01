@@ -256,6 +256,20 @@ def _incomplete(started, clock, kinds=None):
     }
 
 
+def _complete_result(started, clock, completed_faces):
+    try:
+        completed = _stamp(_now(clock))
+    except Exception:
+        completed = started
+    return {
+        "schemaVersion": 1,
+        "kind": "complete",
+        "startedAt": started,
+        "completedAt": completed,
+        "surfaces": [completed_faces[surface] for surface in SURFACES],
+    }
+
+
 def _prepared_items(snapshot, known, limit):
     if limit <= 0:
         return []
@@ -499,17 +513,7 @@ def observe(deadline_epoch_ms, *, clock, browser, lock, evaluator):
         _live(clock, deadline)
     except Exception:
         return _incomplete(started, clock, kinds)
-    try:
-        completed = _stamp(_now(clock))
-    except Exception:
-        completed = started
-    return {
-        "schemaVersion": 1,
-        "kind": "complete",
-        "startedAt": started,
-        "completedAt": completed,
-        "surfaces": [completed_faces[surface] for surface in SURFACES],
-    }
+    return _complete_result(started, clock, completed_faces)
 
 
 def run_cli(raw_input: bytes, *, stdout, observer):
