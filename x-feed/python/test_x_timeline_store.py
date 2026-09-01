@@ -2,11 +2,13 @@
 """Tests for the locked X timeline JSONL append helper."""
 
 import json
+import math
 import multiprocessing
 import os
 import pathlib
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -152,6 +154,94 @@ class TestBrowserLock(unittest.TestCase):
                     if process.is_alive():
                         process.terminate()
                     process.join(timeout=2)
+                store.TIMELINE_BROWSER_LOCK = original_path
+
+    def test_browser_lock_timeout_is_bounded_and_succeeds_after_release(self):
+        """A bounded contender times out, then enters after the holder releases."""
+        timeout_type = getattr(store, "BrowserLockTimeout", None)
+        self.assertIsInstance(
+            timeout_type,
+            type,
+            "x_timeline_store.BrowserLockTimeout must be a defined exception type",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            original_path = store.TIMELINE_BROWSER_LOCK
+            lock_path = pathlib.Path(tmp) / "exact-browser.lock"
+            store.TIMELINE_BROWSER_LOCK = lock_path
+            ctx = multiprocessing.get_context("fork")
+            holder_parent, holder_child = ctx.Pipe()
+            holder = ctx.Process(target=_browser_lock_holder, args=(holder_child,))
+            try:
+                holder.start()
+                holder_child.close()
+                _expect_message(holder_parent, "acquired")
+                self.assertTrue(lock_path.exists())
+
+                timeout_seconds = 0.2
+                entered = False
+                started_at = time.monotonic()
+                with self.assertRaises(timeout_type) as raised:
+                    with store.browser_lock(timeout_seconds=timeout_seconds):
+                        entered = True
+                elapsed = time.monotonic() - started_at
+                self.assertIs(type(raised.exception), timeout_type)
+                self.assertFalse(entered, "timed-out contender entered the critical section")
+                self.assertLess(elapsed, 2.0, "bounded lock attempt exceeded its loose time bound")
+
+                holder_parent.send("release")
+                _expect_message(holder_parent, "released")
+
+                entered_after_release = False
+                with store.browser_lock(timeout_seconds=timeout_seconds):
+                    entered_after_release = True
+                self.assertTrue(entered_after_release)
+
+                holder.join(timeout=2)
+                self.assertEqual(holder.exitcode, 0)
+            finally:
+                if holder.is_alive():
+                    holder_parent.send("release")
+                holder_parent.close()
+                if holder.is_alive():
+                    holder.terminate()
+                holder.join(timeout=2)
+                store.TIMELINE_BROWSER_LOCK = original_path
+
+    def test_lock_timeout_rejects_invalid_values_before_touching_lock(self):
+        """Invalid timeout values fail before either lock path is created."""
+        invalid_values = (
+            (0, ValueError),
+            (-1, ValueError),
+            (-0.1, ValueError),
+            (True, TypeError),
+            (False, TypeError),
+            (math.nan, ValueError),
+            (math.inf, ValueError),
+            (-math.inf, ValueError),
+            ("0.1", TypeError),
+            (object(), TypeError),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            original_path = store.TIMELINE_BROWSER_LOCK
+            try:
+                for index, (value, expected_type) in enumerate(invalid_values):
+                    browser_path = pathlib.Path(tmp) / f"browser-{index}.lock"
+                    store.TIMELINE_BROWSER_LOCK = browser_path
+                    with self.subTest(api="browser_lock", value=repr(value)):
+                        with self.assertRaises(expected_type):
+                            with store.browser_lock(timeout_seconds=value):
+                                pass
+                        self.assertFalse(browser_path.exists())
+
+                    file_path = pathlib.Path(tmp) / f"file-{index}.lock"
+                    with self.subTest(api="file_lock", value=repr(value)):
+                        with self.assertRaises(expected_type):
+                            with store.file_lock(file_path, timeout_seconds=value):
+                                pass
+                        self.assertFalse(file_path.exists())
+            finally:
                 store.TIMELINE_BROWSER_LOCK = original_path
 
 
