@@ -22,6 +22,8 @@ const STARTUP_SELF_TEST_ERROR = 'Unable to run personal-feed X startup self-test
 const STARTUP_SHUTDOWN_ERROR = 'Unable to shutdown personal-feed X startup'
 const STARTUP_SURFACE_SHUTDOWN_ERROR = 'Unable to shutdown personal-feed X startup surface owner'
 const STARTUP_CHILD_SHUTDOWN_ERROR = 'Unable to shutdown personal-feed X startup child owner'
+const STARTUP_DATE = Date
+const STARTUP_DATE_GET_TIME = STARTUP_DATE.prototype.getTime
 const SELF_TEST_RECEIPT = 'personal-feed-x-startup-self-test/v1'
 const SELF_TEST_OUTPUT = '{"schemaVersion":1,"kind":"invalid_input"}\n'
 const SELF_TEST_HOME = '/nonexistent'
@@ -530,6 +532,10 @@ type StartupOwner = Readonly<{
   readonly shutdown: () => Promise<void>
 }>
 
+type StartupClock = Readonly<{
+  readonly now: () => Date
+}>
+
 function runtimeFailure(): never {
   throw new Error(STARTUP_RUNTIME_ERROR)
 }
@@ -544,6 +550,24 @@ function isNonProxyFunction(value: unknown): value is (...args: any[]) => any {
     return !nodeTypes.isProxy(value)
   } catch {
     return false
+  }
+}
+
+function resolveStartupClock(value: unknown): StartupClock {
+  try {
+    if (value === null || typeof value !== 'object' || nodeTypes.isProxy(value)
+      || !Object.isFrozen(value)) runtimeFailure()
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) runtimeFailure()
+    const ownKeys = Reflect.ownKeys(value)
+    if (ownKeys.length !== 1 || ownKeys[0] !== 'now') runtimeFailure()
+    const descriptor = Object.getOwnPropertyDescriptor(value, 'now')
+    if (descriptor === undefined || descriptor.enumerable !== true || !('value' in descriptor)
+      || descriptor.configurable !== false || descriptor.writable !== false
+      || !isNonProxyFunction(descriptor.value)) runtimeFailure()
+    return value as StartupClock
+  } catch {
+    throw new Error(STARTUP_RUNTIME_ERROR)
   }
 }
 
@@ -723,6 +747,46 @@ export function createPersonalFeedXStartupFromPackageEntry(
     const identity = resolvePersonalFeedXStartupIdentityFromPackageEntry(packageEntryUrl)
     const directories = startupDirectories(resolvedPrimitives, config.dataDir)
     return startupObserverChild(identity, directories, resolvedPrimitives)
+  } catch {
+    throw new Error(STARTUP_RUNTIME_ERROR)
+  }
+}
+
+/** Bind a validated install clock while retaining startup creation as a lazy factory. */
+export function bindPersonalFeedXStartupFromPackageEntry(
+  packageEntryUrl: unknown,
+  clock: unknown,
+  primitives?: unknown,
+): (runtimeConfig: unknown) => StartupOwner {
+  try {
+    if (arguments.length < 2 || arguments.length > 3) runtimeFailure()
+    const resolvedClock = resolveStartupClock(clock)
+    const resolvedPrimitives = resolveStartupPrimitives(primitives)
+    const nowEpochMs = (): number => {
+      try {
+        const date = resolvedClock.now()
+        if (!(date instanceof STARTUP_DATE)) runtimeFailure()
+        const epochMs = Reflect.apply(STARTUP_DATE_GET_TIME, date, [])
+        if (!Number.isFinite(epochMs)) runtimeFailure()
+        return epochMs
+      } catch {
+        throw new Error(STARTUP_RUNTIME_ERROR)
+      }
+    }
+    const boundPrimitives = Object.freeze({
+      nativeSpawn: resolvedPrimitives.nativeSpawn,
+      homedir: resolvedPrimitives.homedir,
+      resolveDshHome: resolvedPrimitives.resolveDshHome,
+      nowEpochMs,
+      setTimeout: resolvedPrimitives.setTimeout,
+      clearTimeout: resolvedPrimitives.clearTimeout,
+    })
+    const factory = (runtimeConfig: unknown): StartupOwner => createPersonalFeedXStartupFromPackageEntry(
+      packageEntryUrl,
+      runtimeConfig,
+      boundPrimitives,
+    )
+    return Object.freeze(factory)
   } catch {
     throw new Error(STARTUP_RUNTIME_ERROR)
   }

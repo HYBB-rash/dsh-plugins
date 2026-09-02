@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { CallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { TelegramInboundEnvelope, TelegramInboundResult } from '@deepseek-ai/dsh-telegram-gateway'
 import { installTelegramExtension } from '../src/index.ts'
 
@@ -11,11 +11,17 @@ const ownerObserver = vi.hoisted(() => ({
   closeCount: 0,
   events: [] as string[],
   wiringEvents: [] as string[],
+  contextOwnerOptions: [] as unknown[],
+  contextOwners: [] as unknown[],
+  contextSnapshotResults: [] as unknown[],
   candidateFactoryOptions: [] as unknown[],
   candidateOwners: [] as unknown[],
   coordinatorOptions: [] as unknown[],
   coordinatorOwners: [] as unknown[],
   personalContextRuntimeR4: [] as unknown[],
+  startupBinderCalls: [] as unknown[][],
+  startupBoundFactories: [] as unknown[],
+  startupBoundFactoryCalls: [] as unknown[][],
 }))
 
 vi.mock('@herman/personal-feed', async importOriginal => {
@@ -24,14 +30,25 @@ vi.mock('@herman/personal-feed', async importOriginal => {
     ...actual,
     createPersonalContextOwner: (...args: Parameters<typeof actual.createPersonalContextOwner>) => {
       const owner = actual.createPersonalContextOwner(...args)
-      return Object.freeze({
+      ownerObserver.contextOwnerOptions.push(args[0])
+      const wrapped = Object.freeze({
         ...owner,
+        capture: (...captureArgs: Parameters<typeof owner.capture>) => owner.capture(...captureArgs),
+        read: (...readArgs: Parameters<typeof owner.read>) => owner.read(...readArgs),
+        freezeFence: (...fenceArgs: Parameters<typeof owner.freezeFence>) => owner.freezeFence(...fenceArgs),
+        snapshot: (...snapshotArgs: Parameters<typeof owner.snapshot>) => {
+          const result = owner.snapshot(...snapshotArgs)
+          ownerObserver.contextSnapshotResults.push(result)
+          return result
+        },
         close: (): void => {
           ownerObserver.closeCount += 1
           ownerObserver.events.push('owner.close')
           owner.close()
         },
       })
+      ownerObserver.contextOwners.push(wrapped)
+      return wrapped
     },
     createPersonalFeedV2CandidateLifecycle: (...args: Parameters<typeof actual.createPersonalFeedV2CandidateLifecycle>) => {
       ownerObserver.candidateFactoryOptions.push(args[0])
@@ -46,6 +63,29 @@ vi.mock('@herman/personal-feed', async importOriginal => {
       ownerObserver.coordinatorOwners.push(coordinator)
       ownerObserver.wiringEvents.push('coordinator.factory')
       return coordinator
+    },
+  }
+})
+
+vi.mock('../src/personal-feed/x-startup.ts', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/personal-feed/x-startup.ts')>() as typeof import('../src/personal-feed/x-startup.ts') & {
+    readonly bindPersonalFeedXStartupFromPackageEntry?: (...args: unknown[]) => unknown
+  }
+  const bind = actual.bindPersonalFeedXStartupFromPackageEntry
+  return {
+    ...actual,
+    bindPersonalFeedXStartupFromPackageEntry: (...args: unknown[]): unknown => {
+      ownerObserver.startupBinderCalls.push(args)
+      if (typeof bind !== 'function') throw new Error('CAPABILITY_ASSERTION: startup binder is unavailable')
+      const factory = Reflect.apply(bind, undefined, args)
+      if (typeof factory !== 'function') throw new Error('CAPABILITY_ASSERTION: startup binder did not return a factory')
+      const wrapped = (runtimeConfig: unknown): unknown => {
+        ownerObserver.startupBoundFactoryCalls.push([runtimeConfig])
+        return Reflect.apply(factory, undefined, [runtimeConfig])
+      }
+      Object.freeze(wrapped)
+      ownerObserver.startupBoundFactories.push(wrapped)
+      return wrapped
     },
   }
 })
@@ -213,6 +253,39 @@ function config(dataDir: string, personalFeedDataDir: string): Record<string, un
   }
 }
 
+function expectFrozenInstallClock(value: unknown): asserts value is { readonly now: () => Date } {
+  expect(value).not.toBeNull()
+  expect(typeof value).toBe('object')
+  expect(Object.getPrototypeOf(value as object)).toBe(Object.prototype)
+  expect(Object.isFrozen(value)).toBe(true)
+  expect(Reflect.ownKeys(value as object)).toEqual(['now'])
+  const descriptor = Object.getOwnPropertyDescriptor(value as object, 'now')
+  expect(descriptor?.enumerable).toBe(true)
+  expect(descriptor?.configurable).toBe(false)
+  expect(descriptor?.writable).toBe(false)
+  expect(descriptor?.get).toBeUndefined()
+  expect(descriptor?.set).toBeUndefined()
+  expect(typeof (value as { readonly now?: unknown }).now).toBe('function')
+}
+
+function candidateWindow(
+  request: Readonly<{ readonly requestId: string; readonly cutoff: string; readonly shanghaiDay: string }>,
+  completedAt: string,
+): Record<string, unknown> {
+  return {
+    requestId: request.requestId,
+    cutoff: request.cutoff,
+    shanghaiDay: request.shanghaiDay,
+    startedAt: request.cutoff,
+    completedAt,
+    surfaces: [
+      { kind: 'natural_zero', surface: 'for_you', surfaceOrdinal: 0, startedAt: request.cutoff, completedAt: '2026-09-01T15:59:59.850Z', occurrences: [] },
+      { kind: 'natural_zero', surface: 'following', surfaceOrdinal: 1, startedAt: '2026-09-01T15:59:59.850Z', completedAt: '2026-09-01T15:59:59.875Z', occurrences: [] },
+      { kind: 'natural_zero', surface: 'explore', surfaceOrdinal: 2, startedAt: '2026-09-01T15:59:59.875Z', completedAt, occurrences: [] },
+    ],
+  }
+}
+
 function envelope(currentText: string, reference?: TelegramInboundEnvelope['reference'], messageId = 11): TelegramInboundEnvelope {
   return Object.freeze({
     chat: Object.freeze({ id: 7, type: 'private' }),
@@ -255,11 +328,17 @@ afterEach(() => {
   ownerObserver.closeCount = 0
   ownerObserver.events.length = 0
   ownerObserver.wiringEvents.length = 0
+  ownerObserver.contextOwnerOptions.length = 0
+  ownerObserver.contextOwners.length = 0
+  ownerObserver.contextSnapshotResults.length = 0
   ownerObserver.candidateFactoryOptions.length = 0
   ownerObserver.candidateOwners.length = 0
   ownerObserver.coordinatorOptions.length = 0
   ownerObserver.coordinatorOwners.length = 0
   ownerObserver.personalContextRuntimeR4.length = 0
+  ownerObserver.startupBinderCalls.length = 0
+  ownerObserver.startupBoundFactories.length = 0
+  ownerObserver.startupBoundFactoryCalls.length = 0
   vi.restoreAllMocks()
 })
 
@@ -880,6 +959,305 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
     expect(JSON.stringify(snapshot)).not.toContain('QUOTE-CANARY-DO-NOT-COPY')
     expect(JSON.stringify(harness.llmRequests)).not.toContain('QUOTE-CANARY-DO-NOT-COPY')
     owner.close()
+  })
+
+  it('shares one frozen install clock across R4, R3, R1, and the lazy R2 binding while independent installs stay isolated', async () => {
+    expect(installTelegramExtension.length).toBe(2)
+    const firstRoot = mkdtempSync(join(tmpdir(), 'x-feed-runtime-clock-first-'))
+    const secondRoot = mkdtempSync(join(tmpdir(), 'x-feed-runtime-clock-second-'))
+    temporaryDirectories.push(firstRoot, secondRoot)
+    const firstHarness = emptyHistoryHarness()
+    const secondHarness = emptyHistoryHarness()
+
+    const firstDispose = await installTelegramExtension(firstHarness.ctx as never, config(firstRoot, join(firstRoot, 'personal-feed')))
+    expect(ownerObserver.contextOwnerOptions).toHaveLength(1)
+    expect(ownerObserver.candidateFactoryOptions).toHaveLength(1)
+    expect(ownerObserver.coordinatorOptions).toHaveLength(1)
+    expect(ownerObserver.personalContextRuntimeR4).toHaveLength(1)
+    expect(ownerObserver.startupBinderCalls).toHaveLength(1)
+    expect(ownerObserver.startupBoundFactories).toHaveLength(1)
+    expect(ownerObserver.startupBoundFactoryCalls).toEqual([])
+
+    const firstOwnerOptions = ownerObserver.contextOwnerOptions[0] as { readonly clock?: unknown }
+    const firstCandidateOptions = ownerObserver.candidateFactoryOptions[0] as { readonly clock?: unknown }
+    const firstCoordinatorOptions = ownerObserver.coordinatorOptions[0] as { readonly clock?: unknown; readonly r2?: unknown; readonly r5?: unknown }
+    const firstBinderCall = ownerObserver.startupBinderCalls[0]
+    const firstClock = firstOwnerOptions.clock
+    expectFrozenInstallClock(firstClock)
+    expect(firstCandidateOptions.clock).toBe(firstClock)
+    expect(firstCoordinatorOptions.clock).toBe(firstClock)
+    expect(firstBinderCall?.[0]).toBe(new URL('../src/index.ts', import.meta.url).href)
+    expect(firstBinderCall?.[1]).toBe(firstClock)
+    expect(firstBinderCall).toHaveLength(2)
+    expect(Object.isFrozen(ownerObserver.startupBoundFactories[0])).toBe(true)
+    expect((ownerObserver.startupBoundFactories[0] as Function).length).toBe(1)
+
+    const firstR2 = await (firstCoordinatorOptions.r2 as { readonly observe: (input: unknown) => Promise<unknown> }).observe({})
+    expect(firstR2).toEqual(Object.freeze({ kind: 'unknown' }))
+    expect(Object.keys(firstR2 as Record<string, unknown>)).toEqual(['kind'])
+    const firstR5 = await (firstCoordinatorOptions.r5 as { readonly judge: (input: unknown) => Promise<unknown> }).judge({})
+    expect(firstR5).toEqual({ kind: 'incomplete', completed: [], reason: 'unknown' })
+    expect(Object.isFrozen(firstR5)).toBe(true)
+    expect(ownerObserver.startupBoundFactoryCalls).toEqual([])
+    expect((firstHarness.ctx as { readonly agents: { readonly roots: () => unknown[] } }).agents.roots()).toEqual([])
+    expect(firstHarness.listeners.get('agent/created') ?? []).toHaveLength(1)
+
+    const secondDispose = await installTelegramExtension(secondHarness.ctx as never, config(secondRoot, join(secondRoot, 'personal-feed')))
+    expect(ownerObserver.contextOwnerOptions).toHaveLength(2)
+    expect(ownerObserver.candidateFactoryOptions).toHaveLength(2)
+    expect(ownerObserver.coordinatorOptions).toHaveLength(2)
+    expect(ownerObserver.personalContextRuntimeR4).toHaveLength(2)
+    expect(ownerObserver.startupBinderCalls).toHaveLength(2)
+    expect(ownerObserver.startupBoundFactories).toHaveLength(2)
+    expect(ownerObserver.startupBoundFactoryCalls).toEqual([])
+
+    const secondOwnerOptions = ownerObserver.contextOwnerOptions[1] as { readonly clock?: unknown }
+    const secondCandidateOptions = ownerObserver.candidateFactoryOptions[1] as { readonly clock?: unknown }
+    const secondCoordinatorOptions = ownerObserver.coordinatorOptions[1] as { readonly clock?: unknown }
+    const secondBinderCall = ownerObserver.startupBinderCalls[1]
+    const secondClock = secondOwnerOptions.clock
+    expectFrozenInstallClock(secondClock)
+    expect(secondClock).not.toBe(firstClock)
+    expect(secondCandidateOptions.clock).toBe(secondClock)
+    expect(secondCoordinatorOptions.clock).toBe(secondClock)
+    expect(secondBinderCall?.[0]).toBe(new URL('../src/index.ts', import.meta.url).href)
+    expect(secondBinderCall?.[1]).toBe(secondClock)
+    expect(secondBinderCall?.[1]).not.toBe(firstBinderCall?.[1])
+    expect((secondHarness.ctx as { readonly agents: { readonly roots: () => unknown[] } }).agents.roots()).toEqual([])
+    expect(secondHarness.listeners.get('agent/created') ?? []).toHaveLength(1)
+
+    await firstDispose()
+    await secondDispose()
+    expect(ownerObserver.startupBoundFactoryCalls).toEqual([])
+  })
+
+  it('orders source capture, request cutoff, and real R3 validation through one scripted install clock', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'x-feed-runtime-scripted-clock-'))
+    temporaryDirectories.push(root)
+    const harness = emptyHistoryHarness()
+    const sourceEntry = new URL('../src/index.ts', import.meta.url).href
+    const extension = await import('../src/telegram-extension.ts') as {
+      readonly installTelegramExtensionFromPackageEntry?: (
+        ctx: unknown,
+        rawConfig: Readonly<Record<string, unknown>>,
+        packageEntryUrl: string,
+        clock: { readonly now: () => Date },
+      ) => Promise<() => Promise<void>>
+    }
+    if (typeof extension.installTelegramExtensionFromPackageEntry !== 'function') {
+      throw new Error('CAPABILITY_ASSERTION: private Telegram install composition seam is unavailable')
+    }
+
+    const source10Text = '我关注可靠设计。我知道幂等重试'
+    expect(source10Text).toHaveLength(15)
+    expect(source10Text.slice(3, 7)).toBe('可靠设计')
+    expect(source10Text.slice(11, 15)).toBe('幂等重试')
+    expect(source10Text.slice(0, 1)).toBe('我')
+    expect(source10Text.slice(8, 9)).toBe('我')
+    const attitude = {
+      speaker: 'user',
+      polarity: 'affirmed',
+      modality: 'committed',
+      attribution: 'own_statement',
+      temporal: 'current',
+      qualification: 'unqualified',
+    }
+    const source10Facts = {
+      kind: 'facts',
+      facts: [
+        {
+          lane: 'long_term_interest',
+          stance: 'include',
+          focusSpan: { startUtf16: 3, endUtf16: 7 },
+          protectedSpans: {
+            subject: [{ startUtf16: 0, endUtf16: 1 }],
+            polarity: [],
+            conditions: [],
+            modality: [],
+            attribution: [],
+            temporal: [],
+            applicability: [],
+          },
+          attitude,
+          operation: 'assert',
+          targetFactIds: [],
+        },
+        {
+          lane: 'existing_knowledge',
+          epistemic: 'asserted',
+          focusSpan: { startUtf16: 11, endUtf16: 15 },
+          protectedSpans: {
+            subject: [{ startUtf16: 8, endUtf16: 9 }],
+            polarity: [],
+            conditions: [],
+            modality: [],
+            attribution: [],
+            temporal: [],
+            applicability: [],
+          },
+          attitude,
+          operation: 'assert',
+          targetFactIds: [],
+        },
+      ],
+    }
+    const source10Key = digest({ kind: 'telegram_inbound', chatId: 7, messageId: 10 })
+    const source11Key = digest({ kind: 'telegram_inbound', chatId: 7, messageId: 11 })
+    const source12Key = digest({ kind: 'telegram_inbound', chatId: 7, messageId: 12 })
+    const semanticResponses: Array<{ readonly tool: string; readonly sourceKey?: string; readonly rawText: string; readonly value: unknown }> = [
+      { tool: 'submit-personal-context-classification', sourceKey: source10Key, rawText: source10Text, value: source10Facts },
+      { tool: 'submit-personal-context-entailment', rawText: source10Text, value: { decision: 'confirmed' } },
+      { tool: 'submit-personal-context-entailment', rawText: source10Text, value: { decision: 'confirmed' } },
+      { tool: 'submit-personal-context-classification', sourceKey: source11Key, rawText: '给我一次个人 Feed', value: { kind: 'no_fact', reason: 'not_personal_fact' } },
+      { tool: 'submit-personal-context-no-fact', rawText: '给我一次个人 Feed', value: { decision: 'confirmed' } },
+      { tool: 'submit-personal-context-classification', sourceKey: source12Key, rawText: '请求后的事实', value: { kind: 'no_fact', reason: 'not_personal_fact' } },
+      { tool: 'submit-personal-context-no-fact', rawText: '请求后的事实', value: { decision: 'confirmed' } },
+    ]
+    let semanticCallOrdinal = 0
+    const toolCallChunks = (request: GenerateOptions, value: unknown): StreamChunk[] => {
+      const name = request.tools?.[0]?.name
+      if (typeof name !== 'string') throw new Error('scripted semantic request has no submission tool')
+      const encoded = JSON.stringify(value)
+      if (encoded === undefined) throw new Error('scripted semantic response is not JSON encodable')
+      const callId = CallId(`runtime-semantic-call-${semanticCallOrdinal}`)
+      return [
+        { type: 'block-start', index: 0, blockType: 'tool-call' },
+        { type: 'tool-call-delta', index: 0, id: callId, name, argumentsDelta: encoded },
+        { type: 'block-end', index: 0, block: { type: 'tool-call', id: callId, name, arguments: encoded } },
+        { type: 'finish', reason: { kind: 'tool-calls' } },
+      ]
+    }
+    const llm = (harness.ctx as { llm: { stream: (request: GenerateOptions) => AsyncIterable<StreamChunk> } }).llm
+    llm.stream = vi.fn(async function* (request: GenerateOptions): AsyncIterable<StreamChunk> {
+      harness.llmRequests.push(request)
+      const response = semanticResponses.shift()
+      if (response === undefined) throw new Error('scripted semantic response queue exhausted')
+      semanticCallOrdinal += 1
+      expect(request.tools).toHaveLength(1)
+      expect(request.tools?.[0]?.name).toBe(response.tool)
+      const message = request.messages?.[0] as unknown as { readonly content?: readonly { readonly text?: unknown }[] } | undefined
+      const userText = message?.content?.[0]?.text
+      if (typeof userText !== 'string') throw new Error('scripted semantic request has no user JSON')
+      const input = JSON.parse(userText) as { readonly sourceKey?: unknown; readonly rawText?: unknown; readonly fullRawText?: unknown }
+      if (response.sourceKey !== undefined) expect(input.sourceKey).toBe(response.sourceKey)
+      expect(input.rawText ?? input.fullRawText).toBe(response.rawText)
+      for (const chunk of toolCallChunks(request, response.value)) yield chunk
+    })
+
+    const scripted = [
+      '2026-09-01T15:59:59.700Z',
+      '2026-09-01T15:59:59.800Z',
+      '2026-09-01T15:59:59.800Z',
+      '2026-09-01T15:59:59.900Z',
+      '2026-09-01T15:59:59.900Z',
+      '2026-09-01T15:59:59.901Z',
+    ]
+    let installed = false
+    const clock = Object.freeze({
+      now: vi.fn(() => {
+        if (!installed) return new Date('2026-09-01T15:59:59.000Z')
+        const value = scripted.shift()
+        if (value === undefined) throw new Error('scripted clock exhausted')
+        return new Date(value)
+      }),
+    })
+    let dispose: (() => Promise<void>) | undefined
+    let testCursor: { readonly close: (reason: string) => unknown } | undefined
+    try {
+      dispose = await extension.installTelegramExtensionFromPackageEntry(
+        harness.ctx,
+        config(root, join(root, 'personal-feed')),
+        sourceEntry,
+        clock,
+      )
+      installed = true
+      clock.now.mockClear()
+      const inbound = harness.listeners.get('telegram/inbound') ?? []
+      await waterfall(inbound, envelope(source10Text, undefined, 10))
+      const source10State = (ownerObserver.contextOwners[0] as { readonly read: () => unknown }).read() as {
+        readonly coverage: ReadonlyArray<{ readonly sourceKey: string; readonly status: string; readonly disposition?: { readonly status?: string } }>
+      }
+      expect(source10State.coverage).toEqual([
+        expect.objectContaining({ sourceKey: source10Key, status: 'applied', disposition: expect.objectContaining({ status: 'applied' }) }),
+      ])
+      expect(semanticCallOrdinal).toBe(3)
+      expect(semanticResponses).toHaveLength(4)
+      const feed = await waterfall(inbound, envelope('给我一次个人 Feed', undefined, 11))
+      expect(semanticCallOrdinal).toBe(5)
+      expect(semanticResponses).toHaveLength(2)
+      const firstSnapshot = ownerObserver.contextSnapshotResults.at(-1) as {
+        readonly kind?: unknown
+        readonly snapshot?: { readonly proof?: { readonly currentSource?: unknown; readonly coverage?: { readonly unknownAtFenceSourceKeys?: readonly string[] } } }
+      }
+      expect(firstSnapshot?.kind).toBe('sufficient')
+      expect(feed).toMatchObject({ kind: 'handled-awaiting-delivery', finalText: '这次没有完成：X 来源或观察窗口未完成。' })
+
+    const request = Object.freeze({
+      requestId: 'telegram:7:11',
+      cutoff: '2026-09-01T15:59:59.800Z',
+      shanghaiDay: '2026-09-01',
+    })
+    const candidate = ownerObserver.candidateOwners[0] as {
+      readonly admit: (input: unknown) => Promise<{ readonly kind: string; readonly cursor?: { readonly close: (reason: string) => unknown } }>
+    }
+    const admission = await candidate.admit({
+      request,
+      window: candidateWindow(request, '2026-09-01T15:59:59.900Z'),
+      signal: new AbortController().signal,
+    })
+    expect(admission.kind).toBe('admitted')
+    testCursor = admission.cursor
+    await testCursor?.close('C2 test cleanup')
+
+    const r4 = ownerObserver.personalContextRuntimeR4[0] as {
+      readonly snapshot: (input: unknown) => Promise<unknown>
+    }
+    expect(firstSnapshot?.kind).toBe('sufficient')
+    expect(firstSnapshot?.snapshot?.proof?.currentSource).toMatchObject({ status: 'settled_for_future_request' })
+    expect(firstSnapshot?.snapshot?.proof?.coverage?.unknownAtFenceSourceKeys).toEqual([])
+    expect(ownerObserver.contextOwnerOptions[0]).toMatchObject({ clock })
+    expect(ownerObserver.candidateFactoryOptions[0]).toMatchObject({ clock })
+    expect(ownerObserver.coordinatorOptions[0]).toMatchObject({ clock })
+    const state = (ownerObserver.contextOwners[0] as { readonly read: () => unknown }).read() as {
+      readonly sources: ReadonlyArray<{ readonly sourceKey: string; readonly occurredAt: string }>
+      readonly coverage: ReadonlyArray<{ readonly sourceKey: string; readonly status: string; readonly disposition?: { readonly status?: string } }>
+    }
+    const currentSources = state.sources.filter(source => source.sourceKey === source10Key || source.sourceKey === source11Key)
+    expect(currentSources.map(source => source.occurredAt)).toEqual([
+      '2026-09-01T15:59:59.700Z',
+      '2026-09-01T15:59:59.800Z',
+    ])
+    expect(currentSources.every(source => Date.parse(source.occurredAt) <= Date.parse(request.cutoff))).toBe(true)
+    expect(state.coverage.filter(coverage => coverage.sourceKey === source10Key || coverage.sourceKey === source11Key)).toEqual([
+      expect.objectContaining({ sourceKey: source10Key, status: 'applied', disposition: expect.objectContaining({ status: 'applied' }) }),
+      expect.objectContaining({ sourceKey: source11Key, status: 'ignored', disposition: expect.objectContaining({ status: 'ignored' }) }),
+    ])
+
+    const ledgerPath = join(root, 'personal-feed', 'v2', 'requests.jsonl')
+    const opened = readFileSync(ledgerPath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>)
+      .find(record => record.event === 'request_opened')
+    expect(opened).toMatchObject({
+      requestId: 'telegram:7:11',
+      request: { cutoff: request.cutoff, shanghaiDay: request.shanghaiDay },
+    })
+
+    await waterfall(inbound, envelope('请求后的事实', undefined, 12))
+    const laterSnapshot = await r4.snapshot({ request, signal: new AbortController().signal }) as {
+      readonly kind?: unknown
+      readonly snapshot?: { readonly proof?: { readonly coverage?: { readonly includedTerminalSources?: ReadonlyArray<{ readonly sourceKey: string }>; readonly unknownAtFenceSourceKeys?: readonly string[] } } }
+    }
+    const futureSourceKey = source12Key
+    expect(laterSnapshot.kind).toBe('sufficient')
+    expect(laterSnapshot.snapshot?.proof?.coverage?.includedTerminalSources?.map(source => source.sourceKey) ?? []).not.toContain(futureSourceKey)
+    expect(laterSnapshot.snapshot?.proof?.coverage?.unknownAtFenceSourceKeys ?? []).not.toContain(futureSourceKey)
+    expect(ownerObserver.contextSnapshotResults).toHaveLength(2)
+    expect(clock.now.mock.calls.length).toBe(6)
+    expect(semanticCallOrdinal).toBe(7)
+    expect(semanticResponses).toEqual([])
+    } finally {
+      await testCursor?.close('C2 test cleanup retry')
+      await dispose?.().catch(() => undefined)
+    }
   })
 })
 

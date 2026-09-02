@@ -21,6 +21,7 @@ import {
   TRUSTED_FACT_NAVIGATION_FILE_NAME,
 } from './navigation/file-navigation-snapshot-store.ts'
 import { pinNavigationSnapshot } from './fact-projection/file-projection-sources.ts'
+import { bindPersonalFeedXStartupFromPackageEntry } from './personal-feed/x-startup.ts'
 import {
   RebuildTrustedFactNavigation,
   TrustedFactNavigationProjector,
@@ -48,10 +49,13 @@ export const X_FEED_CONTRACT = [
 ].join('\n')
 
 /** Install the X feedback behavior as an ordinary Telegram business adapter. */
-export async function installTelegramExtension(
+export async function installTelegramExtensionFromPackageEntry(
   ctx: Context,
   rawConfig: Readonly<Record<string, unknown>>,
+  packageEntryUrl: unknown,
+  installClock: Readonly<{ readonly now: () => Date }>,
 ): Promise<() => Promise<void>> {
+  const personalFeedXStartupFactory = bindPersonalFeedXStartupFromPackageEntry(packageEntryUrl, installClock)
   const config = parseXFeedRuntimeConfig(rawConfig)
   let navigation: RebuildTrustedFactNavigation
   try {
@@ -101,7 +105,7 @@ export async function installTelegramExtension(
   }
   const owner = createPersonalContextOwner({
     databasePath: join(config.personalFeedDataDir, 'v2', 'personal-context.sqlite'),
-    clock: { now: () => new Date() },
+    clock: installClock,
     semantics,
   })
   const personalContextRuntime = createPersonalContextTelegramRuntime({
@@ -129,16 +133,20 @@ export async function installTelegramExtension(
     throw primary
   }
 
-  const clock = { now: () => new Date() }
   const personalFeedCandidateLifecycle = createPersonalFeedV2CandidateLifecycle({
     completionLedgerPath: join(config.personalFeedDataDir, 'v2', 'candidate-judgments.jsonl'),
-    clock,
+    clock: installClock,
   })
   const personalFeedCoordinator = createPersonalFeedV2RequestCoordinator({
     ledgerPath: join(config.personalFeedDataDir, 'v2', 'requests.jsonl'),
-    clock,
+    clock: installClock,
     r4: personalContextRuntime.r4,
-    r2: { observe: async () => ({ kind: 'unknown' }) },
+    r2: {
+      observe: async () => {
+        void personalFeedXStartupFactory
+        return Object.freeze({ kind: 'unknown' })
+      },
+    },
     r3: personalFeedCandidateLifecycle,
     r5: { judge: async () => Object.freeze({ kind: 'incomplete', completed: Object.freeze([]), reason: 'unknown' }) },
   })

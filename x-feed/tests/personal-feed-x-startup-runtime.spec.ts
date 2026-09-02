@@ -2,12 +2,13 @@ import { EventEmitter } from 'node:events'
 import {
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 const SELF_TEST_RECEIPT = 'personal-feed-x-startup-self-test/v1'
 const EXPECTED_INVALID_INPUT = '{"schemaVersion":1,"kind":"invalid_input"}\n'
@@ -145,6 +146,7 @@ type Primitives = Readonly<{
 
 type StartupModule = Readonly<{
   readonly createPersonalFeedXStartupFromPackageEntry?: unknown
+  readonly bindPersonalFeedXStartupFromPackageEntry?: unknown
   readonly runPersonalFeedXStartupSelfTestFromPackageEntry?: unknown
 }>
 
@@ -343,15 +345,25 @@ describe('Personal Feed X startup Group4/G3 runtime composition contract', () =>
       expect(typeof root.runPersonalFeedXStartupSelfTest, `${entry}:runPersonalFeedXStartupSelfTest`).toBe('function')
       expect((root.createPersonalFeedXStartup as Function).length).toBe(1)
       expect((root.runPersonalFeedXStartupSelfTest as Function).length).toBe(0)
+      expect((root.installTelegramExtension as Function).length).toBe(2)
       for (const forbidden of [
         'resolvePersonalFeedXStartupIdentityFromPackageEntry',
         'createPersonalFeedXStartupSpawn',
         'createPersonalFeedXStartupFromPackageEntry',
+        'bindPersonalFeedXStartupFromPackageEntry',
+        'installTelegramExtensionFromPackageEntry',
         'runPersonalFeedXStartupSelfTestFromPackageEntry',
         'createPersonalFeedXObserverChild',
         'createPersonalFeedXSurfaceObserver',
       ]) expect(Object.prototype.hasOwnProperty.call(root, forbidden), `${entry}:${forbidden}`).toBe(false)
     }
+
+    const telegramProfile = readFileSync(new URL('../../../local-profiles/telegram/cordis.patch.yml', import.meta.url), 'utf8')
+    const xFeedExtension = /- modulePath:\s*'@herman\/x-feed'\s+configJson:\s*'([^']+)'/u.exec(telegramProfile)
+    expect(xFeedExtension).not.toBeNull()
+    const xFeedConfigJson = xFeedExtension?.[1]
+    expect(xFeedConfigJson).toBeDefined()
+    expect(JSON.parse(xFeedConfigJson as string)).toEqual({ telegramSessionId: 'session-telegram' })
 
     const source = await loadRootModule('source')
     const runtimeConfig = await parseRuntimeConfig()
@@ -920,6 +932,119 @@ describe('Personal Feed X startup Group4/G3 runtime composition contract', () =>
         }
         if (shutdownPromise !== undefined) await shutdownPromise.catch(() => undefined)
         else await startup.shutdown().catch(() => undefined)
+      }
+    }
+  })
+
+  it('uses the bound install clock as the only R2 deadline authority for source and bundled entries', async () => {
+    const runtimeConfig = await parseRuntimeConfig()
+    const request = Object.freeze({
+      requestId: 'telegram:7:11',
+      cutoff: '2026-09-01T00:00:00.000Z',
+      shanghaiDay: '2026-09-01',
+    })
+    const cases = [
+      { label: 'before cutoff', now: '2026-08-31T23:59:59.999Z', expected: 'incomplete', code: 'invalid_request', clockMode: 'normal', spawn: false },
+      { label: 'before Shanghai midnight with no cleanup reserve', now: '2026-09-01T15:59:59.500Z', cutoff: '2026-09-01T15:59:59.000Z', day: '2026-09-01', expected: 'incomplete', code: 'insufficient_budget', clockMode: 'normal', spawn: false },
+      { label: 'clock throws', now: '2026-09-01T00:00:01.000Z', expected: 'incomplete', code: 'observer_failed', clockMode: 'throws', spawn: false },
+      { label: 'invalid Date', now: '2026-09-01T00:00:01.000Z', expected: 'incomplete', code: 'observer_failed', clockMode: 'invalid-date', spawn: false },
+      { label: 'non-Date lookalike', now: '2026-09-01T00:00:01.000Z', expected: 'incomplete', code: 'observer_failed', clockMode: 'non-date-lookalike', spawn: false },
+      { label: 'legal deadline', now: '2026-09-01T00:00:01.000Z', expected: 'complete', code: undefined, clockMode: 'normal', spawn: true },
+    ] as const
+
+    for (const entry of ['source', 'lib'] as const) {
+      const loaded = await loadStartupModule(entry)
+      if (typeof loaded.bindPersonalFeedXStartupFromPackageEntry !== 'function') {
+        throw new Error(`CAPABILITY_ASSERTION: ${entry} startup binder is unavailable`)
+      }
+      const bind = loaded.bindPersonalFeedXStartupFromPackageEntry as (
+        packageEntryUrl: unknown,
+        clock: unknown,
+        primitives?: unknown,
+      ) => unknown
+      for (const current of cases) {
+        const scheduler = new ManualScheduler()
+        const children: FakeChild[] = []
+        const spawnCalls: unknown[][] = []
+        const spawn: NativeSpawn = (...args: unknown[]): unknown => {
+          spawnCalls.push(args)
+          const child = new FakeChild({
+            onEnd: value => queueMicrotask(() => {
+              const caseRequest = Object.freeze({
+                ...request,
+                cutoff: current.cutoff ?? request.cutoff,
+                shanghaiDay: current.day ?? request.shanghaiDay,
+              })
+              value.stdout.emit('data', validCompleteLine(caseRequest))
+              value.emit('exit', 0, null)
+              value.emit('close', 0, null)
+            }),
+          })
+          children.push(child)
+          return child
+        }
+        const getTimeGetter = vi.fn(() => () => Date.parse('2026-09-01T00:00:01.000Z'))
+        const nonDateLookalike = Object.defineProperty({}, 'getTime', {
+          configurable: false,
+          enumerable: true,
+          get: getTimeGetter,
+        })
+        const boundClock = Object.freeze({ now: vi.fn(() => {
+          if (current.clockMode === 'throws') throw new Error(FIXED_ERROR_CANARY)
+          if (current.clockMode === 'invalid-date') return new Date(Number.NaN)
+          if (current.clockMode === 'non-date-lookalike') return nonDateLookalike
+          return new Date(current.now)
+        }) })
+        const primitiveNow = vi.fn(() => { throw new Error(FIXED_ERROR_CANARY) })
+        const primitiveBase = validPrimitives(spawn, scheduler)
+        const canaryPrimitives = Object.freeze({ ...primitiveBase, nowEpochMs: primitiveNow })
+        const factory = bind(
+          entry === 'source' ? SOURCE_ENTRY : LIB_ENTRY,
+          boundClock,
+          canaryPrimitives,
+        ) as ((config: unknown) => Startup) | undefined
+        expect(typeof factory, `${entry}:${current.label}:factory`).toBe('function')
+        expect(Object.isFrozen(factory), `${entry}:${current.label}:factory frozen`).toBe(true)
+        expect((factory as Function).length, `${entry}:${current.label}:factory arity`).toBe(1)
+        const startup = factory?.(Object.freeze({
+          ...runtimeConfig,
+          ...(current.cutoff === undefined ? {} : {}),
+        }))
+        expect(startup).toBeDefined()
+        try {
+          const observed = await (startup as Startup).observe({
+            request: Object.freeze({
+              ...request,
+              cutoff: current.cutoff ?? request.cutoff,
+              shanghaiDay: current.day ?? request.shanghaiDay,
+            }),
+            signal: new AbortController().signal,
+          }) as { readonly kind?: unknown; readonly code?: unknown; readonly close?: () => Promise<void> }
+          expect(observed.kind, `${entry}:${current.label}:result`).toBe(current.expected)
+          if (!current.spawn) {
+            expect(observed, `${entry}:${current.label}:body-free incomplete`).toEqual(Object.freeze({ kind: 'incomplete' }))
+            expect(Reflect.ownKeys(observed as object), `${entry}:${current.label}:incomplete keys`).toEqual(['kind'])
+            expect(JSON.stringify(observed)).not.toContain(FIXED_ERROR_CANARY)
+          }
+          expect(boundClock.now).toHaveBeenCalledTimes(1)
+          if (current.clockMode === 'non-date-lookalike') expect(getTimeGetter).not.toHaveBeenCalled()
+          expect(primitiveNow).not.toHaveBeenCalled()
+          expect(spawnCalls, `${entry}:${current.label}:spawn`).toHaveLength(current.spawn ? 1 : 0)
+          if (current.spawn) {
+            expect(typeof observed.close).toBe('function')
+            const payload = JSON.parse(children[0]?.stdin.endCalls[0]?.[0] as string) as Record<string, unknown>
+            expect(payload).toEqual({
+              schemaVersion: 1,
+              requestId: request.requestId,
+              cutoff: request.cutoff,
+              shanghaiDay: request.shanghaiDay,
+              deadlineEpochMs: Date.parse('2026-09-01T00:01:58.000Z'),
+            })
+            await observed.close?.()
+          }
+        } finally {
+          await (startup as Startup).shutdown().catch(() => undefined)
+        }
       }
     }
   })
