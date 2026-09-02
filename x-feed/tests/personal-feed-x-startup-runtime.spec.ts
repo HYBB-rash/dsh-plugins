@@ -121,6 +121,13 @@ class ManualScheduler {
     record.callback()
   }
 
+  fireDelay(delayMs: number): void {
+    const record = this.records.find(candidate => !candidate.fired && !candidate.cleared && candidate.delayMs === delayMs)
+    if (record === undefined) throw new Error(`scheduler had no active timer for ${delayMs}ms`)
+    record.fired = true
+    record.callback()
+  }
+
   fireAll(): void {
     while (this.records.some(record => !record.fired && !record.cleared)) this.fireNext()
   }
@@ -145,19 +152,21 @@ type RootModule = Readonly<Record<string, unknown>>
 
 const SOURCE_ENTRY = new URL('../src/index.ts', import.meta.url).href
 const LIB_ENTRY = new URL('../lib/index.js', import.meta.url).href
-const STARTUP_MODULE_URL = new URL('../src/personal-feed/x-startup.ts', import.meta.url).href
+const STARTUP_SOURCE_MODULE_URL = new URL('../src/personal-feed/x-startup.ts', import.meta.url).href
+const STARTUP_LIB_MODULE_URL = new URL('../lib/types/personal-feed/x-startup.js', import.meta.url).href
 const CONFIG_MODULE_URL = new URL('../src/config.ts', import.meta.url).href
 
 function cliPathForEntry(packageEntryUrl: string): string {
   return fileURLToPath(new URL('../python/x_personal_feed_observer_cli.py', packageEntryUrl))
 }
 
-async function loadStartupModule(): Promise<StartupModule> {
+async function loadStartupModule(entry: 'source' | 'lib' = 'source'): Promise<StartupModule> {
+  const moduleUrl = entry === 'source' ? STARTUP_SOURCE_MODULE_URL : STARTUP_LIB_MODULE_URL
   try {
-    return await import(/* @vite-ignore */ STARTUP_MODULE_URL) as StartupModule
+    return await import(/* @vite-ignore */ moduleUrl) as StartupModule
   } catch (error: unknown) {
     const detail = error instanceof Error ? error.message : String(error)
-    throw new Error(`CAPABILITY_ASSERTION: x-startup.ts import failed: ${detail}`)
+    throw new Error(`CAPABILITY_ASSERTION: ${entry} x-startup import failed: ${detail}`)
   }
 }
 
@@ -216,6 +225,61 @@ function validCompleteLine(request: Readonly<{ readonly requestId: string; reado
     ],
   }) + '\n'
   return new TextEncoder().encode(raw)
+}
+
+function validCompleteLineWithForYouCanary(
+  request: Readonly<{ readonly requestId: string; readonly cutoff: string; readonly shanghaiDay: string }>,
+  body: string,
+): Uint8Array {
+  const raw = JSON.stringify({
+    schemaVersion: 1,
+    kind: 'complete',
+    ...request,
+    startedAt: '2026-09-01T00:00:00.100Z',
+    completedAt: '2026-09-01T00:00:00.900Z',
+    surfaces: [
+      {
+        kind: 'complete',
+        surface: 'for_you',
+        surfaceOrdinal: 0,
+        startedAt: '2026-09-01T00:00:00.200Z',
+        completedAt: '2026-09-01T00:00:00.300Z',
+        occurrences: [{
+          sourceUrl: 'https://x.com/startup/status/101',
+          body: { kind: 'sufficient', text: body },
+          occurrenceOrdinal: 0,
+          capturedAt: '2026-09-01T00:00:00.250Z',
+          authorHandle: 'startup',
+          publishedAt: '2026-09-01T00:00:00.250Z',
+        }],
+      },
+      { kind: 'natural_zero', surface: 'following', surfaceOrdinal: 1, startedAt: '2026-09-01T00:00:00.400Z', completedAt: '2026-09-01T00:00:00.500Z', occurrences: [] },
+      { kind: 'natural_zero', surface: 'explore', surfaceOrdinal: 2, startedAt: '2026-09-01T00:00:00.600Z', completedAt: '2026-09-01T00:00:00.700Z', occurrences: [] },
+    ],
+  }) + '\n'
+  return new TextEncoder().encode(raw)
+}
+
+function expectFixedShutdownAggregate(error: unknown, forbiddenCanary?: string): void {
+  expect(error).toBeInstanceOf(AggregateError)
+  const aggregate = error as AggregateError
+  expect(aggregate.message).toBe('Unable to shutdown personal-feed X startup')
+  expect(aggregate.errors).toHaveLength(1)
+  expect(aggregate.errors[0]).toBeInstanceOf(Error)
+  expect((aggregate.errors[0] as Error).message).toBe('Unable to shutdown personal-feed X startup child owner')
+  const visibleGraph = JSON.stringify({
+    message: aggregate.message,
+    errors: aggregate.errors.map(value => ({
+      name: value instanceof Error ? value.name : typeof value,
+      message: value instanceof Error ? value.message : String(value),
+    })),
+  })
+  expect(visibleGraph).not.toContain('body')
+  expect(visibleGraph).not.toContain(FIXED_ERROR_CANARY)
+  if (forbiddenCanary !== undefined) expect(visibleGraph).not.toContain(forbiddenCanary)
+  expect(visibleGraph).not.toContain('/nonexistent')
+  expect(visibleGraph).not.toContain('/tmp/startup-test')
+  expect(visibleGraph).not.toContain('pid')
 }
 
 function validPrimitives(nativeSpawn: NativeSpawn, scheduler = new ManualScheduler()): Primitives {
@@ -643,5 +707,220 @@ describe('Personal Feed X startup Group4/G3 runtime composition contract', () =>
     }
     expectNoSensitiveDetails(thrown)
     expect(calls).toHaveLength(0)
+  })
+
+  it('package shutdown joins child ownership after surface drain', async () => {
+    const runtimeConfig = await parseRuntimeConfig()
+    const request = Object.freeze({ requestId: 'telegram:7:11', cutoff: '2026-09-01T00:00:00.000Z', shanghaiDay: '2026-09-01' })
+    for (const entry of ['source', 'lib'] as const) {
+      const loaded = await loadStartupModule(entry)
+      expect(typeof loaded.createPersonalFeedXStartupFromPackageEntry).toBe('function')
+      const create = loaded.createPersonalFeedXStartupFromPackageEntry as (
+        packageEntryUrl: unknown,
+        config: unknown,
+        primitives?: unknown,
+      ) => Startup
+
+      let startup: Startup | undefined
+      let child: FakeChild | undefined
+      let shutdownPromise: Promise<void> | undefined
+      try {
+        const calls: unknown[][] = []
+        const scheduler = new ManualScheduler()
+        const spawn: NativeSpawn = (...args: unknown[]): unknown => {
+          calls.push(args)
+          child = new FakeChild({
+            onEnd: current => queueMicrotask(() => {
+              current.stdout.emit('data', validCompleteLine(request))
+              current.emit('exit', 0, null)
+              current.emit('close', 0, null)
+            }),
+          })
+          return child
+        }
+        startup = create(entry === 'source' ? SOURCE_ENTRY : LIB_ENTRY, runtimeConfig, validPrimitives(spawn, scheduler))
+        const observed = await settleWithWatchdog(startup.observe({ request, signal: new AbortController().signal })) as {
+          readonly kind?: unknown
+          readonly close?: () => Promise<void>
+        }
+        expect(observed.kind).toBe('complete')
+        expect(typeof observed.close).toBe('function')
+        await observed.close?.()
+        shutdownPromise = startup.shutdown()
+        expect(startup.shutdown()).toBe(shutdownPromise)
+        await settleWithWatchdog(shutdownPromise)
+        expect(child?.signals).toEqual([])
+        const afterShutdown = await settleWithWatchdog(startup.observe({ request, signal: new AbortController().signal }))
+        expect(afterShutdown).toEqual(Object.freeze({ kind: 'incomplete' }))
+        expect(Reflect.ownKeys(afterShutdown as object)).toEqual(['kind'])
+        expect(calls).toHaveLength(1)
+      } finally {
+        child?.emit('exit', 0, null)
+        if (child !== undefined && child.listenerCount('error') > 0) child.emit('error', new Error(FIXED_ERROR_CANARY))
+        child?.emit('close', 0, null)
+        if (shutdownPromise !== undefined) await shutdownPromise.catch(() => undefined)
+        else if (startup !== undefined) await startup.shutdown().catch(() => undefined)
+      }
+
+      const hardCalls: unknown[][] = []
+      const hardScheduler = new ManualScheduler()
+      const hardChild = new FakeChild()
+      const hardSpawn: NativeSpawn = (...args: unknown[]): unknown => {
+        hardCalls.push(args)
+        return hardChild
+      }
+      const hardStartup = create(entry === 'source' ? SOURCE_ENTRY : LIB_ENTRY, runtimeConfig, validPrimitives(hardSpawn, hardScheduler))
+      let hardShutdown: Promise<void> | undefined
+      try {
+        const hardObserve = hardStartup.observe({ request, signal: new AbortController().signal })
+        await Promise.resolve()
+        expect(hardCalls).toHaveLength(1)
+        hardScheduler.fireDelay(TOTAL_BUDGET_MS - CLEANUP_RESERVE_MS - 1_000)
+        expect(hardChild.signals).toEqual(['SIGTERM'])
+        hardScheduler.fireDelay(KILL_GRACE_MS)
+        expect(hardChild.signals).toEqual(['SIGTERM', 'SIGKILL'])
+        hardScheduler.fireDelay(TOTAL_BUDGET_MS - 1_000)
+        expect(hardChild.signals).toEqual(['SIGTERM', 'SIGKILL', 'SIGKILL'])
+        const hardResult = await settleWithWatchdog(hardObserve)
+        expect(hardResult).toEqual(Object.freeze({ kind: 'incomplete' }))
+        expect(Reflect.ownKeys(hardResult as object)).toEqual(['kind'])
+
+        hardShutdown = hardStartup.shutdown()
+        expect(hardStartup.shutdown()).toBe(hardShutdown)
+        let shutdownError: unknown
+        try {
+          await settleWithWatchdog(hardShutdown)
+        } catch (error: unknown) {
+          shutdownError = error
+        }
+        expectFixedShutdownAggregate(shutdownError)
+
+        hardChild.emit('exit', 0, null)
+        hardChild.emit('error', new Error(FIXED_ERROR_CANARY))
+        hardChild.emit('close', 0, null)
+        expect(hardStartup.shutdown()).toBe(hardShutdown)
+        let lateShutdownError: unknown
+        try {
+          await settleWithWatchdog(hardShutdown)
+        } catch (error: unknown) {
+          lateShutdownError = error
+        }
+        expectFixedShutdownAggregate(lateShutdownError)
+        const afterShutdown = await settleWithWatchdog(hardStartup.observe({ request, signal: new AbortController().signal }))
+        expect(afterShutdown).toEqual(Object.freeze({ kind: 'incomplete' }))
+        expect(Reflect.ownKeys(afterShutdown as object)).toEqual(['kind'])
+        expect(hardCalls).toHaveLength(1)
+      } finally {
+        hardChild.emit('exit', 0, null)
+        if (hardChild.listenerCount('error') > 0) hardChild.emit('error', new Error(FIXED_ERROR_CANARY))
+        hardChild.emit('close', 0, null)
+        if (hardShutdown !== undefined) await hardShutdown.catch(() => undefined)
+        else await hardStartup.shutdown().catch(() => undefined)
+      }
+    }
+  })
+
+  it('shutdown synchronously seals captures, then joins the still-active child', async () => {
+    const runtimeConfig = await parseRuntimeConfig()
+    const request = Object.freeze({ requestId: 'telegram:7:11', cutoff: '2026-09-01T00:00:00.000Z', shanghaiDay: '2026-09-01' })
+    const canary = 'PERSONAL_FEED_X_STARTUP_CAPTURE_CANARY'
+    for (const entry of ['source', 'lib'] as const) {
+      const loaded = await loadStartupModule(entry)
+      expect(typeof loaded.createPersonalFeedXStartupFromPackageEntry).toBe('function')
+      const create = loaded.createPersonalFeedXStartupFromPackageEntry as (
+        packageEntryUrl: unknown,
+        config: unknown,
+        primitives?: unknown,
+      ) => Startup
+      const calls: unknown[][] = []
+      const scheduler = new ManualScheduler()
+      const children: FakeChild[] = []
+      const spawn: NativeSpawn = (...args: unknown[]): unknown => {
+        calls.push(args)
+        const child = children.length === 0
+          ? new FakeChild({
+            onEnd: current => queueMicrotask(() => {
+              current.stdout.emit('data', validCompleteLineWithForYouCanary(request, canary))
+              current.emit('exit', 0, null)
+              current.emit('close', 0, null)
+            }),
+          })
+          : new FakeChild()
+        children.push(child)
+        return child
+      }
+      const startup = create(entry === 'source' ? SOURCE_ENTRY : LIB_ENTRY, runtimeConfig, validPrimitives(spawn, scheduler))
+      let capture: { readonly take: (input: unknown) => unknown; readonly close: () => Promise<void> } | undefined
+      let shutdownPromise: Promise<void> | undefined
+      try {
+        const firstController = new AbortController()
+        const first = await settleWithWatchdog(startup.observe({ request, signal: firstController.signal })) as {
+          readonly kind?: unknown
+          readonly window?: unknown
+        }
+        expect(first.kind).toBe('complete')
+        const firstWindow = first.window as { readonly surfaces: readonly unknown[] }
+        const firstSurface = firstWindow.surfaces[0] as { readonly occurrences: readonly unknown[] }
+        const firstOccurrence = firstSurface.occurrences[0] as { readonly body: { readonly kind?: unknown; readonly capture?: unknown } }
+        expect(firstOccurrence.body.kind).toBe('sufficient')
+        capture = firstOccurrence.body.capture as typeof capture
+        expect(typeof capture?.take).toBe('function')
+        expect(typeof capture?.close).toBe('function')
+
+        const secondObserve = startup.observe({ request, signal: new AbortController().signal })
+        await Promise.resolve()
+        expect(calls).toHaveLength(2)
+        shutdownPromise = startup.shutdown()
+        expect(startup.shutdown()).toBe(shutdownPromise)
+        expect(await capture!.take({ signal: firstController.signal })).toBeUndefined()
+        const third = await settleWithWatchdog(startup.observe({ request, signal: new AbortController().signal }))
+        expect(third).toEqual(Object.freeze({ kind: 'incomplete' }))
+        expect(Reflect.ownKeys(third as object)).toEqual(['kind'])
+        expect(calls).toHaveLength(2)
+        let shutdownSettled = false
+        void shutdownPromise.then(() => { shutdownSettled = true }, () => { shutdownSettled = true })
+        await Promise.resolve()
+        expect(shutdownSettled).toBe(false)
+
+        expect(children[1]).toBeDefined()
+        scheduler.fireDelay(TOTAL_BUDGET_MS - CLEANUP_RESERVE_MS - 1_000)
+        expect(children[1]?.signals).toEqual(['SIGTERM'])
+        scheduler.fireDelay(KILL_GRACE_MS)
+        expect(children[1]?.signals).toEqual(['SIGTERM', 'SIGKILL'])
+        scheduler.fireDelay(TOTAL_BUDGET_MS - 1_000)
+        expect(children[1]?.signals).toEqual(['SIGTERM', 'SIGKILL', 'SIGKILL'])
+        const second = await settleWithWatchdog(secondObserve)
+        expect(second).toEqual(Object.freeze({ kind: 'incomplete' }))
+        expect(Reflect.ownKeys(second as object)).toEqual(['kind'])
+
+        let shutdownError: unknown
+        try {
+          await settleWithWatchdog(shutdownPromise)
+        } catch (error: unknown) {
+          shutdownError = error
+        }
+        expectFixedShutdownAggregate(shutdownError, canary)
+        children[1]?.emit('exit', 0, null)
+        children[1]?.emit('error', new Error(FIXED_ERROR_CANARY))
+        children[1]?.emit('close', 0, null)
+        expect(startup.shutdown()).toBe(shutdownPromise)
+        let lateShutdownError: unknown
+        try {
+          await settleWithWatchdog(shutdownPromise)
+        } catch (error: unknown) {
+          lateShutdownError = error
+        }
+        expectFixedShutdownAggregate(lateShutdownError, canary)
+      } finally {
+        if (capture !== undefined) await capture.close().catch(() => undefined)
+        for (const child of children) {
+          child.emit('exit', 0, null)
+          if (child.listenerCount('error') > 0) child.emit('error', new Error(FIXED_ERROR_CANARY))
+          child.emit('close', 0, null)
+        }
+        if (shutdownPromise !== undefined) await shutdownPromise.catch(() => undefined)
+        else await startup.shutdown().catch(() => undefined)
+      }
+    }
   })
 })

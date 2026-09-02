@@ -12,13 +12,16 @@ import { types as nodeTypes } from 'node:util'
 import { dirname, isAbsolute, join, normalize, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { resolveDshHome as nodeResolveDshHome } from '@deepseek-ai/dsh-home-paths'
-import { createPersonalFeedXObserverChild } from './x-observer-child.ts'
+import { createPersonalFeedXObserverChildOwner } from './x-observer-child.ts'
 import { createPersonalFeedXSurfaceObserver } from './x-surface-observer.ts'
 
 const STARTUP_RESOLUTION_ERROR = 'Unable to resolve personal-feed X startup identity'
 const STARTUP_SPAWN_ERROR = 'Unable to create personal-feed X startup spawn'
 const STARTUP_RUNTIME_ERROR = 'Unable to create personal-feed X startup'
 const STARTUP_SELF_TEST_ERROR = 'Unable to run personal-feed X startup self-test'
+const STARTUP_SHUTDOWN_ERROR = 'Unable to shutdown personal-feed X startup'
+const STARTUP_SURFACE_SHUTDOWN_ERROR = 'Unable to shutdown personal-feed X startup surface owner'
+const STARTUP_CHILD_SHUTDOWN_ERROR = 'Unable to shutdown personal-feed X startup child owner'
 const SELF_TEST_RECEIPT = 'personal-feed-x-startup-self-test/v1'
 const SELF_TEST_OUTPUT = '{"schemaVersion":1,"kind":"invalid_input"}\n'
 const SELF_TEST_HOME = '/nonexistent'
@@ -633,7 +636,7 @@ function startupObserverChild(
   primitives: StartupPrimitives,
 ): StartupOwner {
   const spawn = createPersonalFeedXStartupSpawn(identity, directories, primitives.nativeSpawn)
-  const child = createPersonalFeedXObserverChild({
+  const childOwner = createPersonalFeedXObserverChildOwner({
     pythonFile: identity.pythonFile,
     observerCliPath: identity.observerCliPath,
     totalBudgetMs: 120_000,
@@ -644,7 +647,66 @@ function startupObserverChild(
     setTimeout: primitives.setTimeout,
     clearTimeout: primitives.clearTimeout,
   })
-  return createPersonalFeedXSurfaceObserver({ child }) as StartupOwner
+  const child = Object.freeze({ observe: childOwner.observe })
+  const surfaceOwner = createPersonalFeedXSurfaceObserver({ child }) as StartupOwner
+  let finalShutdownPromise: Promise<void> | undefined
+
+  const shutdown = (): Promise<void> => {
+    if (finalShutdownPromise !== undefined) return finalShutdownPromise
+
+    let resolveFinal!: () => void
+    let rejectFinal!: (reason: unknown) => void
+    finalShutdownPromise = new Promise<void>((resolve, reject) => {
+      resolveFinal = resolve
+      rejectFinal = reject
+    })
+    void finalShutdownPromise.catch(() => undefined)
+
+    let surfaceShutdown: Promise<void> | undefined
+    let surfaceFailed = false
+    try {
+      surfaceShutdown = surfaceOwner.shutdown()
+    } catch {
+      surfaceFailed = true
+    }
+
+    const finishShutdown = async (): Promise<void> => {
+      if (!surfaceFailed) {
+        try {
+          await surfaceShutdown
+        } catch {
+          surfaceFailed = true
+        }
+      }
+
+      let childFailed = false
+      try {
+        await childOwner.shutdown()
+      } catch {
+        childFailed = true
+      }
+
+      if (surfaceFailed || childFailed) {
+        const errors: Error[] = []
+        if (surfaceFailed) errors.push(new Error(STARTUP_SURFACE_SHUTDOWN_ERROR))
+        if (childFailed) errors.push(new Error(STARTUP_CHILD_SHUTDOWN_ERROR))
+        rejectFinal(new AggregateError(errors, STARTUP_SHUTDOWN_ERROR))
+      } else {
+        resolveFinal()
+      }
+    }
+    void finishShutdown().catch(() => {
+      rejectFinal(new AggregateError([
+        new Error(STARTUP_SURFACE_SHUTDOWN_ERROR),
+        new Error(STARTUP_CHILD_SHUTDOWN_ERROR),
+      ], STARTUP_SHUTDOWN_ERROR))
+    })
+    return finalShutdownPromise
+  }
+
+  Object.freeze(surfaceOwner.observe)
+  Object.freeze(shutdown)
+  return Object.freeze({ observe: surfaceOwner.observe, shutdown })
 }
 
 /** Internal composition seam. It is intentionally not re-exported by the package root. */
