@@ -132,7 +132,7 @@ class _ExistingCdpBrowser:
         return "ready" if _x_page(page_url) else "not_ready"
 
 
-class _BoundedBrowserLock:
+class _BrowserNavigationLockAdapter:
     @contextlib.contextmanager
     def lock(self, timeout_seconds):
         timeout = _positive_timeout(timeout_seconds)
@@ -841,7 +841,7 @@ def main(stdin=sys.stdin.buffer, stdout=sys.stdout, observer=None):
             try:
                 clock = _SystemClock()
                 browser = _ExistingCdpBrowser(clock=clock, deadline_epoch_ms=deadline)
-                lock = _BoundedBrowserLock()
+                lock = _BrowserNavigationLockAdapter()
                 evaluator = _MechanicalCdpEvaluator()
 
                 def chosen(value):

@@ -111,7 +111,7 @@ def _empty_facts(surface, **counts):
 
 
 def _require_cli(case):
-    # x_timeline_store derives its lock path at import time.  Point that
+    # x_browser_navigation_lock derives its lock path at import time.  Point that
     # derivation at a non-default, non-production location and restore the
     # caller's environment before returning; the tests never let this lock
     # implementation touch the path.
@@ -488,7 +488,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
 
         clock_type = getattr(module, "_SystemClock", None)
         browser_type = getattr(module, "_ExistingCdpBrowser", None)
-        lock_type = getattr(module, "_BoundedBrowserLock", None)
+        lock_type = getattr(module, "_BrowserNavigationLockAdapter", None)
         evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)
         for adapter in (clock_type, browser_type, lock_type, evaluator_type):
             self.assertIsNotNone(adapter)
@@ -518,7 +518,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                 mock.patch.object(module, "_ExistingCdpBrowser", wraps=browser_type)
             )
             lock_ctor = stack.enter_context(
-                mock.patch.object(module, "_BoundedBrowserLock", wraps=lock_type)
+                mock.patch.object(module, "_BrowserNavigationLockAdapter", wraps=lock_type)
             )
             evaluator_ctor = stack.enter_context(
                 mock.patch.object(module, "_MechanicalCdpEvaluator", wraps=evaluator_type)
@@ -546,7 +546,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
     def test_browser_and_lock_ports_are_bounded_without_recovery(self):
         module = _require_cli(self)
         browser_type = getattr(module, "_ExistingCdpBrowser", None)
-        lock_type = getattr(module, "_BoundedBrowserLock", None)
+        lock_type = getattr(module, "_BrowserNavigationLockAdapter", None)
         self.assertIsNotNone(browser_type)
         self.assertIsNotNone(lock_type)
 
@@ -657,7 +657,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             sys.modules[legacy_name] = legacy
             sys.modules[unique_name] = module
             spec.loader.exec_module(module)
-            lock_type = getattr(module, "_BoundedBrowserLock", None)
+            lock_type = getattr(module, "_BrowserNavigationLockAdapter", None)
             self.assertIsNotNone(lock_type)
             with lock_type().lock(0.25):
                 self.assertEqual(neutral_calls, [0.25])
