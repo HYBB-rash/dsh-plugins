@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createPersonalFeedV2CandidateLifecycle, createPersonalFeedV2RequestCoordinator } from '@herman/personal-feed'
+import { createPersonalFeedV2CandidateLifecycle } from '@herman/personal-feed'
 import { createPersonalContextOwner, createSessionUserHistoryAdapter } from '@herman/personal-feed'
 import { parseXFeedRuntimeConfig } from './config.ts'
 import { XFeedbackStore } from './store.ts'
@@ -11,7 +11,8 @@ import { runCleanFeedback } from './x-feedback/clean-agent.ts'
 import { FeedbackEffectAdapter, type FeedbackOperationStore } from './x-feedback/feedback-effect-adapter.ts'
 import { InMemoryPendingStore } from './x-feedback/pending-store.ts'
 import { registerTelegramFeedbackAdapter } from './x-feedback/telegram-adapter.ts'
-import { createPersonalFeedTelegramRequestHandler, registerPersonalFeedTelegramAdapter } from './personal-feed/telegram-adapter.ts'
+import { isExplicitPersonalFeedRequest } from './personal-feed/telegram-adapter.ts'
+import { createPersonalFeedTelegramInstallLifetime } from './personal-feed/telegram-feed-lifetime.ts'
 import { createPersonalContextTelegramRuntime } from './personal-feed/personal-context-telegram-runtime.ts'
 import { createPersonalContextSemanticLlmPorts } from './personal-feed/personal-context-semantic-llm.ts'
 import { FileTrustedFactRepository } from './x-feedback/trusted-fact-repository.ts'
@@ -137,7 +138,7 @@ export async function installTelegramExtensionFromPackageEntry(
     completionLedgerPath: join(config.personalFeedDataDir, 'v2', 'candidate-judgments.jsonl'),
     clock: installClock,
   })
-  const personalFeedCoordinator = createPersonalFeedV2RequestCoordinator({
+  const coordinatorOptions = {
     ledgerPath: join(config.personalFeedDataDir, 'v2', 'requests.jsonl'),
     clock: installClock,
     r4: personalContextRuntime.r4,
@@ -149,8 +150,9 @@ export async function installTelegramExtensionFromPackageEntry(
     },
     r3: personalFeedCandidateLifecycle,
     r5: { judge: async () => Object.freeze({ kind: 'incomplete', completed: Object.freeze([]), reason: 'unknown' }) },
-  })
-  const personalFeedHandler = createPersonalFeedTelegramRequestHandler({ coordinator: personalFeedCoordinator })
+  } as const
+  const personalFeedLifetime = createPersonalFeedTelegramInstallLifetime({ coordinatorOptions })
+  const personalFeedHandler = personalFeedLifetime.handler
   let stopSource: (() => void) | undefined
   let stopFeedback: (() => void) | undefined
   let stopPersonalFeed: (() => void) | undefined
@@ -160,6 +162,28 @@ export async function installTelegramExtensionFromPackageEntry(
       try { action() } catch (error) { errors.push(error) }
     }
     return errors
+  }
+  const registerPersonalFeedTelegramListener = (
+    listenerContext: Pick<Context, 'on'>,
+  ): (() => void) => {
+    let disposed = false
+    const stop = listenerContext.on('telegram/inbound', async (envelope, next) => {
+      if (disposed) return await next()
+      if (envelope.currentText.trim() === '') return { kind: 'handled', finalText: '' }
+      if (!isExplicitPersonalFeedRequest(envelope)) return await next()
+      return personalFeedHandler(envelope)
+    })
+    return () => {
+      if (disposed) return
+      disposed = true
+      stop()
+    }
+  }
+  const startPersonalFeedShutdown = (errors: unknown[]): Promise<void> => {
+    try { return personalFeedLifetime.shutdown() } catch (error) {
+      errors.push(error)
+      return Promise.resolve()
+    }
   }
   try {
     stopSource = personalContextRuntime.registerSourceFirst(ctx, {
@@ -177,15 +201,17 @@ export async function installTelegramExtensionFromPackageEntry(
         config.feedbackTurnTimeoutMs,
       ),
     })
-    stopPersonalFeed = registerPersonalFeedTelegramAdapter(ctx, {
-      coordinator: personalFeedCoordinator,
-    })
+    stopPersonalFeed = registerPersonalFeedTelegramListener(ctx)
   } catch (error) {
+    const lifetimeErrors: unknown[] = []
+    const lifetimeShutdown = startPersonalFeedShutdown(lifetimeErrors)
     const cleanup = cleanupErrors([
       ...(stopPersonalFeed === undefined ? [] : [stopPersonalFeed]),
       ...(stopFeedback === undefined ? [] : [stopFeedback]),
       ...(stopSource === undefined ? [] : [stopSource]),
     ])
+    try { await lifetimeShutdown } catch (shutdownError) { lifetimeErrors.push(shutdownError) }
+    cleanup.push(...lifetimeErrors)
     await shutdownPersonalContext(cleanup)
     if (cleanup.length > 0) throw new AggregateError([error, ...cleanup])
     throw error
@@ -233,6 +259,8 @@ export async function installTelegramExtensionFromPackageEntry(
       installForRoot(agent)
     })
   } catch (error) {
+    const lifetimeErrors: unknown[] = []
+    const lifetimeShutdown = startPersonalFeedShutdown(lifetimeErrors)
     const rootCleanups = [...runtimes.values()].reverse()
     runtimes.clear()
     const cleanup = cleanupErrors(rootCleanups)
@@ -242,19 +270,29 @@ export async function installTelegramExtensionFromPackageEntry(
       ...(stopFeedback === undefined ? [] : [stopFeedback]),
       ...(stopSource === undefined ? [] : [stopSource]),
     ]))
+    try { await lifetimeShutdown } catch (shutdownError) { lifetimeErrors.push(shutdownError) }
+    cleanup.push(...lifetimeErrors)
     await shutdownPersonalContext(cleanup)
     if (cleanup.length > 0) throw new AggregateError([error, ...cleanup])
     throw error
   }
 
   let disposePromise: Promise<void> | undefined
+  let lifetimeShutdownPromise: Promise<void> | undefined
   return (): Promise<void> => {
     if (disposePromise !== undefined) return disposePromise
     stopping = true
     const cleanups = [...runtimes.values()].reverse()
     runtimes.clear()
+    const lifetimeErrors: unknown[] = []
+    try {
+      lifetimeShutdownPromise = personalFeedLifetime.shutdown()
+    } catch (error) {
+      lifetimeErrors.push(error)
+      lifetimeShutdownPromise = Promise.resolve()
+    }
     disposePromise = (async () => {
-      const errors: unknown[] = []
+      const errors: unknown[] = [...lifetimeErrors]
       try { stopCreated?.() } catch (error) { errors.push(error) }
       for (const cleanup of cleanups) {
         try { cleanup() } catch (error) { errors.push(error) }
@@ -262,6 +300,7 @@ export async function installTelegramExtensionFromPackageEntry(
       try { stopPersonalFeed?.() } catch (error) { errors.push(error) }
       try { stopFeedback?.() } catch (error) { errors.push(error) }
       try { stopSource?.() } catch (error) { errors.push(error) }
+      try { await lifetimeShutdownPromise } catch (error) { errors.push(error) }
       await shutdownPersonalContext(errors)
       if (errors.length > 0) throw new AggregateError(errors)
     })()

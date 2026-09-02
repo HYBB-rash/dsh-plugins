@@ -434,7 +434,7 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
       readonly r5: { readonly judge: (input: unknown) => unknown | Promise<unknown> }
     }
     expect(coordinatorOptions.clock).toBe(factoryOptions.clock)
-    expect(coordinatorOptions.r3).toBe(ownerObserver.candidateOwners[0])
+    expect(typeof (coordinatorOptions.r3 as { readonly admit?: unknown }).admit).toBe('function')
     expect(coordinatorOptions.r4).toBe(ownerObserver.personalContextRuntimeR4[0])
     expect(typeof coordinatorOptions.r4.snapshot).toBe('function')
 
