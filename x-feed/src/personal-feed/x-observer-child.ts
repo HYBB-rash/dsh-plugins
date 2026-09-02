@@ -288,6 +288,61 @@ function drainLateStreamError(): void {
   // Keep a harmless error listener while a handed-off stream awaits close.
 }
 
+function readCapturedSpecificCount(
+  listenerOps: CapturedListenerOps,
+  event: string,
+  listener: (...args: unknown[]) => void,
+): number | undefined {
+  if (listenerOps.listenerCount === undefined) return undefined
+  try {
+    const specific = Reflect.apply(listenerOps.listenerCount, listenerOps.target, [event, listener])
+    return typeof specific === 'number' && Number.isSafeInteger(specific) && specific >= 0 ? specific : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function detachCapturedSpecific(
+  listenerOps: CapturedListenerOps,
+  event: string,
+  listener: (...args: unknown[]) => void,
+): boolean {
+  if (listenerOps.removeListener === undefined) return false
+  let specific = readCapturedSpecificCount(listenerOps, event, listener)
+  if (specific === undefined) return false
+  const upperBound = specific
+  let attempts = 0
+  try {
+    while (specific > 0 && attempts < upperBound) {
+      Reflect.apply(listenerOps.removeListener, listenerOps.target, [event, listener])
+      const nextSpecific = readCapturedSpecificCount(listenerOps, event, listener)
+      if (nextSpecific === undefined || nextSpecific >= specific) return false
+      specific = nextSpecific
+      attempts += 1
+    }
+  } catch {
+    return false
+  }
+  return specific === 0
+}
+
+function detachCapturedListener(
+  listenerOps: CapturedListenerOps,
+  event: string,
+  listener: (...args: unknown[]) => void,
+  retainedCount = 0,
+): boolean {
+  const baseline = listenerOps.baselines.get(event)
+  if (baseline === undefined || listenerOps.listenerCount === undefined) return false
+  if (!detachCapturedSpecific(listenerOps, event, listener)) return false
+  try {
+    const currentTotal = Reflect.apply(listenerOps.listenerCount, listenerOps.target, [event])
+    return currentTotal === baseline + retainedCount
+  } catch {
+    return false
+  }
+}
+
 function frozenError(code: ErrorCode): ObserverError {
   return Object.freeze({ kind: 'error', code })
 }
@@ -886,61 +941,6 @@ function observeChild(
     let spawnListenerInstalled = false
     let childErrorListenerInstalled = false
     let hardCleanupComplete = false
-
-    const readCapturedSpecificCount = (
-      listenerOps: CapturedListenerOps,
-      event: string,
-      listener: (...args: unknown[]) => void,
-    ): number | undefined => {
-      if (listenerOps.listenerCount === undefined) return undefined
-      try {
-        const specific = Reflect.apply(listenerOps.listenerCount, listenerOps.target, [event, listener])
-        return typeof specific === 'number' && Number.isSafeInteger(specific) && specific >= 0 ? specific : undefined
-      } catch {
-        return undefined
-      }
-    }
-
-    const detachCapturedSpecific = (
-      listenerOps: CapturedListenerOps,
-      event: string,
-      listener: (...args: unknown[]) => void,
-    ): boolean => {
-      if (listenerOps.removeListener === undefined) return false
-      let specific = readCapturedSpecificCount(listenerOps, event, listener)
-      if (specific === undefined) return false
-      const upperBound = specific
-      let attempts = 0
-      try {
-        while (specific > 0 && attempts < upperBound) {
-          Reflect.apply(listenerOps.removeListener, listenerOps.target, [event, listener])
-          const nextSpecific = readCapturedSpecificCount(listenerOps, event, listener)
-          if (nextSpecific === undefined || nextSpecific >= specific) return false
-          specific = nextSpecific
-          attempts += 1
-        }
-      } catch {
-        return false
-      }
-      return specific === 0
-    }
-
-    const detachCapturedListener = (
-      listenerOps: CapturedListenerOps,
-      event: string,
-      listener: (...args: unknown[]) => void,
-      retainedCount = 0,
-    ): boolean => {
-      const baseline = listenerOps.baselines.get(event)
-      if (baseline === undefined || listenerOps.listenerCount === undefined) return false
-      if (!detachCapturedSpecific(listenerOps, event, listener)) return false
-      try {
-        const currentTotal = Reflect.apply(listenerOps.listenerCount, listenerOps.target, [event])
-        return currentTotal === baseline + retainedCount
-      } catch {
-        return false
-      }
-    }
 
     const installCapturedListener = (
       listenerOps: CapturedListenerOps,
