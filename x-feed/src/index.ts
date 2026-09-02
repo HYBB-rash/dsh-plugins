@@ -6,6 +6,11 @@
  * exported here through generic extension ports.
  */
 
+import {
+  createPersonalFeedXStartupFromPackageEntry as createStartupFromPackageEntry,
+  runPersonalFeedXStartupSelfTestFromPackageEntry as runStartupSelfTestFromPackageEntry,
+} from './personal-feed/x-startup.ts'
+
 export {
   parseXFeedRuntimeConfig,
   resolveDataDir,
@@ -26,6 +31,21 @@ export {
   X_CRON_ENVIRONMENT_REQUIREMENTS,
   type XFeedCronProviderOptions,
 } from './x-cron/provider.ts'
+
+/** Compose the production Personal Feed X runtime from this package entry. */
+export function createPersonalFeedXStartup(runtimeConfig: unknown): Readonly<{
+  readonly observe: (input: unknown) => Promise<unknown>
+  readonly shutdown: () => Promise<void>
+}> {
+  if (arguments.length !== 1) throw new Error('Unable to create personal-feed X startup')
+  return createStartupFromPackageEntry(import.meta.url, runtimeConfig)
+}
+
+/** Verify the shipped Personal Feed X Python child without touching business data. */
+export function runPersonalFeedXStartupSelfTest(): Promise<unknown> {
+  if (arguments.length !== 0) return Promise.reject(new Error('Unable to run personal-feed X startup self-test'))
+  return runStartupSelfTestFromPackageEntry(import.meta.url)
+}
 
 export {
   NAVIGATION_SCHEMA_VERSION,
