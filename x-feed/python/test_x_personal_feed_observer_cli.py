@@ -8,6 +8,7 @@ for every contract instead of breaking unittest collection.
 import ast
 import contextlib
 import importlib
+import importlib.util
 import inspect
 import io
 import json
@@ -16,6 +17,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 import urllib.request
 from unittest import mock
@@ -612,26 +614,6 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             self.assertFalse(browser.cdp_ready(remaining))
         self.assertEqual(overflow_reads, [max_http_bytes + 1])
 
-        lock_calls = []
-
-        @contextlib.contextmanager
-        def fake_browser_lock(timeout_seconds=None):
-            lock_calls.append(timeout_seconds)
-            yield
-
-        lock = lock_type()
-        patches = [mock.patch.object(module, "browser_lock", fake_browser_lock, create=True)]
-        store = getattr(module, "x_timeline_store", None)
-        if store is not None:
-            patches.append(mock.patch.object(store, "browser_lock", fake_browser_lock))
-        with contextlib.ExitStack() as stack:
-            for patcher in patches:
-                stack.enter_context(patcher)
-            with lock.lock(remaining):
-                pass
-        self.assertEqual(lock_calls, [remaining])
-        self.assertGreater(lock_calls[0], 0)
-
         for forbidden in ("ensure_cdp", "ensure_x_tab", "new_tab", "run_browser_start"):
             replacement = mock.Mock(side_effect=AssertionError(forbidden + " was called"))
             with mock.patch.object(module, forbidden, replacement, create=True):
@@ -641,6 +623,50 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                     browser.is_x_tab(tabs[0])
                     browser.classify_x_page("https://x.com/home", "")
             replacement.assert_not_called()
+
+    def test_bounded_browser_lock_uses_neutral_navigation_owner(self):
+        """The CLI lock adapter must call the neutral owner, never the legacy store."""
+        neutral_name = "x_browser_navigation_lock"
+        legacy_name = "x_timeline_store"
+        unique_name = f"{MODULE_NAME}_lock_owner_{id(self)}"
+        previous_modules = {
+            name: sys.modules.get(name)
+            for name in (neutral_name, legacy_name, unique_name)
+        }
+        neutral_calls = []
+
+        @contextlib.contextmanager
+        def neutral_browser_lock(timeout_seconds=None):
+            neutral_calls.append(timeout_seconds)
+            yield
+
+        neutral = types.ModuleType(neutral_name)
+        neutral.browser_lock = neutral_browser_lock
+        legacy = types.ModuleType(legacy_name)
+
+        def forbidden_legacy_browser_lock(*_args, **_kwargs):
+            raise AssertionError("CLI called legacy x_timeline_store.browser_lock")
+
+        legacy.browser_lock = forbidden_legacy_browser_lock
+        spec = importlib.util.spec_from_file_location(unique_name, SOURCE_PATH)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            sys.modules[neutral_name] = neutral
+            sys.modules[legacy_name] = legacy
+            sys.modules[unique_name] = module
+            spec.loader.exec_module(module)
+            lock_type = getattr(module, "_BoundedBrowserLock", None)
+            self.assertIsNotNone(lock_type)
+            with lock_type().lock(0.25):
+                self.assertEqual(neutral_calls, [0.25])
+        finally:
+            for name, previous in previous_modules.items():
+                if previous is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = previous
 
     def test_mechanical_cdp_evaluator_uses_fixed_bounded_actions(self):
         module = _require_cli(self)
@@ -2288,7 +2314,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         tree = ast.parse(source)
         stdlib = set(getattr(sys, "stdlib_module_names", ()))
         allowed_nonstdlib = {
-            "__future__", "websocket", "x_timeline_store",
+            "__future__", "websocket", "x_browser_navigation_lock",
             "x_personal_feed_observer",
         }
         imports = []
@@ -2299,6 +2325,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                 imports.append(node.module.split(".", 1)[0])
         for imported in imports:
             self.assertTrue(imported in stdlib or imported in allowed_nonstdlib, imported)
+        self.assertFalse(hasattr(module, "x_timeline_store"))
 
         lowered = source.lower()
         forbidden_fragments = (

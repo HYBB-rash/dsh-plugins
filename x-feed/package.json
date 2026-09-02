@@ -23,6 +23,7 @@
     "python/browser_start.py",
     "python/insight_engine.py",
     "python/x_browser.py",
+    "python/x_browser_navigation_lock.py",
     "python/x_explorer.py",
     "python/x_insight_pipeline.py",
     "python/x_neighborhood.py",

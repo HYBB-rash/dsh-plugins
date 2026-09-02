@@ -104,6 +104,7 @@ describe('X rich Markdown output guard', () => {
       'PREPARE-DELIVERY',
       '/home/herman/.dsh/x_insight_pipeline.py',
       '/tmp/x_insight_package.json',
+      'x_browser_navigation_lock.py',
       'X_INSIGHT_PIPELINE.PY',
       '~/.dsh/storages/dsh-x-feed/feedback.jsonl',
       'file:///tmp/trusted-fact-navigation.json',

@@ -146,6 +146,7 @@ describe('TODO7 packed NodeNext public-root consumer', () => {
     const packedFiles = filesUnder(xFeedPackage).map(path => relative(xFeedPackage, path))
     for (const asset of [
       'python/browser_start.py', 'python/insight_engine.py', 'python/x_browser.py',
+      'python/x_browser_navigation_lock.py',
       'python/x_explorer.py', 'python/x_insight_pipeline.py', 'python/x_neighborhood.py',
       'python/x_paths.py', 'python/x_timeline_collector.py', 'python/x_timeline_dedup.py',
       'python/x_timeline_migrate_explore.py', 'python/x_timeline_store.py', 'python/x_topic_search.py',

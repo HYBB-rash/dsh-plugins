@@ -12,6 +12,7 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import x_browser_navigation_lock as navigation_lock
 import x_timeline_store as store
 
 
@@ -25,7 +26,7 @@ def _append_from_worker(path):
 
 def _browser_lock_holder(control):
     """Hold the shared browser lock until the parent explicitly releases it."""
-    with store.browser_lock():
+    with navigation_lock.browser_lock():
         control.send("acquired")
         if control.recv() != "release":
             raise RuntimeError("unexpected holder command")
@@ -38,7 +39,7 @@ def _browser_lock_contender(control):
     if control.recv() != "attempt":
         raise RuntimeError("unexpected contender command")
     control.send("attempting")
-    with store.browser_lock():
+    with navigation_lock.browser_lock():
         control.send("entered")
         if control.recv() != "finish":
             raise RuntimeError("unexpected contender command")
@@ -97,24 +98,30 @@ class TestAppendUniqueRecords(unittest.TestCase):
 
 
 class TestBrowserLock(unittest.TestCase):
+    def test_legacy_lock_exports_are_the_neutral_owner_objects(self):
+        self.assertIs(store.BrowserLockTimeout, navigation_lock.BrowserLockTimeout)
+        self.assertIs(store.file_lock, navigation_lock.file_lock)
+        self.assertIs(store.browser_lock, navigation_lock.browser_lock)
+        self.assertIs(store.TIMELINE_BROWSER_LOCK, navigation_lock.TIMELINE_BROWSER_LOCK)
+
     def test_browser_lock_uses_exact_path_and_leaves_lock_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            original_path = store.TIMELINE_BROWSER_LOCK
+            original_path = navigation_lock.TIMELINE_BROWSER_LOCK
             lock_path = pathlib.Path(tmp) / "browser.lock"
-            store.TIMELINE_BROWSER_LOCK = lock_path
+            navigation_lock.TIMELINE_BROWSER_LOCK = lock_path
             try:
-                with store.browser_lock():
-                    self.assertEqual(store.TIMELINE_BROWSER_LOCK, lock_path)
+                with navigation_lock.browser_lock():
+                    self.assertEqual(navigation_lock.TIMELINE_BROWSER_LOCK, lock_path)
                     self.assertTrue(lock_path.exists())
                 self.assertTrue(lock_path.exists())
             finally:
-                store.TIMELINE_BROWSER_LOCK = original_path
+                navigation_lock.TIMELINE_BROWSER_LOCK = original_path
 
     def test_browser_lock_serializes_real_holder_and_contender_processes(self):
         """A contender cannot enter until the holder's explicit release."""
         with tempfile.TemporaryDirectory() as tmp:
-            original_path = store.TIMELINE_BROWSER_LOCK
-            store.TIMELINE_BROWSER_LOCK = pathlib.Path(tmp) / "browser.lock"
+            original_path = navigation_lock.TIMELINE_BROWSER_LOCK
+            navigation_lock.TIMELINE_BROWSER_LOCK = pathlib.Path(tmp) / "browser.lock"
             ctx = multiprocessing.get_context("fork")
             holder_parent, holder_child = ctx.Pipe()
             contender_parent, contender_child = ctx.Pipe()
@@ -154,21 +161,21 @@ class TestBrowserLock(unittest.TestCase):
                     if process.is_alive():
                         process.terminate()
                     process.join(timeout=2)
-                store.TIMELINE_BROWSER_LOCK = original_path
+                navigation_lock.TIMELINE_BROWSER_LOCK = original_path
 
     def test_browser_lock_timeout_is_bounded_and_succeeds_after_release(self):
         """A bounded contender times out, then enters after the holder releases."""
-        timeout_type = getattr(store, "BrowserLockTimeout", None)
+        timeout_type = getattr(navigation_lock, "BrowserLockTimeout", None)
         self.assertIsInstance(
             timeout_type,
             type,
-            "x_timeline_store.BrowserLockTimeout must be a defined exception type",
+            "x_browser_navigation_lock.BrowserLockTimeout must be a defined exception type",
         )
 
         with tempfile.TemporaryDirectory() as tmp:
-            original_path = store.TIMELINE_BROWSER_LOCK
+            original_path = navigation_lock.TIMELINE_BROWSER_LOCK
             lock_path = pathlib.Path(tmp) / "exact-browser.lock"
-            store.TIMELINE_BROWSER_LOCK = lock_path
+            navigation_lock.TIMELINE_BROWSER_LOCK = lock_path
             ctx = multiprocessing.get_context("fork")
             holder_parent, holder_child = ctx.Pipe()
             holder = ctx.Process(target=_browser_lock_holder, args=(holder_child,))
@@ -182,7 +189,7 @@ class TestBrowserLock(unittest.TestCase):
                 entered = False
                 started_at = time.monotonic()
                 with self.assertRaises(timeout_type) as raised:
-                    with store.browser_lock(timeout_seconds=timeout_seconds):
+                    with navigation_lock.browser_lock(timeout_seconds=timeout_seconds):
                         entered = True
                 elapsed = time.monotonic() - started_at
                 self.assertIs(type(raised.exception), timeout_type)
@@ -193,7 +200,7 @@ class TestBrowserLock(unittest.TestCase):
                 _expect_message(holder_parent, "released")
 
                 entered_after_release = False
-                with store.browser_lock(timeout_seconds=timeout_seconds):
+                with navigation_lock.browser_lock(timeout_seconds=timeout_seconds):
                     entered_after_release = True
                 self.assertTrue(entered_after_release)
 
@@ -206,7 +213,7 @@ class TestBrowserLock(unittest.TestCase):
                 if holder.is_alive():
                     holder.terminate()
                 holder.join(timeout=2)
-                store.TIMELINE_BROWSER_LOCK = original_path
+                navigation_lock.TIMELINE_BROWSER_LOCK = original_path
 
     def test_lock_timeout_rejects_invalid_values_before_touching_lock(self):
         """Invalid timeout values fail before either lock path is created."""
@@ -224,14 +231,14 @@ class TestBrowserLock(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmp:
-            original_path = store.TIMELINE_BROWSER_LOCK
+            original_path = navigation_lock.TIMELINE_BROWSER_LOCK
             try:
                 for index, (value, expected_type) in enumerate(invalid_values):
                     browser_path = pathlib.Path(tmp) / f"browser-{index}.lock"
-                    store.TIMELINE_BROWSER_LOCK = browser_path
+                    navigation_lock.TIMELINE_BROWSER_LOCK = browser_path
                     with self.subTest(api="browser_lock", value=repr(value)):
                         with self.assertRaises(expected_type):
-                            with store.browser_lock(timeout_seconds=value):
+                            with navigation_lock.browser_lock(timeout_seconds=value):
                                 pass
                         self.assertFalse(browser_path.exists())
 
@@ -242,7 +249,7 @@ class TestBrowserLock(unittest.TestCase):
                                 pass
                         self.assertFalse(file_path.exists())
             finally:
-                store.TIMELINE_BROWSER_LOCK = original_path
+                navigation_lock.TIMELINE_BROWSER_LOCK = original_path
 
 
 class TestIdentity(unittest.TestCase):

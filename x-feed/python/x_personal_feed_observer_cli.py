@@ -15,7 +15,7 @@ import urllib.request
 import websocket
 
 import x_personal_feed_observer
-import x_timeline_store
+import x_browser_navigation_lock
 
 
 MAX_INPUT_BYTES = 4096
@@ -136,7 +136,7 @@ class _BoundedBrowserLock:
     @contextlib.contextmanager
     def lock(self, timeout_seconds):
         timeout = _positive_timeout(timeout_seconds)
-        with x_timeline_store.browser_lock(timeout_seconds=timeout):
+        with x_browser_navigation_lock.browser_lock(timeout_seconds=timeout):
             yield
 
 

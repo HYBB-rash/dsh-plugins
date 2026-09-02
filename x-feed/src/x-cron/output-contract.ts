@@ -52,6 +52,7 @@ const INTERNAL_PROTOCOL_FILE_NAMES = [
   'browser_start.py',
   'insight_engine.py',
   'x_browser.py',
+  'x_browser_navigation_lock.py',
   'x_explorer.py',
   'x_insight_pipeline.py',
   'x_neighborhood.py',

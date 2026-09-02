@@ -1144,7 +1144,7 @@ class TestPersonalFeedObserver(unittest.TestCase):
         source = inspect.getsource(module)
         tree = ast.parse(source)
         stdlib = set(getattr(sys, "stdlib_module_names", ()))
-        allowed_nonstdlib = {"__future__", "websocket", "x_browser", "x_timeline_store"}
+        allowed_nonstdlib = {"__future__", "websocket", "x_browser"}
         imports = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
