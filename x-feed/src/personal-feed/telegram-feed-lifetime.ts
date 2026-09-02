@@ -185,6 +185,38 @@ function wrappedR2(
   }
 }
 
+function mapR3AdmissionResult(result: unknown, authorities: Set<Authority>, sealed: () => boolean): unknown {
+  const outer = exactDescriptorRecord(result, ['kind', 'cursor'])
+  if (outer?.values.get('kind') !== 'admitted') return result
+  const rawCursor = outer.values.get('cursor')
+  const full = exactDescriptorRecord(rawCursor, ['borrowCurrent', 'finalize', 'close'])
+  if (full !== undefined
+    && typeof full.values.get('borrowCurrent') === 'function'
+    && typeof full.values.get('finalize') === 'function'
+    && typeof full.values.get('close') === 'function'
+    && typeof rawCursor === 'object' && rawCursor !== null) {
+    const authority = makeAuthority(authorities, rawCursor, full.values.get('close') as RawClose)
+    return Object.freeze({
+      kind: 'admitted' as const,
+      cursor: Object.freeze({
+        borrowCurrent: (borrowInput: unknown) => Reflect.apply(full.values.get('borrowCurrent') as (...args: unknown[]) => unknown, rawCursor, [borrowInput]),
+        finalize: (claim: unknown) => Reflect.apply(full.values.get('finalize') as (...args: unknown[]) => unknown, rawCursor, [claim]),
+        close: closeProxy(authority, sealed),
+      }),
+    })
+  }
+  const cleanup = descriptorRecord(rawCursor)
+  const cleanupClose = cleanup?.values.get('close')
+  if (cleanup !== undefined && typeof cleanupClose === 'function' && typeof rawCursor === 'object' && rawCursor !== null) {
+    const authority = makeAuthority(authorities, rawCursor, cleanupClose as RawClose)
+    return Object.freeze({
+      kind: 'admitted' as const,
+      cursor: Object.freeze({ close: closeProxy(authority, sealed) }),
+    })
+  }
+  return result
+}
+
 function wrappedR3(
   raw: PersonalFeedV2R3Port,
   authorities: Set<Authority>,
@@ -193,37 +225,7 @@ function wrappedR3(
   return {
     admit: input => {
       const rawResult = Reflect.apply(raw.admit, raw, [input])
-      return mapRealPromise(rawResult, result => {
-      const outer = exactDescriptorRecord(result, ['kind', 'cursor'])
-      if (outer?.values.get('kind') !== 'admitted') return result
-      const rawCursor = outer.values.get('cursor')
-      const full = exactDescriptorRecord(rawCursor, ['borrowCurrent', 'finalize', 'close'])
-      if (full !== undefined
-        && typeof full.values.get('borrowCurrent') === 'function'
-        && typeof full.values.get('finalize') === 'function'
-        && typeof full.values.get('close') === 'function'
-        && typeof rawCursor === 'object' && rawCursor !== null) {
-        const authority = makeAuthority(authorities, rawCursor, full.values.get('close') as RawClose)
-        return Object.freeze({
-          kind: 'admitted' as const,
-          cursor: Object.freeze({
-            borrowCurrent: (borrowInput: unknown) => Reflect.apply(full.values.get('borrowCurrent') as (...args: unknown[]) => unknown, rawCursor, [borrowInput]),
-            finalize: (claim: unknown) => Reflect.apply(full.values.get('finalize') as (...args: unknown[]) => unknown, rawCursor, [claim]),
-            close: closeProxy(authority, sealed),
-          }),
-        })
-      }
-      const cleanup = descriptorRecord(rawCursor)
-      const cleanupClose = cleanup?.values.get('close')
-      if (cleanup !== undefined && typeof cleanupClose === 'function' && typeof rawCursor === 'object' && rawCursor !== null) {
-        const authority = makeAuthority(authorities, rawCursor, cleanupClose as RawClose)
-        return Object.freeze({
-          kind: 'admitted' as const,
-          cursor: Object.freeze({ close: closeProxy(authority, sealed) }),
-        })
-      }
-      return result
-      })
+      return mapRealPromise(rawResult, result => mapR3AdmissionResult(result, authorities, sealed))
     },
   }
 }
