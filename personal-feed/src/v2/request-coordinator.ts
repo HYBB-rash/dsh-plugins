@@ -227,6 +227,9 @@ const SOURCE_WINDOW_TEXT = '这次没有完成：X 来源或观察窗口未完�
 const JUDGEMENT_EXECUTION_TEXT = '这次没有完成：判断或执行未完成。'
 const BUSINESS_EMPTY_TEXT = '这次没有值得看的内容。'
 const CLEANUP_WAIT_MS = 250
+const CLEANUP_SEAL_AND_DRAIN = Symbol.for('@herman/personal-feed/v2/request-coordinator-cleanup-seal-and-drain')
+const CLEANUP_DRAIN_ERROR_TEXT = 'personal Feed v2 request cleanup seal-and-drain failed'
+const cleanupRegistries = new WeakMap<object, CleanupAuthorityRegistry>()
 
 type CleanupAuthorityState = 'ready' | 'closing' | 'retained'
 
@@ -240,14 +243,28 @@ interface CleanupAuthority {
 
 interface CleanupAuthorityRegistry {
   readonly register: (receiver: object, close: (reason: string) => unknown) => CleanupAuthority
+  readonly isSealed: () => boolean
   readonly retry: () => Promise<boolean>
   readonly attempt: (authority: CleanupAuthority) => Promise<boolean>
+  readonly sealAndDrain: () => Promise<void>
 }
 
 interface ParsedR2 {
   readonly window: unknown
   readonly receiver: object
   readonly close: (reason: string) => unknown
+}
+
+const cleanupSealAndDrain = (coordinator: unknown): Promise<unknown> => {
+  if ((typeof coordinator !== 'object' && typeof coordinator !== 'function') || coordinator === null) {
+    return Promise.reject(cleanupDrainError())
+  }
+  const registry = cleanupRegistries.get(coordinator as object)
+  return registry === undefined ? Promise.reject(cleanupDrainError()) : registry.sealAndDrain()
+}
+
+function cleanupDrainError(): PersonalFeedScopeStoreError {
+  return new PersonalFeedScopeStoreError(CLEANUP_DRAIN_ERROR_TEXT)
 }
 
 export function createPersonalFeedV2RequestCoordinator(
@@ -262,6 +279,7 @@ export function createPersonalFeedV2RequestCoordinator(
   const readLedger = (): ParsedLedger => parseLedger(options.ledgerPath)
 
   const retryCleanupDetached = (): void => {
+    if (cleanupRegistry.isSealed()) return
     void cleanupRegistry.retry().catch(() => undefined)
   }
 
@@ -315,6 +333,7 @@ export function createPersonalFeedV2RequestCoordinator(
   }
 
   const prepare = async (input: PersonalFeedV2PrepareInput): Promise<PersonalFeedV2PrepareResult> => {
+    if (cleanupRegistry.isSealed()) throw cleanupDrainError()
     validatePrepareInput(input)
     const requestId = personalFeedV2TelegramRequestId(input.chatId, input.messageId)
     const existing = readLedger().states.get(requestId)
@@ -436,7 +455,15 @@ export function createPersonalFeedV2RequestCoordinator(
     }
   }
 
-  return Object.freeze({ prepare, read })
+  const coordinator = Object.freeze({ prepare, read })
+  cleanupRegistries.set(coordinator, cleanupRegistry)
+  Object.defineProperty(prepare, CLEANUP_SEAL_AND_DRAIN, {
+    value: cleanupSealAndDrain,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  })
+  return coordinator
 }
 
 function validatePrepareInput(input: PersonalFeedV2PrepareInput): void {
@@ -1003,6 +1030,8 @@ function parseFinalization(value: unknown): ParsedFinalization | undefined {
 
 function createCleanupAuthorityRegistry(): CleanupAuthorityRegistry {
   const authorities = new Set<CleanupAuthority>()
+  let sealed = false
+  let drainPromise: Promise<void> | undefined
 
   const register = (receiver: object, close: (reason: string) => unknown): CleanupAuthority => {
     const authority: CleanupAuthority = {
@@ -1024,10 +1053,9 @@ function createCleanupAuthorityRegistry(): CleanupAuthorityRegistry {
     return result === true
   }
 
-  const attempt = async (authority: CleanupAuthority): Promise<boolean> => {
+  const startAttempt = (authority: CleanupAuthority): Promise<boolean> => {
     if (authority.state === 'closing') {
-      if (authority.promise === undefined) return false
-      return wait(authority.promise)
+      return authority.promise ?? Promise.resolve(false)
     }
     if (authority.state === 'retained') authority.state = 'ready'
 
@@ -1037,7 +1065,7 @@ function createCleanupAuthorityRegistry(): CleanupAuthorityRegistry {
       result = Reflect.apply(authority.close, authority.receiver, authority.args)
     } catch {
       authority.state = 'retained'
-      return false
+      return Promise.resolve(false)
     }
     const completion = Promise.resolve(result).then(
       () => {
@@ -1052,7 +1080,11 @@ function createCleanupAuthorityRegistry(): CleanupAuthorityRegistry {
       },
     )
     authority.promise = completion
-    return wait(completion)
+    return completion
+  }
+
+  const attempt = async (authority: CleanupAuthority): Promise<boolean> => {
+    return wait(startAttempt(authority))
   }
 
   const retry = async (): Promise<boolean> => {
@@ -1062,7 +1094,33 @@ function createCleanupAuthorityRegistry(): CleanupAuthorityRegistry {
     return authorities.size !== 0
   }
 
-  return { register, retry, attempt }
+  const isSealed = (): boolean => sealed
+
+  const sealAndDrain = (): Promise<void> => {
+    if (drainPromise !== undefined) return drainPromise
+    sealed = true
+    const snapshot = [...authorities]
+    const drain = (async (): Promise<void> => {
+      const results = await Promise.allSettled(snapshot.map(authority => {
+        try {
+          return startAttempt(authority)
+        } catch {
+          return Promise.reject(cleanupDrainError())
+        }
+      }))
+      const failed = results.some(result => result.status === 'rejected'
+        || (result.status === 'fulfilled' && !result.value))
+      const remaining = authorities.size
+      authorities.clear()
+      snapshot.length = 0
+      if (failed || remaining !== 0) throw cleanupDrainError()
+    })()
+    drainPromise = drain
+    void drain.catch(() => undefined)
+    return drain
+  }
+
+  return { register, isSealed, retry, attempt, sealAndDrain }
 }
 
 function isProvenSelection(
