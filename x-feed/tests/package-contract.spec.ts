@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { readdirSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, relative, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const packageDirectory = resolve(import.meta.dirname, '..')
@@ -11,6 +12,8 @@ const pythonRuntimeFiles = [
   'python/x_explorer.py',
   'python/x_insight_pipeline.py',
   'python/x_neighborhood.py',
+  'python/x_personal_feed_observer.py',
+  'python/x_personal_feed_observer_cli.py',
   'python/x_paths.py',
   'python/x_timeline_collector.py',
   'python/x_timeline_dedup.py',
@@ -19,17 +22,6 @@ const pythonRuntimeFiles = [
   'python/x_topic_search.py',
 ] as const
 
-function packedPaths(): string[] {
-  const output = execFileSync('npm', ['pack', '--dry-run', '--json'], {
-    cwd: packageDirectory,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  const entries = JSON.parse(output) as Array<{ files?: Array<{ path?: string }> }>
-  return entries.flatMap((entry) => (entry.files ?? []).flatMap((file) =>
-    file.path === undefined ? [] : [file.path]))
-}
-
 describe('x-feed business package contract', () => {
   it('ships runtime assets without private state or test material', () => {
     const packageJson = JSON.parse(readFileSync(resolve(packageDirectory, 'package.json'), 'utf8')) as {
@@ -37,14 +29,8 @@ describe('x-feed business package contract', () => {
       main?: string
       types?: string
     }
-    const files = packedPaths()
 
-    expect(files).toContain('package.json')
     expect(packageJson.name).toBe('@herman/x-feed')
-    expect(files).toContain(packageJson.main)
-    expect(files).toContain(packageJson.types)
-    expect(files.some((file) => /^lib\/[^/]+\.js$/.test(file))).toBe(true)
-    expect(files.some((file) => /^lib\/types\/.*\.d\.ts$/.test(file))).toBe(true)
 
     const mainSource = readFileSync(resolve(packageDirectory, packageJson.main ?? ''), 'utf8')
     const typeSource = readFileSync(resolve(packageDirectory, packageJson.types ?? ''), 'utf8')
@@ -92,10 +78,79 @@ describe('x-feed business package contract', () => {
       '.py',
     ]) expect(projectionSource).not.toContain(forbiddenImport)
 
-    for (const runtimeFile of pythonRuntimeFiles) expect(files).toContain(runtimeFile)
-    expect(files.some((file) => /(^|\/)(?:data|storage|storages)(?:\/|$)/.test(file))).toBe(false)
-    expect(files.some((file) => /(?:feedback\.jsonl|shown\.jsonl|x_insight_package\.json|\.dsh)/.test(file))).toBe(false)
-    expect(files.some((file) => /(?:__pycache__|\.pyc$|(?:^|\/)(?:cache|tests?|fixtures?)(?:\/|$)|(?:^|\/)test_[^/]+$)/.test(file))).toBe(false)
-    expect(files.filter((file) => /^python\/test_[^/]+\.py$/.test(file))).toEqual([])
+    let packDestination: string | undefined
+    let unpackDestination: string | undefined
+    try {
+      const packDir = mkdtempSync(resolve(tmpdir(), 'x-feed-pack-'))
+      const unpackDir = mkdtempSync(resolve(tmpdir(), 'x-feed-unpack-'))
+      packDestination = packDir
+      unpackDestination = unpackDir
+      const output = execFileSync('npm', [
+        'pack',
+        '--json',
+        '--pack-destination',
+        packDir,
+      ], {
+        cwd: packageDirectory,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          npm_config_cache: resolve(packDir, 'npm-cache'),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      const entries = JSON.parse(output) as Array<{
+        filename?: string
+        files?: Array<{ path?: string }>
+      }>
+      expect(entries).toHaveLength(1)
+      const entry = entries[0]
+      const files = (entry.files ?? []).flatMap((file) =>
+        file.path === undefined ? [] : [file.path])
+      expect(files).toContain('package.json')
+      expect(files).toContain(packageJson.main)
+      expect(files).toContain(packageJson.types)
+      expect(files.some((file) => /^lib\/[^/]+\.js$/.test(file))).toBe(true)
+      expect(files.some((file) => /^lib\/types\/.*\.d\.ts$/.test(file))).toBe(true)
+      for (const runtimeFile of pythonRuntimeFiles) expect(files).toContain(runtimeFile)
+      expect(files.some((file) => /(^|\/)(?:data|storage|storages)(?:\/|$)/.test(file))).toBe(false)
+      expect(files.some((file) => /(?:feedback\.jsonl|shown\.jsonl|x_insight_package\.json|\.dsh)/.test(file))).toBe(false)
+      expect(files.some((file) => /(?:__pycache__|\.pyc$|(?:^|\/)(?:cache|tests?|fixtures?)(?:\/|$)|(?:^|\/)test_[^/]+$)/.test(file))).toBe(false)
+      expect(files.filter((file) => /^python\/test_[^/]+\.py$/.test(file))).toEqual([])
+      expect(files.some((file) => /credentials?/iu.test(file))).toBe(false)
+
+      expect(entry.filename).toBeDefined()
+      const tarballPath = resolve(packDir, basename(entry.filename ?? ''))
+      expect(existsSync(tarballPath)).toBe(true)
+      execFileSync('tar', ['-xzf', tarballPath, '-C', unpackDir], {
+        cwd: packageDirectory,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+
+      const packageRoot = resolve(unpackDir, 'package')
+      const unpackedPaths: string[] = []
+      const directories = [packageRoot]
+      while (directories.length > 0) {
+        const directory = directories.pop() as string
+        const relativeDirectory = relative(packageRoot, directory)
+        for (const entry of readdirSync(directory, { withFileTypes: true })) {
+          const relativePath = relativeDirectory === ''
+            ? entry.name
+            : `${relativeDirectory}/${entry.name}`
+          unpackedPaths.push(relativePath)
+          if (entry.isDirectory()) directories.push(resolve(directory, entry.name))
+        }
+      }
+      expect(unpackedPaths.some((file) => /credentials?/iu.test(file))).toBe(false)
+      expect(statSync(resolve(packageRoot, 'package.json')).isFile()).toBe(true)
+      expect(statSync(resolve(packageRoot, packageJson.main ?? '')).isFile()).toBe(true)
+      expect(statSync(resolve(packageRoot, packageJson.types ?? '')).isFile()).toBe(true)
+      for (const runtimeFile of pythonRuntimeFiles) {
+        expect(statSync(resolve(packageRoot, runtimeFile)).isFile()).toBe(true)
+      }
+    } finally {
+      if (packDestination !== undefined) rmSync(packDestination, { recursive: true, force: true })
+      if (unpackDestination !== undefined) rmSync(unpackDestination, { recursive: true, force: true })
+    }
   })
 })

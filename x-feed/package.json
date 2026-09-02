@@ -27,6 +27,8 @@
     "python/x_insight_pipeline.py",
     "python/x_neighborhood.py",
     "python/x_paths.py",
+    "python/x_personal_feed_observer.py",
+    "python/x_personal_feed_observer_cli.py",
     "python/x_timeline_collector.py",
     "python/x_timeline_dedup.py",
     "python/x_timeline_migrate_explore.py",
