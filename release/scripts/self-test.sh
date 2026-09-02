@@ -25,6 +25,24 @@ if (resolved !== '/opt/dsh/harness/local-plugins/personal-feed/lib/index.js') {
   throw new Error(`x-feed resolved @herman/personal-feed to ${resolved}`)
 }
 NODE
+node --input-type=module <<'NODE'
+try {
+  const { runPersonalFeedXStartupSelfTest } = await import(
+    'file:///opt/dsh/harness/local-plugins/x-feed/lib/index.js'
+  )
+  if (typeof runPersonalFeedXStartupSelfTest !== 'function') {
+    throw new Error('missing personal feed x startup self-test')
+  }
+  const receipt = await runPersonalFeedXStartupSelfTest()
+  if (receipt !== 'personal-feed-x-startup-self-test/v1') {
+    throw new Error('unexpected personal feed x startup self-test receipt')
+  }
+  process.stdout.write('personal-feed-x-startup-self-test/v1\n')
+} catch {
+  process.stderr.write('personal-feed-x-startup-self-test failed\n')
+  process.exitCode = 1
+}
+NODE
 test ! -e /opt/dsh/harness/local-plugins/dsh-assistant/lib/migrate-cli.js
 test ! -e /opt/dsh/harness/local-plugins/dsh-assistant/lib/historical-recovery.js
 test ! -e /opt/dsh/harness/local-plugins/ui-context-compactor
