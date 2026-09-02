@@ -175,7 +175,7 @@ export async function installTelegramExtensionFromPackageEntry(
       stop()
     }
   }
-  const startPersonalFeedShutdown = (errors: unknown[]): Promise<void> => {
+  const startPersonalFeedProductionShutdown = (errors: unknown[]): Promise<void> => {
     try { return personalFeedProduction.shutdown() } catch (error) {
       errors.push(error)
       return Promise.resolve()
@@ -199,15 +199,15 @@ export async function installTelegramExtensionFromPackageEntry(
     })
     stopPersonalFeed = registerPersonalFeedTelegramListener(ctx)
   } catch (error) {
-    const lifetimeErrors: unknown[] = []
-    const lifetimeShutdown = startPersonalFeedShutdown(lifetimeErrors)
+    const productionShutdownErrors: unknown[] = []
+    const productionShutdown = startPersonalFeedProductionShutdown(productionShutdownErrors)
     const cleanup = cleanupErrors([
       ...(stopPersonalFeed === undefined ? [] : [stopPersonalFeed]),
       ...(stopFeedback === undefined ? [] : [stopFeedback]),
       ...(stopSource === undefined ? [] : [stopSource]),
     ])
-    try { await lifetimeShutdown } catch (shutdownError) { lifetimeErrors.push(shutdownError) }
-    cleanup.push(...lifetimeErrors)
+    try { await productionShutdown } catch (shutdownError) { productionShutdownErrors.push(shutdownError) }
+    cleanup.push(...productionShutdownErrors)
     await shutdownPersonalContext(cleanup)
     if (cleanup.length > 0) throw new AggregateError([error, ...cleanup])
     throw error
@@ -255,8 +255,8 @@ export async function installTelegramExtensionFromPackageEntry(
       installForRoot(agent)
     })
   } catch (error) {
-    const lifetimeErrors: unknown[] = []
-    const lifetimeShutdown = startPersonalFeedShutdown(lifetimeErrors)
+    const productionShutdownErrors: unknown[] = []
+    const productionShutdown = startPersonalFeedProductionShutdown(productionShutdownErrors)
     const rootCleanups = [...runtimes.values()].reverse()
     runtimes.clear()
     const cleanup = cleanupErrors(rootCleanups)
@@ -266,29 +266,29 @@ export async function installTelegramExtensionFromPackageEntry(
       ...(stopFeedback === undefined ? [] : [stopFeedback]),
       ...(stopSource === undefined ? [] : [stopSource]),
     ]))
-    try { await lifetimeShutdown } catch (shutdownError) { lifetimeErrors.push(shutdownError) }
-    cleanup.push(...lifetimeErrors)
+    try { await productionShutdown } catch (shutdownError) { productionShutdownErrors.push(shutdownError) }
+    cleanup.push(...productionShutdownErrors)
     await shutdownPersonalContext(cleanup)
     if (cleanup.length > 0) throw new AggregateError([error, ...cleanup])
     throw error
   }
 
   let disposePromise: Promise<void> | undefined
-  let lifetimeShutdownPromise: Promise<void> | undefined
+  let productionShutdownPromise: Promise<void> | undefined
   return (): Promise<void> => {
     if (disposePromise !== undefined) return disposePromise
     stopping = true
     const cleanups = [...runtimes.values()].reverse()
     runtimes.clear()
-    const lifetimeErrors: unknown[] = []
+    const productionShutdownErrors: unknown[] = []
     try {
-      lifetimeShutdownPromise = personalFeedProduction.shutdown()
+      productionShutdownPromise = personalFeedProduction.shutdown()
     } catch (error) {
-      lifetimeErrors.push(error)
-      lifetimeShutdownPromise = Promise.resolve()
+      productionShutdownErrors.push(error)
+      productionShutdownPromise = Promise.resolve()
     }
     disposePromise = (async () => {
-      const errors: unknown[] = [...lifetimeErrors]
+      const errors: unknown[] = [...productionShutdownErrors]
       try { stopCreated?.() } catch (error) { errors.push(error) }
       for (const cleanup of cleanups) {
         try { cleanup() } catch (error) { errors.push(error) }
@@ -296,7 +296,7 @@ export async function installTelegramExtensionFromPackageEntry(
       try { stopPersonalFeed?.() } catch (error) { errors.push(error) }
       try { stopFeedback?.() } catch (error) { errors.push(error) }
       try { stopSource?.() } catch (error) { errors.push(error) }
-      try { await lifetimeShutdownPromise } catch (error) { errors.push(error) }
+      try { await productionShutdownPromise } catch (error) { errors.push(error) }
       await shutdownPersonalContext(errors)
       if (errors.length > 0) throw new AggregateError(errors)
     })()
