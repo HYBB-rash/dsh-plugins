@@ -88,10 +88,10 @@ function readFrozenPlainDataRecord(value: unknown): PlainDataRecord | undefined 
   }
 }
 
-function readExactFrozenRecord(
+function readExactRecord(
   value: unknown,
   expectedKeys: readonly string[],
-  requireFrozen = true,
+  requireFrozen: boolean,
 ): ReadonlyMap<string, unknown> | undefined {
   try {
     if (value === null || typeof value !== 'object' || Array.isArray(value)
@@ -116,6 +116,20 @@ function readExactFrozenRecord(
   }
 }
 
+function readExactFrozenRecord(
+  value: unknown,
+  expectedKeys: readonly string[],
+): ReadonlyMap<string, unknown> | undefined {
+  return readExactRecord(value, expectedKeys, true)
+}
+
+function readExactDataRecord(
+  value: unknown,
+  expectedKeys: readonly string[],
+): ReadonlyMap<string, unknown> | undefined {
+  return readExactRecord(value, expectedKeys, false)
+}
+
 function readCompositionOptions(value: unknown): CompositionOptions {
   const record = readExactFrozenRecord(value, EXPECTED_OPTIONS_KEYS)
   if (record === undefined) throw new Error('personal Feed Telegram composition options are invalid')
@@ -125,8 +139,8 @@ function readCompositionOptions(value: unknown): CompositionOptions {
   const r4 = record.get('r4')
   const completionLedgerPath = record.get('completionLedgerPath')
   const clock = record.get('clock')
-  const r4Record = readExactFrozenRecord(r4, EXPECTED_R4_KEYS, false)
-  const clockRecord = readExactFrozenRecord(clock, EXPECTED_CLOCK_KEYS, false)
+  const r4Record = readExactDataRecord(r4, EXPECTED_R4_KEYS)
+  const clockRecord = readExactDataRecord(clock, EXPECTED_CLOCK_KEYS)
   if (readFrozenPlainDataRecord(runtimeConfig) === undefined
     || !isNonProxyFunction(startupFactory)
     || !hasFunctionArity(startupFactory, 1)
