@@ -445,8 +445,16 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
     })
     const signal = new AbortController().signal
     const r2 = await coordinatorOptions.r2.observe({ request, signal })
-    expect(r2).toEqual({ kind: 'unknown' })
+    expect(r2).toEqual({ kind: 'incomplete' })
     expect(Object.keys(r2 as Record<string, unknown>)).toEqual(['kind'])
+    expect(ownerObserver.startupBoundFactoryCalls).toHaveLength(1)
+    expect(ownerObserver.startupBoundFactoryCalls[0]?.[0]).toMatchObject({
+      dataDir: root,
+      personalFeedDataDir,
+      telegramSessionId: 'session-telegram',
+      feedbackPendingTtlMs: 600_000,
+      feedbackTurnTimeoutMs: 30_000,
+    })
     const r5 = await coordinatorOptions.r5.judge({
       request,
       snapshot: Object.freeze({}),
@@ -492,11 +500,15 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
     expect(staleRoot).toHaveBeenCalledTimes(2)
     expect(readFileSync(completionLedgerPath)).toEqual(sentinel)
 
-    // The only production creation site is the Telegram install entry.  This
-    // bounded check counts calls, so barrel exports/definitions are not treated
-    // as instances; unrelated entries must not mention the fixed ledger name.
+    // The only production creation site is the private Telegram composition.
+    // This bounded check counts calls, so barrel exports/definitions are not
+    // treated as instances; unrelated entries must not mention the fixed ledger.
     const telegramSource = readFileSync(new URL('../src/telegram-extension.ts', import.meta.url), 'utf8')
-    expect(telegramSource.match(/\bcreatePersonalFeedV2CandidateLifecycle\s*\(/g) ?? []).toHaveLength(1)
+    const compositionSource = readFileSync(new URL('../src/personal-feed/telegram-production-composition.ts', import.meta.url), 'utf8')
+    expect(telegramSource.match(/\bcreatePersonalFeedV2CandidateLifecycle\s*\(/g) ?? []).toHaveLength(0)
+    expect(compositionSource.match(/\bcreatePersonalFeedV2CandidateLifecycle\s*\(/g) ?? []).toHaveLength(1)
+    const packageRootSource = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+    expect(packageRootSource).not.toContain('createPersonalFeedTelegramProductionComposition')
     const nonCreationSources = [
       '../src/personal-feed/personal-context-telegram-runtime.ts',
       '../src/personal-feed/telegram-adapter.ts',
@@ -993,12 +1005,20 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
     expect((ownerObserver.startupBoundFactories[0] as Function).length).toBe(1)
 
     const firstR2 = await (firstCoordinatorOptions.r2 as { readonly observe: (input: unknown) => Promise<unknown> }).observe({})
-    expect(firstR2).toEqual(Object.freeze({ kind: 'unknown' }))
+    expect(firstR2).toEqual(Object.freeze({ kind: 'incomplete' }))
     expect(Object.keys(firstR2 as Record<string, unknown>)).toEqual(['kind'])
+    expect(ownerObserver.startupBoundFactoryCalls).toHaveLength(1)
+    expect(ownerObserver.startupBoundFactoryCalls[0]?.[0]).toMatchObject({
+      dataDir: firstRoot,
+      personalFeedDataDir: join(firstRoot, 'personal-feed'),
+      telegramSessionId: 'session-telegram',
+      feedbackPendingTtlMs: 600_000,
+      feedbackTurnTimeoutMs: 30_000,
+    })
     const firstR5 = await (firstCoordinatorOptions.r5 as { readonly judge: (input: unknown) => Promise<unknown> }).judge({})
     expect(firstR5).toEqual({ kind: 'incomplete', completed: [], reason: 'unknown' })
     expect(Object.isFrozen(firstR5)).toBe(true)
-    expect(ownerObserver.startupBoundFactoryCalls).toEqual([])
+    expect(ownerObserver.startupBoundFactoryCalls).toHaveLength(1)
     expect((firstHarness.ctx as { readonly agents: { readonly roots: () => unknown[] } }).agents.roots()).toEqual([])
     expect(firstHarness.listeners.get('agent/created') ?? []).toHaveLength(1)
 
@@ -1009,7 +1029,7 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
     expect(ownerObserver.personalContextRuntimeR4).toHaveLength(2)
     expect(ownerObserver.startupBinderCalls).toHaveLength(2)
     expect(ownerObserver.startupBoundFactories).toHaveLength(2)
-    expect(ownerObserver.startupBoundFactoryCalls).toEqual([])
+    expect(ownerObserver.startupBoundFactoryCalls).toHaveLength(1)
 
     const secondOwnerOptions = ownerObserver.contextOwnerOptions[1] as { readonly clock?: unknown }
     const secondCandidateOptions = ownerObserver.candidateFactoryOptions[1] as { readonly clock?: unknown }
@@ -1028,7 +1048,7 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
 
     await firstDispose()
     await secondDispose()
-    expect(ownerObserver.startupBoundFactoryCalls).toEqual([])
+    expect(ownerObserver.startupBoundFactoryCalls).toHaveLength(1)
   })
 
   it('orders source capture, request cutoff, and real R3 validation through one scripted install clock', async () => {
@@ -1148,6 +1168,7 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
       '2026-09-01T15:59:59.700Z',
       '2026-09-01T15:59:59.800Z',
       '2026-09-01T15:59:59.800Z',
+      '2026-09-01T15:59:59.800Z',
       '2026-09-01T15:59:59.900Z',
       '2026-09-01T15:59:59.900Z',
       '2026-09-01T15:59:59.901Z',
@@ -1251,7 +1272,7 @@ describe('Personal Context Telegram runtime composition (RED)', () => {
     expect(laterSnapshot.snapshot?.proof?.coverage?.includedTerminalSources?.map(source => source.sourceKey) ?? []).not.toContain(futureSourceKey)
     expect(laterSnapshot.snapshot?.proof?.coverage?.unknownAtFenceSourceKeys ?? []).not.toContain(futureSourceKey)
     expect(ownerObserver.contextSnapshotResults).toHaveLength(2)
-    expect(clock.now.mock.calls.length).toBe(6)
+    expect(clock.now.mock.calls.length).toBe(7)
     expect(semanticCallOrdinal).toBe(7)
     expect(semanticResponses).toEqual([])
     } finally {

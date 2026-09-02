@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createPersonalFeedV2CandidateLifecycle } from '@herman/personal-feed'
 import { createPersonalContextOwner, createSessionUserHistoryAdapter } from '@herman/personal-feed'
 import { parseXFeedRuntimeConfig } from './config.ts'
 import { XFeedbackStore } from './store.ts'
@@ -12,7 +11,7 @@ import { FeedbackEffectAdapter, type FeedbackOperationStore } from './x-feedback
 import { InMemoryPendingStore } from './x-feedback/pending-store.ts'
 import { registerTelegramFeedbackAdapter } from './x-feedback/telegram-adapter.ts'
 import { isExplicitPersonalFeedRequest } from './personal-feed/telegram-adapter.ts'
-import { createPersonalFeedTelegramInstallLifetime } from './personal-feed/telegram-feed-lifetime.ts'
+import { createPersonalFeedTelegramProductionComposition } from './personal-feed/telegram-production-composition.ts'
 import { createPersonalContextTelegramRuntime } from './personal-feed/personal-context-telegram-runtime.ts'
 import { createPersonalContextSemanticLlmPorts } from './personal-feed/personal-context-semantic-llm.ts'
 import { FileTrustedFactRepository } from './x-feedback/trusted-fact-repository.ts'
@@ -134,25 +133,22 @@ export async function installTelegramExtensionFromPackageEntry(
     throw primary
   }
 
-  const personalFeedCandidateLifecycle = createPersonalFeedV2CandidateLifecycle({
-    completionLedgerPath: join(config.personalFeedDataDir, 'v2', 'candidate-judgments.jsonl'),
-    clock: installClock,
-  })
-  const coordinatorOptions = {
-    ledgerPath: join(config.personalFeedDataDir, 'v2', 'requests.jsonl'),
-    clock: installClock,
-    r4: personalContextRuntime.r4,
-    r2: {
-      observe: async () => {
-        void personalFeedXStartupFactory
-        return Object.freeze({ kind: 'unknown' })
-      },
-    },
-    r3: personalFeedCandidateLifecycle,
-    r5: { judge: async () => Object.freeze({ kind: 'incomplete', completed: Object.freeze([]), reason: 'unknown' }) },
-  } as const
-  const personalFeedLifetime = createPersonalFeedTelegramInstallLifetime({ coordinatorOptions })
-  const personalFeedHandler = personalFeedLifetime.handler
+  let personalFeedProduction: ReturnType<typeof createPersonalFeedTelegramProductionComposition>
+  try {
+    personalFeedProduction = createPersonalFeedTelegramProductionComposition(Object.freeze({
+      runtimeConfig: config,
+      startupFactory: personalFeedXStartupFactory,
+      r4: personalContextRuntime.r4,
+      completionLedgerPath: join(config.personalFeedDataDir, 'v2', 'candidate-judgments.jsonl'),
+      clock: installClock,
+    }))
+  } catch (error) {
+    const cleanupErrors: unknown[] = []
+    await shutdownPersonalContext(cleanupErrors)
+    if (cleanupErrors.length > 0) throw new AggregateError([error, ...cleanupErrors])
+    throw error
+  }
+  const personalFeedHandler = personalFeedProduction.handler
   let stopSource: (() => void) | undefined
   let stopFeedback: (() => void) | undefined
   let stopPersonalFeed: (() => void) | undefined
@@ -180,7 +176,7 @@ export async function installTelegramExtensionFromPackageEntry(
     }
   }
   const startPersonalFeedShutdown = (errors: unknown[]): Promise<void> => {
-    try { return personalFeedLifetime.shutdown() } catch (error) {
+    try { return personalFeedProduction.shutdown() } catch (error) {
       errors.push(error)
       return Promise.resolve()
     }
@@ -286,7 +282,7 @@ export async function installTelegramExtensionFromPackageEntry(
     runtimes.clear()
     const lifetimeErrors: unknown[] = []
     try {
-      lifetimeShutdownPromise = personalFeedLifetime.shutdown()
+      lifetimeShutdownPromise = personalFeedProduction.shutdown()
     } catch (error) {
       lifetimeErrors.push(error)
       lifetimeShutdownPromise = Promise.resolve()
