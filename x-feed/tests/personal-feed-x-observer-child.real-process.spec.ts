@@ -149,6 +149,15 @@ async function settleWithWatchdog<T>(promise: Promise<T>): Promise<T> {
   }
 }
 
+async function settleBeforeRelease(promise: Promise<unknown>): Promise<{ readonly settled: true; readonly result: unknown } | { readonly settled: false }> {
+  const timeout = Symbol('not-settled-before-release')
+  const outcome = await Promise.race([
+    promise.then((result) => ({ settled: true as const, result })),
+    new Promise<typeof timeout>((resolve) => setTimeout(() => resolve(timeout), 250)),
+  ])
+  return outcome === timeout ? { settled: false } : outcome
+}
+
 function assertBodyFreeFrozenObserverError(result: unknown, code: string): void {
   expect(result).toEqual(Object.freeze({ kind: 'error', code }))
   expect(result && typeof result === 'object' ? Object.isFrozen(result) : false).toBe(true)
@@ -239,6 +248,21 @@ async function startCase(factory: ObserverFactory, mode: number, pythonFile = pr
       if (originalStarttime === undefined) throw new Error('child disappeared before identity capture')
       records.push({ kind: 'starttime', starttime: originalStarttime })
     }
+    for (const [label, stream] of [['stdout', child.stdout], ['stderr', child.stderr]] as const) {
+      const baselineErrorListeners = stream.listenerCount('error')
+      records.push({ kind: `${label}-error-baseline`, count: baselineErrorListeners })
+      const writableStream = stream as unknown as {
+        destroy?: (...args: unknown[]) => unknown
+      }
+      const originalDestroy = writableStream.destroy
+      if (typeof originalDestroy === 'function') {
+        writableStream.destroy = (...destroyArgs: unknown[]): unknown => {
+          const errorListeners = typeof stream.listenerCount === 'function' ? stream.listenerCount('error') : undefined
+          records.push({ kind: `${label}-destroy`, errorListeners, baselineErrorListeners })
+          return Reflect.apply(originalDestroy, stream, destroyArgs)
+        }
+      }
+    }
     const boundNativeKill = child.kill.bind(child)
     nativeKill = boundNativeKill
     child.stdout.on('data', (data) => records.push({ kind: 'stdout-data', bytes: Buffer.byteLength(data) }))
@@ -275,7 +299,7 @@ async function startCase(factory: ObserverFactory, mode: number, pythonFile = pr
       const timer: TimerDiagnostic = { ordinal, delay, fired: false, cleared: false }
       const handle = globalThis.setTimeout(() => {
         timer.fired = true
-        records.push({ kind: 'timer-fired', ordinal })
+        records.push({ kind: 'timer-fired', ordinal, delay })
         callback()
       }, delay)
       timers.set(handle, timer)
@@ -470,10 +494,33 @@ describe('Personal Feed X observer child real-process lifecycle contract', () =>
       }, expected: 'aborted' },
       { action: async (testCase: Case) => {
         await waitFor(() => testCase.records.some((record) => record.kind === 'exit') ? true : undefined, 'holder exit before deadline')
-        await new Promise((resolve) => setTimeout(resolve, Math.max(0, testCase.deadline + CLEANUP_RESERVE_MS + 100 - Date.now())))
         expect(testCase.records.some((record) => record.kind === 'close')).toBe(false)
+        await waitFor(() => testCase.records.some((record) => record.kind === 'timer-fired' && record.delay === CLEANUP_RESERVE_MS + 399) ? true : undefined, 'hard B timer')
         expect(testCase.kills).toEqual([])
+        const beforeRelease = await settleBeforeRelease(testCase.promise)
+        expect(beforeRelease.settled).toBe(true)
+        if (beforeRelease.settled) assertBodyFreeFrozenObserverError(beforeRelease.result, 'timed_out')
+        const stdoutDestroy = testCase.records.find((record) => record.kind === 'stdout-destroy')
+        const stderrDestroy = testCase.records.find((record) => record.kind === 'stderr-destroy')
+        const stdoutBaseline = testCase.records.find((record) => record.kind === 'stdout-error-baseline')
+        const stderrBaseline = testCase.records.find((record) => record.kind === 'stderr-error-baseline')
+        expect(stdoutDestroy).toBeDefined()
+        expect(stderrDestroy).toBeDefined()
+        expect(stdoutBaseline).toBeDefined()
+        expect(stderrBaseline).toBeDefined()
+        expect(typeof stdoutBaseline?.count).toBe('number')
+        expect(typeof stderrBaseline?.count).toBe('number')
+        expect(stdoutDestroy?.errorListeners).toBeGreaterThan(stdoutBaseline?.count as number)
+        expect(stderrDestroy?.errorListeners).toBeGreaterThan(stderrBaseline?.count as number)
+        if (testCase.child.pid !== undefined && testCase.originalStarttime !== undefined) {
+          expect(['gone', 'reused']).toContain(classifyIdentity(testCase.child.pid, testCase.originalStarttime))
+        }
         releaseMarker(testCase.marker)
+        if (!testCase.records.some((record) => record.kind === 'close')) {
+          await waitFor(() => testCase.records.some((record) => record.kind === 'close') ? true : undefined, 'holder close after release')
+        }
+        expect(testCase.child.stdout.listenerCount('error')).toBe(stdoutBaseline?.count)
+        expect(testCase.child.stderr.listenerCount('error')).toBe(stderrBaseline?.count)
       }, expected: 'timed_out' },
     ]
     for (const holderCase of holderActions) {
@@ -489,7 +536,7 @@ describe('Personal Feed X observer child real-process lifecycle contract', () =>
     const factory = await loadFactory()
     for (const reason of ['aborted', 'timed_out'] as const) {
       const scheduler = {
-        now: 0,
+        now: 601,
         timers: [] as Array<{ readonly callback: () => void; readonly due: number; readonly delay: number; cleared: boolean }>,
         setTimeout(callback: () => void, delay: number) {
           const timer = { callback, due: this.now + delay, delay, cleared: false }
@@ -522,12 +569,18 @@ describe('Personal Feed X observer child real-process lifecycle contract', () =>
       expect(killCount).toBe(0)
       await Promise.resolve()
       if (reason === 'aborted') controller.abort()
-      else scheduler.advance(5_000)
+      else scheduler.advance(4_000)
       expect(killCount).toBe(0)
       let settled = false
       void promise.then(() => { settled = true })
       await Promise.resolve()
       expect(settled).toBe(false)
+      if (reason === 'timed_out') {
+        scheduler.advance(4_100)
+        const afterBudget = await settleBeforeRelease(promise)
+        expect(afterBudget.settled).toBe(true)
+        if (afterBudget.settled) assertBodyFreeFrozenObserverError(afterBudget.result, 'timed_out')
+      }
       child.emit('close', 0, null)
       assertBodyFreeFrozenObserverError(await promise, reason)
       child.emit('exit', 1, 'SIGTERM')

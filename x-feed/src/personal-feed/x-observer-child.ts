@@ -185,6 +185,11 @@ type ObserverChild = Readonly<{
   readonly observe: (input: unknown) => Promise<ObserverResult>
 }>
 
+type ObserverOwner = Readonly<{
+  readonly observe: (input: unknown) => Promise<ObserverResult>
+  readonly shutdown: () => Promise<void>
+}>
+
 type DataRecord = Readonly<Record<string, unknown>>
 
 type ObserverBody = Readonly<
@@ -242,18 +247,46 @@ type ObserverResult = ObserverError | ObserverComplete | ObserverIncomplete
 
 type ChildStream = Readonly<{
   readonly on: (event: string, listener: (...args: unknown[]) => void) => unknown
+  readonly removeListener?: (event: string, listener: (...args: unknown[]) => void) => unknown
+  readonly destroy?: () => unknown
 }>
 
 type ChildProcess = Readonly<{
   readonly pid?: unknown
   readonly stdin: Readonly<{
     readonly end: (...args: unknown[]) => unknown
+    readonly destroy?: () => unknown
   }>
   readonly stdout: ChildStream
   readonly stderr: ChildStream
   readonly on: (event: string, listener: (...args: unknown[]) => void) => unknown
+  readonly removeListener?: (event: string, listener: (...args: unknown[]) => void) => unknown
   readonly kill: (signal: 'SIGTERM' | 'SIGKILL') => unknown
 }>
+
+type ObserverOwnerHooks = Readonly<{
+  readonly reserve: () => symbol
+  readonly release: (token: symbol) => void
+  readonly poison: () => void
+  readonly quarantine: (token: symbol) => void
+  readonly reaped: (token: symbol) => void
+}>
+
+type CapturedListenerOps = Readonly<{
+  readonly target: object
+  readonly on: ((...args: unknown[]) => unknown) | undefined
+  readonly removeListener: ((...args: unknown[]) => unknown) | undefined
+  readonly listenerCount: ((...args: unknown[]) => unknown) | undefined
+  readonly destroy: ((...args: unknown[]) => unknown) | undefined
+  readonly baselines: ReadonlyMap<string, number | undefined>
+}>
+
+type BusinessListenerState = 'absent' | 'maybe-installed' | 'installed'
+type DrainListenerState = 'not-attempted' | 'maybe-installed' | 'verified-installed' | 'absent'
+
+function drainLateStreamError(): void {
+  // Keep a harmless error listener while a handed-off stream awaits close.
+}
 
 function frozenError(code: ErrorCode): ObserverError {
   return Object.freeze({ kind: 'error', code })
@@ -591,6 +624,46 @@ function readOwnSpawnPid(value: unknown): number | undefined {
   }
 }
 
+function readSafeMethod(value: unknown, name: string): ((...args: unknown[]) => unknown) | undefined {
+  if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return undefined
+  try {
+    if (nodeTypes.isProxy(value)) return undefined
+    let cursor: object | null = value
+    while (cursor !== null) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(cursor, name)
+      if (descriptor !== undefined) {
+        if (!('value' in descriptor) || typeof descriptor.value !== 'function') return undefined
+        return descriptor.value as (...args: unknown[]) => unknown
+      }
+      cursor = Object.getPrototypeOf(cursor) as object | null
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
+function captureListenerOps(target: object, events: readonly string[]): CapturedListenerOps {
+  const on = readSafeMethod(target, 'on')
+  const removeListener = readSafeMethod(target, 'removeListener')
+  const listenerCount = readSafeMethod(target, 'listenerCount')
+  const destroy = readSafeMethod(target, 'destroy')
+  const baselines = new Map<string, number | undefined>()
+  for (const event of events) {
+    let baseline: number | undefined
+    if (listenerCount !== undefined) {
+      try {
+        const value = Reflect.apply(listenerCount, target, [event])
+        if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) baseline = value
+      } catch {
+        // A missing baseline prevents claiming a later detach.
+      }
+    }
+    baselines.set(event, baseline)
+  }
+  return Object.freeze({ target, on, removeListener, listenerCount, destroy, baselines })
+}
+
 function isNowEpochMs(value: unknown): value is () => number {
   return typeof value === 'function'
 }
@@ -678,39 +751,54 @@ function parseOptions(value: unknown): ObserverOptions {
   }
 }
 
-function observeChild(options: ObserverOptions, input: unknown): Promise<ObserverResult> {
+function observeChild(
+  options: ObserverOptions,
+  input: unknown,
+  ownerHooks?: ObserverOwnerHooks,
+  ownershipToken?: symbol,
+): Promise<ObserverResult> {
+  const releaseBeforeSpawn = (): void => {
+    if (ownershipToken !== undefined) {
+      ownerHooks?.release(ownershipToken)
+      ownershipToken = undefined
+    }
+  }
+  const failBeforeSpawn = (result: ObserverError): Promise<ObserverResult> => {
+    releaseBeforeSpawn()
+    return Promise.resolve(result)
+  }
   const inputRecord = exactDataRecord(input, INPUT_KEYS)
-  if (inputRecord === undefined) return Promise.resolve(frozenError('invalid_request'))
+  if (inputRecord === undefined) return failBeforeSpawn(frozenError('invalid_request'))
 
   const parsed = parseRequest(inputRecord.request)
   const signal = inputRecord.signal
   let realAbortSignal: AbortSignal
   try {
-    if (nodeTypes.isProxy(signal) || !(signal instanceof AbortSignal)) return Promise.resolve(frozenError('invalid_request'))
+    if (nodeTypes.isProxy(signal) || !(signal instanceof AbortSignal)) return failBeforeSpawn(frozenError('invalid_request'))
     realAbortSignal = signal
   } catch {
-    return Promise.resolve(frozenError('invalid_request'))
+    return failBeforeSpawn(frozenError('invalid_request'))
   }
-  if (parsed === undefined) return Promise.resolve(frozenError('invalid_request'))
+  if (parsed === undefined) return failBeforeSpawn(frozenError('invalid_request'))
 
   let preAborted: boolean
   try {
     preAborted = realAbortSignal.aborted
   } catch {
-    return Promise.resolve(frozenError('invalid_request'))
+    return failBeforeSpawn(frozenError('invalid_request'))
   }
-  if (preAborted) return Promise.resolve(frozenError('aborted'))
+  if (preAborted) return failBeforeSpawn(frozenError('aborted'))
 
   let snapshot: number
   try {
     snapshot = options.nowEpochMs()
   } catch {
-    return Promise.resolve(frozenError('observer_failed'))
+    return failBeforeSpawn(frozenError('observer_failed'))
   }
-  if (!Number.isFinite(snapshot)) return Promise.resolve(frozenError('observer_failed'))
+  if (!Number.isFinite(snapshot)) return failBeforeSpawn(frozenError('observer_failed'))
 
   const cutoffEpochMs = parsed.cutoffEpochMs
-  if (snapshot < cutoffEpochMs) return Promise.resolve(frozenError('invalid_request'))
+  if (snapshot < cutoffEpochMs) return failBeforeSpawn(frozenError('invalid_request'))
 
   const nextShanghaiMidnight = Date.parse(`${parsed.request.shanghaiDay}T00:00:00.000Z`) - SHANGHAI_OFFSET_MS + DAY_MS
   const budgetEnd = Math.min(cutoffEpochMs + options.totalBudgetMs, nextShanghaiMidnight - 1)
@@ -719,7 +807,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     && snapshot < deadlineEpochMs
     && deadlineEpochMs < budgetEnd
     && deadlineEpochMs + options.killGraceMs < budgetEnd)) {
-    return Promise.resolve(frozenError('insufficient_budget'))
+    return failBeforeSpawn(frozenError('insufficient_budget'))
   }
 
   const payload = `{"schemaVersion":1,"requestId":${JSON.stringify(parsed.request.requestId)},"cutoff":${JSON.stringify(parsed.request.cutoff)},"shanghaiDay":${JSON.stringify(parsed.request.shanghaiDay)},"deadlineEpochMs":${deadlineEpochMs}}`
@@ -731,12 +819,33 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       { shell: false, stdio: ['pipe', 'pipe', 'pipe'] },
     ) as ChildProcess
   } catch {
-    return Promise.resolve(frozenError('observer_failed'))
+    return failBeforeSpawn(frozenError('observer_failed'))
   }
 
   const capturedPid = readOwnSpawnPid(child)
 
   return new Promise<ObserverResult>((resolve) => {
+    let stdinStream: ChildProcess['stdin']
+    let stdoutStream: ChildStream
+    let stderrStream: ChildStream
+    try {
+      stdinStream = child.stdin
+      stdoutStream = child.stdout
+      stderrStream = child.stderr
+    } catch {
+      ownerHooks?.poison()
+      if (ownershipToken !== undefined) {
+        ownerHooks?.quarantine(ownershipToken)
+        ownershipToken = undefined
+      }
+      resolve(frozenError('observer_failed'))
+      return
+    }
+    const childListenerOps = captureListenerOps(child, ['exit', 'close', 'spawn', 'error'])
+    const stdoutListenerOps = captureListenerOps(stdoutStream, ['data', 'error'])
+    const stderrListenerOps = captureListenerOps(stderrStream, ['data', 'error'])
+    const stdinListenerOps = captureListenerOps(stdinStream, [])
+
     type TimerSlot = {
       generation: number
       active: boolean
@@ -747,10 +856,12 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     let processExited = spawnState === 'failed'
     let stdioClosed = false
     let settled = false
+    let hardBudgetHandoff = false
+    let quarantineToken: symbol | undefined
     let firstReason: ErrorCode | undefined = spawnState === 'failed' ? 'observer_failed' : undefined
     let stdout = ''
-    const stdoutDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
-    const stderrDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+    let stdoutDecoder: InstanceType<typeof TextDecoder> | undefined = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+    let stderrDecoder: InstanceType<typeof TextDecoder> | undefined = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
     let stdoutRawBytes = 0
     let stderrRawBytes = 0
     let stdoutFirstByteSeen = false
@@ -764,6 +875,97 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     let graceKillAttempted = false
     let graceConsumed = false
     let budgetKillAttempted = false
+    let stdoutDataState: BusinessListenerState = 'absent'
+    let stderrDataState: BusinessListenerState = 'absent'
+    let stdoutErrorState: BusinessListenerState = 'absent'
+    let stderrErrorState: BusinessListenerState = 'absent'
+    let stdoutDrainState: DrainListenerState = 'not-attempted'
+    let stderrDrainState: DrainListenerState = 'not-attempted'
+    let exitListenerInstalled = false
+    let closeListenerInstalled = false
+    let spawnListenerInstalled = false
+    let childErrorListenerInstalled = false
+    let hardCleanupComplete = false
+
+    const readCapturedSpecificCount = (
+      listenerOps: CapturedListenerOps,
+      event: string,
+      listener: (...args: unknown[]) => void,
+    ): number | undefined => {
+      if (listenerOps.listenerCount === undefined) return undefined
+      try {
+        const specific = Reflect.apply(listenerOps.listenerCount, listenerOps.target, [event, listener])
+        return typeof specific === 'number' && Number.isSafeInteger(specific) && specific >= 0 ? specific : undefined
+      } catch {
+        return undefined
+      }
+    }
+
+    const detachCapturedSpecific = (
+      listenerOps: CapturedListenerOps,
+      event: string,
+      listener: (...args: unknown[]) => void,
+    ): boolean => {
+      if (listenerOps.removeListener === undefined) return false
+      let specific = readCapturedSpecificCount(listenerOps, event, listener)
+      if (specific === undefined) return false
+      const upperBound = specific
+      let attempts = 0
+      try {
+        while (specific > 0 && attempts < upperBound) {
+          Reflect.apply(listenerOps.removeListener, listenerOps.target, [event, listener])
+          const nextSpecific = readCapturedSpecificCount(listenerOps, event, listener)
+          if (nextSpecific === undefined || nextSpecific >= specific) return false
+          specific = nextSpecific
+          attempts += 1
+        }
+      } catch {
+        return false
+      }
+      return specific === 0
+    }
+
+    const detachCapturedListener = (
+      listenerOps: CapturedListenerOps,
+      event: string,
+      listener: (...args: unknown[]) => void,
+      retainedCount = 0,
+    ): boolean => {
+      const baseline = listenerOps.baselines.get(event)
+      if (baseline === undefined || listenerOps.listenerCount === undefined) return false
+      if (!detachCapturedSpecific(listenerOps, event, listener)) return false
+      try {
+        const currentTotal = Reflect.apply(listenerOps.listenerCount, listenerOps.target, [event])
+        return currentTotal === baseline + retainedCount
+      } catch {
+        return false
+      }
+    }
+
+    const installCapturedListener = (
+      listenerOps: CapturedListenerOps,
+      event: string,
+      listener: (...args: unknown[]) => void,
+    ): 'installed' | 'absent' | 'maybe-installed' => {
+      if (listenerOps.on === undefined) return 'maybe-installed'
+      try {
+        Reflect.apply(listenerOps.on, listenerOps.target, [event, listener])
+        if (listenerOps.listenerCount === undefined) return 'maybe-installed'
+        const specific = Reflect.apply(listenerOps.listenerCount, listenerOps.target, [event, listener])
+        if (typeof specific !== 'number' || !Number.isSafeInteger(specific) || specific < 0) return 'maybe-installed'
+        return specific > 0 ? 'installed' : 'absent'
+      } catch {
+        return 'maybe-installed'
+      }
+    }
+
+    const destroyCapturedStream = (listenerOps: CapturedListenerOps): void => {
+      try {
+        if (listenerOps.destroy !== undefined) Reflect.apply(listenerOps.destroy, listenerOps.target, [])
+      } catch {
+        // Best-effort cleanup only.
+      }
+    }
 
     const canSignalChild = (): boolean => spawnState === 'running'
       && !processExited && !stdioClosed && !settled
@@ -915,6 +1117,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       }
 
       try {
+        if (stdoutDecoder === undefined) return
         stdout += stdoutDecoder.decode(bytes, { stream: true })
       } catch {
         lockFirstReason('protocol_invalid')
@@ -932,6 +1135,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       const { bytes, byteLength } = byteChunk
 
       try {
+        if (stderrDecoder === undefined) return
         stderrDecoder.decode(bytes, { stream: true })
         stderrRawBytes += byteLength
       } catch {
@@ -948,6 +1152,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     }
 
     const failWithoutBudgetTimer = (): void => {
+      ownerHooks?.poison()
       if (!stdioClosed && !settled && firstReason === undefined) {
         firstReason = 'observer_failed'
         stdout = ''
@@ -957,6 +1162,7 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       cancelTimer(budgetSlot)
       attemptTerm()
       attemptBudgetKill()
+      handoffAtHardBudget()
     }
 
     function onGrace(): void {
@@ -971,10 +1177,14 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
 
     const onBudget = (): void => {
       if (stdioClosed || settled) return
+      ownerHooks?.poison()
       consumeGraceForBudget()
-      if (firstReason === undefined) lockFirstReason('timed_out')
-      else attemptTerm()
+      if (firstReason === undefined) firstReason = 'timed_out'
+      stdout = ''
+      cancelTimer(deadlineSlot)
+      attemptTerm()
       attemptBudgetKill()
+      handoffAtHardBudget()
     }
 
     const cleanup = (): void => {
@@ -988,6 +1198,124 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
         } catch {
           // Marked removed before the call so a throwing removal cannot leak ownership.
         }
+      }
+    }
+
+    const cleanupBusinessListeners = (removeDrainListeners = false): void => {
+      if (removeDrainListeners) {
+        if (stdoutDataState !== 'absent' && detachCapturedSpecific(stdoutListenerOps, 'data', collectStdout)) stdoutDataState = 'absent'
+        if (stderrDataState !== 'absent' && detachCapturedSpecific(stderrListenerOps, 'data', collectStderr)) stderrDataState = 'absent'
+        if (stdoutErrorState !== 'absent') {
+          if (detachCapturedSpecific(stdoutListenerOps, 'error', markStreamFailure)) stdoutErrorState = 'absent'
+        }
+        if (stderrErrorState !== 'absent') {
+          if (detachCapturedSpecific(stderrListenerOps, 'error', markStreamFailure)) stderrErrorState = 'absent'
+        }
+        if (stdoutDrainState !== 'not-attempted' && stdoutDrainState !== 'absent'
+          && detachCapturedSpecific(stdoutListenerOps, 'error', drainLateStreamError)) stdoutDrainState = 'absent'
+        if (stderrDrainState !== 'not-attempted' && stderrDrainState !== 'absent'
+          && detachCapturedSpecific(stderrListenerOps, 'error', drainLateStreamError)) stderrDrainState = 'absent'
+        return
+      }
+      if (stdoutDataState !== 'absent') {
+        if (detachCapturedListener(stdoutListenerOps, 'data', collectStdout)) stdoutDataState = 'absent'
+      }
+      if (stderrDataState !== 'absent') {
+        if (detachCapturedListener(stderrListenerOps, 'data', collectStderr)) stderrDataState = 'absent'
+      }
+      if (stdoutErrorState !== 'absent' && (removeDrainListeners || stdoutDrainState === 'verified-installed')) {
+        if (detachCapturedListener(stdoutListenerOps, 'error', markStreamFailure, stdoutDrainState === 'verified-installed' ? 1 : 0)) stdoutErrorState = 'absent'
+      }
+      if (stderrErrorState !== 'absent' && (removeDrainListeners || stderrDrainState === 'verified-installed')) {
+        if (detachCapturedListener(stderrListenerOps, 'error', markStreamFailure, stderrDrainState === 'verified-installed' ? 1 : 0)) stderrErrorState = 'absent'
+      }
+    }
+
+    const cleanupBusinessState = (): void => {
+      cleanup()
+      if (stdoutDrainState === 'not-attempted') {
+        stdoutDrainState = 'maybe-installed'
+        const drainState = installCapturedListener(stdoutListenerOps, 'error', drainLateStreamError)
+        stdoutDrainState = drainState === 'installed' ? 'verified-installed' : drainState === 'absent' ? 'absent' : 'maybe-installed'
+      }
+      if (stderrDrainState === 'not-attempted') {
+        stderrDrainState = 'maybe-installed'
+        const drainState = installCapturedListener(stderrListenerOps, 'error', drainLateStreamError)
+        stderrDrainState = drainState === 'installed' ? 'verified-installed' : drainState === 'absent' ? 'absent' : 'maybe-installed'
+      }
+      cleanupBusinessListeners()
+      stdout = ''
+      stdoutRawBytes = 0
+      stderrRawBytes = 0
+      stdoutDecoder = undefined
+      stderrDecoder = undefined
+      try {
+        destroyCapturedStream(stdinListenerOps)
+      } catch {
+        // Best-effort cleanup only.
+      }
+      try {
+        destroyCapturedStream(stdoutListenerOps)
+      } catch {
+        // Best-effort cleanup only.
+      }
+      try {
+        destroyCapturedStream(stderrListenerOps)
+      } catch {
+        // Best-effort cleanup only.
+      }
+      hardCleanupComplete = true
+    }
+
+    function handoffAtHardBudget(): void {
+      if (stdioClosed || settled || hardBudgetHandoff) return
+      hardBudgetHandoff = true
+      settled = true
+      ownerHooks?.poison()
+      if (ownershipToken !== undefined) {
+        ownerHooks?.quarantine(ownershipToken)
+        quarantineToken = ownershipToken
+        ownershipToken = undefined
+      }
+      cleanupBusinessState()
+      finishHardReap()
+      resolve(frozenError(firstReason ?? 'observer_failed'))
+    }
+
+    function finishHardReap(): void {
+      if (!hardCleanupComplete || !stdioClosed) return
+      cleanupBusinessListeners(true)
+      const childDetached = (installed: boolean, event: string, listener: (...args: unknown[]) => void): boolean => {
+        if (!installed) return true
+        return detachCapturedListener(childListenerOps, event, listener)
+      }
+      if (exitListenerInstalled && childDetached(true, 'exit', onExit)) exitListenerInstalled = false
+      if (closeListenerInstalled && childDetached(true, 'close', onClose)) closeListenerInstalled = false
+      if (spawnListenerInstalled && childDetached(true, 'spawn', onSpawn)) spawnListenerInstalled = false
+      if (childErrorListenerInstalled && childDetached(true, 'error', markChildFailure)) childErrorListenerInstalled = false
+      const streamBaselineRestored = (listenerOps: CapturedListenerOps): boolean => {
+        const dataBaseline = listenerOps.baselines.get('data')
+        const baseline = listenerOps.baselines.get('error')
+        const dataListener = listenerOps.target === stdoutListenerOps.target ? collectStdout : collectStderr
+        const dataSpecific = readCapturedSpecificCount(listenerOps, 'data', dataListener)
+        const businessSpecific = readCapturedSpecificCount(listenerOps, 'error', markStreamFailure)
+        const drainSpecific = readCapturedSpecificCount(listenerOps, 'error', drainLateStreamError)
+        if (dataBaseline === undefined || baseline === undefined || dataSpecific !== 0
+          || businessSpecific !== 0 || drainSpecific !== 0 || listenerOps.listenerCount === undefined) return false
+        try {
+          return Reflect.apply(listenerOps.listenerCount, listenerOps.target, ['data']) === dataBaseline
+            && Reflect.apply(listenerOps.listenerCount, listenerOps.target, ['error']) === baseline
+        } catch {
+          return false
+        }
+      }
+      const streamDetached = stdoutDataState === 'absent' && stderrDataState === 'absent'
+        && streamBaselineRestored(stdoutListenerOps) && streamBaselineRestored(stderrListenerOps)
+      const childDetachedCompletely = !exitListenerInstalled && !closeListenerInstalled
+        && !spawnListenerInstalled && !childErrorListenerInstalled
+      if (streamDetached && childDetachedCompletely) {
+        if (quarantineToken !== undefined) ownerHooks?.reaped(quarantineToken)
+        quarantineToken = undefined
       }
     }
 
@@ -1018,9 +1346,17 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     }
 
     const onClose = (code?: unknown, signalToReport?: unknown): void => {
-      if (stdioClosed || settled) return
+      if (stdioClosed) {
+        if (hardBudgetHandoff) finishHardReap()
+        return
+      }
       stdioClosed = true
       processExited = true
+      if (hardBudgetHandoff) {
+        finishHardReap()
+        return
+      }
+      if (settled) return
       settled = true
       let result: ObserverResult
       if (firstReason !== undefined) {
@@ -1028,11 +1364,13 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       } else {
         let finalizationReason: ErrorCode | undefined
         try {
+          if (stdoutDecoder === undefined) throw new Error()
           stdout += stdoutDecoder.decode()
         } catch {
           finalizationReason = 'protocol_invalid'
         }
         try {
+          if (stderrDecoder === undefined) throw new Error()
           stderrDecoder.decode()
         } catch {
           if (finalizationReason === undefined) finalizationReason = 'observer_failed'
@@ -1053,6 +1391,10 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
         }
       }
       cleanup()
+      if (ownershipToken !== undefined) {
+        ownerHooks?.release(ownershipToken)
+        ownershipToken = undefined
+      }
       resolve(result)
     }
 
@@ -1060,7 +1402,9 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
     let closeGateInstalled = false
     let listenerInstallationFailed = false
     try {
-      child.on('exit', onExit)
+      if (childListenerOps.on === undefined) throw new Error()
+      exitListenerInstalled = true
+      Reflect.apply(childListenerOps.on, child, ['exit', onExit])
       exitGateInstalled = true
     } catch {
       spawnState = 'failed'
@@ -1071,18 +1415,24 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       }
     }
     try {
-      child.on('close', onClose)
+      if (childListenerOps.on === undefined) throw new Error()
+      closeListenerInstalled = true
+      Reflect.apply(childListenerOps.on, child, ['close', onClose])
       closeGateInstalled = true
     } catch {
       listenerInstallationFailed = true
     }
     try {
-      child.on('spawn', onSpawn)
+      if (childListenerOps.on === undefined) throw new Error()
+      spawnListenerInstalled = true
+      Reflect.apply(childListenerOps.on, child, ['spawn', onSpawn])
     } catch {
       listenerInstallationFailed = true
     }
     try {
-      child.on('error', markChildFailure)
+      if (childListenerOps.on === undefined) throw new Error()
+      childErrorListenerInstalled = true
+      Reflect.apply(childListenerOps.on, child, ['error', markChildFailure])
     } catch {
       listenerInstallationFailed = true
     }
@@ -1133,13 +1483,15 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
       if (abortedAfterRegistration) onAbort()
 
       if (!stdioClosed && !settled) {
-        child.stdout.on('data', collectStdout)
-        child.stderr.on('data', collectStderr)
-        child.stdout.on('error', markStreamFailure)
-        child.stderr.on('error', markStreamFailure)
+        stdoutDataState = installCapturedListener(stdoutListenerOps, 'data', collectStdout)
+        stderrDataState = installCapturedListener(stderrListenerOps, 'data', collectStderr)
+        stdoutErrorState = installCapturedListener(stdoutListenerOps, 'error', markStreamFailure)
+        stderrErrorState = installCapturedListener(stderrListenerOps, 'error', markStreamFailure)
+        if (stdoutDataState !== 'installed' || stderrDataState !== 'installed'
+          || stdoutErrorState !== 'installed' || stderrErrorState !== 'installed') lockFirstReason('observer_failed')
       }
 
-      if (!stdioClosed && !settled) child.stdin.end(payload, 'utf8', (...callbackValues: unknown[]) => {
+      if (!stdioClosed && !settled) stdinStream.end(payload, 'utf8', (...callbackValues: unknown[]) => {
         for (const callbackValue of callbackValues) {
           if (callbackValue !== undefined && callbackValue !== null) {
             lockFirstReason('observer_failed')
@@ -1153,9 +1505,50 @@ function observeChild(options: ObserverOptions, input: unknown): Promise<Observe
   })
 }
 
-export function createPersonalFeedXObserverChild(options: unknown): ObserverChild {
+function createPersonalFeedXObserverChildOwnerInternal(options: unknown): ObserverOwner {
   const parsedOptions = parseOptions(options)
-  return Object.freeze({
-    observe: (input: unknown): Promise<ObserverResult> => observeChild(parsedOptions, input),
+  let poisoned = false
+  let sealed = false
+  let shutdownPromise: Promise<void> | undefined
+  const ownership = new Map<symbol, 'active' | 'quarantined'>()
+  const hooks: ObserverOwnerHooks = Object.freeze({
+    reserve: () => {
+      const token = Symbol('personal-feed-x-observer-child')
+      ownership.set(token, 'active')
+      return token
+    },
+    release: (token: symbol) => {
+      if (ownership.get(token) === 'active') ownership.delete(token)
+    },
+    poison: () => { poisoned = true },
+    quarantine: (token: symbol) => {
+      if (ownership.get(token) === 'active') ownership.set(token, 'quarantined')
+    },
+    reaped: (token: symbol) => { ownership.delete(token) },
   })
+  const observe = (input: unknown): Promise<ObserverResult> => {
+    if (poisoned || sealed) return Promise.resolve(frozenError('observer_failed'))
+    const token = hooks.reserve()
+    return observeChild(parsedOptions, input, hooks, token)
+  }
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise !== undefined) return shutdownPromise
+    sealed = true
+    if (ownership.size > 0) {
+      shutdownPromise = Promise.reject(new Error('Unable to shutdown personal-feed X observer child: resource not reaped'))
+    } else {
+      shutdownPromise = Promise.resolve()
+    }
+    return shutdownPromise
+  }
+  return Object.freeze({ observe, shutdown })
+}
+
+export function createPersonalFeedXObserverChildOwner(options: unknown): ObserverOwner {
+  return createPersonalFeedXObserverChildOwnerInternal(options)
+}
+
+export function createPersonalFeedXObserverChild(options: unknown): ObserverChild {
+  const owner = createPersonalFeedXObserverChildOwnerInternal(options)
+  return Object.freeze({ observe: owner.observe })
 }
