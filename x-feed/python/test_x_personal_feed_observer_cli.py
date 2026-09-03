@@ -714,6 +714,58 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                 _surface_facts("for_you", home_tablist_count=2, home_tabs=home_tabs),
             )
 
+    def test_nonempty_snapshot_uses_root_status_anchor_despite_background_progress(self):
+        module = _require_cli(self)
+        evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)
+        self.assertIsNotNone(evaluator_type)
+        evaluator = evaluator_type()
+        ws_url = "ws://127.0.0.1:9222/devtools/page/page-live-snapshot"
+        candidate = {
+            "sourceUrl": "https://x.com/alice/status/808",
+            "authorHandle": "alice",
+            "publishedAt": TIMESTAMP,
+            "body": "root body",
+            "depth": 0,
+            "insideQuote": False,
+            "showMoreControlCount": 0,
+            "placeholder": False,
+        }
+        socket = _FakeWebSocket({
+            "cells": [{"candidates": [candidate]}],
+            "emptyFacts": _empty_facts("for_you", loadingCount=1),
+        })
+
+        with mock.patch.object(module.websocket, "create_connection", return_value=socket):
+            result = evaluator.evaluate(
+                ws_url,
+                "snapshot",
+                surface="for_you",
+                timeout_seconds=2.0,
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "items": [{
+                    "sourceUrl": candidate["sourceUrl"],
+                    "authorHandle": candidate["authorHandle"],
+                    "publishedAt": candidate["publishedAt"],
+                    "body": candidate["body"],
+                    "showMore": False,
+                    "placeholder": False,
+                }],
+                "explicitEmpty": False,
+            },
+        )
+        expression = socket.sent[0]["params"]["expression"]
+        self.assertIn('a[href*="/status/"] time', expression)
+        self.assertIn('closest(\'div[role="link"]\')', expression)
+        self.assertIn(".filter(candidate => candidate.sourceUrl !== null)", expression)
+        self.assertIn(".filter(cell => cell.candidates.length > 0)", expression)
+        self.assertNotIn("links.length === 1", expression)
+        self.assertNotIn("body:text ? text.innerText : null", expression)
+        self.assertTrue(socket.closed)
+
     def test_mechanical_cdp_evaluator_uses_fixed_bounded_actions(self):
         module = _require_cli(self)
         evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)
@@ -1230,7 +1282,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         self.assertRegex(snapshot_expression, r"(?:role\s*[=:]\s*[\"']?button|<button)")
         self.assertNotRegex(snapshot_expression, r"querySelector\([^)]*button")
         self.assertNotRegex(snapshot_expression, r"Show more|显示更多")
-        self.assertNotRegex(
+        self.assertRegex(
             snapshot_expression,
             r"\.filter\([^)]*candidates[^)]*(?:length|size)[^)]*>\s*0",
         )
@@ -2345,14 +2397,21 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                     "emptyFacts": _empty_facts("for_you", emptyMarkerCount=1),
                 },
             )
-        with self.subTest(nonempty_failure="blocker_claim"):
-            evaluate_snapshot(
-                "for_you",
-                {
-                    "cells": [{"candidates": [nonempty_candidate]}],
-                    "emptyFacts": _empty_facts("for_you", loadingCount=1),
-                },
-            )
+        with self.subTest(nonempty_background_progress="accepted"):
+            socket = _FakeWebSocket({
+                "cells": [{"candidates": [nonempty_candidate]}],
+                "emptyFacts": _empty_facts("for_you", loadingCount=1),
+            })
+            with mock.patch.object(module.websocket, "create_connection", return_value=socket):
+                result = evaluator.evaluate(
+                    ws_url,
+                    "snapshot",
+                    surface="for_you",
+                    timeout_seconds=timeout_seconds,
+                )
+            self.assertEqual(len(result["items"]), 1)
+            self.assertFalse(result["explicitEmpty"])
+            self.assertTrue(socket.closed)
 
     def test_cli_static_and_persistence_boundaries(self):
         module = _require_cli(self)

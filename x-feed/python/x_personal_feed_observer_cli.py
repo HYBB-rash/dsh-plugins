@@ -173,17 +173,19 @@ _SNAPSHOT_EXPRESSION = (
     "const cells = nodes.map(cell => { const candidates = "
     "[...cell.querySelectorAll('article[data-testid=\"tweet\"]')].slice(0, 8).map(article => { "
     "const owned = node => node.closest('article[data-testid=\"tweet\"]') === article; "
-    "const links = [...article.querySelectorAll('a[href*=\"/status/\"]')].filter(owned); "
-    "const link = links.length === 1 ? links[0] : null; "
+    "const inQuotedCard = node => { const quoted = node.closest('div[role=\"link\"]'); "
+    "return quoted !== null && article.contains(quoted); }; "
+    "const times = [...article.querySelectorAll('a[href*=\"/status/\"] time')].filter(owned).filter(time => !inQuotedCard(time)); "
+    "const time = times.length === 1 ? times[0] : null; "
+    "const link = time ? time.closest('a[href*=\"/status/\"]') : null; "
     "const status = (() => { try { if (!link) return null; const url = new URL(link.href); "
     "const parts = url.pathname.split('/'); const handle = parts[1]; const ident = parts[3]; "
     "if (url.protocol !== 'https:' || !['x.com','www.x.com'].includes(url.hostname) || "
     "parts.length !== 4 || parts[0] !== '' || parts[2] !== 'status' || "
     "!/^[A-Za-z0-9_]{1,15}$/.test(handle) || !/^[1-9][0-9]*$/.test(ident)) return null; "
     "return 'https://x.com/' + handle.toLowerCase() + '/status/' + ident; } catch (_) { return null; } })(); "
-    "const times = [...article.querySelectorAll('time')].filter(owned); "
-    "const texts = [...article.querySelectorAll('[data-testid=\"tweetText\"]')].filter(owned); "
-    "const time = times.length === 1 ? times[0] : null; const text = texts.length === 1 ? texts[0] : null; "
+    "const texts = [...article.querySelectorAll('[data-testid=\"tweetText\"]')].filter(owned).filter(text => !inQuotedCard(text)); "
+    "const text = texts.length === 1 ? texts[0] : null; "
     "let depth = 0; let ancestor = article.parentElement; while (ancestor && ancestor !== cell) { "
     "if (ancestor.matches('article[data-testid=\"tweet\"]')) depth += 1; ancestor = ancestor.parentElement; } "
     "const quote = depth > 0; "
@@ -191,9 +193,10 @@ _SNAPSHOT_EXPRESSION = (
     ".filter(owned).filter(control => (control.tagName === 'BUTTON' || control.getAttribute('role') === role) "
     "&& !control.disabled && control.getAttribute('aria-disabled') !== 'true'); "
     "return {sourceUrl:status, authorHandle:status ? status.split('/')[3] : null, "
-    "publishedAt:time ? time.getAttribute('datetime') : null, body:text ? text.innerText : null, "
+    "publishedAt:time ? time.getAttribute('datetime') : null, body:text ? text.innerText : '', "
     "depth, insideQuote:quote, showMoreControlCount:more.length, "
-    "placeholder:!status || !time || !text}; }); return {candidates}; }); "
+    "placeholder:!status || !time || !text}; }).filter(candidate => candidate.sourceUrl !== null); "
+    "return {candidates}; }).filter(cell => cell.candidates.length > 0); "
     "const visible = node => node.getClientRects().length > 0 && node.getAttribute('aria-hidden') !== 'true'; "
     "const emptyMarkerCount = [...root.querySelectorAll('[data-testid=\"emptyState\"]')].filter(visible).length; "
     "const outsideRootEmptyMarkerCount = document.body ? [...document.body.querySelectorAll('[data-testid=\"emptyState\"]')]"
@@ -361,12 +364,14 @@ def _snapshot_value(value, surface):
             raise _CdpFailure()
     if facts["surfaceRootCount"] != 1 or facts["outsideRootEmptyMarkerCount"] != 0:
         raise _CdpFailure()
-    if any(facts[name] != 0 for name in ("loadingCount", "loginCount", "authCount", "errorCount", "retryCount")):
+    if any(facts[name] != 0 for name in ("loginCount", "authCount", "errorCount", "retryCount")):
         raise _CdpFailure()
     cells = value["cells"]
     if not isinstance(cells, list):
         raise _CdpFailure()
     if not cells:
+        if facts["loadingCount"] != 0:
+            raise _CdpFailure()
         if facts["emptyMarkerCount"] != 1:
             raise _CdpFailure()
         return {
