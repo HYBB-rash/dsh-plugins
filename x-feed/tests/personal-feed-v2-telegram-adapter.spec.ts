@@ -61,6 +61,7 @@ describe('Personal Feed v2 Telegram adapter', () => {
 
   it.each([
     '给我一次个人 Feed',
+    '给我发一次个人Feed',
     '我想看一下 personal feed',
     '我最近不关心通用 AI 新闻了，给我一次个人 Feed。',
   ])('intercepts the explicit request %s exactly once and never reaches root', async currentText => {

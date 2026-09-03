@@ -62,7 +62,7 @@ export function isExplicitPersonalFeedRequest(envelope: TelegramInboundEnvelope)
   if (containsXLink(envelope.currentText) || containsXLink(envelope.reference?.selectedText)
     || containsXLink(envelope.reference?.messageText)) return false
   const text = envelope.currentText.trim()
-  return /^(?:给我一次个人\s+feed|我想看一下 personal\s+feed|我最近不关心通用 ai 新闻了，给我一次个人\s+feed)[。.!！?？]?$/i.test(text)
+  return /^(?:给我(?:发)?一次个人\s*feed|我想看一下 personal\s+feed|我最近不关心通用 ai 新闻了，给我一次个人\s+feed)[。.!！?？]?$/i.test(text)
 }
 
 function containsXLink(value: string | undefined): boolean {
