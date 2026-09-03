@@ -832,6 +832,157 @@ describe('gateway lifecycle', () => {
     await expect(apply(harness.ctx, gatewayConfig(), { createHttp: () => http })).rejects.toBe(fatal)
   })
 
+  it.each([
+    ['TimeoutError', new DOMException('CONFIGURED_STARTUP_TIMEOUT_CANARY', 'TimeoutError')],
+    ['Telegram retry', new TelegramApiError('retry', 'CONFIGURED_STARTUP_RETRY_CANARY')],
+    ['transport error', new Error('CONFIGURED_STARTUP_TRANSPORT_CANARY')],
+  ] as const)('keeps configured-chat activation ready after a %s startup notification failure instead of rejecting', async (_kind, failure) => {
+    scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+    const harness = gatewayContext({ token: 'credential-token' })
+    let polls = 0
+    const sendMessage = vi.fn(async (_chatId: number, _text: string, _options?: SendMessageOptions) => {
+      throw failure
+    })
+    const http: TelegramHttp = {
+      getMe: async () => ({ id: 1 }),
+      getUpdates: async (_offset, _timeout, signal) => {
+        polls += 1
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) {
+            resolve()
+            return
+          }
+          signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+        return []
+      },
+      sendMessage,
+    }
+
+    try {
+      await expect(apply(harness.ctx, gatewayConfig({ allowedChatId: '42' }), { createHttp: () => http }))
+        .resolves.toBeUndefined()
+      expect(polls).toBeGreaterThan(0)
+      expect(harness.services.appExit).not.toHaveBeenCalled()
+      expect(sendMessage.mock.calls.map(([, text]) => text)).toEqual([
+        '✅ 已连接。你可以让我记住、跟进，或执行一件当前事情。',
+      ])
+      expect(sendMessage).toHaveBeenCalledTimes(1)
+      expect(harness.ctx.logger.warn).toHaveBeenCalledTimes(1)
+      expect(harness.ctx.logger.warn).toHaveBeenCalledWith('telegram-gateway: startup notification failed')
+      expect(harness.ctx.logger.warn.mock.calls.flat().join('\n')).not.toContain('CONFIGURED_STARTUP_')
+    } finally {
+      await harness.cleanup()?.()
+    }
+  })
+
+  it('preserves a fatal configured startup notification rejection instead of swallowing it', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+    const harness = gatewayContext({ token: 'credential-token' })
+    const fatal = new TelegramApiError('fatal', 'CONFIGURED_STARTUP_FATAL_CANARY')
+    let polls = 0
+    const sendMessage = vi.fn(async (_chatId: number, _text: string, _options?: SendMessageOptions) => {
+      throw fatal
+    })
+    const http: TelegramHttp = {
+      getMe: async () => ({ id: 1 }),
+      getUpdates: async (_offset, _timeout, signal) => {
+        polls += 1
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) {
+            resolve()
+            return
+          }
+          signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+        return []
+      },
+      sendMessage,
+    }
+
+    try {
+      await expect(apply(harness.ctx, gatewayConfig({ allowedChatId: '42' }), { createHttp: () => http }))
+        .rejects.toBe(fatal)
+      expect(polls).toBe(0)
+      expect(harness.services.appExit).not.toHaveBeenCalled()
+      expect(sendMessage).toHaveBeenCalledTimes(1)
+    } finally {
+      await harness.cleanup()?.()
+    }
+  })
+
+  it('rethrows the original abort reason when configured startup notification aborts during send instead of the transport error', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+    const harness = gatewayContext()
+    const lifetime = new AbortController()
+    const abortReason = new Error('CONFIGURED_STARTUP_ABORT_REASON_CANARY')
+    let ready = 0
+    let polls = 0
+    const sendMessage = vi.fn(async (_chatId: number, _text: string, _options?: SendMessageOptions) => {
+      lifetime.abort(abortReason)
+      throw new Error('CONFIGURED_STARTUP_TRANSPORT_AFTER_ABORT_CANARY')
+    })
+    const http: TelegramHttp = {
+      getMe: async () => ({ id: 1 }),
+      getUpdates: async () => {
+        polls += 1
+        return []
+      },
+      sendMessage,
+    }
+
+    await expect(runGateway(
+      harness.ctx,
+      gatewayConfig({ allowedChatId: '42' }),
+      http,
+      lifetime.signal,
+      () => { ready += 1 },
+    )).rejects.toBe(abortReason)
+    expect(ready).toBe(0)
+    expect(polls).toBe(0)
+    expect(harness.ctx.logger.warn).not.toHaveBeenCalled()
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('continues first-private authorization dispatch after a startup notification transport failure instead of abandoning the update', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+    const harness = gatewayContext()
+    const lifetime = new AbortController()
+    harness.agent.followup.mockImplementation(() => {
+      harness.agent.session.events = makeTurnEvents({ text: 'first-private dispatch completed' })
+    })
+    let polls = 0
+    const sendMessage = vi.fn(async (_chatId: number, text: string, _options?: SendMessageOptions) => {
+      if (text === '✅ 已连接。你可以让我记住、跟进，或执行一件当前事情。') {
+        throw new Error('FIRST_PRIVATE_STARTUP_TRANSPORT_CANARY')
+      }
+      return { messageId: 1 }
+    })
+    const http: TelegramHttp = {
+      getMe: async () => ({ id: 1 }),
+      getUpdates: async () => {
+        if (polls++ === 0) {
+          return [{ update_id: 1, message: { message_id: 5, chat: { id: 42, type: 'private' }, text: 'authorize and run' } }]
+        }
+        lifetime.abort()
+        return []
+      },
+      sendMessage,
+    }
+
+    await expect(runGateway(harness.ctx, gatewayConfig(), http, lifetime.signal)).resolves.toBeUndefined()
+
+    expect(polls).toBe(2)
+    expect(sendMessage.mock.calls.map(([, text]) => text)).toEqual([
+      '✅ 已连接。你可以让我记住、跟进，或执行一件当前事情。',
+      'first-private dispatch completed',
+    ])
+    expect(sendMessage.mock.calls.filter(([, text]) => text === '✅ 已连接。你可以让我记住、跟进，或执行一件当前事情。')).toHaveLength(1)
+    expect(harness.ctx.logger.warn).toHaveBeenCalledTimes(1)
+    expect(harness.ctx.logger.warn).toHaveBeenCalledWith('telegram-gateway: startup notification failed')
+    expect(harness.ctx.logger.warn.mock.calls.flat().join('\n')).not.toContain('FIRST_PRIVATE_STARTUP_TRANSPORT_CANARY')
+  })
+
   it('requests application shutdown when polling fails after readiness', async () => {
     scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
     const harness = gatewayContext({ token: 'credential-token' })

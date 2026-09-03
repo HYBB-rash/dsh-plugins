@@ -335,6 +335,22 @@ async function deliverText(
   }
 }
 
+/** Send the best-effort startup notification while preserving fatal failures. */
+async function sendStartupNotification(
+  ctx: Context,
+  http: TelegramHttp,
+  chatId: number,
+  signal: AbortSignal,
+): Promise<void> {
+  try {
+    await http.sendMessage(chatId, '✅ 已连接。你可以让我记住、跟进，或执行一件当前事情。', undefined, signal)
+  } catch (error) {
+    signal.throwIfAborted()
+    if (error instanceof TelegramApiError && error.kind === 'fatal') throw error
+    ctx.logger.warn('telegram-gateway: startup notification failed')
+  }
+}
+
 /** Build the neutral transport envelope consumed by inbound listeners. */
 function buildInboundEnvelope(
   message: NonNullable<TelegramUpdate['message']>,
@@ -478,7 +494,7 @@ export async function runGateway(
 
   try {
     if (Number.isFinite(chatId)) {
-      await http.sendMessage(chatId, '✅ 已连接。你可以让我记住、跟进，或执行一件当前事情。', undefined, signal)
+      await sendStartupNotification(ctx, http, chatId, signal)
     }
     ready()
 
@@ -518,7 +534,7 @@ export async function runGateway(
         if (!Number.isFinite(chatId)) {
           if (message.chat.type !== 'private') continue
           chatId = message.chat.id
-          await http.sendMessage(chatId, '✅ 已连接。你可以让我记住、跟进，或执行一件当前事情。', undefined, signal)
+          await sendStartupNotification(ctx, http, chatId, signal)
         }
         if (message.chat.id !== chatId) continue
         const text = message.text
