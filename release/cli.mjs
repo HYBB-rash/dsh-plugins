@@ -4453,7 +4453,16 @@ wait_http() {
 wait_http http://127.0.0.1:3080/
 test "$(docker inspect dsh-web --format '{{.State.Running}}/{{.RestartCount}}')" = 'true/0'
 test "$(docker inspect dsh-prepare --format '{{.State.Status}}/{{.State.ExitCode}}')" = 'exited/0'
-docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs >/dev/null
+cron_control_ready=false
+for attempt in $(seq 1 24); do
+  if docker exec dsh-web node /opt/dsh/release-system/scripts/check-cron-control-ready.cjs \
+      >/dev/null 2>/dev/null; then
+    cron_control_ready=true
+    break
+  fi
+  sleep 5
+done
+test "$cron_control_ready" = true
 
 compose up -d telegram lan-proxy
 wait_http http://192.168.6.240:3080/

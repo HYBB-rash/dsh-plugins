@@ -901,6 +901,54 @@ assert 'productionReceipt?.notionInboxInit' in production
 assert "label: '生产 Notion task mirror 初始化'" in production
 assert 'code: exitCodes.production' in production
 PY
+
+# The Web HTTP endpoint may become healthy before the cron manager has created
+# its control socket.  Exercise the exact remote release gate with a transient
+# readiness failure and with a permanently unavailable manager.
+cron_wait_script="$test_root/cron-control-ready-wait.sh"
+python3 - "$repo_root/release/cli.mjs" "$cron_wait_script" <<'PY'
+import pathlib, sys
+
+source_path, output_path = map(pathlib.Path, sys.argv[1:])
+source = source_path.read_text(encoding='utf-8')
+manager_start = source.index('# Start the manager first;')
+telegram_start = source.index('compose up -d telegram lan-proxy', manager_start)
+manager_gate = source[manager_start:telegram_start]
+start = manager_gate.index('cron_control_ready=false')
+terminal = 'test "$cron_control_ready" = true'
+end = manager_gate.index(terminal, start) + len(terminal)
+wait_script = manager_gate[start:end]
+assert 'for attempt in $(seq 1 24); do' in wait_script
+assert wait_script.count('check-cron-control-ready.cjs') == 1
+assert 'sleep 5' in wait_script
+output_path.write_text(wait_script + '\n', encoding='utf-8')
+PY
+
+attempts_log="$test_root/cron-ready-attempts.log"
+run_cron_wait_fixture() {
+  local succeed_at="$1"
+  : >"$attempts_log"
+  ATTEMPTS_LOG="$attempts_log" SUCCESS_AT="$succeed_at" bash -c '
+    docker() {
+      printf "%s\n" attempt >>"$ATTEMPTS_LOG"
+      local count
+      count="$(wc -l <"$ATTEMPTS_LOG")"
+      test "$count" -ge "$SUCCESS_AT"
+    }
+    sleep() { test "$1" = 5; }
+    source "$1"
+  ' _ "$cron_wait_script"
+}
+
+run_cron_wait_fixture 3
+test "$(wc -l <"$attempts_log")" = 3
+set +e
+run_cron_wait_fixture 25
+cron_wait_status="$?"
+set -e
+test "$cron_wait_status" = 1
+test "$(wc -l <"$attempts_log")" = 24
+
 grep -Fq 'acceptanceChecklist' "$repo_root/release/cli.mjs"
 grep -Fq 'requiredCount: acceptanceChecklist.length' "$repo_root/release/cli.mjs"
 grep -Fq 'sha256: sha256Text(normalized)' "$repo_root/release/cli.mjs"
