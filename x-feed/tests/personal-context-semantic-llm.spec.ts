@@ -260,6 +260,36 @@ describe('single Personal Context semantic boundary', () => {
     expect(fixture.ctx.llm.stream).toHaveBeenCalledTimes(1)
   })
 
+  it('uses the sole revisions tool call when the provider also emits non-authoritative text', async () => {
+    const decision = {
+      kind: 'revisions',
+      changes: [{
+        operation: 'assert',
+        targetFactIds: [],
+        lane: 'long_term_interest',
+        stance: 'include',
+        evidenceSpan: { startUtf16: 0, endUtf16: 20 },
+        scopeSpan: { startUtf16: 5, endUtf16: 9 },
+      }],
+    }
+    const fixture = context(request => {
+      const [start, delta, end, finish] = toolCall(request, decision)
+      return [
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'I will submit the structured result.' },
+        { ...start, index: 1 } as StreamChunk,
+        { ...delta, index: 1 } as StreamChunk,
+        { type: 'block-end', index: 0, block: { type: 'text', text: 'I will submit the structured result.' } },
+        { ...end, index: 1 } as StreamChunk,
+        finish,
+      ]
+    })
+    const semantic = (await loadFactory())({ ctx: fixture.ctx, provider: 'p', model: 'm' })
+
+    await expect(semantic.revise(input)).resolves.toStrictEqual(decision)
+    expect(fixture.ctx.llm.stream).toHaveBeenCalledTimes(1)
+  })
+
   it.each([
     {
       label: 'free text',

@@ -195,7 +195,7 @@ function decodeDecision(assembler: BlockAssembler, toolName: string): unknown {
   if (assembler.finish.kind !== 'tool-calls') throw new Error('unexpected finish')
   const blocks = assembler.blocks()
   const calls = blocks.filter(block => block.type === 'tool-call')
-  if (calls.length !== 1 || blocks.some(block => block.type !== 'tool-call' && block.type !== 'reasoning')) {
+  if (calls.length !== 1 || blocks.some(block => block.type !== 'tool-call' && block.type !== 'reasoning' && block.type !== 'text')) {
     throw new Error('unexpected blocks')
   }
   const call = calls[0]
