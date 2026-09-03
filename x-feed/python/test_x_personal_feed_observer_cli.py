@@ -45,10 +45,11 @@ SURFACE_TARGETS = {
     "following": "https://x.com/home",
     "explore": "https://x.com/explore",
 }
+EXPLORE_ENTRY_URL = "https://x.com/explore/tabs/trending"
 SURFACE_PROOFS = {
     "for_you": {"pathname": "/home", "selectedHomeTabOrdinal": 0, "exploreRoot": False},
     "following": {"pathname": "/home", "selectedHomeTabOrdinal": 1, "exploreRoot": False},
-    "explore": {"pathname": "/explore", "selectedHomeTabOrdinal": None, "exploreRoot": True},
+    "explore": {"pathname": "/search", "selectedHomeTabOrdinal": None, "exploreRoot": True},
 }
 
 if str(SOURCE_PATH.parent) not in sys.path:
@@ -75,7 +76,7 @@ def _surface_facts(surface, *, selected=None, loading=0, root_count=None,
         home_tablist_count = 0 if home_tablist_count is None else home_tablist_count
         home_tabs = [] if home_tabs is None else home_tabs
         explore_root_count = 1 if explore_root_count is None else explore_root_count
-        pathname = "/explore" if pathname is None else pathname
+        pathname = "/search" if pathname is None else pathname
     return {
         "pathname": pathname,
         "rootCount": root_count,
@@ -865,7 +866,34 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             raw_value = _response_value(current_action[0], current_surface[0])
             if current_action[0] == "navigate":
                 raw_value = _surface_facts(current_surface[0])
-            socket = _FakeWebSocket(raw_value)
+            if current_action[0] == "navigate" and current_surface[0] == "explore":
+                def explore_frame(request, response_id, _value):
+                    if request["method"] == "Page.navigate":
+                        return {
+                            "id": response_id,
+                            "result": {"frameId": "frame-1", "loaderId": "loader-1"},
+                        }
+                    expression = request["params"]["expression"]
+                    value = (
+                        {
+                            "pathname": "/explore/tabs/trending",
+                            "rootCount": 1,
+                            "loadingCount": 0,
+                            "eligibleEntryCount": 1,
+                            "firstCellOrdinal": 0,
+                            "clicked": True,
+                        }
+                        if "eligibleEntryCount" in expression
+                        else _surface_facts("explore")
+                    )
+                    return {
+                        "id": response_id,
+                        "result": {"result": {"type": "object", "value": value}},
+                    }
+
+                socket = _FakeWebSocket({}, frame_factory=explore_frame)
+            else:
+                socket = _FakeWebSocket(raw_value)
             socket.connection_kwargs = kwargs
             created.append(socket)
             self.assertGreater(timeout, 0)
@@ -1012,7 +1040,17 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         with self.subTest(navigate_activation="explore_no_home_activation"):
             result, socket, state_checks = navigate_sequence(
                 "explore",
-                [(_surface_facts("explore"), True)],
+                [
+                    ({
+                        "pathname": "/explore/tabs/trending",
+                        "rootCount": 1,
+                        "loadingCount": 0,
+                        "eligibleEntryCount": 1,
+                        "firstCellOrdinal": 0,
+                        "clicked": True,
+                    }, False),
+                    (_surface_facts("explore"), True),
+                ],
             )
             self.assertEqual(result, {"url": SURFACE_TARGETS["explore"], "body": ""})
             self.assertEqual(state_checks, 1)
@@ -1021,12 +1059,18 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                 list(range(1, len(socket.sent) + 1)),
             )
             self.assertEqual(sum(message["method"] == "Page.navigate" for message in socket.sent), 1)
-            self.assertEqual(sum(message["method"] == "Runtime.evaluate" for message in socket.sent), 1)
+            self.assertEqual(
+                [message["params"]["url"] for message in socket.sent if message["method"] == "Page.navigate"],
+                [EXPLORE_ENTRY_URL],
+            )
+            self.assertEqual(sum(message["method"] == "Runtime.evaluate" for message in socket.sent), 2)
             runtime_messages = [
                 message for message in socket.sent if message["method"] == "Runtime.evaluate"
             ]
+            self.assertIn("eligibleEntryCount", runtime_messages[0]["params"]["expression"])
+            self.assertIn(".click()", runtime_messages[0]["params"]["expression"])
             assert_root_scoped_expression(
-                runtime_messages[0]["params"]["expression"],
+                runtime_messages[1]["params"]["expression"],
                 explore=True,
             )
 
@@ -1090,7 +1134,10 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                 self.assertLessEqual(len(navigate["body"].encode("utf-8")), 6144)
                 self.assertTrue(created[-1].closed)
                 self.assertEqual(created[-1].sent[0]["method"], "Page.navigate")
-                self.assertEqual(created[-1].sent[0]["params"], {"url": target})
+                self.assertEqual(
+                    created[-1].sent[0]["params"],
+                    {"url": EXPLORE_ENTRY_URL if surface == "explore" else target},
+                )
 
         current_surface[0] = "for_you"
         current_action[0] = "probe"
@@ -1977,7 +2024,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)
         self.assertIsNotNone(evaluator_type)
         ws_url = "ws://127.0.0.1:9222/devtools/page/page-f2"
-        timeout_seconds = 2.0
+        timeout_seconds = 10.0
 
         def run_navigation(surface, values, *, expected_result=None, expected_probes,
                            expected_activation, expected_sleeps, should_fail=False):
@@ -2084,7 +2131,14 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             run_navigation(
                 "explore",
                 [
-                    _surface_facts("for_you"),
+                    {
+                        "pathname": "/explore/tabs/trending",
+                        "rootCount": 1,
+                        "loadingCount": 0,
+                        "eligibleEntryCount": 1,
+                        "firstCellOrdinal": 0,
+                        "clicked": True,
+                    },
                     _surface_facts("explore"),
                 ],
                 expected_result={"url": SURFACE_TARGETS["explore"], "body": ""},
@@ -2142,10 +2196,10 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         with self.subTest(navigate_transition="always_loading_bounded"):
             run_navigation(
                 "following",
-                [_surface_facts("following", loading=1)] * 3,
-                expected_probes=3,
+                [_surface_facts("following", loading=1)] * 32,
+                expected_probes=32,
                 expected_activation=0,
-                expected_sleeps=2,
+                expected_sleeps=31,
                 should_fail=True,
             )
 
@@ -2215,6 +2269,459 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                     expected_sleeps=0,
                     should_fail=True,
                 )
+
+    def test_navigation_waits_for_a_slow_real_page_mount(self):
+        """A normal X mount that takes several polls must not be failed early."""
+        module = _require_cli(self)
+        evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)
+        self.assertIsNotNone(evaluator_type)
+        ws_url = "ws://127.0.0.1:9222/devtools/page/page-slow-mount"
+        clock = _FakeMonotonic()
+        waiting = _surface_facts(
+            "for_you",
+            root_count=0,
+            home_tablist_count=0,
+            home_tabs=[],
+            explore_root_count=0,
+        )
+        values = [waiting, waiting, waiting, waiting, waiting, _surface_facts("for_you")]
+        frame_index = [0]
+
+        def frame_factory(request, response_id, _value):
+            if request["method"] == "Page.navigate":
+                return {
+                    "id": response_id,
+                    "result": {"frameId": "frame-slow", "loaderId": "loader-slow"},
+                }
+            self.assertEqual(request["method"], "Runtime.evaluate")
+            value = values[frame_index[0]]
+            frame_index[0] += 1
+            return {
+                "id": response_id,
+                "result": {"result": {"type": "object", "value": value}},
+            }
+
+        socket = _FakeWebSocket({}, frame_factory=frame_factory)
+        evaluator = evaluator_type(monotonic=clock, sleeper=clock.sleep)
+        with mock.patch.object(module.websocket, "create_connection", return_value=socket):
+            result = evaluator.evaluate(
+                ws_url,
+                "navigate",
+                surface="for_you",
+                timeout_seconds=5.0,
+            )
+
+        self.assertEqual(result, {"url": SURFACE_TARGETS["for_you"], "body": ""})
+        self.assertEqual(frame_index[0], 6)
+        self.assertEqual(len(clock.sleeps), 5)
+        self.assertTrue(all(delay > 0 for delay in clock.sleeps))
+        self.assertLess(sum(clock.sleeps), 5.0)
+        self.assertTrue(socket.closed)
+
+    def test_snapshot_waits_for_transient_loading_before_returning_candidates(self):
+        """A first loading frame must not turn a healthy surface into failed."""
+        module = _require_cli(self)
+        evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)
+        self.assertIsNotNone(evaluator_type)
+        ws_url = "ws://127.0.0.1:9222/devtools/page/page-loading-snapshot"
+        clock = _FakeMonotonic()
+        loading = {
+            "cells": [],
+            "emptyFacts": _empty_facts("for_you", loadingCount=1),
+        }
+        candidate = {
+            "sourceUrl": "https://x.com/alice/status/909",
+            "authorHandle": "alice",
+            "publishedAt": TIMESTAMP,
+            "body": "ready body",
+            "depth": 0,
+            "insideQuote": False,
+            "showMoreControlCount": 0,
+            "placeholder": False,
+        }
+        ready = {
+            "cells": [{"candidates": [candidate]}],
+            "emptyFacts": _empty_facts("for_you", loadingCount=1),
+        }
+        values = [loading, loading, ready]
+        frame_index = [0]
+
+        def frame_factory(request, response_id, _value):
+            self.assertEqual(request["method"], "Runtime.evaluate")
+            value = values[frame_index[0]]
+            frame_index[0] += 1
+            return {
+                "id": response_id,
+                "result": {"result": {"type": "object", "value": value}},
+            }
+
+        socket = _FakeWebSocket({}, frame_factory=frame_factory)
+        evaluator = evaluator_type(monotonic=clock, sleeper=clock.sleep)
+        with mock.patch.object(module.websocket, "create_connection", return_value=socket):
+            result = evaluator.evaluate(
+                ws_url,
+                "snapshot",
+                surface="for_you",
+                timeout_seconds=5.0,
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "items": [{
+                    "sourceUrl": candidate["sourceUrl"],
+                    "authorHandle": candidate["authorHandle"],
+                    "publishedAt": candidate["publishedAt"],
+                    "body": candidate["body"],
+                    "showMore": False,
+                    "placeholder": False,
+                }],
+                "explicitEmpty": False,
+            },
+        )
+        self.assertEqual(frame_index[0], 3)
+        self.assertEqual(len(clock.sleeps), 2)
+        self.assertTrue(all(delay > 0 for delay in clock.sleeps))
+        self.assertLess(sum(clock.sleeps), 5.0)
+        self.assertTrue(socket.closed)
+
+    def test_explore_enters_the_first_visible_search_timeline_before_completion(self):
+        """Explore must reach original posts without ranking or exposing a trend query."""
+        module = _require_cli(self)
+        evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)
+        self.assertIsNotNone(evaluator_type)
+        ws_url = "ws://127.0.0.1:9222/devtools/page/page-explore-entry"
+        clock = _FakeMonotonic()
+        entry_values = [
+            {
+                "pathname": "/explore/tabs/trending",
+                "rootCount": 0,
+                "loadingCount": 1,
+                "eligibleEntryCount": 0,
+                "firstCellOrdinal": -1,
+                "clicked": False,
+            },
+            {
+                "pathname": "/explore/tabs/trending",
+                "rootCount": 1,
+                "loadingCount": 0,
+                "eligibleEntryCount": 11,
+                "firstCellOrdinal": 2,
+                "clicked": True,
+            },
+        ]
+        entry_index = [0]
+        expressions = []
+
+        def frame_factory(request, response_id, _value):
+            if request["method"] == "Page.navigate":
+                return {
+                    "id": response_id,
+                    "result": {"frameId": "frame-explore", "loaderId": "loader-explore"},
+                }
+            self.assertEqual(request["method"], "Runtime.evaluate")
+            expression = request["params"]["expression"]
+            expressions.append(expression)
+            if "eligibleEntryCount" in expression:
+                value = entry_values[entry_index[0]]
+                entry_index[0] += 1
+            else:
+                value = _surface_facts("explore")
+            return {
+                "id": response_id,
+                "result": {"result": {"type": "object", "value": value}},
+            }
+
+        socket = _FakeWebSocket({}, frame_factory=frame_factory)
+        evaluator = evaluator_type(monotonic=clock, sleeper=clock.sleep)
+        with mock.patch.object(module.websocket, "create_connection", return_value=socket):
+            result = evaluator.evaluate(
+                ws_url,
+                "navigate",
+                surface="explore",
+                timeout_seconds=8.0,
+            )
+
+        navigate_messages = [
+            message for message in socket.sent if message["method"] == "Page.navigate"
+        ]
+        self.assertEqual(
+            [message["params"]["url"] for message in navigate_messages],
+            ["https://x.com/explore/tabs/trending"],
+        )
+        self.assertEqual(result, {"url": SURFACE_TARGETS["explore"], "body": ""})
+        self.assertEqual(entry_index[0], 2)
+        self.assertEqual(len(expressions), 3)
+        self.assertIn("eligibleEntryCount", expressions[0])
+        self.assertIn("eligibleEntryCount", expressions[1])
+        self.assertNotIn("eligibleEntryCount", expressions[2])
+        self.assertIn(".click()", expressions[1])
+        self.assertNotIn("/search?", json.dumps(result, separators=(",", ":")))
+        self.assertTrue(socket.closed)
+
+    def test_existing_browser_reuses_the_search_timeline_left_by_explore(self):
+        """A completed Explore search page remains an eligible existing X tab."""
+        module = _require_cli(self)
+        browser_type = getattr(module, "_ExistingCdpBrowser", None)
+        self.assertIsNotNone(browser_type)
+        browser = browser_type(clock=mock.Mock(), deadline_epoch_ms=10_000)
+        self.assertTrue(
+            browser.is_x_tab({
+                "type": "page",
+                "url": "https://x.com/search?q=synthetic-topic&src=trend_click",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/search-page",
+            })
+        )
+
+    def test_explore_production_expressions_chain_dom_entry_search_probe_snapshot(self):
+        """The production Explore expressions must compose on a real DOM-shaped fixture."""
+        module = _require_cli(self)
+        evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)
+        self.assertIsNotNone(evaluator_type)
+        observer_module = importlib.import_module("x_personal_feed_observer")
+
+        expressions = [
+            evaluator_type()._command("probe", "explore", None)[1]["expression"],
+            evaluator_type()._command("snapshot", "explore", None)[1]["expression"],
+        ]
+        entry_expression = getattr(module, "_EXPLORE_ENTRY_EXPRESSION", None)
+        self.assertIsInstance(entry_expression, str)
+
+        fixture = r'''
+class Node {
+  constructor(tag, attrs = {}, children = [], text = "") {
+    this.tagName = tag.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.parentElement = null;
+    this.innerText = text;
+    this.disabled = false;
+    for (const child of children) child.parentElement = this;
+  }
+  get href() { return this.attrs.href || ""; }
+  getAttribute(name) {
+    return Object.prototype.hasOwnProperty.call(this.attrs, name) ? String(this.attrs[name]) : null;
+  }
+  getClientRects() { return this.attrs.hidden ? [] : [{}]; }
+  contains(node) {
+    for (let current = node; current; current = current.parentElement) if (current === this) return true;
+    return false;
+  }
+  matches(selector) {
+    return selector.split(",").some(part => this._matchesOne(part.trim()));
+  }
+  _matchesOne(selector) {
+    const parts = selector.split(/\s+/).filter(Boolean);
+    let current = this;
+    for (let index = parts.length - 1; index >= 0; index -= 1) {
+      if (!current || !current._matchesSimple(parts[index])) return false;
+      if (index > 0) {
+        current = current.parentElement;
+        while (current && !current._matchesSimple(parts[index - 1])) current = current.parentElement;
+      }
+    }
+    return true;
+  }
+  _matchesSimple(selector) {
+    const tag = selector.match(/^[A-Za-z][A-Za-z0-9-]*/);
+    let rest = tag ? selector.slice(tag[0].length) : selector;
+    if (tag && this.tagName !== tag[0].toUpperCase()) return false;
+    const attrs = [...rest.matchAll(/\[([^\]=~*]+)(?:([*]?=)(["']?)([^\]"']*)\3)?\]/g)];
+    if (attrs.length === 0 && rest.length !== 0) return false;
+    for (const [, name, operator, , expected] of attrs) {
+      const actual = this.getAttribute(name);
+      if (actual === null) return false;
+      if (operator === "=" && actual !== expected) return false;
+      if (operator === "*=" && !actual.includes(expected)) return false;
+    }
+    return true;
+  }
+  querySelectorAll(selector) {
+    const found = [];
+    const visit = node => {
+      for (const child of node.children) {
+        if (child.matches(selector)) found.push(child);
+        visit(child);
+      }
+    };
+    visit(this);
+    return found;
+  }
+  closest(selector) {
+    for (let current = this; current; current = current.parentElement) {
+      if (current.matches(selector)) return current;
+    }
+    return null;
+  }
+  click() { if (this.onClick) this.onClick(); }
+}
+
+function makePage(pathname) {
+  const location = {pathname};
+  const time = new Node("time", {datetime: "2026-09-01T00:00:00.000Z"});
+  const link = new Node("a", {href: "https://x.com/alice/status/42"}, [time]);
+  const text = new Node("div", {"data-testid": "tweetText"}, [], "fixture body");
+  const article = new Node("article", {"data-testid": "tweet"}, [link, text]);
+  const searchEntry = new Node("a", {href: "https://x.com/search?q=fixture-topic"});
+  searchEntry.onClick = () => { location.pathname = "/search"; };
+  const cell = new Node("div", {"data-testid": "cellInnerDiv"}, [article, searchEntry]);
+  const root = new Node("main", {"data-testid": "primaryColumn"}, [cell]);
+  const body = new Node("body", {}, [root]);
+  const document = {body, querySelectorAll: selector => body.querySelectorAll(selector)};
+  return {location, document};
+}
+
+function run(pathname, entryExpression, probeExpression, snapshotExpression) {
+  const page = makePage(pathname);
+  globalThis.location = page.location;
+  globalThis.document = page.document;
+  const entry = eval(entryExpression);
+  const afterEntryPathname = location.pathname;
+  const probe = eval(probeExpression);
+  const snapshot = eval(snapshotExpression);
+  return {entry, afterEntryPathname, probe, snapshot};
+}
+
+const entryExpression = __ENTRY__;
+const probeExpression = __PROBE__;
+const snapshotExpression = __SNAPSHOT__;
+process.stdout.write(JSON.stringify({
+  valid: run("/explore/tabs/trending", entryExpression, probeExpression, snapshotExpression),
+  oldPath: run("/explore", entryExpression, probeExpression, snapshotExpression),
+}));
+'''
+        script = fixture.replace(
+            "__ENTRY__", json.dumps(entry_expression, ensure_ascii=False)
+        ).replace(
+            "__PROBE__", json.dumps(expressions[0], ensure_ascii=False)
+        ).replace(
+            "__SNAPSHOT__", json.dumps(expressions[1], ensure_ascii=False)
+        )
+        completed = subprocess.run(
+            ["node", "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        observed = json.loads(completed.stdout)
+        valid = observed["valid"]
+        self.assertEqual(valid["entry"], {
+            "pathname": "/explore/tabs/trending",
+            "rootCount": 1,
+            "loadingCount": 0,
+            "eligibleEntryCount": 1,
+            "firstCellOrdinal": 0,
+            "clicked": True,
+        })
+        self.assertEqual(valid["afterEntryPathname"], "/search")
+        self.assertEqual(
+            valid["probe"],
+            {
+                "pathname": "/search",
+                "rootCount": 0,
+                "loadingCount": 0,
+                "homeTablistCount": 0,
+                "homeTabs": [],
+                "exploreRootCount": 1,
+                "outsideRootSelectedTabs": [],
+            },
+        )
+        self.assertEqual(valid["snapshot"]["cells"], [{"candidates": [{
+            "sourceUrl": "https://x.com/alice/status/42",
+            "authorHandle": "alice",
+            "publishedAt": TIMESTAMP,
+            "body": "fixture body",
+            "depth": 0,
+            "insideQuote": False,
+            "showMoreControlCount": 0,
+            "placeholder": False,
+        }]}])
+        self.assertEqual(valid["snapshot"]["emptyFacts"], {
+            "surfaceProof": dict(SURFACE_PROOFS["explore"]),
+            "surfaceRootCount": 1,
+            "emptyMarkerCount": 0,
+            "outsideRootEmptyMarkerCount": 0,
+            "loadingCount": 0,
+            "loginCount": 0,
+            "authCount": 0,
+            "errorCount": 0,
+            "retryCount": 0,
+        })
+        snapshot_value = module._snapshot_value(valid["snapshot"], "explore")
+        self.assertEqual(snapshot_value, {
+            "items": [{
+                "sourceUrl": "https://x.com/alice/status/42",
+                "authorHandle": "alice",
+                "publishedAt": TIMESTAMP,
+                "body": "fixture body",
+                "showMore": False,
+                "placeholder": False,
+            }],
+            "explicitEmpty": False,
+        })
+
+        old_path = observed["oldPath"]
+        self.assertEqual(old_path["entry"]["pathname"], "/explore")
+        self.assertFalse(old_path["entry"]["clicked"])
+        with self.assertRaises(Exception):
+            module._explore_entry_transition(old_path["entry"])
+        mismatched = json.loads(json.dumps(valid["snapshot"]))
+        mismatched["emptyFacts"]["surfaceProof"]["pathname"] = "/explore"
+        with self.assertRaises(Exception):
+            module._snapshot_value(mismatched, "explore")
+
+        class Clock:
+            def now_ms(self):
+                return 1_000_000
+
+        class LockContext:
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class Lock:
+            def lock(self, timeout_seconds=None):
+                return LockContext()
+
+        class Browser:
+            def cdp_ready(self, timeout_seconds):
+                return True
+            def list_tabs(self, timeout_seconds):
+                return [{
+                    "type": "page",
+                    "url": "https://x.com/home",
+                    "webSocketDebuggerUrl": "ws://x/shared",
+                }]
+            def is_x_tab(self, tab):
+                return True
+            def classify_x_page(self, url, body):
+                return "ready"
+
+        class Evaluator:
+            def evaluate(self, ws_url, action, *, surface, stable_id=None, timeout_seconds=None):
+                if action == "navigate":
+                    return {"url": observer_module.TARGETS[surface], "body": ""}
+                if action == "probe":
+                    return {"surfaceProof": dict(observer_module.PROOFS[surface])}
+                if action == "snapshot":
+                    return snapshot_value
+                if action in {"expand", "scroll"}:
+                    return {"ok": True}
+                raise AssertionError(action)
+
+        result = observer_module.observe(
+            1_100_000,
+            clock=Clock(),
+            browser=Browser(),
+            lock=Lock(),
+            evaluator=Evaluator(),
+        )
+        self.assertEqual(result["kind"], "complete")
+        self.assertEqual(
+            [face["kind"] for face in result["surfaces"]],
+            ["complete", "complete", "complete"],
+        )
 
     def test_snapshot_empty_facts_are_surface_scoped_and_bounded(self):
         module = _require_cli(self)

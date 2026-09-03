@@ -22,8 +22,10 @@ MAX_INPUT_BYTES = 4096
 MAX_HTTP_BYTES = 1024 * 1024
 MAX_CDP_BYTES = 1024 * 1024
 MAX_CDP_EVENTS_PER_EXCHANGE = 8
-MAX_NAVIGATION_POLLS = 3
+MAX_NAVIGATION_POLLS = 32
 NAVIGATION_POLL_INTERVAL_SECONDS = 0.1
+MAX_SNAPSHOT_READY_POLLS = 20
+SNAPSHOT_READY_POLL_INTERVAL_SECONDS = 0.1
 MAX_URL_BYTES = 512
 MAX_BODY_BYTES = 6144
 
@@ -32,10 +34,11 @@ SURFACE_TARGETS = {
     "following": "https://x.com/home",
     "explore": "https://x.com/explore",
 }
+EXPLORE_ENTRY_URL = "https://x.com/explore/tabs/trending"
 SURFACE_PROOFS = {
     "for_you": {"pathname": "/home", "selectedHomeTabOrdinal": 0, "explore" + "Root": False},
     "following": {"pathname": "/home", "selectedHomeTabOrdinal": 1, "explore" + "Root": False},
-    "explore": {"pathname": "/explore", "selectedHomeTabOrdinal": None, "explore" + "Root": True},
+    "explore": {"pathname": "/search", "selectedHomeTabOrdinal": None, "explore" + "Root": True},
 }
 EXPLORE_ROOT_COUNT = "explore" + "RootCount"
 
@@ -82,16 +85,21 @@ def _x_page(value):
         parsed = urllib.parse.urlsplit(value)
     except (UnicodeError, ValueError):
         return False
-    return (
-        parsed.scheme == "https"
-        and parsed.hostname in {"x.com", "www.x.com"}
-        and not parsed.username
-        and not parsed.password
-        and parsed.port is None
-        and not parsed.query
-        and not parsed.fragment
-        and parsed.path in {"/home", "/explore"}
-    )
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in {"x.com", "www.x.com"}
+        or parsed.username
+        or parsed.password
+        or parsed.port is not None
+        or parsed.fragment
+    ):
+        return False
+    if parsed.path in {"/home", "/explore", "/explore/tabs/trending"}:
+        return not parsed.query
+    if parsed.path != "/search":
+        return False
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    return any(isinstance(value, str) and bool(value) for value in query.get("q", []))
 
 
 class _ExistingCdpBrowser:
@@ -144,7 +152,7 @@ _PROBE_EXPRESSION = (
     "(() => { const pathname = location.pathname; "
     "const primaryRoots = [...document.querySelectorAll('[data-testid=\"primaryColumn\"]')]; "
     "const homeRoots = pathname === '/home' ? primaryRoots : []; "
-    "const explore_roots = pathname === '/explore' ? primaryRoots : []; "
+    "const explore_roots = pathname === '/search' ? primaryRoots : []; "
     "const roots = pathname === '/home' ? homeRoots : explore_roots; "
     "const root = roots.length === 1 ? roots[0] : null; "
     "const loading = root ? root.querySelectorAll('[aria-busy=\"true\"]').length : 0; "
@@ -158,6 +166,25 @@ _PROBE_EXPRESSION = (
     "homeTablistCount:tablists.length, homeTabs:tabs, " + "explore" + "RootCount:explore_roots.length, "
     "outsideRootSelectedTabs:outside}; })()"
 )
+_EXPLORE_ENTRY_EXPRESSION = (
+    "(() => { const pathname = location.pathname; "
+    "const roots = [...document.querySelectorAll('[data-testid=\"primaryColumn\"]')]; "
+    "const root = roots.length === 1 ? roots[0] : null; "
+    "const visible = node => node.getClientRects().length > 0 && node.getAttribute('aria-hidden') !== 'true'; "
+    "const cells = root ? [...root.querySelectorAll('[data-testid=\"cellInnerDiv\"]')] : []; "
+    "const loadingCount = root ? root.querySelectorAll('[aria-busy=\"true\"],[role=\"progressbar\"]').length : 0; "
+    "const eligible = root ? [...root.querySelectorAll('a[href]')].filter(anchor => { try { "
+    "const url = new URL(anchor.href); return visible(anchor) && url.protocol === 'https:' && "
+    "['x.com','www.x.com'].includes(url.hostname) && !url.username && !url.password && url.port === '' && "
+    "url.pathname === '/search' && (url.searchParams.get('q') || '').length > 0 && url.hash === ''; "
+    "} catch (_) { return false; } }) : []; "
+    "const firstCell = eligible.length > 0 ? eligible[0].closest('[data-testid=\"cellInnerDiv\"]') : null; "
+    "const firstCellOrdinal = firstCell ? cells.indexOf(firstCell) : -1; "
+    "const clicked = pathname === '/explore/tabs/trending' && roots.length === 1 && loadingCount === 0 && "
+    "eligible.length > 0 && firstCellOrdinal >= 0; if (clicked) eligible[0].click(); "
+    "return {pathname,rootCount:roots.length,loadingCount,eligibleEntryCount:eligible.length,"
+    "firstCellOrdinal,clicked}; })()"
+)
 _SNAPSHOT_EXPRESSION = (
     "(() => { const roots = [...document.querySelectorAll('[data-testid=\"primaryColumn\"]')]; "
     "if (roots.length !== 1) return {cells:null, emptyFacts:{surfaceProof:null,surfaceRootCount:roots.length,emptyMarkerCount:0,outsideRootEmptyMarkerCount:0,loadingCount:0,loginCount:0,authCount:0,errorCount:0,retryCount:0}}; "
@@ -166,7 +193,7 @@ _SNAPSHOT_EXPRESSION = (
     ".filter(tablist => tablist.querySelectorAll('[role=\"tab\"]').length >= 2) : []; "
     "const homeTabs = homeTablists.length === 1 ? [...homeTablists[0].querySelectorAll('[role=\"tab\"]')] : []; "
     "const selected = homeTabs.map((tab, ordinal) => ({ordinal, selected: tab.getAttribute('aria-selected') === 'true'})).filter(tab => tab.selected); "
-    "const surfaceProof = pathname === '/explore' ? {pathname:'/explore',selectedHomeTabOrdinal:null,[exploreKey]:true} : "
+    "const surfaceProof = pathname === '/search' ? {pathname:'/search',selectedHomeTabOrdinal:null,[exploreKey]:true} : "
     "pathname === '/home' && homeTablists.length === 1 && homeTabs.length >= 2 && selected.length === 1 ? "
     "{pathname:'/home',selectedHomeTabOrdinal:selected[0].ordinal,[exploreKey]:false} : null; "
     "const nodes = [...root.querySelectorAll('[data-testid=\"cellInnerDiv\"]')].slice(0, 8); "
@@ -417,6 +444,39 @@ def _snapshot_value(value, surface):
     return {"items": items, "explicitEmpty": False}
 
 
+def _snapshot_waitable(value, surface):
+    if surface not in SURFACE_TARGETS or not isinstance(value, dict):
+        return False
+    if set(value) != {"cells", "emptyFacts"} or value["cells"] != []:
+        return False
+    facts = value["emptyFacts"]
+    fields = {
+        "surfaceProof",
+        "surfaceRootCount",
+        "emptyMarkerCount",
+        "outsideRootEmptyMarkerCount",
+        "loadingCount",
+        "loginCount",
+        "authCount",
+        "errorCount",
+        "retryCount",
+    }
+    if not isinstance(facts, dict) or set(facts) != fields:
+        return False
+    if facts["surfaceProof"] != SURFACE_PROOFS[surface]:
+        return False
+    for name in fields - {"surfaceProof"}:
+        value = facts[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return False
+    return (
+        facts["surfaceRootCount"] == 1
+        and facts["emptyMarkerCount"] == 0
+        and facts["outsideRootEmptyMarkerCount"] == 0
+        and all(facts[name] == 0 for name in ("loginCount", "authCount", "errorCount", "retryCount"))
+    )
+
+
 def _surface_decision(surface, raw_facts):
     required = {
         "pathname",
@@ -446,7 +506,7 @@ def _surface_decision(surface, raw_facts):
 
     if surface == "explore":
         if (
-            raw_facts["pathname"] != "/explore"
+            raw_facts["pathname"] != "/search"
             or raw_facts["rootCount"] != 0
             or raw_facts["homeTablistCount"] != 0
             or tabs != []
@@ -485,6 +545,41 @@ def _surface_decision(surface, raw_facts):
     return decision
 
 
+def _explore_entry_transition(raw_facts):
+    fields = {
+        "pathname",
+        "rootCount",
+        "loadingCount",
+        "eligibleEntryCount",
+        "firstCellOrdinal",
+        "clicked",
+    }
+    if not isinstance(raw_facts, dict) or set(raw_facts) != fields:
+        raise _CdpFailure()
+    if raw_facts["pathname"] != "/explore/tabs/trending":
+        raise _CdpFailure()
+    for name in ("rootCount", "loadingCount", "eligibleEntryCount"):
+        value = raw_facts[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise _CdpFailure()
+    first = raw_facts["firstCellOrdinal"]
+    if isinstance(first, bool) or not isinstance(first, int) or first < -1:
+        raise _CdpFailure()
+    if not isinstance(raw_facts["clicked"], bool) or raw_facts["rootCount"] > 1:
+        raise _CdpFailure()
+    if raw_facts["rootCount"] == 0:
+        if raw_facts["eligibleEntryCount"] != 0 or first != -1 or raw_facts["clicked"]:
+            raise _CdpFailure()
+        return {"kind": "wait"}
+    if raw_facts["loadingCount"] != 0:
+        if raw_facts["clicked"]:
+            raise _CdpFailure()
+        return {"kind": "wait"}
+    if raw_facts["eligibleEntryCount"] <= 0 or first < 0 or not raw_facts["clicked"]:
+        raise _CdpFailure()
+    return {"kind": "entered"}
+
+
 def _expand_decision(raw_facts):
     fields = {"matchingCellCount", "targetRootCount", "showMoreControlCount", "clicked"}
     if not isinstance(raw_facts, dict) or set(raw_facts) != fields:
@@ -516,7 +611,7 @@ def _surface_transition(surface, raw_facts, activated=False):
     if surface not in SURFACE_TARGETS or not isinstance(raw_facts, dict) or set(raw_facts) != fields:
         raise _CdpFailure()
     pathname = raw_facts["pathname"]
-    if pathname not in {"/home", "/explore"}:
+    if pathname not in {"/home", "/search"}:
         raise _CdpFailure()
     for name in ("rootCount", "loadingCount", "homeTablistCount", EXPLORE_ROOT_COUNT):
         value = raw_facts[name]
@@ -532,7 +627,7 @@ def _surface_transition(surface, raw_facts, activated=False):
     if root_count > 1 or explore_count > 1 or tablist_count > 1:
         raise _CdpFailure()
 
-    if pathname == "/explore":
+    if pathname == "/search":
         if root_count != 0 or tablist_count != 0 or tabs:
             raise _CdpFailure()
         if explore_count == 0:
@@ -600,7 +695,8 @@ class _MechanicalCdpEvaluator:
         if action != "expand" and stable_id is not None:
             raise _CdpFailure()
         if action == "navigate":
-            return "Page.navigate", {"url": SURFACE_TARGETS[surface]}
+            target = EXPLORE_ENTRY_URL if surface == "explore" else SURFACE_TARGETS[surface]
+            return "Page.navigate", {"url": target}
         if action == "probe":
             return "Runtime.evaluate", {"expression": _PROBE_EXPRESSION, "returnByValue": True}
         if action == "snapshot":
@@ -767,6 +863,25 @@ class _MechanicalCdpEvaluator:
                 if result.get("errorText"):
                     raise _CdpFailure()
                 command_id = 2
+                if surface == "explore":
+                    for poll in range(MAX_NAVIGATION_POLLS):
+                        entry_response = exchange(
+                            command_id,
+                            "Runtime.evaluate",
+                            {"expression": _EXPLORE_ENTRY_EXPRESSION, "returnByValue": True},
+                        )
+                        command_id += 1
+                        transition = _explore_entry_transition(self._runtime_value(entry_response))
+                        if transition["kind"] == "entered":
+                            break
+                        if poll + 1 >= MAX_NAVIGATION_POLLS:
+                            raise _CdpFailure()
+                        delay = min(NAVIGATION_POLL_INTERVAL_SECONDS, remaining())
+                        self._sleeper(delay)
+                        remaining()
+                    delay = min(NAVIGATION_POLL_INTERVAL_SECONDS, remaining())
+                    self._sleeper(delay)
+                    remaining()
                 activated_once = False
                 sleeps = 0
                 for poll in range(MAX_NAVIGATION_POLLS):
@@ -808,7 +923,19 @@ class _MechanicalCdpEvaluator:
                 return {"surfaceProof": decision["surfaceProof"]}
             value = self._runtime_value(response)
             if action == "snapshot":
-                return _snapshot_value(value, surface)
+                command_id = 2
+                for poll in range(MAX_SNAPSHOT_READY_POLLS):
+                    try:
+                        return _snapshot_value(value, surface)
+                    except _CdpFailure:
+                        if not _snapshot_waitable(value, surface) or poll + 1 >= MAX_SNAPSHOT_READY_POLLS:
+                            raise
+                    delay = min(SNAPSHOT_READY_POLL_INTERVAL_SECONDS, remaining())
+                    self._sleeper(delay)
+                    remaining()
+                    value = self._runtime_value(exchange(command_id, method, params))
+                    command_id += 1
+                raise _CdpFailure()
             if action == "expand":
                 return _expand_decision(value)
             if "ok" not in value or not isinstance(value["ok"], bool):

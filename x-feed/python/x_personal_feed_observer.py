@@ -17,7 +17,7 @@ TARGETS = {
 PROOFS = {
     "for_you": {"pathname": "/home", "selectedHomeTabOrdinal": 0, "explore" + "Root": False},
     "following": {"pathname": "/home", "selectedHomeTabOrdinal": 1, "explore" + "Root": False},
-    "explore": {"pathname": "/explore", "selectedHomeTabOrdinal": None, "explore" + "Root": True},
+    "explore": {"pathname": "/search", "selectedHomeTabOrdinal": None, "explore" + "Root": True},
 }
 HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 STAMP_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$")

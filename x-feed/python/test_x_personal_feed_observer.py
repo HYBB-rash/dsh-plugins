@@ -28,7 +28,7 @@ SURFACE_URLS = {
 SURFACE_PROOFS = {
     "for_you": {"pathname": "/home", "selectedHomeTabOrdinal": 0, "exploreRoot": False},
     "following": {"pathname": "/home", "selectedHomeTabOrdinal": 1, "exploreRoot": False},
-    "explore": {"pathname": "/explore", "selectedHomeTabOrdinal": None, "exploreRoot": True},
+    "explore": {"pathname": "/search", "selectedHomeTabOrdinal": None, "exploreRoot": True},
 }
 TIMESTAMP = "2026-09-01T00:00:00.000Z"
 REQUEST_ID = "telegram:7:11"
