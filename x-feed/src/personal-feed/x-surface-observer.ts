@@ -1,159 +1,61 @@
-import { types as nodeTypes } from 'node:util'
+import { execFile as nodeExecFile } from 'node:child_process'
+import { basename, dirname, isAbsolute } from 'node:path'
+import { promisify } from 'node:util'
 
-const REFLECT_APPLY = typeof Reflect === 'object' && typeof Reflect.apply === 'function'
-  ? Reflect.apply
-  : undefined
-const OBJECT_PROTOTYPE = Object.prototype
-const ARRAY_PROTOTYPE = Array.prototype
-const TOP_KEYS = Object.freeze([
-  'schemaVersion', 'kind', 'requestId', 'cutoff', 'shanghaiDay', 'startedAt', 'completedAt', 'surfaces',
-] as const)
-const INPUT_KEYS = Object.freeze(['request', 'signal'] as const)
-const REQUEST_KEYS = Object.freeze(['requestId', 'cutoff', 'shanghaiDay'] as const)
-const FACTORY_KEYS = Object.freeze(['child'] as const)
-const CHILD_KEYS = Object.freeze(['observe'] as const)
-const SURFACE_KEYS = Object.freeze(['kind', 'surface', 'surfaceOrdinal', 'startedAt', 'completedAt', 'occurrences'] as const)
-const OCCURRENCE_KEYS = Object.freeze(['sourceUrl', 'body', 'occurrenceOrdinal', 'capturedAt', 'authorHandle', 'publishedAt'] as const)
-const SURFACES = Object.freeze(['for_you', 'following', 'explore'] as const)
-const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1_000
+const execFile = promisify(nodeExecFile)
+const SURFACES = ['for_you', 'following', 'explore'] as const
+const MAX_BUFFER = 1_048_576
 const MAX_SURFACE_OCCURRENCES = 8
 const MAX_TOTAL_OCCURRENCES = 24
 const MAX_BODY_BYTES = 6_144
-const CANONICAL_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
-const CANONICAL_DAY = /^\d{4}-\d{2}-\d{2}$/
+const INCOMPLETE = Object.freeze({ kind: 'incomplete' as const })
+const STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const DAY = /^\d{4}-\d{2}-\d{2}$/
 
-type DataRecord = Readonly<Record<string, unknown>>
+type PlainRecord = Record<string, unknown>
 type Request = Readonly<{
   readonly requestId: string
   readonly cutoff: string
   readonly shanghaiDay: string
 }>
 
+type CommandRequest = Readonly<{
+  readonly file: string
+  readonly args: readonly string[]
+  readonly cwd: string
+  readonly timeoutMs: number
+  readonly maxBuffer: number
+  readonly shell: false
+  readonly signal: AbortSignal
+}>
+
+type CommandResult = Readonly<{ readonly stdout: string; readonly stderr: string }>
+type CommandRunner = (request: CommandRequest) => Promise<CommandResult>
+type Clock = Readonly<{ readonly now: () => Date }>
 
 type Slot = {
   state: 'open' | 'taken' | 'closed'
   text: string | undefined
 }
 
-type Batch = {
+type CaptureBatch = {
   readonly signal: AbortSignal
-  readonly batches: Set<Batch>
   readonly slots: Set<Slot>
   readonly onAbort: () => void
   closed: boolean
-  listenerInstalled: boolean
 }
 
-type ParsedRequest = Readonly<{
-  readonly request: Request
-  readonly cutoffEpochMs: number
-}>
-
-type Intrinsics = Readonly<{
-  readonly apply: typeof Reflect.apply | undefined
-  readonly abortedGetter: (() => boolean) | undefined
-  readonly addEventListener: ((type: string, listener: (...args: unknown[]) => unknown, options?: unknown) => unknown) | undefined
-  readonly removeEventListener: ((type: string, listener: (...args: unknown[]) => unknown, options?: unknown) => unknown) | undefined
-}>
-
-function captureIntrinsics(): Intrinsics {
-  let abortedGetter: (() => boolean) | undefined
-  let addEventListener: Intrinsics['addEventListener']
-  let removeEventListener: Intrinsics['removeEventListener']
-  try {
-    const abortSignalPrototype = typeof AbortSignal === 'function' ? AbortSignal.prototype : undefined
-    const eventTargetPrototype = typeof EventTarget === 'function' ? EventTarget.prototype : undefined
-    abortedGetter = Object.getOwnPropertyDescriptor(abortSignalPrototype ?? {}, 'aborted')?.get as (() => boolean) | undefined
-    addEventListener = Object.getOwnPropertyDescriptor(eventTargetPrototype ?? {}, 'addEventListener')?.value as Intrinsics['addEventListener']
-    removeEventListener = Object.getOwnPropertyDescriptor(eventTargetPrototype ?? {}, 'removeEventListener')?.value as Intrinsics['removeEventListener']
-  } catch {
-    abortedGetter = undefined
-    addEventListener = undefined
-    removeEventListener = undefined
-  }
-  return Object.freeze({ apply: REFLECT_APPLY, abortedGetter, addEventListener, removeEventListener })
+function isRecord(value: unknown): value is PlainRecord {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-const INTRINSICS = captureIntrinsics()
-const INCOMPLETE = Object.freeze({ kind: 'incomplete' as const })
-
-function isProxy(value: unknown): boolean {
-  try {
-    return nodeTypes.isProxy(value)
-  } catch {
-    return true
-  }
+function hasExactKeys(value: PlainRecord, keys: readonly string[]): boolean {
+  const actual = Object.keys(value)
+  return actual.length === keys.length && keys.every(key => Object.hasOwn(value, key))
 }
 
-function exactRecord(value: unknown, keys: readonly string[]): DataRecord | undefined {
-  if (value === null || typeof value !== 'object' || isProxy(value)) return undefined
-  try {
-    const prototype = Object.getPrototypeOf(value)
-    if (prototype !== OBJECT_PROTOTYPE && prototype !== null) return undefined
-    const ownKeys = Reflect.ownKeys(value)
-    if (ownKeys.length !== keys.length) return undefined
-    const descriptors = Object.getOwnPropertyDescriptors(value)
-    const allowed = new Set(keys)
-    for (const ownKey of ownKeys) {
-      if (typeof ownKey !== 'string' || !allowed.has(ownKey)) return undefined
-      const descriptor = descriptors[ownKey]
-      if (descriptor === undefined || descriptor.enumerable !== true || !('value' in descriptor)) return undefined
-    }
-    const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>
-    for (const key of keys) {
-      const descriptor = descriptors[key]
-      if (descriptor === undefined || descriptor.enumerable !== true || !('value' in descriptor)) return undefined
-      snapshot[key] = descriptor.value
-    }
-    return snapshot
-  } catch {
-    return undefined
-  }
-}
-
-function exactArray(value: unknown): readonly unknown[] | undefined {
-  if (!Array.isArray(value) || isProxy(value)) return undefined
-  try {
-    if (Object.getPrototypeOf(value) !== ARRAY_PROTOTYPE) return undefined
-    const ownKeys = Reflect.ownKeys(value)
-    const descriptors = Object.getOwnPropertyDescriptors(value)
-    const lengthDescriptor = Reflect.getOwnPropertyDescriptor(value, 'length')
-    if (lengthDescriptor === undefined || lengthDescriptor.enumerable !== false || !('value' in lengthDescriptor)
-      || lengthDescriptor.value !== value.length || ownKeys.length !== value.length + 1) return undefined
-    for (const ownKey of ownKeys) {
-      if (ownKey === 'length') continue
-      if (typeof ownKey !== 'string' || !/^\d+$/.test(ownKey)) return undefined
-      const index = Number(ownKey)
-      const descriptor = descriptors[ownKey]
-      if (!Number.isSafeInteger(index) || index < 0 || index >= value.length || String(index) !== ownKey
-        || descriptor === undefined || descriptor.enumerable !== true || !('value' in descriptor)) return undefined
-    }
-    for (let index = 0; index < value.length; index += 1) {
-      const descriptor = descriptors[String(index)]
-      if (descriptor === undefined || descriptor.enumerable !== true || !('value' in descriptor)) return undefined
-    }
-    return value
-  } catch {
-    return undefined
-  }
-}
-
-function validUnicode(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index)
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1)
-      if (!(next >= 0xdc00 && next <= 0xdfff)) return false
-      index += 1
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      return false
-    }
-  }
-  return true
-}
-
-function parseTimestamp(value: unknown): number | undefined {
-  if (typeof value !== 'string' || !validUnicode(value) || !CANONICAL_TIMESTAMP.test(value)) return undefined
+function parseStamp(value: unknown): number | undefined {
+  if (typeof value !== 'string' || !STAMP.test(value)) return undefined
   const epochMs = Date.parse(value)
   if (!Number.isFinite(epochMs)) return undefined
   try {
@@ -163,63 +65,39 @@ function parseTimestamp(value: unknown): number | undefined {
   }
 }
 
-function validRequestId(value: unknown): value is string {
-  if (typeof value !== 'string') return false
-  const match = /^telegram:(-[1-9][0-9]*|[1-9][0-9]*):([1-9][0-9]*)$/.exec(value)
-  if (match === null) return false
-  const chatId = Number(match[1])
-  const messageId = Number(match[2])
-  return Number.isSafeInteger(chatId) && String(chatId) === match[1]
-    && Number.isSafeInteger(messageId) && messageId > 0 && String(messageId) === match[2]
-}
-
-function parseRequest(value: unknown): ParsedRequest | undefined {
-  const record = exactRecord(value, REQUEST_KEYS)
-  if (record === undefined) return undefined
-  const requestId = record.requestId
-  const cutoff = record.cutoff
-  const shanghaiDay = record.shanghaiDay
-  if (!validRequestId(requestId) || typeof cutoff !== 'string' || typeof shanghaiDay !== 'string'
-    || !CANONICAL_DAY.test(shanghaiDay)) return undefined
-  const cutoffEpochMs = parseTimestamp(cutoff)
+function parseRequest(value: unknown): Readonly<{ readonly request: Request; readonly cutoffEpochMs: number; readonly deadlineEpochMs: number }> | undefined {
+  if (!isRecord(value) || !hasExactKeys(value, ['requestId', 'cutoff', 'shanghaiDay'])) return undefined
+  const { requestId, cutoff, shanghaiDay } = value
+  if (typeof requestId !== 'string' || typeof cutoff !== 'string' || typeof shanghaiDay !== 'string'
+    || !/^telegram:(?:-[1-9]\d*|[1-9]\d*):[1-9]\d*$/.test(requestId) || !DAY.test(shanghaiDay)) return undefined
+  const [chatId, messageId] = requestId.slice('telegram:'.length).split(':').map(Number)
+  if (!Number.isSafeInteger(chatId) || chatId === 0 || !Number.isSafeInteger(messageId) || (messageId ?? 0) <= 0) return undefined
+  const cutoffEpochMs = parseStamp(cutoff)
   if (cutoffEpochMs === undefined) return undefined
+  let expectedDay: string
   try {
-    const expectedShanghaiDay = new Date(cutoffEpochMs + SHANGHAI_OFFSET_MS).toISOString().slice(0, 10)
-    if (expectedShanghaiDay !== shanghaiDay) return undefined
+    expectedDay = new Date(cutoffEpochMs + 8 * 60 * 60 * 1_000).toISOString().slice(0, 10)
   } catch {
     return undefined
   }
-  return {
+  if (expectedDay !== shanghaiDay) return undefined
+  const deadlineEpochMs = Date.parse(`${shanghaiDay}T16:00:00.000Z`)
+  if (!Number.isSafeInteger(deadlineEpochMs) || cutoffEpochMs >= deadlineEpochMs) return undefined
+  return Object.freeze({
     request: Object.freeze({ requestId, cutoff, shanghaiDay }),
     cutoffEpochMs,
-  }
+    deadlineEpochMs,
+  })
 }
 
-function readAborted(signal: unknown): boolean | undefined {
-  if (signal === null || (typeof signal !== 'object' && typeof signal !== 'function') || isProxy(signal)
-    || INTRINSICS.apply === undefined || INTRINSICS.abortedGetter === undefined) return undefined
+function nowEpochMs(clock: Clock): number | undefined {
   try {
-    const value = INTRINSICS.apply(INTRINSICS.abortedGetter, signal, [])
-    return typeof value === 'boolean' ? value : undefined
+    const value = clock.now()
+    const epochMs = value instanceof Date ? value.getTime() : Number.NaN
+    return Number.isFinite(epochMs) ? epochMs : undefined
   } catch {
     return undefined
   }
-}
-
-function safeBodyBytes(value: string): number | undefined {
-  try {
-    return new TextEncoder().encode(value).byteLength
-  } catch {
-    return undefined
-  }
-}
-
-function validSafeNonNegativeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-}
-
-function validSurface(value: unknown): value is typeof SURFACES[number] {
-  return value === 'for_you' || value === 'following' || value === 'explore'
 }
 
 function closeSlot(slot: Slot): void {
@@ -227,302 +105,248 @@ function closeSlot(slot: Slot): void {
   slot.state = 'closed'
 }
 
-function closeBatch(batch: Batch): void {
+function closeBatch(batch: CaptureBatch): void {
   if (batch.closed) return
   batch.closed = true
   for (const slot of batch.slots) closeSlot(slot)
   batch.slots.clear()
-  if (batch.listenerInstalled && INTRINSICS.apply !== undefined && INTRINSICS.removeEventListener !== undefined) {
-    try {
-      INTRINSICS.apply(INTRINSICS.removeEventListener, batch.signal, ['abort', batch.onAbort])
-    } catch {
-      // A real signal's intrinsic remove is not expected to fail; closure is already sealed.
-    }
-  }
-  batch.listenerInstalled = false
-  batch.batches.delete(batch)
+  batch.signal.removeEventListener('abort', batch.onAbort)
 }
 
-function makeCapture(batch: Batch, text: string): Readonly<{ readonly take: (input: unknown) => string | undefined; readonly close: (...args: unknown[]) => Promise<void> }> {
+function createBatch(signal: AbortSignal): CaptureBatch | undefined {
+  let batch!: CaptureBatch
+  const onAbort = (): void => closeBatch(batch)
+  batch = { signal, slots: new Set<Slot>(), onAbort, closed: false }
+  signal.addEventListener('abort', onAbort, { once: true })
+  if (signal.aborted) {
+    closeBatch(batch)
+    return undefined
+  }
+  return batch
+}
+
+function createSufficientBody(batch: CaptureBatch, text: string): Readonly<Record<string, unknown>> {
   const slot: Slot = { state: 'open', text }
   batch.slots.add(slot)
   const take = (input: unknown): string | undefined => {
-    if (batch.closed || slot.state !== 'open') return undefined
-    const record = exactRecord(input, ['signal'])
-    if (record === undefined || record.signal !== batch.signal) return undefined
-    const aborted = readAborted(record.signal)
-    if (aborted !== false) return undefined
-    const local = slot.text
-    if (local === undefined) return undefined
+    if (batch.closed || batch.signal.aborted || slot.state !== 'open'
+      || !isRecord(input) || !hasExactKeys(input, ['signal']) || input.signal !== batch.signal) return undefined
+    const value = slot.text
+    if (value === undefined) return undefined
     slot.text = undefined
     slot.state = 'taken'
-    return local
+    return value
   }
-  const close = (..._args: unknown[]): Promise<void> => {
+  const close = (): Promise<void> => {
     if (slot.state === 'open') closeSlot(slot)
     return Promise.resolve()
   }
   Object.freeze(take)
   Object.freeze(close)
-  return Object.freeze({ take, close })
+  return Object.freeze({ kind: 'sufficient', capture: Object.freeze({ take, close }) })
 }
 
-function makeInsufficientCapture(batch: Batch): Readonly<{ readonly kind: 'insufficient'; readonly close: (...args: unknown[]) => Promise<void> }> {
+function createInsufficientBody(batch: CaptureBatch): Readonly<Record<string, unknown>> {
   const slot: Slot = { state: 'open', text: undefined }
   batch.slots.add(slot)
-  const close = (..._args: unknown[]): Promise<void> => {
+  const close = (): Promise<void> => {
     if (slot.state === 'open') closeSlot(slot)
     return Promise.resolve()
   }
   Object.freeze(close)
-  return Object.freeze({ kind: 'insufficient' as const, close })
+  return Object.freeze({ kind: 'insufficient', close })
 }
 
-function makeBatch(signal: AbortSignal, batches: Set<Batch>): Batch | undefined {
-  if (INTRINSICS.apply === undefined || INTRINSICS.addEventListener === undefined
-    || INTRINSICS.removeEventListener === undefined) return undefined
-  let batch!: Batch
-  const onAbort = (): void => closeBatch(batch)
-  batch = {
-    signal,
-    batches,
-    slots: new Set<Slot>(),
-    onAbort,
-    closed: false,
-    listenerInstalled: false,
+function parseBody(value: unknown, batch: CaptureBatch): Readonly<Record<string, unknown>> | undefined {
+  if (!isRecord(value)) return undefined
+  if (hasExactKeys(value, ['kind', 'text']) && value.kind === 'sufficient' && typeof value.text === 'string'
+    && value.text.trim() !== '' && new TextEncoder().encode(value.text).byteLength <= MAX_BODY_BYTES) {
+    return createSufficientBody(batch, value.text)
   }
-  batches.add(batch)
-  try {
-    INTRINSICS.apply(INTRINSICS.addEventListener, signal, ['abort', batch.onAbort, { once: true }])
-    batch.listenerInstalled = true
-    const aborted = readAborted(signal)
-    if (aborted !== false) {
-      closeBatch(batch)
-      return undefined
-    }
-    return batch
-  } catch {
-    closeBatch(batch)
-    return undefined
-  }
-}
-
-function validBody(value: unknown):
-  | { readonly kind: 'sufficient'; readonly text: string }
-  | { readonly kind: 'insufficient'; readonly reason: 'placeholder' | 'empty' | 'too_large' | 'show_more_failed' }
-  | undefined {
-  const sufficient = exactRecord(value, ['kind', 'text'])
-  if (sufficient !== undefined && sufficient.kind === 'sufficient' && typeof sufficient.text === 'string'
-    && validUnicode(sufficient.text) && sufficient.text.trim().length > 0) {
-    const bytes = safeBodyBytes(sufficient.text)
-    if (bytes !== undefined && bytes <= MAX_BODY_BYTES) return { kind: 'sufficient', text: sufficient.text }
-  }
-  const insufficient = exactRecord(value, ['kind', 'reason'])
-  const reason = insufficient?.reason
-  if (insufficient !== undefined && insufficient.kind === 'insufficient'
-    && (reason === 'placeholder' || reason === 'empty' || reason === 'too_large' || reason === 'show_more_failed')) {
-    return { kind: 'insufficient', reason }
+  if (hasExactKeys(value, ['kind', 'reason']) && value.kind === 'insufficient'
+    && (value.reason === 'placeholder' || value.reason === 'empty' || value.reason === 'too_large' || value.reason === 'show_more_failed')) {
+    return createInsufficientBody(batch)
   }
   return undefined
 }
 
-function mapObservationOccurrence(
-  occurrenceRecord: DataRecord | undefined,
-  occurrenceOrdinal: number,
+function parseOccurrence(
+  value: unknown,
+  ordinal: number,
   cutoffEpochMs: number,
-  surfaceStartedEpochMs: number,
-  surfaceCompletedEpochMs: number,
-  totalOccurrences: { value: number },
-  batch: Batch,
-): unknown | undefined {
-  if (occurrenceRecord === undefined || occurrenceRecord.occurrenceOrdinal !== occurrenceOrdinal
-    || !validSafeNonNegativeInteger(occurrenceRecord.occurrenceOrdinal)) return undefined
-  const sourceUrl = occurrenceRecord.sourceUrl
-  const authorHandle = occurrenceRecord.authorHandle
-  const capturedAt = occurrenceRecord.capturedAt
-  const publishedAt = occurrenceRecord.publishedAt
-  if (typeof sourceUrl !== 'string' || typeof authorHandle !== 'string' || typeof capturedAt !== 'string'
-    || typeof publishedAt !== 'string' || !validUnicode(sourceUrl) || !validUnicode(authorHandle)) return undefined
-  const urlMatch = /^https:\/\/x\.com\/([a-z0-9_]{1,15})\/status\/([1-9]\d*)$/.exec(sourceUrl)
-  const capturedEpochMs = parseTimestamp(capturedAt)
-  if (urlMatch === null || authorHandle !== urlMatch[1] || capturedEpochMs === undefined
-    || capturedEpochMs < cutoffEpochMs || capturedEpochMs < surfaceStartedEpochMs || capturedEpochMs >= surfaceCompletedEpochMs
-    || parseTimestamp(publishedAt) === undefined) return undefined
-  const body = validBody(occurrenceRecord.body)
+  faceStartedEpochMs: number,
+  faceCompletedEpochMs: number,
+  batch: CaptureBatch,
+): Readonly<Record<string, unknown>> | undefined {
+  if (!isRecord(value) || !hasExactKeys(value, ['sourceUrl', 'body', 'occurrenceOrdinal', 'capturedAt', 'authorHandle', 'publishedAt'])
+    || value.occurrenceOrdinal !== ordinal) return undefined
+  const { sourceUrl, authorHandle, capturedAt, publishedAt } = value
+  if (typeof sourceUrl !== 'string' || typeof authorHandle !== 'string') return undefined
+  const match = /^https:\/\/x\.com\/([a-z0-9_]{1,15})\/status\/([1-9]\d*)$/.exec(sourceUrl)
+  const capturedEpochMs = parseStamp(capturedAt)
+  if (match === null || authorHandle !== match[1] || capturedEpochMs === undefined
+    || capturedEpochMs < cutoffEpochMs || capturedEpochMs < faceStartedEpochMs || capturedEpochMs >= faceCompletedEpochMs
+    || parseStamp(publishedAt) === undefined) return undefined
+  const body = parseBody(value.body, batch)
   if (body === undefined) return undefined
-  totalOccurrences.value += 1
-  if (totalOccurrences.value > MAX_TOTAL_OCCURRENCES) return undefined
-  let outputBody: unknown
-  if (body.kind === 'sufficient') {
-    const capture = makeCapture(batch, body.text)
-    outputBody = Object.freeze({ kind: 'sufficient' as const, capture })
-  } else {
-    outputBody = makeInsufficientCapture(batch)
-  }
-  return Object.freeze({
-    sourceUrl,
-    body: outputBody,
-    occurrenceOrdinal,
-    capturedAt,
-    authorHandle,
-    publishedAt,
-  })
+  return Object.freeze({ sourceUrl, body, occurrenceOrdinal: ordinal, capturedAt, authorHandle, publishedAt })
 }
 
 function parseComplete(
-  value: unknown,
+  raw: unknown,
   request: Request,
   cutoffEpochMs: number,
-  batch: Batch,
-): Readonly<{ readonly window: unknown; readonly close: () => Promise<void> }> | undefined {
-  const top = exactRecord(value, TOP_KEYS)
-  if (top === undefined || top.schemaVersion !== 1 || top.kind !== 'complete'
-    || top.requestId !== request.requestId || top.cutoff !== request.cutoff || top.shanghaiDay !== request.shanghaiDay) return undefined
-  const startedAt = top.startedAt
-  const completedAt = top.completedAt
-  const startedEpochMs = parseTimestamp(startedAt)
-  const completedEpochMs = parseTimestamp(completedAt)
-  const surfacesInput = exactArray(top.surfaces)
-  if (startedEpochMs === undefined || completedEpochMs === undefined || completedEpochMs < startedEpochMs
-    || startedEpochMs < cutoffEpochMs || surfacesInput === undefined || surfacesInput.length !== 3) return undefined
-
-  const outputSurfaces: unknown[] = []
+  deadlineEpochMs: number,
+  signal: AbortSignal,
+): Readonly<{ readonly kind: 'complete'; readonly window: unknown; readonly close: () => Promise<void> }> | undefined {
+  if (!isRecord(raw) || !hasExactKeys(raw, [
+    'schemaVersion', 'kind', 'requestId', 'cutoff', 'shanghaiDay', 'startedAt', 'completedAt', 'surfaces',
+  ]) || raw.schemaVersion !== 1 || raw.kind !== 'complete' || raw.requestId !== request.requestId
+    || raw.cutoff !== request.cutoff || raw.shanghaiDay !== request.shanghaiDay || !Array.isArray(raw.surfaces)
+    || raw.surfaces.length !== SURFACES.length) return undefined
+  const startedEpochMs = parseStamp(raw.startedAt)
+  const completedEpochMs = parseStamp(raw.completedAt)
+  if (startedEpochMs === undefined || completedEpochMs === undefined || startedEpochMs < cutoffEpochMs
+    || completedEpochMs <= startedEpochMs || completedEpochMs >= deadlineEpochMs) return undefined
+  const batch = createBatch(signal)
+  if (batch === undefined) return undefined
+  const outputFaces: unknown[] = []
   let previousCompletedEpochMs = cutoffEpochMs
-  const totalOccurrences = { value: 0 }
-  for (let surfaceOrdinal = 0; surfaceOrdinal < 3; surfaceOrdinal += 1) {
-    const surfaceRecord = exactRecord(surfacesInput[surfaceOrdinal], SURFACE_KEYS)
-    const expectedSurface = SURFACES[surfaceOrdinal]
-    if (surfaceRecord === undefined || expectedSurface === undefined || !validSurface(surfaceRecord.surface)
-      || surfaceRecord.surface !== expectedSurface || surfaceRecord.surfaceOrdinal !== surfaceOrdinal
-      || !validSafeNonNegativeInteger(surfaceRecord.surfaceOrdinal)
-      || (surfaceRecord.kind !== 'complete' && surfaceRecord.kind !== 'natural_zero')) return undefined
-    const surfaceStartedAt = surfaceRecord.startedAt
-    const surfaceCompletedAt = surfaceRecord.completedAt
-    const surfaceStartedEpochMs = parseTimestamp(surfaceStartedAt)
-    const surfaceCompletedEpochMs = parseTimestamp(surfaceCompletedAt)
-    const occurrencesInput = exactArray(surfaceRecord.occurrences)
-    if (surfaceStartedEpochMs === undefined || surfaceCompletedEpochMs === undefined || occurrencesInput === undefined
-      || surfaceStartedEpochMs < cutoffEpochMs || surfaceCompletedEpochMs <= surfaceStartedEpochMs
-      || surfaceStartedEpochMs < previousCompletedEpochMs || surfaceCompletedEpochMs > completedEpochMs
-      || occurrencesInput.length > MAX_SURFACE_OCCURRENCES
-      || (surfaceRecord.kind === 'natural_zero' && occurrencesInput.length !== 0)
-      || (surfaceRecord.kind === 'complete' && occurrencesInput.length === 0)) return undefined
-
-    const outputOccurrences: unknown[] = []
-    for (let occurrenceOrdinal = 0; occurrenceOrdinal < occurrencesInput.length; occurrenceOrdinal += 1) {
-      const outputOccurrence = mapObservationOccurrence(
-        exactRecord(occurrencesInput[occurrenceOrdinal], OCCURRENCE_KEYS),
-        occurrenceOrdinal,
-        cutoffEpochMs,
-        surfaceStartedEpochMs,
-        surfaceCompletedEpochMs,
-        totalOccurrences,
-        batch,
-      )
-      if (outputOccurrence === undefined) return undefined
-      outputOccurrences.push(outputOccurrence)
+  let totalOccurrences = 0
+  try {
+    for (let ordinal = 0; ordinal < SURFACES.length; ordinal += 1) {
+      const value = raw.surfaces[ordinal]
+      const expectedSurface = SURFACES[ordinal]
+      if (!isRecord(value) || expectedSurface === undefined || !hasExactKeys(value, [
+        'kind', 'surface', 'surfaceOrdinal', 'startedAt', 'completedAt', 'occurrences',
+      ]) || (value.kind !== 'complete' && value.kind !== 'natural_zero') || value.surface !== expectedSurface
+        || value.surfaceOrdinal !== ordinal || !Array.isArray(value.occurrences)
+        || value.occurrences.length > MAX_SURFACE_OCCURRENCES
+        || (value.kind === 'natural_zero' && value.occurrences.length !== 0)
+        || (value.kind === 'complete' && value.occurrences.length === 0)) throw new Error()
+      const faceStartedEpochMs = parseStamp(value.startedAt)
+      const faceCompletedEpochMs = parseStamp(value.completedAt)
+      if (faceStartedEpochMs === undefined || faceCompletedEpochMs === undefined
+        || faceStartedEpochMs < previousCompletedEpochMs || faceCompletedEpochMs <= faceStartedEpochMs
+        || faceCompletedEpochMs > completedEpochMs || faceCompletedEpochMs >= deadlineEpochMs) throw new Error()
+      const outputOccurrences: unknown[] = []
+      for (let itemOrdinal = 0; itemOrdinal < value.occurrences.length; itemOrdinal += 1) {
+        totalOccurrences += 1
+        if (totalOccurrences > MAX_TOTAL_OCCURRENCES) throw new Error()
+        const occurrence = parseOccurrence(
+          value.occurrences[itemOrdinal],
+          itemOrdinal,
+          cutoffEpochMs,
+          faceStartedEpochMs,
+          faceCompletedEpochMs,
+          batch,
+        )
+        if (occurrence === undefined) throw new Error()
+        outputOccurrences.push(occurrence)
+      }
+      outputFaces.push(Object.freeze({
+        kind: value.kind,
+        surface: expectedSurface,
+        surfaceOrdinal: ordinal,
+        startedAt: value.startedAt,
+        completedAt: value.completedAt,
+        occurrences: Object.freeze(outputOccurrences),
+      }))
+      previousCompletedEpochMs = faceCompletedEpochMs
     }
-    outputSurfaces.push(Object.freeze({
-      kind: surfaceRecord.kind,
-      surface: expectedSurface,
-      surfaceOrdinal,
-      startedAt: surfaceStartedAt,
-      completedAt: surfaceCompletedAt,
-      occurrences: Object.freeze(outputOccurrences),
-    }))
-    previousCompletedEpochMs = surfaceCompletedEpochMs
+  } catch {
+    closeBatch(batch)
+    return undefined
   }
-  if (readAborted(batch.signal) !== false) return undefined
   const window = Object.freeze({
     requestId: request.requestId,
     cutoff: request.cutoff,
     shanghaiDay: request.shanghaiDay,
-    startedAt,
-    completedAt,
-    surfaces: Object.freeze(outputSurfaces),
+    startedAt: raw.startedAt,
+    completedAt: raw.completedAt,
+    surfaces: Object.freeze(outputFaces),
   })
   const close = (): Promise<void> => {
     closeBatch(batch)
     return Promise.resolve()
   }
   Object.freeze(close)
-  return Object.freeze({ kind: 'complete' as const, window, close }) as unknown as Readonly<{ readonly window: unknown; readonly close: () => Promise<void> }>
+  return Object.freeze({ kind: 'complete', window, close })
+}
+
+async function runExecFile(request: CommandRequest): Promise<CommandResult> {
+  const result = await execFile(request.file, [...request.args], {
+    cwd: request.cwd,
+    encoding: 'utf8',
+    timeout: request.timeoutMs,
+    maxBuffer: request.maxBuffer,
+    shell: request.shell,
+    signal: request.signal,
+  })
+  return { stdout: result.stdout, stderr: result.stderr }
+}
+
+function parseOutput(result: CommandResult): unknown {
+  if (result.stderr !== '' || !result.stdout.endsWith('\n')) return undefined
+  const line = result.stdout.slice(0, -1)
+  if (line === '' || line.includes('\n') || line.includes('\r')) return undefined
+  try {
+    return JSON.parse(line)
+  } catch {
+    return undefined
+  }
 }
 
 export function createPersonalFeedXSurfaceObserver(options: unknown): Readonly<{
   readonly observe: (input: unknown) => Promise<unknown>
-  readonly shutdown: () => Promise<void>
 }> {
-  const optionsRecord = exactRecord(options, FACTORY_KEYS)
-  const childValue = optionsRecord?.child
-  const childRecord = exactRecord(childValue, CHILD_KEYS)
-  const childObserve = childRecord?.observe
-  if (optionsRecord === undefined || childRecord === undefined || typeof childObserve !== 'function') throw new TypeError()
-  const childOwner = childValue as object
-  const batches = new Set<Batch>()
-  let accepting = true
-  let active = 0
-  let shutdownPromise: Promise<void> | undefined
-  let resolveShutdown: (() => void) | undefined
-
-  const observe = async (input: unknown): Promise<unknown> => {
-    if (!accepting) return INCOMPLETE
-    const inputRecord = exactRecord(input, INPUT_KEYS)
-    const parsedRequest = parseRequest(inputRecord?.request)
-    const signal = inputRecord?.signal
-    if (inputRecord === undefined || parsedRequest === undefined || readAborted(signal) === undefined) return INCOMPLETE
-    if (readAborted(signal) !== false || !accepting) return INCOMPLETE
-
-    const childInput = Object.freeze({ request: parsedRequest.request, signal: signal as AbortSignal })
-    active += 1
-    try {
-      let raw: unknown
-      try {
-        raw = await REFLECT_APPLY!(childObserve, childOwner, [childInput])
-      } catch {
-        return INCOMPLETE
-      }
-      if (!accepting || readAborted(signal) !== false) return INCOMPLETE
-      const top = exactRecord(raw, TOP_KEYS)
-      if (top === undefined || top.schemaVersion !== 1 || top.kind !== 'complete'
-        || top.requestId !== parsedRequest.request.requestId || top.cutoff !== parsedRequest.request.cutoff
-        || top.shanghaiDay !== parsedRequest.request.shanghaiDay) return INCOMPLETE
-      const batch = makeBatch(signal as AbortSignal, batches)
-      if (batch === undefined) return INCOMPLETE
-      let complete: Readonly<{ readonly window: unknown; readonly close: () => Promise<void> }> | undefined
-      try {
-        complete = parseComplete(raw, parsedRequest.request, parsedRequest.cutoffEpochMs, batch)
-      } catch {
-        complete = undefined
-      }
-      if (complete === undefined || !accepting || readAborted(signal) !== false) {
-        closeBatch(batch)
-        return INCOMPLETE
-      }
-      return complete
-    } finally {
-      active -= 1
-      if (!accepting && active === 0 && resolveShutdown !== undefined) {
-        const resolve = resolveShutdown
-        resolveShutdown = undefined
-        resolve()
-      }
-    }
+  if (!isRecord(options)) throw new TypeError('personal Feed X observer options are invalid')
+  const pythonBin = options.pythonBin
+  const observerCliPath = options.observerCliPath
+  const clock = options.clock
+  const run = options.run ?? runExecFile
+  if (typeof pythonBin !== 'string' || !isAbsolute(pythonBin) || pythonBin.includes('\0')
+    || typeof observerCliPath !== 'string' || !isAbsolute(observerCliPath) || observerCliPath.includes('\0')
+    || basename(observerCliPath) !== 'x_personal_feed_observer_cli.py'
+    || !isRecord(clock) || typeof clock.now !== 'function' || typeof run !== 'function') {
+    throw new TypeError('personal Feed X observer options are invalid')
   }
 
-  const shutdown = (): Promise<void> => {
-    if (shutdownPromise !== undefined) return shutdownPromise
-    accepting = false
-    for (const batch of [...batches]) closeBatch(batch)
-    if (active === 0) {
-      shutdownPromise = Promise.resolve()
-    } else {
-      shutdownPromise = new Promise<void>(resolve => { resolveShutdown = resolve })
+  const observe = async (input: unknown): Promise<unknown> => {
+    if (!isRecord(input) || !hasExactKeys(input, ['request', 'signal']) || !(input.signal instanceof AbortSignal)) return INCOMPLETE
+    const signal = input.signal
+    const parsed = parseRequest(input.request)
+    if (parsed === undefined || signal.aborted) return INCOMPLETE
+    const startedNow = nowEpochMs(clock as Clock)
+    if (startedNow === undefined || startedNow < parsed.cutoffEpochMs || startedNow >= parsed.deadlineEpochMs) return INCOMPLETE
+    const timeoutMs = Math.floor(parsed.deadlineEpochMs - startedNow)
+    const wire = JSON.stringify({ schemaVersion: 1, ...parsed.request, deadlineEpochMs: parsed.deadlineEpochMs })
+    let commandResult: CommandResult
+    try {
+      commandResult = await (run as CommandRunner)(Object.freeze({
+        file: pythonBin,
+        args: Object.freeze([observerCliPath, wire]),
+        cwd: dirname(observerCliPath),
+        timeoutMs,
+        maxBuffer: MAX_BUFFER,
+        shell: false,
+        signal,
+      }))
+    } catch {
+      return INCOMPLETE
     }
-    return shutdownPromise
+    if (signal.aborted) return INCOMPLETE
+    const raw = parseOutput(commandResult)
+    const complete = parseComplete(raw, parsed.request, parsed.cutoffEpochMs, parsed.deadlineEpochMs, signal)
+    if (complete === undefined) return INCOMPLETE
+    const completedNow = nowEpochMs(clock as Clock)
+    if (completedNow === undefined || completedNow >= parsed.deadlineEpochMs || signal.aborted) {
+      await complete.close()
+      return INCOMPLETE
+    }
+    return complete
   }
 
   Object.freeze(observe)
-  Object.freeze(shutdown)
-  return Object.freeze({ observe, shutdown })
+  return Object.freeze({ observe })
 }

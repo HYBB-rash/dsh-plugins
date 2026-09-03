@@ -97,12 +97,20 @@ describe('personal-feed v2 package carrier contract', () => {
     const typeSource = readFileSync(join(packageDirectory, packageJson.types ?? ''), 'utf8')
     for (const v2Export of [
       'createPersonalFeedV2RequestCoordinator',
-      'createPersonalFeedV2CandidateLifecycle',
+      'createPersonalFeedV2CandidateStateOwner',
       'createPersonalContextOwner',
-      'createSessionUserHistoryAdapter',
     ]) {
       expect(mainSource).toContain(v2Export)
       expect(typeSource).toContain(v2Export)
+    }
+    for (const rejectedPersonalContextMechanism of [
+      'createSessionUserHistoryAdapter',
+      'PersonalContextFence',
+      'PersonalContextCoverageProof',
+      'PersonalContextSemanticPorts',
+    ]) {
+      expect(mainSource).not.toContain(rejectedPersonalContextMechanism)
+      expect(typeSource).not.toContain(rejectedPersonalContextMechanism)
     }
     for (const forbiddenExport of forbiddenV1Exports) {
       expect(mainSource).not.toMatch(new RegExp(`export[^\\n]*${forbiddenExport}`))

@@ -160,14 +160,13 @@ def _assert_body_free_incomplete(case, result):
 def _run_child(source, raw):
     """Run one bounded child and always reap it, including timeout paths."""
     process = subprocess.Popen(
-        [sys.executable, str(source)],
-        stdin=subprocess.PIPE,
+        [sys.executable, str(source), raw.decode("utf-8")],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     try:
         try:
-            stdout, stderr = process.communicate(input=raw, timeout=5)
+            stdout, stderr = process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
             stdout, stderr = process.communicate(timeout=5)
@@ -186,20 +185,19 @@ def _json_bootstrap(source, result):
         f"sys.path.insert(0,{str(source.parent)!r});"
         f"import {MODULE_NAME} as m;"
         f"result=json.loads({result_literal!r});"
-        "raise SystemExit(m.main(sys.stdin.buffer,sys.stdout,observer=lambda _deadline: result))"
+        "raise SystemExit(m.main([sys.argv[1]],sys.stdout,observer=lambda _deadline: result))"
     )
 
 
 def _run_bootstrap(source, result):
     process = subprocess.Popen(
-        [sys.executable, "-c", _json_bootstrap(source, result)],
-        stdin=subprocess.PIPE,
+        [sys.executable, "-c", _json_bootstrap(source, result), VALID_REQUEST.decode("utf-8")],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     try:
         try:
-            stdout, stderr = process.communicate(input=VALID_REQUEST, timeout=5)
+            stdout, stderr = process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
             stdout, stderr = process.communicate(timeout=5)
@@ -367,7 +365,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         module = _require_cli(self)
         self.assertTrue(SOURCE_PATH.is_file())
         signature = inspect.signature(module.main)
-        self.assertEqual(list(signature.parameters), ["stdin", "stdout", "observer"])
+        self.assertEqual(list(signature.parameters), ["argv", "stdout", "observer"])
         self.assertIs(signature.parameters["observer"].default, None)
         source = inspect.getsource(module)
         self.assertRegex(source, r"if\s+__name__\s*==\s*[\"']__main__[\"']")
@@ -426,7 +424,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         observed_deadlines = []
         stdout = io.StringIO()
         rc = module.main(
-            io.BytesIO(VALID_REQUEST),
+            [VALID_REQUEST.decode("utf-8")],
             stdout,
             observer=lambda deadline: (observed_deadlines.append(deadline), result)[1],
         )
@@ -469,7 +467,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
 
                 with contextlib.redirect_stderr(invalid_stderr):
                     rc = module.main(
-                        io.BytesIO(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()),
+                        [json.dumps(request, ensure_ascii=False, separators=(",", ":"))],
                         invalid_stdout,
                         observer=must_not_run,
                     )
@@ -524,7 +522,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                 mock.patch.object(module, "_MechanicalCdpEvaluator", wraps=evaluator_type)
             )
             stdout = io.StringIO()
-            result_code = module.main(io.BytesIO(EXPIRED_REQUEST), stdout)
+            result_code = module.main([EXPIRED_REQUEST.decode("utf-8")], stdout)
 
         self.assertEqual(result_code, 0)
         result = _compact_line(self, stdout)
@@ -2333,7 +2331,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             "daily_report", "insight_engine", "neighborhood", "subprocess",
             "ensure_cdp", "ensure_x_tab", "new_tab", "browser_start", "restart",
             "timeline.append", "append_unique", "history", "shown", "current_collection",
-            "session", "logging", "logger", "sys.stderr", "sys.argv", "os.environ", "tempfile",
+            "session", "logging", "logger", "sys.stderr", "os.environ", "tempfile",
         )
         for fragment in forbidden_fragments:
             self.assertNotIn(fragment, lowered, fragment)
@@ -2380,7 +2378,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                     clear=False,
                 ), contextlib.redirect_stderr(stderr):
                     try:
-                        result_code = module.main(io.BytesIO(VALID_REQUEST), stdout, observer=observer)
+                        result_code = module.main([VALID_REQUEST.decode("utf-8")], stdout, observer=observer)
                     except Exception as exc:
                         self.assertNotIn(canary, str(exc))
                         self.fail("production CLI leaked an observer exception")

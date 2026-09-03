@@ -1,347 +1,76 @@
-import { types as nodeTypes } from 'node:util'
-import { dirname, join, normalize, resolve } from 'node:path'
 import {
+  createPersonalFeedV2CandidateStateOwner,
   createPersonalFeedV2RequestCoordinator,
-  createPersonalFeedV2CandidateLifecycle,
-  type CreatePersonalFeedV2CandidateLifecycleOptions,
   type CreatePersonalFeedV2RequestCoordinatorOptions,
-  type PersonalFeedV2R2Input,
   type PersonalFeedV2R2Port,
 } from '@herman/personal-feed'
-import type {
-  TelegramInboundEnvelope,
-  TelegramInboundResult,
-} from '@deepseek-ai/dsh-telegram-gateway'
+import type { TelegramInboundEnvelope, TelegramInboundResult } from '@deepseek-ai/dsh-telegram-gateway'
 import { createPersonalFeedTelegramRequestHandler } from './telegram-adapter.ts'
 
-const EXPECTED_OPTIONS_KEYS = Object.freeze([
-  'runtimeConfig',
-  'startupFactory',
-  'r4',
-  'completionLedgerPath',
-  'clock',
-] as const)
-const EXPECTED_R4_KEYS = Object.freeze(['snapshot'] as const)
-const EXPECTED_CLOCK_KEYS = Object.freeze(['now'] as const)
-const EXPECTED_OWNER_KEYS = Object.freeze(['observe', 'shutdown'] as const)
-const PROMISE_THEN = Promise.prototype.then
-const UNKNOWN_RESULT = Object.freeze({ kind: 'unknown' })
 const FAILED_RESULT: TelegramInboundResult = Object.freeze({
   kind: 'failed',
   visibleError: '这次没有完成：判断或执行未完成。',
 })
-const CLEANUP_FAILURE_MESSAGE = 'personal Feed Telegram cleanup failed'
 const CONSERVATIVE_R5_RESULT = Object.freeze({
   kind: 'incomplete',
-  completed: Object.freeze([]),
-  reason: 'unknown',
 })
-const CONSERVATIVE_R5 = Object.freeze({
-  judge: () => CONSERVATIVE_R5_RESULT,
-})
-
-type PlainDataRecord = Readonly<Record<string, unknown>>
+const CONSERVATIVE_R5 = Object.freeze({ judgeOne: () => CONSERVATIVE_R5_RESULT })
 
 type CompositionOptions = Readonly<{
-  readonly runtimeConfig: PlainDataRecord
-  readonly startupFactory: (runtimeConfig: unknown) => unknown
   readonly r4: CreatePersonalFeedV2RequestCoordinatorOptions['r4']
-  readonly completionLedgerPath: string
+  readonly r2: PersonalFeedV2R2Port
+  readonly candidateStatePath: string
   readonly clock: CreatePersonalFeedV2RequestCoordinatorOptions['clock']
 }>
 
-type PersonalFeedTelegramProductionComposition = Readonly<{
+type Composition = Readonly<{
   readonly handler: (envelope: TelegramInboundEnvelope) => Promise<TelegramInboundResult>
   readonly shutdown: () => Promise<void>
 }>
 
-type StartupOwner = Readonly<{
-  readonly observe: (input: PersonalFeedV2R2Input) => unknown
-  readonly shutdown: () => unknown
-}>
-
-type OwnerState = 'uninitialized' | 'initializing' | 'ready' | 'failed' | 'shutting' | 'closed'
-
-function isNonProxyFunction(value: unknown): value is (...args: never[]) => unknown {
-  if (typeof value !== 'function') return false
-  try {
-    return !nodeTypes.isProxy(value)
-  } catch {
-    return false
-  }
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-function readFrozenPlainDataRecord(value: unknown): PlainDataRecord | undefined {
-  try {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)
-      || nodeTypes.isProxy(value) || !Object.isFrozen(value)) return undefined
-    const prototype = Object.getPrototypeOf(value)
-    if (prototype !== Object.prototype && prototype !== null) return undefined
-    const keys = Reflect.ownKeys(value)
-    const descriptors = Object.getOwnPropertyDescriptors(value)
-    const values: Record<string, unknown> = Object.create(null) as Record<string, unknown>
-    for (const key of keys) {
-      if (typeof key !== 'string') return undefined
-      const descriptor = descriptors[key]
-      if (descriptor === undefined || descriptor.enumerable !== true
-        || !Object.hasOwn(descriptor, 'value')
-        || descriptor.configurable !== false || descriptor.writable !== false) return undefined
-      values[key] = descriptor.value
-    }
-    return values as PlainDataRecord
-  } catch {
-    return undefined
-  }
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Reflect.ownKeys(value)
+  return actual.length === keys.length && keys.every(key => Object.hasOwn(value, key))
 }
 
-function readExactRecord(
-  value: unknown,
-  expectedKeys: readonly string[],
-  requireFrozen: boolean,
-): ReadonlyMap<string, unknown> | undefined {
-  try {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)
-      || nodeTypes.isProxy(value) || (requireFrozen && !Object.isFrozen(value))) return undefined
-    const prototype = Object.getPrototypeOf(value)
-    if (prototype !== Object.prototype && prototype !== null) return undefined
-    const keys = Reflect.ownKeys(value)
-    if (keys.length !== expectedKeys.length
-      || keys.some(key => typeof key !== 'string' || !expectedKeys.includes(key))) return undefined
-    const descriptors = Object.getOwnPropertyDescriptors(value)
-    const values = new Map<string, unknown>()
-    for (const key of expectedKeys) {
-      const descriptor = descriptors[key]
-      if (descriptor === undefined || descriptor.enumerable !== true
-        || !Object.hasOwn(descriptor, 'value')
-        || (requireFrozen && (descriptor.configurable !== false || descriptor.writable !== false))) return undefined
-      values.set(key, descriptor.value)
-    }
-    return values
-  } catch {
-    return undefined
-  }
+function hasSingleFunction(value: unknown, key: string): boolean {
+  return isRecord(value) && hasExactKeys(value, [key]) && typeof value[key] === 'function'
 }
 
-function readExactFrozenRecord(
-  value: unknown,
-  expectedKeys: readonly string[],
-): ReadonlyMap<string, unknown> | undefined {
-  return readExactRecord(value, expectedKeys, true)
-}
-
-function readExactDataRecord(
-  value: unknown,
-  expectedKeys: readonly string[],
-): ReadonlyMap<string, unknown> | undefined {
-  return readExactRecord(value, expectedKeys, false)
-}
-
-function readCompositionOptions(value: unknown): CompositionOptions {
-  const record = readExactFrozenRecord(value, EXPECTED_OPTIONS_KEYS)
-  if (record === undefined) throw new Error('personal Feed Telegram composition options are invalid')
-
-  const runtimeConfig = record.get('runtimeConfig')
-  const startupFactory = record.get('startupFactory')
-  const r4 = record.get('r4')
-  const completionLedgerPath = record.get('completionLedgerPath')
-  const clock = record.get('clock')
-  const r4Record = readExactDataRecord(r4, EXPECTED_R4_KEYS)
-  const clockRecord = readExactDataRecord(clock, EXPECTED_CLOCK_KEYS)
-  if (readFrozenPlainDataRecord(runtimeConfig) === undefined
-    || !isNonProxyFunction(startupFactory)
-    || !hasFunctionArity(startupFactory, 1)
-    || r4Record === undefined
-    || !isNonProxyFunction(r4Record.get('snapshot'))
-    || typeof completionLedgerPath !== 'string'
-    || completionLedgerPath.trim() === ''
-    || clockRecord === undefined
-    || !isNonProxyFunction(clockRecord.get('now'))) {
+function readOptions(value: unknown): CompositionOptions {
+  if (!isRecord(value) || !Object.isFrozen(value)
+    || !hasExactKeys(value, ['r4', 'r2', 'candidateStatePath', 'clock'])
+    || !hasSingleFunction(value.r4, 'snapshot') || !hasSingleFunction(value.r2, 'observe')
+    || typeof value.candidateStatePath !== 'string' || value.candidateStatePath.trim() === ''
+    || !hasSingleFunction(value.clock, 'now')) {
     throw new Error('personal Feed Telegram composition options are invalid')
   }
-  return {
-    runtimeConfig: runtimeConfig as PlainDataRecord,
-    startupFactory: startupFactory as CompositionOptions['startupFactory'],
-    r4: r4 as CompositionOptions['r4'],
-    completionLedgerPath,
-    clock: clock as CompositionOptions['clock'],
-  }
+  return value as CompositionOptions
 }
 
-function hasFunctionArity(value: Function, expected: number): boolean {
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, 'length')
-    return descriptor !== undefined && Object.hasOwn(descriptor, 'value') && descriptor.value === expected
-  } catch {
-    return false
-  }
-}
-
-function readOwner(value: unknown): StartupOwner | undefined {
-  const record = readExactFrozenRecord(value, EXPECTED_OWNER_KEYS)
-  if (record === undefined) return undefined
-  const observe = record.get('observe')
-  const shutdown = record.get('shutdown')
-  if (!isNonProxyFunction(observe) || !isNonProxyFunction(shutdown)) return undefined
-  return value as StartupOwner
-}
-
-function mapNativePromise(value: unknown, onFulfilled: (value: unknown) => unknown, onRejected: () => unknown): unknown {
-  if (!nodeTypes.isPromise(value)) return onFulfilled(value)
-  return Reflect.apply(PROMISE_THEN, value, [onFulfilled, onRejected])
-}
-
-function createLazyOwner(
-  runtimeConfig: PlainDataRecord,
-  startupFactory: (runtimeConfig: unknown) => unknown,
-  publicShutdownPromise: () => Promise<void> | undefined,
-): Readonly<PersonalFeedV2R2Port & { readonly shutdown: () => Promise<void> }> {
-  let state: OwnerState = 'uninitialized'
-  let owner: StartupOwner | undefined
-  let shutdownPromise: Promise<void> | undefined
-  let resolveShutdown: (() => void) | undefined
-  let rejectShutdown: (() => void) | undefined
-  const isShutting = (): boolean => state === 'shutting'
-
-  const fixedShutdownFailure = (): Error => new Error(CLEANUP_FAILURE_MESSAGE)
-
-  const publishShutdown = (): Promise<void> => {
-    if (shutdownPromise !== undefined) return shutdownPromise
-    shutdownPromise = new Promise<void>((resolve, reject) => {
-      resolveShutdown = resolve
-      rejectShutdown = () => reject(fixedShutdownFailure())
-    })
-    void shutdownPromise.catch(() => undefined)
-    return shutdownPromise
-  }
-
-  const completeShutdown = (): void => {
-    state = 'closed'
-    resolveShutdown?.()
-  }
-
-  const failShutdown = (): void => {
-    state = 'closed'
-    rejectShutdown?.()
-  }
-
-  const closeReadyOwner = (): void => {
-    let raw: unknown
-    try {
-      raw = Reflect.apply(owner!.shutdown, owner, [])
-    } catch {
-      failShutdown()
-      return
-    }
-    if (raw === publicShutdownPromise() || raw === shutdownPromise) {
-      failShutdown()
-      return
-    }
-    if (!nodeTypes.isPromise(raw)) {
-      completeShutdown()
-      return
-    }
-    void Reflect.apply(PROMISE_THEN, raw, [
-      () => { completeShutdown() },
-      () => { failShutdown() },
-    ])
-  }
-
-  const shutdown = (): Promise<void> => {
-    if (shutdownPromise !== undefined) return shutdownPromise
-
-    if (state === 'uninitialized' || state === 'failed') {
-      state = 'closed'
-      shutdownPromise = Promise.resolve()
-      return shutdownPromise
-    }
-
-    if (state === 'initializing') {
-      state = 'shutting'
-      return publishShutdown()
-    }
-
-    if (state === 'ready') {
-      state = 'shutting'
-      const stableShutdown = publishShutdown()
-      closeReadyOwner()
-      return stableShutdown
-    }
-
-    state = 'closed'
-    shutdownPromise = Promise.resolve()
-    return shutdownPromise
-  }
-
-  const observe = (input: PersonalFeedV2R2Input): unknown => {
-    if (state === 'closed' || state === 'shutting' || state === 'failed') return UNKNOWN_RESULT
-    if (owner === undefined) {
-      state = 'initializing'
-      try {
-        const created = Reflect.apply(startupFactory, undefined, [runtimeConfig])
-        const validated = readOwner(created)
-        if (validated === undefined) throw new Error('personal Feed Telegram startup owner is invalid')
-        owner = validated
-      } catch {
-        if (shutdownPromise !== undefined) completeShutdown()
-        else state = 'failed'
-        return UNKNOWN_RESULT
-      }
-      if (isShutting()) {
-        closeReadyOwner()
-        return UNKNOWN_RESULT
-      }
-      state = 'ready'
-    }
-
-    let raw: unknown
-    try {
-      raw = Reflect.apply(owner.observe, owner, [input])
-    } catch {
-      return UNKNOWN_RESULT
-    }
-    return mapNativePromise(raw, value => value, () => UNKNOWN_RESULT)
-  }
-
-  return Object.freeze({ observe, shutdown })
-}
-
-/** Internal production composition seam; intentionally absent from the package root. */
-export function createPersonalFeedTelegramProductionComposition(
-  options: unknown,
-): PersonalFeedTelegramProductionComposition {
-  const resolved = readCompositionOptions(options)
-  const requestLedgerPath = join(dirname(resolved.completionLedgerPath), 'requests.jsonl')
-  if (resolve(normalize(resolved.completionLedgerPath)) === resolve(normalize(requestLedgerPath))) {
-    throw new Error('personal Feed Telegram composition ledger paths collide')
-  }
-
-  let publicShutdownPromise: Promise<void> | undefined
-  let resolvePublicShutdown: (() => void) | undefined
-  let rejectPublicShutdown: ((reason: unknown) => void) | undefined
-  const lazyOwner = createLazyOwner(
-    resolved.runtimeConfig,
-    resolved.startupFactory,
-    () => publicShutdownPromise,
-  )
-  const candidateOptions: CreatePersonalFeedV2CandidateLifecycleOptions = {
-    completionLedgerPath: resolved.completionLedgerPath,
+/** Internal install-scoped composition; intentionally absent from the package root. */
+export function createPersonalFeedTelegramProductionComposition(options: unknown): Composition {
+  const resolved = readOptions(options)
+  const candidateState = createPersonalFeedV2CandidateStateOwner({
+    statePath: resolved.candidateStatePath,
     clock: resolved.clock,
-  }
-  const candidateLifecycle = createPersonalFeedV2CandidateLifecycle(candidateOptions)
-  const coordinatorOptions: CreatePersonalFeedV2RequestCoordinatorOptions = {
-    ledgerPath: requestLedgerPath,
+  })
+  const coordinator = createPersonalFeedV2RequestCoordinator({
     clock: resolved.clock,
     r4: resolved.r4,
-    r2: lazyOwner,
-    r3: candidateLifecycle,
+    r2: resolved.r2,
+    r3: candidateState,
     r5: CONSERVATIVE_R5,
-  }
-  const coordinator = createPersonalFeedV2RequestCoordinator(coordinatorOptions)
+  })
   const requestHandler = createPersonalFeedTelegramRequestHandler({ coordinator })
   const installController = new AbortController()
-  const installReason = new Error('personal Feed Telegram install shutdown')
+  const active = new Set<Promise<TelegramInboundResult>>()
   let accepting = true
-  const active = new Set<Promise<unknown>>()
+  let shutdownPromise: Promise<void> | undefined
 
   const handler = (envelope: TelegramInboundEnvelope): Promise<TelegramInboundResult> => {
     if (!accepting) return Promise.resolve(FAILED_RESULT)
@@ -355,7 +84,6 @@ export function createPersonalFeedTelegramProductionComposition(
         ...(envelope.reference === undefined ? {} : { reference: envelope.reference }),
         signal,
       })
-      if (!accepting) return Promise.resolve(FAILED_RESULT)
       operation = Promise.resolve(requestHandler(forwarded)).then(
         result => result,
         () => FAILED_RESULT,
@@ -364,47 +92,22 @@ export function createPersonalFeedTelegramProductionComposition(
       operation = Promise.resolve(FAILED_RESULT)
     }
     active.add(operation)
-    void operation.then(
-      () => { active.delete(operation) },
-      () => { active.delete(operation) },
-    )
+    void operation.finally(() => { active.delete(operation) })
     return operation
   }
 
   const shutdown = (): Promise<void> => {
-    if (publicShutdownPromise !== undefined) return publicShutdownPromise
+    if (shutdownPromise !== undefined) return shutdownPromise
     accepting = false
-    installController.abort(installReason)
-    publicShutdownPromise = new Promise<void>((resolveValue, rejectValue) => {
-      resolvePublicShutdown = resolveValue
-      rejectPublicShutdown = rejectValue
-    })
-    void publicShutdownPromise.catch(() => undefined)
-    const errors: unknown[] = []
-    const observeCleanup = async (operation: () => unknown): Promise<void> => {
-      try {
-        await operation()
-      } catch {
-        errors.push(new Error(CLEANUP_FAILURE_MESSAGE))
-      }
-    }
-    const ownerShutdown = observeCleanup(lazyOwner.shutdown)
-    const drain = async (): Promise<void> => {
-      while (active.size > 0) {
-        await Promise.all([...active].map(async operation => {
-          try { await operation } catch { errors.push(new Error(CLEANUP_FAILURE_MESSAGE)) }
-        }))
-      }
-      await observeCleanup(coordinator.drain)
-    }
-    void Promise.all([ownerShutdown, drain()] as const).then(
-      () => {
-        if (errors.length > 0) rejectPublicShutdown?.(new AggregateError(errors))
-        else resolvePublicShutdown?.()
-      },
-      () => { rejectPublicShutdown?.(new Error(CLEANUP_FAILURE_MESSAGE)) },
-    )
-    return publicShutdownPromise
+    installController.abort(new Error('personal Feed Telegram install shutdown'))
+    shutdownPromise = (async () => {
+      while (active.size > 0) await Promise.allSettled([...active])
+    })()
+    void shutdownPromise.catch(() => undefined)
+    return shutdownPromise
   }
+
+  Object.freeze(handler)
+  Object.freeze(shutdown)
   return Object.freeze({ handler, shutdown })
 }

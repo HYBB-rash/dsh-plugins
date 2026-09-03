@@ -1,18 +1,14 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {
-  TelegramInboundDeliveryReceipt,
   TelegramInboundEnvelope,
   TelegramInboundResult,
 } from '@deepseek-ai/dsh-telegram-gateway'
-import type {
-  PersonalFeedV2RequestCoordinator,
-  PersonalFeedV2Receipt,
-} from '@herman/personal-feed'
+import type { PersonalFeedV2RequestCoordinator } from '@herman/personal-feed'
 
 export type PersonalFeedTelegramAdapterContext = Pick<Context, 'on'>
 
 export interface PersonalFeedTelegramAdapterOptions {
-  readonly coordinator: PersonalFeedV2RequestCoordinator
+  readonly handler: (envelope: TelegramInboundEnvelope) => Promise<TelegramInboundResult>
 }
 
 const failedText = '这次没有完成：判断或执行未完成。'
@@ -21,7 +17,7 @@ export interface PersonalFeedTelegramRequestHandlerOptions {
   readonly coordinator: PersonalFeedV2RequestCoordinator
 }
 
-/** The single request/prepare/receipt boundary shared by every Telegram entry. */
+/** The single request boundary shared by every Telegram entry. */
 export function createPersonalFeedTelegramRequestHandler(
   options: PersonalFeedTelegramRequestHandlerOptions,
 ): (envelope: TelegramInboundEnvelope) => Promise<TelegramInboundResult> {
@@ -32,16 +28,9 @@ export function createPersonalFeedTelegramRequestHandler(
         messageId: envelope.message.id,
         signal: envelope.signal,
       })
-      if (prepared.kind === 'duplicate_consumed') return { kind: 'handled', finalText: '' }
       return {
-        kind: 'handled-awaiting-delivery' as const,
+        kind: 'handled' as const,
         finalText: prepared.outcome.finalText,
-        settle: (receipt: TelegramInboundDeliveryReceipt) => {
-          if (!hasOneTelegramMessageId(receipt)) {
-            throw new Error('Telegram delivery receipt must contain exactly one message id')
-          }
-          return prepared.settle(receipt as PersonalFeedV2Receipt)
-        },
       }
     } catch {
       return { kind: 'failed', visibleError: failedText }
@@ -55,12 +44,11 @@ export function registerPersonalFeedTelegramAdapter(
   options: PersonalFeedTelegramAdapterOptions,
 ): () => void {
   let disposed = false
-  const handler = createPersonalFeedTelegramRequestHandler(options)
   const stop = ctx.on('telegram/inbound', async (envelope, next) => {
     if (disposed) return await next()
     if (envelope.currentText.trim() === '') return { kind: 'handled', finalText: '' }
     if (!isExplicitPersonalFeedRequest(envelope)) return await next()
-    return handler(envelope)
+    return options.handler(envelope)
   })
 
   return () => {
@@ -80,11 +68,4 @@ export function isExplicitPersonalFeedRequest(envelope: TelegramInboundEnvelope)
 function containsXLink(value: string | undefined): boolean {
   return value !== undefined
     && /(?:https?:\/\/)?(?:www\.)?(?:x\.com|twitter\.com)(?:[/?#\s]|$)/i.test(value)
-}
-
-function hasOneTelegramMessageId(value: TelegramInboundDeliveryReceipt): boolean {
-  return Array.isArray(value.messageIds)
-    && value.messageIds.length === 1
-    && Number.isSafeInteger(value.messageIds[0])
-    && value.messageIds[0] > 0
 }

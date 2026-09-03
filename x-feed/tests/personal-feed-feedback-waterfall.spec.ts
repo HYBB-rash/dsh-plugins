@@ -9,7 +9,11 @@ import {
   type TelegramFeedbackAdapterDependencies,
 } from '../src/x-feedback/telegram-adapter.ts'
 import { InMemoryPendingStore } from '../src/x-feedback/pending-store.ts'
-import { registerPersonalFeedTelegramAdapter } from '../src/personal-feed/telegram-adapter.ts'
+import {
+  createPersonalFeedTelegramRequestHandler,
+  registerPersonalFeedTelegramAdapter,
+} from '../src/personal-feed/telegram-adapter.ts'
+import { createPersonalContextTelegramRuntime } from '../src/personal-feed/personal-context-telegram-runtime.ts'
 import type { FeedbackUseCaseResult } from '../src/x-feedback/use-case.ts'
 
 const signal = new AbortController().signal
@@ -114,7 +118,6 @@ function feedCoordinator(
         finalText: personalFeedText,
         digest: 'a'.repeat(64),
       },
-      settle: vi.fn(),
     }
   })
   return { coordinator: { prepare, read: vi.fn() }, events }
@@ -125,9 +128,18 @@ function installComposition(
   dependencies: TelegramFeedbackAdapterDependencies,
 ) {
   const ctx = new Context()
+  const contextRuntime = createPersonalContextTelegramRuntime({
+    owner: {
+      observe: vi.fn(async () => ({ kind: 'ignored' })),
+      snapshot: vi.fn(),
+    } as never,
+    installSignal: new AbortController().signal,
+  })
+  const stopSource = contextRuntime.registerSourceFirst(ctx)
   const stopFeedback = registerTelegramFeedbackAdapter(ctx, dependencies)
-  const stopPersonalFeed = registerPersonalFeedTelegramAdapter(ctx, { coordinator } as never)
-  return { ctx, dispose: () => { stopPersonalFeed(); stopFeedback() } }
+  const handler = createPersonalFeedTelegramRequestHandler({ coordinator } as never)
+  const stopPersonalFeed = registerPersonalFeedTelegramAdapter(ctx, { handler })
+  return { ctx, dispose: () => { stopPersonalFeed(); stopFeedback(); stopSource() } }
 }
 
 const contexts: Context[] = []
@@ -155,7 +167,7 @@ describe('X pending handoff at the real Telegram waterfall boundary', () => {
 
       expect(events).toEqual(['clear'])
       expect(coordinatorEvents).toEqual(['prepare'])
-      expect(result).toMatchObject({ kind: 'handled-awaiting-delivery', finalText: personalFeedText })
+      expect(result).toMatchObject({ kind: 'handled', finalText: personalFeedText })
       expect(coordinator.prepare).toHaveBeenCalledOnce()
       expect(calls.clean).not.toHaveBeenCalled()
       expect(calls.repository).not.toHaveBeenCalled()

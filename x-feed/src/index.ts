@@ -7,11 +7,7 @@
  */
 
 import {
-  createPersonalFeedXStartupFromPackageEntry as createStartupFromPackageEntry,
-  runPersonalFeedXStartupSelfTestFromPackageEntry as runStartupSelfTestFromPackageEntry,
-} from './personal-feed/x-startup.ts'
-import {
-  installTelegramExtensionFromPackageEntry,
+  installTelegramExtensionWithClock,
 } from './telegram-extension.ts'
 
 export {
@@ -34,28 +30,13 @@ export {
   type XFeedCronProviderOptions,
 } from './x-cron/provider.ts'
 
-/** Compose the production Personal Feed X runtime from this package entry. */
-export function createPersonalFeedXStartup(runtimeConfig: unknown): Readonly<{
-  readonly observe: (input: unknown) => Promise<unknown>
-  readonly shutdown: () => Promise<void>
-}> {
-  if (arguments.length !== 1) throw new Error('Unable to create personal-feed X startup')
-  return createStartupFromPackageEntry(import.meta.url, runtimeConfig)
-}
-
 /** Install the X feedback behavior with an isolated clock for this install. */
 export function installTelegramExtension(
-  ctx: Parameters<typeof installTelegramExtensionFromPackageEntry>[0],
-  rawConfig: Parameters<typeof installTelegramExtensionFromPackageEntry>[1],
-): ReturnType<typeof installTelegramExtensionFromPackageEntry> {
+  ctx: Parameters<typeof installTelegramExtensionWithClock>[0],
+  rawConfig: Parameters<typeof installTelegramExtensionWithClock>[1],
+): ReturnType<typeof installTelegramExtensionWithClock> {
   const clock = Object.freeze({ now: () => new Date() })
-  return installTelegramExtensionFromPackageEntry(ctx, rawConfig, import.meta.url, clock)
-}
-
-/** Verify the shipped Personal Feed X Python child without touching business data. */
-export function runPersonalFeedXStartupSelfTest(): Promise<unknown> {
-  if (arguments.length !== 0) return Promise.reject(new Error('Unable to run personal-feed X startup self-test'))
-  return runStartupSelfTestFromPackageEntry(import.meta.url)
+  return installTelegramExtensionWithClock(ctx, rawConfig, clock)
 }
 
 export {

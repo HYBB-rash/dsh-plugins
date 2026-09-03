@@ -829,10 +829,17 @@ observe = x_personal_feed_observer.observe
 run_cli = x_personal_feed_observer.run_cli
 
 
-def main(stdin=sys.stdin.buffer, stdout=sys.stdout, observer=None):
+def main(argv=None, stdout=sys.stdout, observer=None):
+    arguments = sys.argv[1:] if argv is None else argv
     try:
-        raw = stdin.read(MAX_INPUT_BYTES + 1)
-    except Exception:
+        raw = (
+            arguments[0].encode("utf-8")
+            if isinstance(arguments, list)
+            and len(arguments) == 1
+            and isinstance(arguments[0], str)
+            else b""
+        )
+    except UnicodeError:
         raw = b""
     chosen = observer
     if chosen is None:
@@ -863,4 +870,4 @@ def main(stdin=sys.stdin.buffer, stdout=sys.stdout, observer=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

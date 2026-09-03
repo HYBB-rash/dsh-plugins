@@ -1,19 +1,20 @@
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createPersonalContextOwner, createSessionUserHistoryAdapter } from '@herman/personal-feed'
-import { parseXFeedRuntimeConfig } from './config.ts'
+import { createPersonalContextOwner } from '@herman/personal-feed'
+import { parseXFeedRuntimeConfig, resolvePipelinePath } from './config.ts'
 import { XFeedbackStore } from './store.ts'
 import { registerXFeedTools } from './tools.ts'
 import { runCleanFeedback } from './x-feedback/clean-agent.ts'
 import { FeedbackEffectAdapter, type FeedbackOperationStore } from './x-feedback/feedback-effect-adapter.ts'
 import { InMemoryPendingStore } from './x-feedback/pending-store.ts'
 import { registerTelegramFeedbackAdapter } from './x-feedback/telegram-adapter.ts'
-import { isExplicitPersonalFeedRequest } from './personal-feed/telegram-adapter.ts'
 import { createPersonalFeedTelegramProductionComposition } from './personal-feed/telegram-production-composition.ts'
 import { createPersonalContextTelegramRuntime } from './personal-feed/personal-context-telegram-runtime.ts'
-import { createPersonalContextSemanticLlmPorts } from './personal-feed/personal-context-semantic-llm.ts'
+import { createPersonalContextSemanticLlmPort } from './personal-feed/personal-context-semantic-llm.ts'
+import { registerPersonalFeedTelegramAdapter } from './personal-feed/telegram-adapter.ts'
+import { createPersonalFeedXSurfaceObserver } from './personal-feed/x-surface-observer.ts'
 import { FileTrustedFactRepository } from './x-feedback/trusted-fact-repository.ts'
 import { FeedbackUseCase } from './x-feedback/use-case.ts'
 import {
@@ -21,7 +22,6 @@ import {
   TRUSTED_FACT_NAVIGATION_FILE_NAME,
 } from './navigation/file-navigation-snapshot-store.ts'
 import { pinNavigationSnapshot } from './fact-projection/file-projection-sources.ts'
-import { bindPersonalFeedXStartupFromPackageEntry } from './personal-feed/x-startup.ts'
 import {
   RebuildTrustedFactNavigation,
   TrustedFactNavigationProjector,
@@ -49,13 +49,11 @@ export const X_FEED_CONTRACT = [
 ].join('\n')
 
 /** Install the X feedback behavior as an ordinary Telegram business adapter. */
-export async function installTelegramExtensionFromPackageEntry(
+export async function installTelegramExtensionWithClock(
   ctx: Context,
   rawConfig: Readonly<Record<string, unknown>>,
-  packageEntryUrl: unknown,
   installClock: Readonly<{ readonly now: () => Date }>,
 ): Promise<() => Promise<void>> {
-  const personalFeedXStartupFactory = bindPersonalFeedXStartupFromPackageEntry(packageEntryUrl, installClock)
   const config = parseXFeedRuntimeConfig(rawConfig)
   let navigation: RebuildTrustedFactNavigation
   try {
@@ -83,69 +81,45 @@ export async function installTelegramExtensionFromPackageEntry(
     clock: { now: () => Date.now() },
   })
   const useCase = new FeedbackUseCase(pendingStore)
-  const service = (ctx as unknown as { get?: (name: string) => unknown }).get?.('sessionQuery')
-  if (!isSessionQuery(service)) throw new Error('x-feed: Telegram sessionQuery service is unavailable')
   const modelService = (ctx as unknown as { get?: (name: string) => unknown }).get?.('agentDefaultModel')
   if (!isModelSelectionService(modelService)) throw new Error('x-feed: default model selection service is unavailable')
   const selection = modelService.currentSelection()
   if (!isModelSelection(selection)) throw new Error('x-feed: default model selection is invalid')
-  const history = createSessionUserHistoryAdapter({
-    sessionId: config.telegramSessionId,
-    sessionQuery: service,
-  })
-  const semanticLifecycle = createPersonalContextSemanticLlmPorts({
+  const semantic = createPersonalContextSemanticLlmPort({
     ctx,
     provider: selection.provider,
     model: selection.model,
   })
-  const semantics = {
-    classifier: semanticLifecycle.classifier,
-    entailmentValidator: semanticLifecycle.entailmentValidator,
-    noFactValidator: semanticLifecycle.noFactValidator,
-  }
   const owner = createPersonalContextOwner({
-    databasePath: join(config.personalFeedDataDir, 'v2', 'personal-context.sqlite'),
+    logPath: join(config.personalFeedDataDir, 'v2', 'personal-facts.jsonl'),
     clock: installClock,
-    semantics,
+    semantic,
   })
+  const installLifetime = new AbortController()
   const personalContextRuntime = createPersonalContextTelegramRuntime({
     owner,
-    semanticLifecycle,
+    installSignal: installLifetime.signal,
   })
-  const shutdownPersonalContext = async (errors: unknown[]): Promise<void> => {
-    try { await personalContextRuntime.shutdown() } catch (error) { errors.push(error) }
-    try { owner.close() } catch (error) { errors.push(error) }
-  }
-  let bootstrap: Awaited<ReturnType<typeof owner.bootstrap>>
-  try {
-    bootstrap = await owner.bootstrap({ history })
-  } catch (error) {
-    const cleanupErrors: unknown[] = []
-    await shutdownPersonalContext(cleanupErrors)
-    if (cleanupErrors.length > 0) throw new AggregateError([error, ...cleanupErrors])
-    throw error
-  }
-  if (bootstrap.status !== 'complete') {
-    const primary = new Error(`x-feed: personal context bootstrap incomplete (${bootstrap.reason})`)
-    const cleanupErrors: unknown[] = []
-    await shutdownPersonalContext(cleanupErrors)
-    if (cleanupErrors.length > 0) throw new AggregateError([primary, ...cleanupErrors])
-    throw primary
+  const observerCliPath = join(dirname(resolvePipelinePath({})), 'x_personal_feed_observer_cli.py')
+  const personalFeedXObserver = createPersonalFeedXSurfaceObserver({
+    pythonBin: '/usr/bin/python3',
+    observerCliPath,
+    clock: installClock,
+  })
+  const abortInstall = (): void => {
+    if (!installLifetime.signal.aborted) installLifetime.abort(new Error('x-feed Telegram extension stopped'))
   }
 
   let personalFeedProduction: ReturnType<typeof createPersonalFeedTelegramProductionComposition>
   try {
     personalFeedProduction = createPersonalFeedTelegramProductionComposition(Object.freeze({
-      runtimeConfig: config,
-      startupFactory: personalFeedXStartupFactory,
       r4: personalContextRuntime.r4,
-      completionLedgerPath: join(config.personalFeedDataDir, 'v2', 'candidate-judgments.jsonl'),
+      r2: personalFeedXObserver,
+      candidateStatePath: join(config.personalFeedDataDir, 'v2', 'candidate-state.jsonl'),
       clock: installClock,
     }))
   } catch (error) {
-    const cleanupErrors: unknown[] = []
-    await shutdownPersonalContext(cleanupErrors)
-    if (cleanupErrors.length > 0) throw new AggregateError([error, ...cleanupErrors])
+    abortInstall()
     throw error
   }
   const personalFeedHandler = personalFeedProduction.handler
@@ -159,22 +133,6 @@ export async function installTelegramExtensionFromPackageEntry(
     }
     return errors
   }
-  const registerPersonalFeedTelegramListener = (
-    listenerContext: Pick<Context, 'on'>,
-  ): (() => void) => {
-    let disposed = false
-    const stop = listenerContext.on('telegram/inbound', async (envelope, next) => {
-      if (disposed) return await next()
-      if (envelope.currentText.trim() === '') return { kind: 'handled', finalText: '' }
-      if (!isExplicitPersonalFeedRequest(envelope)) return await next()
-      return personalFeedHandler(envelope)
-    })
-    return () => {
-      if (disposed) return
-      disposed = true
-      stop()
-    }
-  }
   const startPersonalFeedProductionShutdown = (errors: unknown[]): Promise<void> => {
     try { return personalFeedProduction.shutdown() } catch (error) {
       errors.push(error)
@@ -182,9 +140,7 @@ export async function installTelegramExtensionFromPackageEntry(
     }
   }
   try {
-    stopSource = personalContextRuntime.registerSourceFirst(ctx, {
-      personalFeedHandler,
-    })
+    stopSource = personalContextRuntime.registerSourceFirst(ctx)
     stopFeedback = registerTelegramFeedbackAdapter(ctx, {
       pendingStore,
       trustedFactRepository,
@@ -197,8 +153,11 @@ export async function installTelegramExtensionFromPackageEntry(
         config.feedbackTurnTimeoutMs,
       ),
     })
-    stopPersonalFeed = registerPersonalFeedTelegramListener(ctx)
+    stopPersonalFeed = registerPersonalFeedTelegramAdapter(ctx, {
+      handler: personalFeedHandler,
+    })
   } catch (error) {
+    abortInstall()
     const productionShutdownErrors: unknown[] = []
     const productionShutdown = startPersonalFeedProductionShutdown(productionShutdownErrors)
     const cleanup = cleanupErrors([
@@ -208,7 +167,6 @@ export async function installTelegramExtensionFromPackageEntry(
     ])
     try { await productionShutdown } catch (shutdownError) { productionShutdownErrors.push(shutdownError) }
     cleanup.push(...productionShutdownErrors)
-    await shutdownPersonalContext(cleanup)
     if (cleanup.length > 0) throw new AggregateError([error, ...cleanup])
     throw error
   }
@@ -255,6 +213,7 @@ export async function installTelegramExtensionFromPackageEntry(
       installForRoot(agent)
     })
   } catch (error) {
+    abortInstall()
     const productionShutdownErrors: unknown[] = []
     const productionShutdown = startPersonalFeedProductionShutdown(productionShutdownErrors)
     const rootCleanups = [...runtimes.values()].reverse()
@@ -268,7 +227,6 @@ export async function installTelegramExtensionFromPackageEntry(
     ]))
     try { await productionShutdown } catch (shutdownError) { productionShutdownErrors.push(shutdownError) }
     cleanup.push(...productionShutdownErrors)
-    await shutdownPersonalContext(cleanup)
     if (cleanup.length > 0) throw new AggregateError([error, ...cleanup])
     throw error
   }
@@ -278,6 +236,7 @@ export async function installTelegramExtensionFromPackageEntry(
   return (): Promise<void> => {
     if (disposePromise !== undefined) return disposePromise
     stopping = true
+    abortInstall()
     const cleanups = [...runtimes.values()].reverse()
     runtimes.clear()
     const productionShutdownErrors: unknown[] = []
@@ -297,21 +256,11 @@ export async function installTelegramExtensionFromPackageEntry(
       try { stopFeedback?.() } catch (error) { errors.push(error) }
       try { stopSource?.() } catch (error) { errors.push(error) }
       try { await productionShutdownPromise } catch (error) { errors.push(error) }
-      await shutdownPersonalContext(errors)
       if (errors.length > 0) throw new AggregateError(errors)
     })()
     void disposePromise.then(undefined, () => undefined)
     return disposePromise
   }
-}
-
-function isSessionQuery(value: unknown): value is {
-  readonly listEvents: (sessionId: string, signal?: AbortSignal) => unknown | Promise<unknown>
-  readonly readEvent: (input: unknown, signal?: AbortSignal) => unknown | Promise<unknown>
-} {
-  return value !== null && typeof value === 'object'
-    && typeof (value as { listEvents?: unknown }).listEvents === 'function'
-    && typeof (value as { readEvent?: unknown }).readEvent === 'function'
 }
 
 function isModelSelectionService(value: unknown): value is { currentSelection(): unknown } {

@@ -19,9 +19,6 @@
 
 import { chunkText, type SendMessageOptions, type TelegramHttp } from './telegram-contract.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { TelegramInboundDeliveryReceipt } from './inbound-contract.ts'
-
-export type TurnFeedbackReceipt = TelegramInboundDeliveryReceipt
 
 /** Narrow logger surface used by feedback calls. */
 export interface TurnFeedbackLogger {
@@ -167,23 +164,12 @@ export class TurnFeedback {
 
   /** Close new frames and deliver the authoritative final text, then 👍. */
   async finish(finalText: string): Promise<void> {
-    await this.finishWithReceipt(finalText)
-  }
-
-  /** Close new frames, deliver the final text, and return its transport receipt. */
-  async finishWithReceipt(finalText: string): Promise<TurnFeedbackReceipt> {
     this.close()
     await this.deliveryTail
     const normalized = normalizeVisibleText(finalText)
-    const messageIds = await this.writeFinal(normalized)
+    await this.writeFinal(normalized)
     await ignoreFeedbackFailure(this.logger, 'success reaction', () => {
       return this.http.setReaction(this.chatId, this.triggerMessageId, '👍', this.signal)
-    })
-    return Object.freeze({
-      chatId: this.chatId,
-      triggerMessageId: this.triggerMessageId,
-      visibleText: normalized,
-      messageIds: Object.freeze([...messageIds]),
     })
   }
 

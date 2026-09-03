@@ -120,7 +120,7 @@ describe('Telegram extension boundary', () => {
     }
   })
 
-  it('installs source capture before X feedback and Personal Feed, whose unavailable ports fail explicit Feed safely', async () => {
+  it('observes Personal Feed first, then lets X feedback clear pending before the Feed handler fails safely', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'x-feed-telegram-personal-feed-'))
     const personalFeedDataDir = join(dataDir, 'personal-feed')
     const harness = makeCtx()
@@ -145,7 +145,7 @@ describe('Telegram extension boundary', () => {
       const result = await harness.ctx.waterfall!('telegram/inbound', envelope, root)
 
       expect(result).toMatchObject({
-        kind: 'handled-awaiting-delivery',
+        kind: 'handled',
         finalText: '这次没有完成：个人语境不足或未完成。',
       })
       expect((result as { readonly finalText: string }).finalText).not.toBe('这次没有值得看的内容。')
