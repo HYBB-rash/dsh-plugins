@@ -1,8 +1,12 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { CallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import type {
-  PersonalContextActiveFact,
-  PersonalContextSemanticInput,
-  PersonalContextSemanticPort,
+import {
+  createPersonalContextOwner,
+  type PersonalContextActiveFact,
+  type PersonalContextSemanticInput,
+  type PersonalContextSemanticPort,
 } from '@herman/personal-feed'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -82,7 +86,133 @@ function context(script: (request: GenerateOptions) => readonly StreamChunk[]) {
   }
 }
 
+function collectSpanSchemas(value: unknown, found: Record<string, unknown>[] = []): Record<string, unknown>[] {
+  if (Array.isArray(value)) {
+    for (const item of value) collectSpanSchemas(item, found)
+    return found
+  }
+  if (value === null || typeof value !== 'object') return found
+  const record = value as Record<string, unknown>
+  const properties = record.properties
+  if (properties !== null && typeof properties === 'object' && !Array.isArray(properties)) {
+    const fields = properties as Record<string, unknown>
+    if (fields.startUtf16 !== undefined && fields.endUtf16 !== undefined) found.push(fields)
+  }
+  for (const nested of Object.values(record)) collectSpanSchemas(nested, found)
+  return found
+}
+
+function expectBoundedRequest(request: GenerateOptions, rawText: string, utf16Length: number): void {
+  const textBlock = request.messages[0]?.content.find(block => block.type === 'text')
+  expect(textBlock?.type).toBe('text')
+  if (textBlock?.type !== 'text') throw new Error('expected one personal-context text material')
+  expect(JSON.parse(textBlock.text)).toMatchObject({ rawText, rawTextUtf16Length: utf16Length })
+
+  const parameters = request.tools?.[0]?.parameters
+  const encodedSchema = JSON.stringify(parameters)
+  expect(encodedSchema).toContain('evidenceSpan')
+  expect(encodedSchema).toContain('scopeSpan')
+  const spans = collectSpanSchemas(parameters)
+  expect(spans.length).toBeGreaterThan(0)
+  for (const fields of spans) {
+    expect(fields.startUtf16).toMatchObject({ maximum: utf16Length })
+    expect(fields.endUtf16).toMatchObject({ maximum: utf16Length })
+  }
+}
+
 describe('single Personal Context semantic boundary', () => {
+  it('declares the revisions tool parameters as a top-level object', async () => {
+    const fixture = context(request => toolCall(request, { kind: 'ignored' }))
+    const semantic = (await loadFactory())({ ctx: fixture.ctx, provider: 'p', model: 'm' })
+
+    await expect(semantic.revise(input)).resolves.toStrictEqual({ kind: 'ignored' })
+
+    expect(fixture.requests).toHaveLength(1)
+    expect(fixture.requests[0]?.tools?.[0]?.parameters).toHaveProperty('type', 'object')
+  })
+
+  it.each([
+    { rawText: '我关注🧠Agent', utf16Length: 10 },
+    { rawText: '短句', utf16Length: 2 },
+  ])('binds every span to the current rawText UTF-16 length for $rawText', async ({ rawText, utf16Length }) => {
+    const fixture = context(request => toolCall(request, { kind: 'ignored' }))
+    const semantic = (await loadFactory())({ ctx: fixture.ctx, provider: 'p', model: 'm' })
+
+    await expect(semantic.revise(Object.freeze({ ...input, rawText }))).resolves.toStrictEqual({ kind: 'ignored' })
+
+    expect(fixture.requests).toHaveLength(1)
+    expectBoundedRequest(fixture.requests[0]!, rawText, utf16Length)
+  })
+
+  it('applies both direct personal-context lanes through the semantic port and existing owner', async () => {
+    const interestText = '虚构测试角色甲长期关注火星苔藓园艺。'
+    const knowledgeText = '虚构测试角色甲已经知道月宫温室采用蓝色玻璃。'
+    const decisions = [
+      {
+        kind: 'revisions',
+        changes: [{
+          operation: 'assert',
+          targetFactIds: [],
+          lane: 'long_term_interest',
+          stance: 'include',
+          evidenceSpan: { startUtf16: 0, endUtf16: 18 },
+          scopeSpan: { startUtf16: 11, endUtf16: 17 },
+        }],
+      },
+      {
+        kind: 'revisions',
+        changes: [{
+          operation: 'assert',
+          targetFactIds: [],
+          lane: 'existing_knowledge',
+          epistemic: 'asserted',
+          evidenceSpan: { startUtf16: 0, endUtf16: 22 },
+          scopeSpan: { startUtf16: 11, endUtf16: 21 },
+        }],
+      },
+    ] as const
+    let decisionIndex = 0
+    const fixture = context(request => toolCall(request, decisions[decisionIndex++]!))
+    const semantic = (await loadFactory())({ ctx: fixture.ctx, provider: 'p', model: 'm' })
+    const directory = await mkdtemp(join(tmpdir(), 'personal-context-protocol-'))
+
+    try {
+      const owner = createPersonalContextOwner({
+        logPath: join(directory, 'personal-facts.jsonl'),
+        clock: { now: () => new Date('2026-09-03T11:00:00.000Z') },
+        semantic,
+      })
+
+      await expect(owner.observe({
+        source: { kind: 'telegram_inbound', chatId: -7001, messageId: 5001 },
+        rawText: interestText,
+      })).resolves.toStrictEqual({ kind: 'applied' })
+      await expect(owner.observe({
+        source: { kind: 'telegram_inbound', chatId: -7001, messageId: 5002 },
+        rawText: knowledgeText,
+      })).resolves.toStrictEqual({ kind: 'applied' })
+
+      expect(fixture.requests).toHaveLength(2)
+      expectBoundedRequest(fixture.requests[0]!, interestText, 18)
+      expectBoundedRequest(fixture.requests[1]!, knowledgeText, 22)
+      expect(owner.snapshot({
+        request: {
+          requestId: 'pf-v2-personal-context-protocol',
+          cutoff: '2026-09-03T12:00:00.000Z',
+          shanghaiDay: '2026-09-03',
+        },
+      })).toMatchObject({
+        kind: 'sufficient',
+        snapshot: {
+          longTermInterest: { activeFacts: [{ lane: 'long_term_interest' }] },
+          existingKnowledge: { activeFacts: [{ lane: 'existing_knowledge' }] },
+        },
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   it('submits one span-and-enum-only revisions tool and returns its exact decoded decision', async () => {
     const decision = {
       kind: 'revisions',

@@ -48,8 +48,9 @@ export function createPersonalContextSemanticLlmPort(options: {
       }
       const timeout = AbortSignal.timeout(timeoutMs)
       const signal = callerSignal === undefined ? timeout : AbortSignal.any([callerSignal, timeout])
-      const tool = revisionsTool(input.activeFacts)
-      const request = semanticRequest(options.provider, options.model, input, tool, signal)
+      const rawTextUtf16Length = input.rawText.length
+      const tool = revisionsTool(input.activeFacts, rawTextUtf16Length)
+      const request = semanticRequest(options.provider, options.model, input, rawTextUtf16Length, tool, signal)
       const assembler = new BlockAssembler()
       try {
         for await (const chunk of options.ctx.llm.stream(request)) assembler.push(chunk)
@@ -66,6 +67,7 @@ function semanticRequest(
   provider: string,
   model: string,
   input: PersonalContextSemanticInput,
+  rawTextUtf16Length: number,
   tool: ToolSchema,
   signal: AbortSignal,
 ): GenerateOptions {
@@ -74,7 +76,7 @@ function semanticRequest(
     model,
     reasoningEffort: ReasoningEffortId('off'),
     messages: [createUserMessage({
-      content: [{ type: 'text', text: JSON.stringify(input) }],
+      content: [{ type: 'text', text: JSON.stringify({ ...input, rawTextUtf16Length }) }],
       source: { kind: 'plugin', plugin: 'x-feed' },
     })],
     system: SYSTEM,
@@ -85,7 +87,10 @@ function semanticRequest(
   })
 }
 
-function revisionsTool(activeFacts: readonly PersonalContextActiveFact[]): ToolSchema {
+function revisionsTool(
+  activeFacts: readonly PersonalContextActiveFact[],
+  rawTextUtf16Length: number,
+): ToolSchema {
   const interestIds = activeFacts
     .filter(fact => fact.lane === 'long_term_interest')
     .map(fact => fact.factId)
@@ -97,6 +102,7 @@ function revisionsTool(activeFacts: readonly PersonalContextActiveFact[]): ToolS
     name: TOOL_NAME,
     description: 'Submit exact personal-context revisions or ignore this source.',
     parameters: {
+      type: 'object',
       oneOf: [
         closedObject({ kind: { type: 'string', const: 'ignored' } }),
         closedObject({
@@ -106,14 +112,14 @@ function revisionsTool(activeFacts: readonly PersonalContextActiveFact[]): ToolS
             minItems: 1,
             items: {
               oneOf: [
-                factRevision('assert', 'long_term_interest', 'stance', ['include', 'exclude'], interestIds),
-                factRevision('correct', 'long_term_interest', 'stance', ['include', 'exclude'], interestIds),
-                factRevision('replace', 'long_term_interest', 'stance', ['include', 'exclude'], interestIds),
-                factRevision('assert', 'existing_knowledge', 'epistemic', ['asserted', 'uncertain'], knowledgeIds),
-                factRevision('correct', 'existing_knowledge', 'epistemic', ['asserted', 'uncertain'], knowledgeIds),
-                factRevision('replace', 'existing_knowledge', 'epistemic', ['asserted', 'uncertain'], knowledgeIds),
-                evidenceRevision('confirm', allIds),
-                evidenceRevision('withdraw', allIds),
+                factRevision('assert', 'long_term_interest', 'stance', ['include', 'exclude'], interestIds, rawTextUtf16Length),
+                factRevision('correct', 'long_term_interest', 'stance', ['include', 'exclude'], interestIds, rawTextUtf16Length),
+                factRevision('replace', 'long_term_interest', 'stance', ['include', 'exclude'], interestIds, rawTextUtf16Length),
+                factRevision('assert', 'existing_knowledge', 'epistemic', ['asserted', 'uncertain'], knowledgeIds, rawTextUtf16Length),
+                factRevision('correct', 'existing_knowledge', 'epistemic', ['asserted', 'uncertain'], knowledgeIds, rawTextUtf16Length),
+                factRevision('replace', 'existing_knowledge', 'epistemic', ['asserted', 'uncertain'], knowledgeIds, rawTextUtf16Length),
+                evidenceRevision('confirm', allIds, rawTextUtf16Length),
+                evidenceRevision('withdraw', allIds, rawTextUtf16Length),
               ],
             },
           },
@@ -134,10 +140,10 @@ function closedObject(properties: Record<string, JsonSchema>): JsonSchema {
   }
 }
 
-function span(): JsonSchema {
+function span(rawTextUtf16Length: number): JsonSchema {
   return closedObject({
-    startUtf16: { type: 'integer', minimum: 0 },
-    endUtf16: { type: 'integer', minimum: 1 },
+    startUtf16: { type: 'integer', minimum: 0, maximum: rawTextUtf16Length },
+    endUtf16: { type: 'integer', minimum: 1, maximum: rawTextUtf16Length },
   })
 }
 
@@ -161,22 +167,27 @@ function factRevision(
   stateKey: 'stance' | 'epistemic',
   states: readonly string[],
   ids: readonly string[],
+  rawTextUtf16Length: number,
 ): JsonSchema {
   return closedObject({
     operation: { type: 'string', const: operation },
     targetFactIds: targets(ids, operation),
     lane: { type: 'string', const: lane },
     [stateKey]: { type: 'string', enum: [...states] },
-    evidenceSpan: span(),
-    scopeSpan: span(),
+    evidenceSpan: span(rawTextUtf16Length),
+    scopeSpan: span(rawTextUtf16Length),
   })
 }
 
-function evidenceRevision(operation: 'confirm' | 'withdraw', ids: readonly string[]): JsonSchema {
+function evidenceRevision(
+  operation: 'confirm' | 'withdraw',
+  ids: readonly string[],
+  rawTextUtf16Length: number,
+): JsonSchema {
   return closedObject({
     operation: { type: 'string', const: operation },
     targetFactIds: targets(ids, operation),
-    evidenceSpan: span(),
+    evidenceSpan: span(rawTextUtf16Length),
   })
 }
 
