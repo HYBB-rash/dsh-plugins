@@ -3,6 +3,7 @@ import {
   createPersonalFeedV2RequestCoordinator,
   type CreatePersonalFeedV2RequestCoordinatorOptions,
   type PersonalFeedV2R2Port,
+  type PersonalFeedV2R5Port,
 } from '@herman/personal-feed'
 import type { TelegramInboundEnvelope, TelegramInboundResult } from '@deepseek-ai/dsh-telegram-gateway'
 import { createPersonalFeedTelegramRequestHandler } from './telegram-adapter.ts'
@@ -11,14 +12,10 @@ const FAILED_RESULT: TelegramInboundResult = Object.freeze({
   kind: 'failed',
   visibleError: '这次没有完成：判断或执行未完成。',
 })
-const CONSERVATIVE_R5_RESULT = Object.freeze({
-  kind: 'incomplete',
-})
-const CONSERVATIVE_R5 = Object.freeze({ judgeOne: () => CONSERVATIVE_R5_RESULT })
-
 type CompositionOptions = Readonly<{
   readonly r4: CreatePersonalFeedV2RequestCoordinatorOptions['r4']
   readonly r2: PersonalFeedV2R2Port
+  readonly r5: PersonalFeedV2R5Port
   readonly candidateStatePath: string
   readonly clock: CreatePersonalFeedV2RequestCoordinatorOptions['clock']
 }>
@@ -43,8 +40,9 @@ function hasSingleFunction(value: unknown, key: string): boolean {
 
 function readOptions(value: unknown): CompositionOptions {
   if (!isRecord(value) || !Object.isFrozen(value)
-    || !hasExactKeys(value, ['r4', 'r2', 'candidateStatePath', 'clock'])
+    || !hasExactKeys(value, ['r4', 'r2', 'r5', 'candidateStatePath', 'clock'])
     || !hasSingleFunction(value.r4, 'snapshot') || !hasSingleFunction(value.r2, 'observe')
+    || !hasSingleFunction(value.r5, 'judgeOne')
     || typeof value.candidateStatePath !== 'string' || value.candidateStatePath.trim() === ''
     || !hasSingleFunction(value.clock, 'now')) {
     throw new Error('personal Feed Telegram composition options are invalid')
@@ -64,7 +62,7 @@ export function createPersonalFeedTelegramProductionComposition(options: unknown
     r4: resolved.r4,
     r2: resolved.r2,
     r3: candidateState,
-    r5: CONSERVATIVE_R5,
+    r5: resolved.r5,
   })
   const requestHandler = createPersonalFeedTelegramRequestHandler({ coordinator })
   const installController = new AbortController()

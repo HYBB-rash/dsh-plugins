@@ -8,6 +8,8 @@ const state = vi.hoisted(() => ({
   contextOwners: [] as unknown[],
   semanticOptions: [] as unknown[],
   semanticPorts: [] as unknown[],
+  judgmentOptions: [] as unknown[],
+  judgmentPorts: [] as unknown[],
   runtimeOptions: [] as unknown[],
   runtimeR4: Object.freeze({ snapshot: vi.fn() }) as unknown,
   sourceHandlers: [] as unknown[],
@@ -26,6 +28,8 @@ afterEach(() => {
   state.contextOwners.length = 0
   state.semanticOptions.length = 0
   state.semanticPorts.length = 0
+  state.judgmentOptions.length = 0
+  state.judgmentPorts.length = 0
   state.runtimeOptions.length = 0
   state.sourceHandlers.length = 0
   state.productionOptions.length = 0
@@ -51,6 +55,15 @@ vi.mock('../src/personal-feed/personal-context-semantic-llm.ts', () => ({
     const semantic = Object.freeze({ revise: vi.fn() })
     state.semanticPorts.push(semantic)
     return semantic
+  }),
+}))
+
+vi.mock('../src/personal-feed/personal-feed-judgment-llm.ts', () => ({
+  createPersonalFeedJudgmentLlmPort: vi.fn((options: unknown) => {
+    state.judgmentOptions.push(options)
+    const judgment = Object.freeze({ judgeOne: vi.fn() })
+    state.judgmentPorts.push(judgment)
+    return judgment
   }),
 }))
 
@@ -137,11 +150,12 @@ function fixture() {
   mkdirSync(personalFeedDataDir, { recursive: true })
   writeFileSync(join(dataDir, 'trusted-fact-navigation.json'), '{}\n')
   const listeners: string[] = []
+  const currentSelection = vi.fn(() => ({ provider: 'provider', model: 'model' }))
   const ctx = {
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     llm: { stream: vi.fn() },
     get: vi.fn((name: string) => name === 'agentDefaultModel'
-      ? { currentSelection: () => ({ provider: 'provider', model: 'model' }) }
+      ? { currentSelection }
       : undefined),
     on: vi.fn((name: string) => {
       listeners.push(name)
@@ -149,7 +163,7 @@ function fixture() {
     }),
     agents: { roots: () => [] },
   }
-  return { root, dataDir, personalFeedDataDir, listeners, ctx }
+  return { root, dataDir, personalFeedDataDir, listeners, currentSelection, ctx }
 }
 
 describe('Personal Feed Telegram install composition', () => {
@@ -170,6 +184,10 @@ describe('Personal Feed Telegram install composition', () => {
     }])
     expect(state.semanticOptions).toHaveLength(1)
     expect(state.semanticOptions[0]).toMatchObject({ ctx: value.ctx, provider: 'provider', model: 'model' })
+    expect(value.currentSelection).toHaveBeenCalledOnce()
+    expect(state.judgmentOptions).toHaveLength(1)
+    expect(state.judgmentOptions[0]).toStrictEqual({ ctx: value.ctx, provider: 'provider', model: 'model' })
+    expect(state.judgmentPorts).toHaveLength(1)
     expect(state.contextOwnerOptions).toStrictEqual([{
       logPath: join(value.personalFeedDataDir, 'v2', 'personal-facts.jsonl'),
       clock,
@@ -184,6 +202,7 @@ describe('Personal Feed Telegram install composition', () => {
     expect(state.productionOptions[0]).toStrictEqual({
       r4: state.runtimeR4,
       r2: state.observers[0],
+      r5: state.judgmentPorts[0],
       candidateStatePath: join(value.personalFeedDataDir, 'v2', 'candidate-state.jsonl'),
       clock,
     })
@@ -192,6 +211,8 @@ describe('Personal Feed Telegram install composition', () => {
     expect(value.ctx.get).not.toHaveBeenCalledWith('sessionQuery')
 
     await dispose()
+    expect(state.judgmentOptions).toHaveLength(1)
+    expect(state.judgmentPorts).toHaveLength(1)
   })
 
   it('aborts the one install signal, removes listeners, and reuses one production shutdown promise on disposal', async () => {

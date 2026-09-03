@@ -13,6 +13,7 @@ import { registerTelegramFeedbackAdapter } from './x-feedback/telegram-adapter.t
 import { createPersonalFeedTelegramProductionComposition } from './personal-feed/telegram-production-composition.ts'
 import { createPersonalContextTelegramRuntime } from './personal-feed/personal-context-telegram-runtime.ts'
 import { createPersonalContextSemanticLlmPort } from './personal-feed/personal-context-semantic-llm.ts'
+import { createPersonalFeedJudgmentLlmPort } from './personal-feed/personal-feed-judgment-llm.ts'
 import { registerPersonalFeedTelegramAdapter } from './personal-feed/telegram-adapter.ts'
 import { createPersonalFeedXSurfaceObserver } from './personal-feed/x-surface-observer.ts'
 import { FileTrustedFactRepository } from './x-feedback/trusted-fact-repository.ts'
@@ -90,6 +91,11 @@ export async function installTelegramExtensionWithClock(
     provider: selection.provider,
     model: selection.model,
   })
+  const judgment = createPersonalFeedJudgmentLlmPort({
+    ctx,
+    provider: selection.provider,
+    model: selection.model,
+  })
   const owner = createPersonalContextOwner({
     logPath: join(config.personalFeedDataDir, 'v2', 'personal-facts.jsonl'),
     clock: installClock,
@@ -115,6 +121,7 @@ export async function installTelegramExtensionWithClock(
     personalFeedProduction = createPersonalFeedTelegramProductionComposition(Object.freeze({
       r4: personalContextRuntime.r4,
       r2: personalFeedXObserver,
+      r5: judgment,
       candidateStatePath: join(config.personalFeedDataDir, 'v2', 'candidate-state.jsonl'),
       clock: installClock,
     }))

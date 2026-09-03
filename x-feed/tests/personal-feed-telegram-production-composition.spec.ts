@@ -23,11 +23,18 @@ function envelope(messageId: number, signal = new AbortController().signal): Tel
   })
 }
 
-function options(r2: Readonly<{ readonly observe: (input: unknown) => unknown }>, r4?: Readonly<{ readonly snapshot: (input: unknown) => unknown }>) {
+function options(
+  r2: Readonly<{ readonly observe: (input: unknown) => unknown }>,
+  r4?: Readonly<{ readonly snapshot: (input: unknown) => unknown }>,
+  r5: Readonly<{ readonly judgeOne: (input: unknown) => unknown }> = Object.freeze({
+    judgeOne: () => Object.freeze({ kind: 'incomplete' }),
+  }),
+) {
   const root = directory()
   return Object.freeze({
     r4: r4 ?? Object.freeze({ snapshot: () => Object.freeze({ kind: 'sufficient', snapshot: Object.freeze({ context: 'safe' }) }) }),
     r2,
+    r5,
     candidateStatePath: join(root, 'candidate-state.jsonl'),
     clock: CLOCK,
   })
@@ -77,6 +84,81 @@ describe('Personal Feed Telegram production composition', () => {
       finalText: '这次没有完成：X 来源或观察窗口未完成。',
     })
     expect((result as { readonly finalText?: string }).finalText).not.toBe('这次没有值得看的内容。')
+    await composition.shutdown()
+  })
+
+  it.each([
+    ['qualified', 'https://x.com/alpha/status/101'],
+    ['not qualified', '这次没有值得看的内容。'],
+    ['incomplete', '这次没有完成：判断或执行未完成。'],
+  ] as const)('passes injected R5 through the real candidate-state chain when it returns %s', async (judgment, expectedText) => {
+    const requestCutoff = '2026-09-01T00:00:00.000Z'
+    const capture = Object.freeze({
+      take: vi.fn(() => '一个完整候选正文'),
+      close: vi.fn(async () => undefined),
+    })
+    const window = Object.freeze({
+      requestId: 'telegram:7:41',
+      cutoff: requestCutoff,
+      shanghaiDay: '2026-09-01',
+      startedAt: '2026-09-01T00:00:00.100Z',
+      completedAt: '2026-09-01T00:00:03.000Z',
+      surfaces: Object.freeze([
+        Object.freeze({
+          kind: 'complete', surface: 'for_you', surfaceOrdinal: 0,
+          startedAt: '2026-09-01T00:00:00.100Z', completedAt: '2026-09-01T00:00:01.000Z',
+          occurrences: Object.freeze([Object.freeze({
+            sourceUrl: 'https://x.com/alpha/status/101',
+            body: Object.freeze({ kind: 'sufficient', capture }),
+            occurrenceOrdinal: 0, capturedAt: '2026-09-01T00:00:00.400Z',
+            authorHandle: 'alpha', publishedAt: '2026-08-31T00:00:00.000Z',
+          })]),
+        }),
+        Object.freeze({
+          kind: 'natural_zero', surface: 'following', surfaceOrdinal: 1,
+          startedAt: '2026-09-01T00:00:01.000Z', completedAt: '2026-09-01T00:00:02.000Z',
+          occurrences: Object.freeze([]),
+        }),
+        Object.freeze({
+          kind: 'natural_zero', surface: 'explore', surfaceOrdinal: 2,
+          startedAt: '2026-09-01T00:00:02.000Z', completedAt: '2026-09-01T00:00:03.000Z',
+          occurrences: Object.freeze([]),
+        }),
+      ]),
+    })
+    const r2 = Object.freeze({
+      observe: vi.fn(async () => Object.freeze({
+        kind: 'complete',
+        window,
+        close: vi.fn(async () => undefined),
+      })),
+    })
+    const seen: unknown[] = []
+    const r5 = Object.freeze({
+      judgeOne: vi.fn(async (input: unknown) => {
+        seen.push(input)
+        return Object.freeze({ kind: judgment === 'qualified' ? 'qualified' : judgment === 'not qualified' ? 'not_qualified' : 'incomplete' })
+      }),
+    })
+    const composition = createPersonalFeedTelegramProductionComposition(options(r2, undefined, r5))
+    const result = await composition.handler(envelope(41))
+
+    expect(result).toEqual({ kind: 'handled', finalText: expectedText })
+    expect(r5.judgeOne).toHaveBeenCalledOnce()
+    expect(seen).toHaveLength(1)
+    const judged = seen[0] as { readonly request: unknown; readonly snapshot: unknown; readonly candidate: unknown; readonly signal: unknown }
+    expect(Object.keys(judged).sort()).toEqual(['candidate', 'request', 'signal', 'snapshot'])
+    expect(Object.hasOwn(judged, 'window')).toBe(false)
+    expect(judged.request).toEqual({ requestId: 'telegram:7:41', cutoff: requestCutoff, shanghaiDay: '2026-09-01' })
+    expect(judged.snapshot).toEqual({ context: 'safe' })
+    expect(judged.candidate).toMatchObject({
+      stableId: 'x-status:101',
+      canonicalUrl: 'https://x.com/alpha/status/101',
+      body: '一个完整候选正文',
+    })
+    expect(Object.keys(judged.candidate as object).sort()).toEqual(['body', 'canonicalUrl', 'provenance', 'stableId'])
+    expect(JSON.stringify(judged)).not.toContain('surfaces')
+    expect(JSON.stringify(judged)).not.toContain('batch')
     await composition.shutdown()
   })
 
