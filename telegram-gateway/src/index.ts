@@ -105,6 +105,7 @@ export const inject = [
   'sessions',
   'credentials',
   'loader',
+  'llm',
 ]
 
 /** Gateway configuration. */

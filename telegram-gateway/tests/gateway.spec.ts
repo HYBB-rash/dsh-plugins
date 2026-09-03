@@ -9,7 +9,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import {
   apply, chunkText, createOffsetStore, createTelegramHttp, formatMarkdownV2, runGateway, summarizeTurn,
-  isTelegramInboundEnvelope, TelegramApiError, type Config, type SendMessageOptions, type TelegramHttp, type TelegramUpdate,
+  inject as gatewayInject, isTelegramInboundEnvelope, TelegramApiError, type Config, type SendMessageOptions, type TelegramHttp, type TelegramUpdate,
 } from '../src/index.ts'
 import type { TelegramInboundEnvelope, TelegramInboundResult } from '../src/inbound-contract.ts'
 import {
@@ -146,6 +146,10 @@ function gatewayContext(options: {
     setupContext,
   }
 }
+
+it('declares the llm service required by trusted Telegram extensions', () => {
+  expect(gatewayInject).toContain('llm')
+})
 
 describe('summarizeTurn', () => {
   it('aggregates the last assistant text after the firstSeq boundary', () => {
