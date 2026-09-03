@@ -666,6 +666,54 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                 else:
                     sys.modules[name] = previous
 
+    def test_home_feed_tabs_allow_additional_lists_and_ignore_empty_tablists(self):
+        module = _require_cli(self)
+        decision = getattr(module, "_surface_decision", None)
+        transition = getattr(module, "_surface_transition", None)
+        evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)
+        self.assertTrue(callable(decision))
+        self.assertTrue(callable(transition))
+        self.assertIsNotNone(evaluator_type)
+
+        home_tabs = [
+            {"ordinal": 0, "selected": True},
+            {"ordinal": 1, "selected": False},
+            {"ordinal": 2, "selected": False},
+            {"ordinal": 3, "selected": False},
+        ]
+        facts = _surface_facts("for_you", home_tabs=home_tabs)
+        self.assertEqual(
+            decision("for_you", facts),
+            _surface_decision_result("for_you"),
+        )
+        self.assertEqual(
+            transition("following", facts),
+            {
+                "kind": "activate",
+                "surfaceProof": SURFACE_PROOFS["following"],
+                "activateOrdinal": 1,
+            },
+        )
+
+        evaluator = evaluator_type()
+        expressions = [
+            evaluator._command("probe", "for_you", None)[1]["expression"],
+            evaluator._command("snapshot", "for_you", None)[1]["expression"],
+            evaluator._activation_params(1)["expression"],
+        ]
+        for expression in expressions:
+            with self.subTest(expression=expression[:40]):
+                self.assertIn(
+                    ".filter(tablist => tablist.querySelectorAll('[role=\"tab\"]').length >= 2)",
+                    expression,
+                )
+
+        with self.assertRaises(Exception):
+            decision(
+                "for_you",
+                _surface_facts("for_you", home_tablist_count=2, home_tabs=home_tabs),
+            )
+
     def test_mechanical_cdp_evaluator_uses_fixed_bounded_actions(self):
         module = _require_cli(self)
         evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)

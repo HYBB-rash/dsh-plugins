@@ -148,7 +148,8 @@ _PROBE_EXPRESSION = (
     "const roots = pathname === '/home' ? homeRoots : explore_roots; "
     "const root = roots.length === 1 ? roots[0] : null; "
     "const loading = root ? root.querySelectorAll('[aria-busy=\"true\"]').length : 0; "
-    "const tablists = pathname === '/home' && root ? [...root.querySelectorAll('[role=\"tablist\"]')] : []; "
+    "const tablists = pathname === '/home' && root ? [...root.querySelectorAll('[role=\"tablist\"]')] "
+    ".filter(tablist => tablist.querySelectorAll('[role=\"tab\"]').length >= 2) : []; "
     "const tabs = tablists.length === 1 ? [...tablists[0].querySelectorAll('[role=\"tab\"]')] "
     ".map((tab, ordinal) => ({ordinal, selected: tab.getAttribute('aria-selected') === 'true'})) : []; "
     "const outside = document.body ? [...document.body.querySelectorAll('[role=\"tab\"][aria-selected=\"true\"]')] "
@@ -161,11 +162,12 @@ _SNAPSHOT_EXPRESSION = (
     "(() => { const roots = [...document.querySelectorAll('[data-testid=\"primaryColumn\"]')]; "
     "if (roots.length !== 1) return {cells:null, emptyFacts:{surfaceProof:null,surfaceRootCount:roots.length,emptyMarkerCount:0,outsideRootEmptyMarkerCount:0,loadingCount:0,loginCount:0,authCount:0,errorCount:0,retryCount:0}}; "
     "const root = roots[0]; const pathname = location.pathname; const exploreKey = 'explore' + 'Root'; "
-    "const homeTablists = pathname === '/home' ? [...root.querySelectorAll('[role=\"tablist\"]')] : []; "
+    "const homeTablists = pathname === '/home' ? [...root.querySelectorAll('[role=\"tablist\"]')] "
+    ".filter(tablist => tablist.querySelectorAll('[role=\"tab\"]').length >= 2) : []; "
     "const homeTabs = homeTablists.length === 1 ? [...homeTablists[0].querySelectorAll('[role=\"tab\"]')] : []; "
     "const selected = homeTabs.map((tab, ordinal) => ({ordinal, selected: tab.getAttribute('aria-selected') === 'true'})).filter(tab => tab.selected); "
     "const surfaceProof = pathname === '/explore' ? {pathname:'/explore',selectedHomeTabOrdinal:null,[exploreKey]:true} : "
-    "pathname === '/home' && homeTablists.length === 1 && homeTabs.length === 2 && selected.length === 1 ? "
+    "pathname === '/home' && homeTablists.length === 1 && homeTabs.length >= 2 && selected.length === 1 ? "
     "{pathname:'/home',selectedHomeTabOrdinal:selected[0].ordinal,[exploreKey]:false} : null; "
     "const nodes = [...root.querySelectorAll('[data-testid=\"cellInnerDiv\"]')].slice(0, 8); "
     "const cells = nodes.map(cell => { const candidates = "
@@ -453,7 +455,7 @@ def _surface_decision(surface, raw_facts):
         or raw_facts["rootCount"] != 1
         or raw_facts["homeTablistCount"] != 1
         or raw_facts[EXPLORE_ROOT_COUNT] != 0
-        or len(tabs) != 2
+        or len(tabs) < 2
     ):
         raise _CdpFailure()
     ordinals = []
@@ -462,14 +464,14 @@ def _surface_decision(surface, raw_facts):
         if not isinstance(tab, dict) or set(tab) != {"ordinal", "selected"}:
             raise _CdpFailure()
         ordinal = tab["ordinal"]
-        if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal not in {0, 1}:
+        if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal < 0:
             raise _CdpFailure()
         if not isinstance(tab["selected"], bool):
             raise _CdpFailure()
         ordinals.append(ordinal)
         if tab["selected"]:
             selected.append(ordinal)
-    if sorted(ordinals) != [0, 1] or len(selected) != 1:
+    if sorted(ordinals) != list(range(len(tabs))) or len(selected) != 1:
         raise _CdpFailure()
     decision = {"surfaceProof": dict(SURFACE_PROOFS[surface])}
     target = 0 if surface == "for_you" else 1
@@ -549,15 +551,13 @@ def _surface_transition(surface, raw_facts, activated=False):
         if tabs:
             raise _CdpFailure()
         return {"kind": "wait"}
-    if len(tabs) > 2:
-        raise _CdpFailure()
     ordinals = []
     selected = []
     for tab in tabs:
         if not isinstance(tab, dict) or set(tab) != {"ordinal", "selected"}:
             raise _CdpFailure()
         ordinal = tab["ordinal"]
-        if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal not in {0, 1}:
+        if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal < 0:
             raise _CdpFailure()
         if not isinstance(tab["selected"], bool):
             raise _CdpFailure()
@@ -566,7 +566,7 @@ def _surface_transition(surface, raw_facts, activated=False):
             selected.append(ordinal)
     if len(tabs) < 2:
         return {"kind": "wait"}
-    if sorted(ordinals) != [0, 1] or len(selected) > 1:
+    if sorted(ordinals) != list(range(len(tabs))) or len(selected) > 1:
         raise _CdpFailure()
     if len(selected) == 0 or loading_count != 0:
         return {"kind": "wait"}
@@ -708,10 +708,11 @@ class _MechanicalCdpEvaluator:
             "(() => { const activateOrdinal = " + str(ordinal) + "; "
             "const roots = [...document.querySelectorAll('[data-testid=\"primaryColumn\"]')]; "
             "const rootCount = roots.length; if (rootCount !== 1) return {ok:false}; "
-            "const root = roots[0]; const tablists = [...root.querySelectorAll('[role=\"tablist\"]')]; "
+            "const root = roots[0]; const tablists = [...root.querySelectorAll('[role=\"tablist\"]')] "
+            ".filter(tablist => tablist.querySelectorAll('[role=\"tab\"]').length >= 2); "
             "if (tablists.length !== 1) return {ok:false}; "
             "const tabs = [...tablists[0].querySelectorAll('[role=\"tab\"]')]; "
-            "if (tabs.length !== 2) return {ok:false}; "
+            "if (tabs.length < 2) return {ok:false}; "
             "const ordinals = tabs.map((tab, index) => index); "
             "if (ordinals[0] !== 0 || ordinals[1] !== 1) return {ok:false}; "
             "const tab = tabs[activateOrdinal]; if (!tab) return {ok:false}; "
