@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -8,7 +8,6 @@ import {
   type PersonalFeedV2PrepareResult,
 } from '../src/index.ts'
 
-const CLEANUP_SEAL_AND_DRAIN = Symbol.for('@herman/personal-feed/v2/request-coordinator-cleanup-seal-and-drain')
 const temporaryDirectories: string[] = []
 
 afterEach(() => {
@@ -99,14 +98,10 @@ function fixture(mode: FixtureMode, r2Close: ClosePair, r3Close = recoverableClo
   const directory = mkdtempSync(join(tmpdir(), 'personal-feed-v2-cleanup-'))
   temporaryDirectories.push(directory)
   const ledgerPath = join(directory, 'requests.jsonl')
-  let clockCalls = 0
   const coordinator = createPersonalFeedV2RequestCoordinator({
     ledgerPath,
     clock: {
-      now: () => {
-        clockCalls += 1
-        return new Date('2026-08-31T15:59:59.000Z')
-      },
+      now: () => new Date('2026-08-31T15:59:59.000Z'),
     },
     r4: {
       snapshot: async () => Object.freeze({
@@ -148,20 +143,7 @@ function fixture(mode: FixtureMode, r2Close: ClosePair, r3Close = recoverableClo
       },
     },
   })
-  return { coordinator, ledgerPath, r2Close, r3Close, getClockCalls: () => clockCalls }
-}
-
-function cleanupDrain(coordinator: object): (coordinator: object) => Promise<unknown> {
-  const prepare = (coordinator as { readonly prepare?: unknown }).prepare
-  expect(typeof prepare).toBe('function')
-  const descriptor = Object.getOwnPropertyDescriptor(prepare as object, CLEANUP_SEAL_AND_DRAIN)
-  expect(descriptor, 'request cleanup seal-and-drain capability is missing').toBeDefined()
-  expect(descriptor?.enumerable).toBe(false)
-  expect(descriptor?.writable).toBe(false)
-  expect(descriptor?.configurable).toBe(false)
-  expect(descriptor === undefined ? undefined : Object.hasOwn(descriptor, 'value')).toBe(true)
-  expect(typeof descriptor?.value).toBe('function')
-  return descriptor?.value as (coordinator: object) => Promise<unknown>
+  return { coordinator, ledgerPath, r2Close, r3Close }
 }
 
 function validInput(messageId = 11) {
@@ -188,32 +170,27 @@ async function rejected(promise: Promise<unknown>): Promise<Error> {
   throw new Error('expected promise to reject')
 }
 
-describe('personal Feed v2 request cleanup seal-and-drain capability', () => {
-  it('keeps the coordinator and package carrier contracts closed while exposing only the internal symbol capability', async () => {
+describe('personal Feed v2 request coordinator drain', () => {
+  it('exposes an exact frozen coordinator shape with an explicit drain capability', async () => {
     const sample = fixture('r3-incomplete', recoverableClosePair())
     const coordinator = sample.coordinator
-    expect(Reflect.ownKeys(coordinator)).toEqual(['prepare', 'read'])
-    expect(Object.keys(coordinator)).toEqual(['prepare', 'read'])
+    expect(Reflect.ownKeys(coordinator)).toEqual(['prepare', 'read', 'drain'])
+    expect(Object.keys(coordinator)).toEqual(['prepare', 'read', 'drain'])
     expect(Object.isFrozen(coordinator)).toBe(true)
-
-    const prepare = coordinator.prepare as unknown as object
-    const descriptor = Object.getOwnPropertyDescriptor(prepare, CLEANUP_SEAL_AND_DRAIN)
-    expect(descriptor, 'missing internal cleanup capability').toBeDefined()
-    expect(descriptor?.enumerable).toBe(false)
-    expect(descriptor?.writable).toBe(false)
-    expect(descriptor?.configurable).toBe(false)
-    expect(descriptor === undefined ? undefined : Object.hasOwn(descriptor, 'value')).toBe(true)
-    expect(typeof descriptor?.value).toBe('function')
-    const standardFunctionKeys = new Set(Reflect.ownKeys(async function standardPrepare() {}))
-    const prepareKeys = Reflect.ownKeys(prepare)
-    expect(prepareKeys.filter(key => key === CLEANUP_SEAL_AND_DRAIN)).toHaveLength(1)
-    expect(prepareKeys.filter(key => typeof key === 'string' && !standardFunctionKeys.has(key))).toEqual([])
-    expect(prepareKeys.filter(key => typeof key === 'symbol' && key !== CLEANUP_SEAL_AND_DRAIN)).toEqual([])
-    expect(Object.keys(prepare)).toEqual([])
+    expect(typeof coordinator.prepare).toBe('function')
+    expect(typeof coordinator.read).toBe('function')
+    expect(typeof coordinator.drain).toBe('function')
+    const descriptors = Object.getOwnPropertyDescriptors(coordinator)
+    for (const key of ['prepare', 'read', 'drain'] as const) {
+      expect(descriptors[key]?.enumerable, key).toBe(true)
+      expect(descriptors[key]?.writable, key).toBe(false)
+      expect(descriptors[key]?.configurable, key).toBe(false)
+      expect(descriptors[key]?.get, key).toBeUndefined()
+      expect(descriptors[key]?.set, key).toBeUndefined()
+    }
 
     const namedExports = Object.keys(publicApi)
     expect(namedExports.some(name => /cleanup|seal|drain/iu.test(name))).toBe(false)
-    expect(Object.values(publicApi)).not.toContain(CLEANUP_SEAL_AND_DRAIN)
     const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
       readonly exports?: unknown
     }
@@ -222,53 +199,14 @@ describe('personal Feed v2 request cleanup seal-and-drain capability', () => {
       './package.json': './package.json',
     })
 
-    await cleanupDrain(coordinator)(coordinator)
-  })
-
-  it('rejects forged, proxied, getter-backed, and cross-coordinator keys without touching their bodies or cleanup authorities', async () => {
-    const first = fixture('r3-incomplete', recoverableClosePair())
-    const second = fixture('r3-incomplete', recoverableClosePair())
-    await first.coordinator.prepare(validInput())
-    expect(first.r2Close.counts()).toEqual({ proxy: 1, raw: 1 })
-    const firstDrain = cleanupDrain(first.coordinator)
-    const secondDrain = cleanupDrain(second.coordinator)
-    expect(firstDrain).toBe(secondDrain)
-    const getterTouches: string[] = []
-    const getterBacked = new Proxy({}, {
-      get: () => {
-        getterTouches.push('get')
-        throw new Error('GETTER_CANARY')
-      },
-      getPrototypeOf: () => {
-        getterTouches.push('getPrototypeOf')
-        throw new Error('GETTER_CANARY')
-      },
-      ownKeys: () => {
-        getterTouches.push('ownKeys')
-        throw new Error('GETTER_CANARY')
-      },
-    })
-    const forged = Object.freeze({ prepare: first.coordinator.prepare, read: first.coordinator.read })
-    const recombined = Object.freeze({ prepare: first.coordinator.prepare, read: second.coordinator.read })
-
-    const errors = await Promise.all([
-      rejected(Reflect.apply(firstDrain, undefined, [forged])),
-      rejected(Reflect.apply(firstDrain, undefined, [getterBacked])),
-      rejected(Reflect.apply(firstDrain, undefined, [Object.create(null)])),
-      rejected(Reflect.apply(firstDrain, undefined, [recombined])),
-    ])
-    expect(new Set(errors.map(error => error.message)).size).toBe(1)
-    expect(errors[0]?.message).not.toContain('GETTER_CANARY')
-    expect(getterTouches).toEqual([])
-    expect(first.r2Close.counts()).toEqual({ proxy: 1, raw: 1 })
-    expect(second.r2Close.counts()).toEqual({ proxy: 0, raw: 0 })
+    await coordinator.drain()
   })
 
   it.each([
     ['exact R2 close', 'r3-incomplete' as const],
     ['exact R3 cursor close', 'r3-admitted' as const],
     ['R3 cleanup-only salvage close', 'r3-cleanup-only' as const],
-  ])('%s retains a failed coordinator close for the internal drain and delivers exactly once after the lifetime retry', async (_label, mode) => {
+  ])('%s retains a failed coordinator close for explicit drain and delivers exactly once after the lifetime retry', async (_label, mode) => {
     const r2Close = recoverableClosePair()
     const r3Close = recoverableClosePair()
     const sample = fixture(mode, r2Close, r3Close)
@@ -279,9 +217,8 @@ describe('personal Feed v2 request cleanup seal-and-drain capability', () => {
 
     await r2Close.rawRetry(true)
     if (mode !== 'r3-incomplete') await r3Close.rawRetry(true)
-    const drain = cleanupDrain(sample.coordinator)
-    const first = Reflect.apply(drain, undefined, [sample.coordinator])
-    expect(Reflect.apply(drain, undefined, [sample.coordinator])).toBe(first)
+    const first = sample.coordinator.drain()
+    expect(sample.coordinator.drain()).toBe(first)
     await first
 
     const counts = sample.r2Close.counts()
@@ -305,9 +242,8 @@ describe('personal Feed v2 request cleanup seal-and-drain capability', () => {
     const prepared = await sample.coordinator.prepare(validInput()) as Extract<PersonalFeedV2PrepareResult, { readonly kind: 'prepared' }>
     expect(prepared.outcome.kind).toBe('incomplete')
 
-    const drain = cleanupDrain(sample.coordinator)
-    const first = Reflect.apply(drain, undefined, [sample.coordinator])
-    const second = Reflect.apply(drain, undefined, [sample.coordinator])
+    const first = sample.coordinator.drain()
+    const second = sample.coordinator.drain()
     expect(second).toBe(first)
     let settled = false
     void first.then(() => { settled = true }, () => { settled = true })
@@ -326,9 +262,8 @@ describe('personal Feed v2 request cleanup seal-and-drain capability', () => {
     const prepared = await sample.coordinator.prepare(validInput()) as Extract<PersonalFeedV2PrepareResult, { readonly kind: 'prepared' }>
     await r2Close.rawRetry(false).catch(() => undefined)
 
-    const drain = cleanupDrain(sample.coordinator)
-    const first = Reflect.apply(drain, undefined, [sample.coordinator])
-    const second = Reflect.apply(drain, undefined, [sample.coordinator])
+    const first = sample.coordinator.drain()
+    const second = sample.coordinator.drain()
     expect(second).toBe(first)
     const error = await rejected(first)
     expect(error.message).not.toContain('RAW_CLOSE_CANARY')
@@ -340,33 +275,6 @@ describe('personal Feed v2 request cleanup seal-and-drain capability', () => {
     expect(r2Close.counts()).toEqual({ proxy: 2, raw: 2 })
   })
 
-  it('seals before direct prepare can read hostile input, write the ledger, or touch clock and ports', async () => {
-    const sample = fixture('r3-incomplete', recoverableClosePair())
-    const drain = cleanupDrain(sample.coordinator)
-    await Reflect.apply(drain, undefined, [sample.coordinator])
-    const touches: string[] = []
-    const hostile = new Proxy({}, {
-      get: () => {
-        touches.push('get')
-        throw new Error('HOSTILE_INPUT_CANARY')
-      },
-      getPrototypeOf: () => {
-        touches.push('getPrototypeOf')
-        throw new Error('HOSTILE_INPUT_CANARY')
-      },
-      ownKeys: () => {
-        touches.push('ownKeys')
-        throw new Error('HOSTILE_INPUT_CANARY')
-      },
-    })
-    const error = await rejected(sample.coordinator.prepare(hostile as never))
-    expect(error.message).not.toContain('HOSTILE_INPUT_CANARY')
-    expect(touches).toEqual([])
-    expect(sample.getClockCalls()).toBe(0)
-    expect(existsSync(sample.ledgerPath)).toBe(false)
-    expect(sample.r2Close.counts()).toEqual({ proxy: 0, raw: 0 })
-  })
-
   it('keeps settle receipt behavior stable while seal/drain races valid and invalid receipts with one close attempt per authority', async () => {
     const r2Close = recoverableClosePair()
     const r3Close = recoverableClosePair()
@@ -374,8 +282,7 @@ describe('personal Feed v2 request cleanup seal-and-drain capability', () => {
     const prepared = await sample.coordinator.prepare(validInput()) as Extract<PersonalFeedV2PrepareResult, { readonly kind: 'prepared' }>
     await r2Close.rawRetry(true)
     await r3Close.rawRetry(true)
-    const drain = cleanupDrain(sample.coordinator)
-    const drainPromise = Reflect.apply(drain, undefined, [sample.coordinator])
+    const drainPromise = sample.coordinator.drain()
     expect(() => prepared.settle(validReceipt('wrong text'))).toThrow()
     prepared.settle(validReceipt(prepared.outcome.finalText))
     prepared.settle(validReceipt(prepared.outcome.finalText))

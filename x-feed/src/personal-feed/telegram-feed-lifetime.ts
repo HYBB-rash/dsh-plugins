@@ -15,7 +15,6 @@ const FAILED_RESULT: TelegramInboundResult = Object.freeze({
   kind: 'failed',
   visibleError: '这次没有完成：判断或执行未完成。',
 })
-const CLEANUP_SEAL_AND_DRAIN = Symbol.for('@herman/personal-feed/v2/request-coordinator-cleanup-seal-and-drain')
 const PROMISE_THEN = Promise.prototype.then
 
 type RawClose = (reason: string) => unknown
@@ -230,14 +229,8 @@ function wrappedR3(
   }
 }
 
-function coordinatorDrain(coordinator: object): Promise<void> {
-  const prepare = (coordinator as { readonly prepare?: unknown }).prepare
-  if (typeof prepare !== 'function') return Promise.reject(new Error('personal Feed Telegram coordinator cleanup capability missing'))
-  const descriptor = Object.getOwnPropertyDescriptor(prepare, CLEANUP_SEAL_AND_DRAIN)
-  if (descriptor === undefined || descriptor.enumerable || descriptor.configurable || descriptor.writable || typeof descriptor.value !== 'function') {
-    return Promise.reject(new Error('personal Feed Telegram coordinator cleanup capability missing'))
-  }
-  return Reflect.apply(descriptor.value as (this: unknown, value: object) => Promise<void>, prepare, [coordinator])
+function coordinatorDrain(coordinator: { readonly drain: () => Promise<void> }): Promise<void> {
+  return coordinator.drain()
 }
 
 export function createPersonalFeedTelegramInstallLifetime(

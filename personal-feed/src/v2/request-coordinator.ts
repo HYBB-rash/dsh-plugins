@@ -179,6 +179,7 @@ export type PersonalFeedV2RequestSnapshot =
 export interface PersonalFeedV2RequestCoordinator {
   readonly prepare: (input: PersonalFeedV2PrepareInput) => Promise<PersonalFeedV2PrepareResult>
   readonly read: (requestId: string) => PersonalFeedV2RequestSnapshot | undefined
+  readonly drain: () => Promise<void>
 }
 
 type RequestOpenedRecord = {
@@ -227,9 +228,7 @@ const SOURCE_WINDOW_TEXT = '这次没有完成：X 来源或观察窗口未完�
 const JUDGEMENT_EXECUTION_TEXT = '这次没有完成：判断或执行未完成。'
 const BUSINESS_EMPTY_TEXT = '这次没有值得看的内容。'
 const CLEANUP_WAIT_MS = 250
-const CLEANUP_SEAL_AND_DRAIN = Symbol.for('@herman/personal-feed/v2/request-coordinator-cleanup-seal-and-drain')
 const CLEANUP_DRAIN_ERROR_TEXT = 'personal Feed v2 request cleanup seal-and-drain failed'
-const cleanupRegistries = new WeakMap<object, CleanupAuthorityRegistry>()
 
 type CleanupAuthorityState = 'ready' | 'closing' | 'retained'
 
@@ -253,14 +252,6 @@ interface ParsedR2 {
   readonly window: unknown
   readonly receiver: object
   readonly close: (reason: string) => unknown
-}
-
-const cleanupSealAndDrain = (coordinator: unknown): Promise<unknown> => {
-  if ((typeof coordinator !== 'object' && typeof coordinator !== 'function') || coordinator === null) {
-    return Promise.reject(cleanupDrainError())
-  }
-  const registry = cleanupRegistries.get(coordinator as object)
-  return registry === undefined ? Promise.reject(cleanupDrainError()) : registry.sealAndDrain()
 }
 
 function cleanupDrainError(): PersonalFeedScopeStoreError {
@@ -455,15 +446,8 @@ export function createPersonalFeedV2RequestCoordinator(
     }
   }
 
-  const coordinator = Object.freeze({ prepare, read })
-  cleanupRegistries.set(coordinator, cleanupRegistry)
-  Object.defineProperty(prepare, CLEANUP_SEAL_AND_DRAIN, {
-    value: cleanupSealAndDrain,
-    enumerable: false,
-    writable: false,
-    configurable: false,
-  })
-  return coordinator
+  const drain = cleanupRegistry.sealAndDrain
+  return Object.freeze({ prepare, read, drain })
 }
 
 function validatePrepareInput(input: PersonalFeedV2PrepareInput): void {

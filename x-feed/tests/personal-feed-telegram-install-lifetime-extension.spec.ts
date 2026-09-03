@@ -20,7 +20,11 @@ const state = vi.hoisted(() => ({
   startupOwner: undefined as unknown,
   startupOwnerObserveCalls: 0,
   startupOwnerShutdownCalls: 0,
-  coordinator: undefined as { readonly prepare: (input: unknown) => Promise<unknown>; readonly read: () => unknown } | undefined,
+  coordinator: undefined as {
+    readonly prepare: (input: unknown) => Promise<unknown>
+    readonly read: () => unknown
+    readonly drain: () => Promise<void>
+  } | undefined,
   coordinatorOptions: undefined as unknown,
   personalContextR4: undefined as unknown,
   personalContextBootstrapCalls: 0,
@@ -34,7 +38,6 @@ const state = vi.hoisted(() => ({
 const LIFETIME_MODULE_URL = new URL('../src/personal-feed/telegram-feed-lifetime.ts', import.meta.url).href
 const EXTENSION_MODULE_URL = new URL('../src/telegram-extension.ts', import.meta.url).href
 const EXTENSION_SOURCE_URL = new URL('../src/telegram-extension.ts', import.meta.url)
-const CLEANUP_SEAL_AND_DRAIN = Symbol.for('@herman/personal-feed/v2/request-coordinator-cleanup-seal-and-drain')
 const temporaryDirectories: string[] = []
 
 function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
@@ -104,15 +107,12 @@ vi.mock('@herman/personal-feed', () => ({
       await r2.observe({ request: result.request, signal: (input as { readonly signal: AbortSignal }).signal })
       return result
     })
-    Object.defineProperty(prepare, CLEANUP_SEAL_AND_DRAIN, {
-      value: async (coordinator: object) => {
-        expect(coordinator).toBe(state.coordinator)
-        state.coordinatorDrains += 1
-        state.events.push('coordinator.drain')
-        errorIfConfigured('coordinator.drain')
-      }, enumerable: false, writable: false, configurable: false,
-    })
-    state.coordinator = Object.freeze({ prepare, read: () => undefined })
+    const drain = async (): Promise<void> => {
+      state.coordinatorDrains += 1
+      state.events.push('coordinator.drain')
+      errorIfConfigured('coordinator.drain')
+    }
+    state.coordinator = Object.freeze({ prepare, read: () => undefined, drain })
     state.events.push('coordinator.create')
     return state.coordinator
   }),

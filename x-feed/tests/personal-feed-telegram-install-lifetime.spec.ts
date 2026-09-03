@@ -16,7 +16,6 @@ import type {
 } from '@deepseek-ai/dsh-telegram-gateway'
 
 const LIFETIME_MODULE_URL = new URL('../src/personal-feed/telegram-feed-lifetime.ts', import.meta.url).href
-const CLEANUP_SEAL_AND_DRAIN = Symbol.for('@herman/personal-feed/v2/request-coordinator-cleanup-seal-and-drain')
 const temporaryDirectories: string[] = []
 
 type Lifetime = Readonly<{
@@ -226,19 +225,6 @@ function lifetimeOptions(options: CreatePersonalFeedV2RequestCoordinatorOptions,
   })
 }
 
-function internalDrain(coordinator: object): (coordinator: object) => Promise<void> {
-  const prepare = (coordinator as { readonly prepare?: unknown }).prepare
-  const descriptor = typeof prepare === 'function'
-    ? Object.getOwnPropertyDescriptor(prepare, CLEANUP_SEAL_AND_DRAIN)
-    : undefined
-  expect(descriptor, 'coordinator internal cleanup seal-and-drain is missing').toBeDefined()
-  expect(descriptor?.enumerable).toBe(false)
-  expect(descriptor?.writable).toBe(false)
-  expect(descriptor?.configurable).toBe(false)
-  expect(typeof descriptor?.value).toBe('function')
-  return descriptor?.value as (coordinator: object) => Promise<void>
-}
-
 function errorMessages(error: unknown): string[] {
   if (error instanceof AggregateError) return error.errors.flatMap(errorMessages)
   return [error instanceof Error ? error.message : String(error)]
@@ -249,16 +235,17 @@ afterEach(() => {
 })
 
 describe('Personal Feed Telegram install lifetime', () => {
-  it('returns the exact frozen handler/shutdown carrier while the coordinator remains publicly closed', async () => {
+  it('returns the exact frozen handler/shutdown carrier and explicit coordinator drain', async () => {
     const sample = fixture()
     const lifetime = await createLifetime(lifetimeOptions(sample.options))
     exactFrozenShape(lifetime, ['handler', 'shutdown'])
     expect(typeof lifetime.handler).toBe('function')
     expect(typeof lifetime.shutdown).toBe('function')
     const coordinator = createPersonalFeedV2RequestCoordinator(sample.options)
-    expect(Reflect.ownKeys(coordinator)).toEqual(['prepare', 'read'])
+    expect(Reflect.ownKeys(coordinator)).toEqual(['prepare', 'read', 'drain'])
     expect(Object.isFrozen(coordinator)).toBe(true)
-    expect(typeof internalDrain(coordinator)).toBe('function')
+    exactFrozenShape(coordinator, ['prepare', 'read', 'drain'])
+    expect(typeof coordinator.drain).toBe('function')
     await lifetime.shutdown()
   })
 
