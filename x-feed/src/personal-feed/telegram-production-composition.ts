@@ -1,16 +1,18 @@
 import { types as nodeTypes } from 'node:util'
 import { dirname, join, normalize, resolve } from 'node:path'
 import {
+  createPersonalFeedV2RequestCoordinator,
   createPersonalFeedV2CandidateLifecycle,
   type CreatePersonalFeedV2CandidateLifecycleOptions,
   type CreatePersonalFeedV2RequestCoordinatorOptions,
   type PersonalFeedV2R2Input,
   type PersonalFeedV2R2Port,
 } from '@herman/personal-feed'
-import {
-  createPersonalFeedTelegramInstallLifetime,
-  type PersonalFeedTelegramInstallLifetime,
-} from './telegram-feed-lifetime.ts'
+import type {
+  TelegramInboundEnvelope,
+  TelegramInboundResult,
+} from '@deepseek-ai/dsh-telegram-gateway'
+import { createPersonalFeedTelegramRequestHandler } from './telegram-adapter.ts'
 
 const EXPECTED_OPTIONS_KEYS = Object.freeze([
   'runtimeConfig',
@@ -24,6 +26,10 @@ const EXPECTED_CLOCK_KEYS = Object.freeze(['now'] as const)
 const EXPECTED_OWNER_KEYS = Object.freeze(['observe', 'shutdown'] as const)
 const PROMISE_THEN = Promise.prototype.then
 const UNKNOWN_RESULT = Object.freeze({ kind: 'unknown' })
+const FAILED_RESULT: TelegramInboundResult = Object.freeze({
+  kind: 'failed',
+  visibleError: '这次没有完成：判断或执行未完成。',
+})
 const CLEANUP_FAILURE_MESSAGE = 'personal Feed Telegram cleanup failed'
 const CONSERVATIVE_R5_RESULT = Object.freeze({
   kind: 'incomplete',
@@ -45,8 +51,8 @@ type CompositionOptions = Readonly<{
 }>
 
 type PersonalFeedTelegramProductionComposition = Readonly<{
-  readonly handler: PersonalFeedTelegramInstallLifetime['handler']
-  readonly shutdown: PersonalFeedTelegramInstallLifetime['shutdown']
+  readonly handler: (envelope: TelegramInboundEnvelope) => Promise<TelegramInboundResult>
+  readonly shutdown: () => Promise<void>
 }>
 
 type StartupOwner = Readonly<{
@@ -330,27 +336,75 @@ export function createPersonalFeedTelegramProductionComposition(
     r3: candidateLifecycle,
     r5: CONSERVATIVE_R5,
   }
-  const lifetime = createPersonalFeedTelegramInstallLifetime({
-    coordinatorOptions,
-    r2Shutdown: lazyOwner.shutdown,
-  })
+  const coordinator = createPersonalFeedV2RequestCoordinator(coordinatorOptions)
+  const requestHandler = createPersonalFeedTelegramRequestHandler({ coordinator })
+  const installController = new AbortController()
+  const installReason = new Error('personal Feed Telegram install shutdown')
+  let accepting = true
+  const active = new Set<Promise<unknown>>()
+
+  const handler = (envelope: TelegramInboundEnvelope): Promise<TelegramInboundResult> => {
+    if (!accepting) return Promise.resolve(FAILED_RESULT)
+    let operation: Promise<TelegramInboundResult>
+    try {
+      const signal = AbortSignal.any([envelope.signal, installController.signal])
+      const forwarded = Object.freeze({
+        chat: envelope.chat,
+        message: envelope.message,
+        currentText: envelope.currentText,
+        ...(envelope.reference === undefined ? {} : { reference: envelope.reference }),
+        signal,
+      })
+      if (!accepting) return Promise.resolve(FAILED_RESULT)
+      operation = Promise.resolve(requestHandler(forwarded)).then(
+        result => result,
+        () => FAILED_RESULT,
+      )
+    } catch {
+      operation = Promise.resolve(FAILED_RESULT)
+    }
+    active.add(operation)
+    void operation.then(
+      () => { active.delete(operation) },
+      () => { active.delete(operation) },
+    )
+    return operation
+  }
+
   const shutdown = (): Promise<void> => {
     if (publicShutdownPromise !== undefined) return publicShutdownPromise
+    accepting = false
+    installController.abort(installReason)
     publicShutdownPromise = new Promise<void>((resolveValue, rejectValue) => {
       resolvePublicShutdown = resolveValue
       rejectPublicShutdown = rejectValue
     })
     void publicShutdownPromise.catch(() => undefined)
-    try {
-      const lifetimeShutdown = lifetime.shutdown()
-      void lifetimeShutdown.then(
-        () => { resolvePublicShutdown?.() },
-        error => { rejectPublicShutdown?.(error) },
-      )
-    } catch {
-      rejectPublicShutdown?.(new Error(CLEANUP_FAILURE_MESSAGE))
+    const errors: unknown[] = []
+    const observeCleanup = async (operation: () => unknown): Promise<void> => {
+      try {
+        await operation()
+      } catch {
+        errors.push(new Error(CLEANUP_FAILURE_MESSAGE))
+      }
     }
+    const ownerShutdown = observeCleanup(lazyOwner.shutdown)
+    const drain = async (): Promise<void> => {
+      while (active.size > 0) {
+        await Promise.all([...active].map(async operation => {
+          try { await operation } catch { errors.push(new Error(CLEANUP_FAILURE_MESSAGE)) }
+        }))
+      }
+      await observeCleanup(coordinator.drain)
+    }
+    void Promise.all([ownerShutdown, drain()] as const).then(
+      () => {
+        if (errors.length > 0) rejectPublicShutdown?.(new AggregateError(errors))
+        else resolvePublicShutdown?.()
+      },
+      () => { rejectPublicShutdown?.(new Error(CLEANUP_FAILURE_MESSAGE)) },
+    )
     return publicShutdownPromise
   }
-  return Object.freeze({ handler: lifetime.handler, shutdown })
+  return Object.freeze({ handler, shutdown })
 }

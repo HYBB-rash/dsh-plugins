@@ -7,8 +7,6 @@ const state = vi.hoisted(() => ({
   events: [] as string[],
   sourceHandler: undefined as unknown,
   sourceWaterfall: undefined as ((envelope: unknown, next: () => unknown) => Promise<unknown>) | undefined,
-  lifetimeHandler: undefined as unknown,
-  lifetimeFactories: 0,
   compositionHandler: undefined as unknown,
   compositionShutdown: undefined as unknown,
   compositionFactories: 0,
@@ -35,7 +33,6 @@ const state = vi.hoisted(() => ({
   throwOn: new Set<string>(),
 }))
 
-const LIFETIME_MODULE_URL = new URL('../src/personal-feed/telegram-feed-lifetime.ts', import.meta.url).href
 const EXTENSION_MODULE_URL = new URL('../src/telegram-extension.ts', import.meta.url).href
 const EXTENSION_SOURCE_URL = new URL('../src/telegram-extension.ts', import.meta.url)
 const temporaryDirectories: string[] = []
@@ -50,7 +47,6 @@ function resetState(): void {
   state.events.length = 0
   state.sourceHandler = undefined
   state.sourceWaterfall = undefined
-  state.lifetimeHandler = undefined
   state.coordinator = undefined
   state.coordinatorOptions = undefined
   state.personalContextR4 = undefined
@@ -68,7 +64,6 @@ function resetState(): void {
   state.startupOwnerShutdownCalls = 0
   state.prepareCalls.length = 0
   state.coordinatorDrains = 0
-  state.lifetimeFactories = 0
   state.sourceCapture = deferred()
   state.sourceDone = deferred()
   state.throwOn.clear()
@@ -131,29 +126,6 @@ vi.mock('@herman/personal-feed', () => ({
   })),
   createSessionUserHistoryAdapter: vi.fn(() => Object.freeze({})),
 }))
-
-vi.mock('../src/personal-feed/telegram-feed-lifetime.ts', async importOriginal => {
-  const actual = await importOriginal() as {
-    readonly createPersonalFeedTelegramInstallLifetime: (options: unknown) => {
-      readonly handler: (envelope: unknown) => Promise<unknown>
-      readonly shutdown: () => Promise<void>
-    }
-  }
-  return {
-    ...actual,
-    createPersonalFeedTelegramInstallLifetime: vi.fn((options: unknown) => {
-      state.lifetimeFactories += 1
-      const lifetime = actual.createPersonalFeedTelegramInstallLifetime(options)
-      const handler = vi.fn((envelope: unknown) => lifetime.handler(envelope))
-      state.lifetimeHandler = handler
-      const shutdown = vi.fn(async () => {
-        state.events.push('lifetime.shutdown.call')
-        return await lifetime.shutdown()
-      })
-      return Object.freeze({ handler, shutdown })
-    }),
-  }
-})
 
 vi.mock('../src/personal-feed/telegram-production-composition.ts', async importOriginal => {
   const actual = await importOriginal() as {
@@ -299,17 +271,7 @@ async function loadExtension(): Promise<Readonly<Record<string, unknown>>> {
     return await import(/* @vite-ignore */ EXTENSION_MODULE_URL) as Readonly<Record<string, unknown>>
   } catch (error: unknown) {
     const detail = error instanceof Error ? error.message : String(error)
-    throw new Error(`CAPABILITY_ASSERTION: extension/lifetime import unavailable: ${detail}`, { cause: error })
-  }
-}
-
-async function requireLifetimeCapability(): Promise<void> {
-  try {
-    const module = await import(/* @vite-ignore */ LIFETIME_MODULE_URL) as Readonly<Record<string, unknown>>
-    if (typeof module.createPersonalFeedTelegramInstallLifetime !== 'function') throw new Error('factory export is missing')
-  } catch (error: unknown) {
-    const detail = error instanceof Error ? error.message : String(error)
-    throw new Error(`CAPABILITY_ASSERTION: extension lifetime capability unavailable: ${detail}`, { cause: error })
+    throw new Error(`CAPABILITY_ASSERTION: extension import unavailable: ${detail}`, { cause: error })
   }
 }
 
@@ -366,21 +328,19 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
 
-describe('Personal Feed Telegram install lifetime extension integration', () => {
-  it('shares one real lifetime handler across both entries and orders drain, source continuation, teardown, and errors', async () => {
+describe('Personal Feed Telegram extension integration', () => {
+  it('shares one real composition handler across both entries and orders drain, source continuation, teardown, and errors', async () => {
     resetState()
-    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-lifetime-extension-'))
+    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-telegram-extension-'))
     temporaryDirectories.push(directory)
     writeFileSync(join(directory, 'trusted-fact-navigation.json'), '{}')
     const roots = [makeAgent('first'), makeAgent('second')]
     const { ctx, listeners } = makeContext(roots)
-    await requireLifetimeCapability()
     const module = await loadExtension()
     const extensionSource = readFileSync(EXTENSION_SOURCE_URL, 'utf8')
     expect(extensionSource.match(/createPersonalFeedTelegramProductionComposition\s*\(/gu)).toHaveLength(1)
     expect(extensionSource).toContain("from './personal-feed/telegram-production-composition.ts'")
     expect(extensionSource).not.toContain('createPersonalFeedV2CandidateLifecycle')
-    expect(extensionSource).not.toContain('createPersonalFeedTelegramInstallLifetime')
     expect(extensionSource).not.toContain('void personalFeedXStartupFactory')
     expect(extensionSource).not.toMatch(/r2\s*:\s*\{\s*observe\s*:\s*async\s*\(\)\s*=>/u)
     expect(extensionSource).not.toContain('export { createPersonalFeedTelegramProductionComposition')
@@ -415,7 +375,6 @@ describe('Personal Feed Telegram install lifetime extension integration', () => 
     expect(state.coordinatorOptions).toBeDefined()
     expect(state.sourceHandler).toBeDefined()
     expect(state.compositionHandler).toBe(state.sourceHandler)
-    expect(state.lifetimeFactories).toBe(1)
     expect(state.prepareCalls).toHaveLength(0)
     expect(state.events.filter(value => value === 'coordinator.create')).toHaveLength(1)
 
@@ -425,7 +384,6 @@ describe('Personal Feed Telegram install lifetime extension integration', () => 
     const normalResult = await normalListener?.(feedEnvelope(11), next)
     expect(normalResult).toMatchObject({ kind: 'handled-awaiting-delivery' })
     expect(state.prepareCalls).toHaveLength(1)
-    expect((state.lifetimeHandler as { readonly mock: { readonly calls: readonly unknown[][] } }).mock.calls).toHaveLength(1)
     expect(state.startupFactoryCalls).toBe(1)
     expect(state.startupOwnerObserveCalls).toBe(1)
     expect(state.startupFactoryRuntimeConfigs[0]).toBe(state.parsedRuntimeConfig)
@@ -434,7 +392,6 @@ describe('Personal Feed Telegram install lifetime extension integration', () => 
     state.sourceCapture?.resolve()
     await expect(fallback).resolves.toMatchObject({ kind: 'handled-awaiting-delivery' })
     expect(state.prepareCalls).toHaveLength(2)
-    expect((state.lifetimeHandler as { readonly mock: { readonly calls: readonly unknown[][] } }).mock.calls).toHaveLength(2)
     expect(state.startupFactoryCalls).toBe(1)
     expect(state.startupOwnerObserveCalls).toBe(2)
     state.sourceCapture = deferred()
@@ -468,9 +425,6 @@ describe('Personal Feed Telegram install lifetime extension integration', () => 
       'owner.close',
     ]))
     expect(state.events.filter(value => value === 'composition.shutdown.call')).toHaveLength(1)
-    expect(state.events.indexOf('lifetime.shutdown.call')).toBeLessThan(state.events.indexOf('source.stop'))
-    expect(state.events.indexOf('lifetime.shutdown.call')).toBeLessThan(state.events.indexOf('root.stop:first'))
-    expect(state.events.indexOf('lifetime.shutdown.call')).toBeLessThan(state.events.indexOf('feedback.stop'))
     expect(state.events.indexOf('runtime.shutdown')).toBeGreaterThan(state.events.indexOf('source.stop'))
     expect(state.events.indexOf('coordinator.drain')).toBeLessThan(state.events.indexOf('runtime.shutdown'))
     expect(state.events.indexOf('owner.close')).toBeGreaterThan(state.events.indexOf('runtime.shutdown'))
@@ -483,7 +437,7 @@ describe('Personal Feed Telegram install lifetime extension integration', () => 
     expect(state.prepareCalls).toHaveLength(2)
 
     resetState()
-    const secondDirectory = mkdtempSync(join(tmpdir(), 'personal-feed-lifetime-errors-'))
+    const secondDirectory = mkdtempSync(join(tmpdir(), 'personal-feed-telegram-extension-errors-'))
     temporaryDirectories.push(secondDirectory)
     writeFileSync(join(secondDirectory, 'trusted-fact-navigation.json'), '{}')
     state.sourceDone?.resolve()
@@ -503,7 +457,7 @@ describe('Personal Feed Telegram install lifetime extension integration', () => 
       'TEARDOWN_section.first_CANARY',
       'TEARDOWN_section.second_CANARY',
       'TEARDOWN_listener.agent/created_CANARY',
-      'TEARDOWN_coordinator.drain_CANARY',
+      'personal Feed Telegram cleanup failed',
       'TEARDOWN_runtime.shutdown_CANARY',
       'TEARDOWN_owner.close_CANARY',
     ]))
@@ -527,7 +481,7 @@ describe('Personal Feed Telegram install lifetime extension integration', () => 
     resetState()
     state.sourceDone?.resolve()
     state.throwOn.add('composition.constructor')
-    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-lifetime-composition-rollback-'))
+    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-telegram-composition-rollback-'))
     temporaryDirectories.push(directory)
     writeFileSync(join(directory, 'trusted-fact-navigation.json'), '{}')
     const { ctx } = makeContext([makeAgent('first')])
