@@ -32,6 +32,7 @@
 
 ## Telegram gateway
 
+- 2026-09-05：对错误 cwd 的压缩 Session 做离线迁移时，先停服并备份 Session、Workspace 状态和投影缓存；每个 `.jsonl.zstd` 是拼接的独立帧，只重压带 checksum 的首个 header 帧，事件帧应原字节保留并以摘要校验。随后移动到新 cwd 对应的 project/session 目录，并从旧 Workspace 的持久成员中精确移除该 Session；启动后让 Gateway 在新路径创建/绑定 Workspace，投影缓存按新 identity 重建。
 - 2026-09-05：Harness 把 Session header 的不可变 `cwd` 作为 Workspace 归属事实，`attachSession()` 会校验路径一致；本地运行入口必须在首次创建 Telegram 会话前设置 `DSH_CWD=$DSH_HOME/workspace` 并从该目录启动。已有错误 cwd 的历史会话不能靠重新 attach 迁移，必须单独做停服、快照和持久化身份迁移。
 - 2026-09-05：`cwd` 只决定 Telegram Agent 的工作目录，不会让 Session 自动成为 Workspace 成员。Gateway 自建或恢复固定根会话后，应在 ready/轮询前按 `agent.session.header.cwd` 复用或创建 Workspace，并只对 `agent.session.id` 做幂等 attach；归属失败不得继续启动，且新取得的 Agent 必须在同一清理区间释放。不要按 cwd 扫描和收编其他会话。
 - Telegram 正文采用消息级投递：保留 👀、typing、引用、reaction 与最终交付，忽略 `assistant/chunk`；把完整 text + tool-call `assistant/message` 串行投递为不可编辑中途消息，再由 `summarizeTurn()` 权威收口最终文本。相同完整正文只能成功交付一次，是否自然且不重放需真实客户端验收。
