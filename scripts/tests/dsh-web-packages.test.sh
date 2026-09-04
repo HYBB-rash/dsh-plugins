@@ -45,6 +45,7 @@ EOF
 cat >"$fixture_root/test-bin/node" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+printf 'env DSH_HOME=%q DSH_CWD=%q PWD=%q\n' "$DSH_HOME" "${DSH_CWD-}" "$PWD" >>"$DSH_WEB_TEST_LOG"
 printf 'node' >>"$DSH_WEB_TEST_LOG"
 printf ' %q' "$@" >>"$DSH_WEB_TEST_LOG"
 printf '\n' >>"$DSH_WEB_TEST_LOG"
@@ -141,6 +142,8 @@ if grep -Fq -- '--port 5080' "$DSH_WEB_TEST_LOG"; then
   echo 'source Web runtime ignored an explicit port override' >&2
   exit 1
 fi
+grep -Fq "env DSH_HOME=$fixture_root/home DSH_CWD=$fixture_root/home/workspace PWD=$fixture_root/home/workspace" "$DSH_WEB_TEST_LOG"
+test -d "$fixture_root/home/workspace"
 if grep -Fq 'pnpm' "$DSH_WEB_TEST_LOG"; then
   echo 'Web runtime rebuilt or installed packages' >&2
   exit 1

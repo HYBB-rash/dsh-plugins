@@ -4,14 +4,19 @@ set -euo pipefail
 package_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ -d "$package_root/upstream/deepseek-harness" ]]; then
   export DSH_HOME="${DSH_WEB_HOME:-$package_root/.dsh-web}"
+  export DSH_CWD="${DSH_CWD:-$DSH_HOME/workspace}"
   harness_root="$package_root/upstream/deepseek-harness"
   patch="$package_root/config/web/portable.patch.yml"
   default_port=5080
 else
   : "${DSH_HOME:?set DSH_HOME to an external writable directory}"
+  export DSH_CWD="${DSH_CWD:-$DSH_HOME/workspace}"
   harness_root="$package_root/harness"
   patch="$package_root/config/web.patch.yml"
 fi
+
+mkdir -p "$DSH_CWD"
+cd "$DSH_CWD"
 
 if ! command -v node >/dev/null 2>&1; then
   echo 'node is required to run DSH Web' >&2
