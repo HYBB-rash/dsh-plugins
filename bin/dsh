@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+package_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+if [[ -d "$package_root/upstream/deepseek-harness" ]]; then
+  harness_root="$package_root/upstream/deepseek-harness"
+else
+  harness_root="$package_root/harness"
+fi
+
+if [[ -x "$package_root/runtime-node/bin/node" ]]; then
+  node_bin="$package_root/runtime-node/bin/node"
+else
+  if ! command -v node >/dev/null 2>&1; then
+    echo 'node is required to run the DSH CLI' >&2
+    exit 127
+  fi
+  node_bin=$(command -v node)
+fi
+
+cli="$harness_root/apps/cli/lib/bin.js"
+if [[ ! -f "$cli" ]]; then
+  echo "missing built DSH CLI: $cli" >&2
+  exit 1
+fi
+
+exec "$node_bin" --expose-internals "$cli" "$@"

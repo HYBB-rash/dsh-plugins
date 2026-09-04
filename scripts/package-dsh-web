@@ -59,6 +59,7 @@ required_files=(
   "$harness_root/apps/web/dist/index.html"
   "$harness_root/.dsh-build/client-build-environment.json"
   "$repository_root/config/web/portable.patch.yml"
+  "$repository_root/bin/dsh"
   "$repository_root/scripts/dsh-web-install-plugins"
   "$repository_root/scripts/dsh-web-runtime"
 )
@@ -90,6 +91,7 @@ install -m 0600 "$production_credentials/secrets/notion.token" "$temporary_root/
 install -m 0644 "$repository_root/config/web/portable.patch.yml" "$temporary_root/dsh-web/config/web.patch.yml"
 install -m 0755 "$repository_root/scripts/dsh-web-install-plugins" "$temporary_root/dsh-web/bin/install-plugins"
 install -m 0755 "$repository_root/scripts/dsh-web-runtime" "$temporary_root/dsh-web/bin/web"
+install -m 0755 "$repository_root/bin/dsh" "$temporary_root/dsh-web/bin/dsh"
 
 for plugin in telegram-gateway dsh-cron dsh-assistant; do
   (cd "$repository_root/$plugin" && pnpm pack --pack-destination "$temporary_root/dsh-web/plugins" >/dev/null)

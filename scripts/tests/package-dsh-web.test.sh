@@ -8,6 +8,7 @@ trap cleanup EXIT
 
 source_root="$fixture_root/source"
 mkdir -p \
+  "$source_root/bin" \
   "$source_root/scripts" \
   "$source_root/config/web" \
   "$source_root/upstream/deepseek-harness/apps/cli/lib" \
@@ -24,6 +25,11 @@ if [[ ! -x "$repository_root/scripts/package-dsh-web" ]]; then
   exit 1
 fi
 cp "$repository_root/scripts/package-dsh-web" "$source_root/scripts/package-dsh-web"
+if [[ ! -x "$repository_root/bin/dsh" ]]; then
+  echo 'missing executable bin/dsh launcher' >&2
+  exit 1
+fi
+cp "$repository_root/bin/dsh" "$source_root/bin/dsh"
 for helper in dsh-web-install-plugins dsh-web-runtime; do
   if [[ -f "$repository_root/scripts/$helper" ]]; then
     cp "$repository_root/scripts/$helper" "$source_root/scripts/$helper"
@@ -105,6 +111,12 @@ real_node=$(command -v node)
 cat >"$runtime_node/bin/node" <<EOF
 #!/usr/bin/env bash
 if [[ \${1:-} == --version ]]; then echo v24.19.0; exit 0; fi
+if [[ -n \${DSH_RUNTIME_TEST_LOG:-} ]]; then
+  printf 'node' >"\$DSH_RUNTIME_TEST_LOG"
+  printf ' %q' "\$@" >>"\$DSH_RUNTIME_TEST_LOG"
+  printf '\n' >>"\$DSH_RUNTIME_TEST_LOG"
+  exit 0
+fi
 exec "$real_node" "\$@"
 EOF
 chmod +x "$runtime_node/bin/node"
@@ -133,7 +145,8 @@ for expected in \
   dsh-web/production-credentials/.credentials.yaml \
   dsh-web/production-credentials/secrets/notion.token \
   dsh-web/bin/install-plugins \
-  dsh-web/bin/web; do
+  dsh-web/bin/web \
+  dsh-web/bin/dsh; do
   grep -Fxq "$expected" "$fixture_root/files.txt" || {
     echo "archive is missing $expected" >&2
     exit 1
@@ -154,6 +167,7 @@ test "$("$unpacked/dsh-web/runtime-node/bin/node" --version)" = v24.19.0
 cmp "$source_root/config/web/portable.patch.yml" "$unpacked/dsh-web/config/web.patch.yml"
 cmp "$source_root/scripts/dsh-web-install-plugins" "$unpacked/dsh-web/bin/install-plugins"
 cmp "$source_root/scripts/dsh-web-runtime" "$unpacked/dsh-web/bin/web"
+cmp "$source_root/bin/dsh" "$unpacked/dsh-web/bin/dsh"
 for plugin_archive in "$unpacked/dsh-web/plugins"/*.tgz; do
   contents=$(tar -tzf "$plugin_archive")
   for expected in package/package.json package/cordis.patch.yml package/lib/index.js; do
@@ -181,6 +195,9 @@ printf '\n' >>"$DSH_RUNTIME_TEST_LOG"
 EOF
 chmod +x "$fixture_root/runtime-bin/node"
 export DSH_RUNTIME_TEST_LOG="$fixture_root/runtime.log"
+"$unpacked/dsh-web/bin/dsh" --version
+grep -Fq -- "--expose-internals $unpacked/dsh-web/harness/apps/cli/lib/bin.js --version" "$DSH_RUNTIME_TEST_LOG"
+: >"$DSH_RUNTIME_TEST_LOG"
 for package in dsh-telegram-gateway dsh-cron dsh-assistant; do
   mkdir -p "$fixture_root/home/profiles/web/node_modules/@deepseek-ai/$package"
 done

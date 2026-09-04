@@ -7,6 +7,7 @@ cleanup() { rm -rf -- "$fixture_root"; }
 trap cleanup EXIT
 
 mkdir -p \
+  "$fixture_root/bin" \
   "$fixture_root/scripts" \
   "$fixture_root/config/web" \
   "$fixture_root/upstream/deepseek-harness/apps/cli/lib" \
@@ -19,6 +20,11 @@ mkdir -p \
 cp "$repository_root/scripts/dsh-web-install-plugins" "$fixture_root/scripts/dsh-web-install-plugins"
 cp "$repository_root/scripts/dsh-web-runtime" "$fixture_root/scripts/dsh-web-runtime"
 cp "$repository_root/scripts/dsh-web-notify-start-url.mjs" "$fixture_root/scripts/dsh-web-notify-start-url.mjs"
+if [[ ! -x "$repository_root/bin/dsh" ]]; then
+  echo 'missing executable bin/dsh launcher' >&2
+  exit 1
+fi
+cp "$repository_root/bin/dsh" "$fixture_root/bin/dsh"
 cp "$repository_root/config/web/portable.patch.yml" "$fixture_root/config/web/portable.patch.yml"
 printf 'console.log("dsh")\n' >"$fixture_root/upstream/deepseek-harness/apps/cli/lib/bin.js"
 printf 'private source credentials\n' >"$fixture_root/config/web/production-credentials/.credentials.yaml"
@@ -83,6 +89,10 @@ printf '\n' >>"$DSH_WEB_TEST_LOG"
 if [[ "${DSH_WEB_TEST_EMIT_LAUNCH_URL:-}" == 1 && " $* " == *apps/cli/lib/bin.js* ]]; then
   printf '%s\n' 'dsh web: http://127.0.0.1:3080/?token=local-launch-secret'
   printf '%s\n' 'dsh web: http://127.0.0.1:3080/?token=ignored-second-secret'
+fi
+if [[ " $* " == *'--profile web'* && " $* " == *'--patch'* ]]; then
+  printf 'dsh path=%q\n' "$(command -v dsh)" >>"$DSH_WEB_TEST_LOG"
+  dsh --version
 fi
 EOF
 chmod +x \
@@ -214,6 +224,8 @@ grep -Fq -- 'node --expose-internals' "$DSH_WEB_TEST_LOG"
 grep -Fq -- '--profile web --patch' "$DSH_WEB_TEST_LOG"
 grep -Fq "$fixture_root/config/web/portable.patch.yml" "$DSH_WEB_TEST_LOG"
 grep -Fq -- '--host 127.0.0.1 --port 3080 --no-open' "$DSH_WEB_TEST_LOG"
+grep -Fq "dsh path=$fixture_root/bin/dsh" "$DSH_WEB_TEST_LOG"
+grep -Fq "node --expose-internals $fixture_root/upstream/deepseek-harness/apps/cli/lib/bin.js --version" "$DSH_WEB_TEST_LOG"
 if grep -Fq -- '--port 5080' "$DSH_WEB_TEST_LOG"; then
   echo 'source Web runtime ignored an explicit port override' >&2
   exit 1
