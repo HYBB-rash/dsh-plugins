@@ -28,7 +28,9 @@
 
 ## 发布入口与隔离
 
-生产发布唯一入口是 `./release/dsh`：从明确 Git commit 构建同一不可变镜像，并遵守其停机、快照、验证、用户验收和显式回滚边界。不得直接同步源码、修改线上 selector、远程安装依赖，也不得恢复或扩展已退役的 `deploy.sh` 流程。
+用户明确选择 `herman.hermes` 普通 `tar.gz` Web 部署时，先读取并遵循 `$dsh-web-deploy` 与 `docs/dsh-web-portable-deployment.md`；该流程只使用 `scripts/package-dsh-web`、`scripts/dsh-web-deploy` 和远端 `dsh-web-start`，上传与启动保持分离，不得混用 Docker、`release/dsh` 或 `release/` 内资产。
+
+Docker/OCI 生产发布唯一入口是 `./release/dsh`：从明确 Git commit 构建同一不可变镜像，并遵守其停机、快照、验证、用户验收和显式回滚边界。不得直接同步源码、修改线上 selector、远程安装依赖，也不得恢复或扩展已退役的 `deploy.sh` 流程。
 
 涉及 Docker 开发、快照、发版、验收或回退时，先阅读 `release/README.md`。OpenClaw 始终在流程之外，不得改动；开发、测试、发版和运行都必须允许它完全不存在，也不得读取其目录、凭据、CLI、插件或状态。
 
