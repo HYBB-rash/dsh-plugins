@@ -21,6 +21,11 @@ for package in telegram-gateway dsh-cron dsh-assistant personal-feed; do
   mkdir -p "$fixture_root/$package"
 done
 
+for installed in dsh-telegram-gateway dsh-cron dsh-assistant; do
+  mkdir -p "$fixture_root/home/profiles/web/node_modules/@deepseek-ai/$installed"
+  : >"$fixture_root/home/profiles/web/node_modules/@deepseek-ai/$installed/manager-owned"
+done
+
 for compiler in tsc tsdown; do
   cat >"$fixture_root/upstream/deepseek-harness/node_modules/.bin/$compiler" <<'EOF'
 #!/usr/bin/env bash
@@ -70,6 +75,17 @@ for package in telegram-gateway dsh-cron dsh-assistant personal-feed; do
     exit 1
   }
 done
+
+for installed in dsh-telegram-gateway dsh-cron dsh-assistant; do
+  test -f "$fixture_root/home/profiles/web/node_modules/@deepseek-ai/$installed/manager-owned" || {
+    echo "launcher directly replaced the profile-installed $installed package" >&2
+    exit 1
+  }
+done
+grep -Fq 'plugin --profile web add --force' "$DSH_WEB_TEST_LOG" || {
+  echo "launcher did not delegate forced local-package refresh to the plugin manager" >&2
+  exit 1
+}
 
 python3 - "$fixture_root/home/profiles/web/cordis.patch.yml" <<'PY'
 from pathlib import Path

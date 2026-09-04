@@ -15,8 +15,6 @@ harness_tsc="$harness_root/node_modules/.bin/tsc"
 harness_tsdown="$harness_root/node_modules/.bin/tsdown"
 harness_deepseek_scope="$harness_root/node_modules/.pnpm/node_modules/@deepseek-ai"
 harness_herman_scope="$harness_root/node_modules/.pnpm/node_modules/@herman"
-profile_deepseek_scope="$DSH_HOME/profiles/web/node_modules/@deepseek-ai"
-profile_herman_scope="$DSH_HOME/profiles/web/node_modules/@herman"
 
 ensure_local_plugin_links() {
   local plugin
@@ -101,15 +99,7 @@ build_plugin "$root_directory/dsh-cron"
 build_plugin "$root_directory/dsh-assistant"
 build_plugin "$root_directory/personal-feed"
 
-for installed in \
-  "$profile_deepseek_scope/dsh-telegram-gateway" \
-  "$profile_deepseek_scope/dsh-cron" \
-  "$profile_deepseek_scope/dsh-assistant" \
-  "$profile_herman_scope/personal-feed"; do
-  rm -rf "$installed"
-done
-
-pnpm dsh plugin --profile web add \
+pnpm dsh plugin --profile web add --force \
   "file:$root_directory/telegram-gateway" \
   "file:$root_directory/dsh-cron" \
   "file:$root_directory/dsh-assistant" \
