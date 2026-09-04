@@ -16,6 +16,8 @@
 5. 实现后首轮测试错误调用真实 Git。定位为测试夹具创建假 `git/systemctl/nix/ss` 后漏设执行位；补齐执行位后，测试开始验证真实脚本行为。
 6. 测试覆盖脏源、脏目标、非 fast-forward、安装失败、有效配置插件数量错误、非 loopback 监听、成功顺序和源等于目标。安装或配置失败不启动服务；启动后发现非 loopback 监听会再次停服。
 7. 回归源码安装/运行拆分、Telegram 通知器、普通归档打包和 VM 部署合同，确认本地入口没有调用生产启动器。
+8. 部署前发现 `main` 被另一任务推进，脚本的 fast-forward 门禁阻止旧基线部署且服务未停；任务分支变基到最新 `main` 后重新完成全部回归。
+9. 从干净任务分支直接运行新入口完成真实自部署：长期 checkout 快进、Harness 与三个插件构建、真实 Profile 刷新、配置检查、服务启动和 loopback 检查全部由脚本完成。
 
 ## 逻辑链条
 
@@ -46,7 +48,11 @@
 - GREEN：`scripts/tests/package-dsh-web.test.sh` 通过。
 - GREEN：`scripts/tests/dsh-web-deploy.test.sh` 通过。
 - GREEN：`bash -n` 与 `git diff --check` 通过。
-- 真实自部署及 3080 验收将在文档提交后补记。
+- 真实自部署：脚本输出 `DSH local Web deployment passed`，长期 `main` checkout 与部署源处于同一提交。
+- systemd：`active/running`、`NRestarts=0`，仍从 `/home/herman/Projects/dsh-plugins-web-local/scripts/dsh-web-runtime` 启动。
+- Profile：三个 `file:` 均指向长期 checkout。
+- 网络与认证：仅监听 `127.0.0.1:3080`；无认证 `401`，使用本次启动认证后 `200`。
+- journal：没有 Telegram 通知失败、native、插件树、冲突或 wave13 标记；Telegram API 接受本次启动通知。
 
 ## 遗留
 
