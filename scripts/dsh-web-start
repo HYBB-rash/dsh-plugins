@@ -6,6 +6,7 @@ package_root=${DSH_WEB_PACKAGE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 archive="$package_root/dsh-web.tar.gz"
 checksum="$package_root/dsh-web.tar.gz.sha256"
 proxy_script="$package_root/dsh-web-lan-proxy.mjs"
+notify_script="$package_root/dsh-web-notify-start-url.mjs"
 releases="$package_root/releases"
 runtime_bin="$package_root/runtime-bin"
 export DSH_HOME=${DSH_HOME:-$HOME/.dsh}
@@ -13,6 +14,8 @@ export DSH_CWD=${DSH_CWD:-$DSH_HOME/workspace}
 host=${DSH_WEB_HOST:-127.0.0.1}
 port=${DSH_WEB_PORT:-3080}
 lan_address=${DSH_LAN_ADDRESS:-192.168.6.240}
+public_authority=${DSH_WEB_PUBLIC_AUTHORITY:-dsh.man-her.icu}
+export DSH_WEB_PUBLIC_ORIGIN=${DSH_WEB_PUBLIC_ORIGIN:-https://dsh.man-her.icu}
 
 for command_name in tar sha256sum awk mktemp install mv ln; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -20,7 +23,7 @@ for command_name in tar sha256sum awk mktemp install mv ln; do
     exit 127
   fi
 done
-for required_file in "$archive" "$checksum" "$proxy_script"; do
+for required_file in "$archive" "$checksum" "$proxy_script" "$notify_script"; do
   if [[ ! -f "$required_file" || -L "$required_file" ]]; then
     echo "missing regular deployment input: $required_file" >&2
     exit 1
@@ -112,8 +115,23 @@ export PATH="$runtime_bin:$PATH"
 "$release/bin/install-plugins"
 ln -sfn "releases/$archive_sha" "$package_root/current.next"
 mv -Tf "$package_root/current.next" "$package_root/current"
+relay_web_stdout() {
+  local line launch_url notified=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    printf '%s\n' "$line"
+    if ((notified == 0)) && [[ "$line" =~ ^dsh\ web:\ (http://127\.0\.0\.1:[0-9]+/\?token=[A-Za-z0-9_-]+)$ ]]; then
+      launch_url=${BASH_REMATCH[1]}
+      if ! printf '%s\n' "$launch_url" | "$runtime_node" "$notify_script" >/dev/null 2>&1; then
+        echo 'dsh web: Telegram startup URL notification failed' >&2
+      fi
+      notified=1
+    fi
+  done
+}
+
 cd "$DSH_CWD"
-"$package_root/current/bin/web" --host "$host" --port "$port" --no-open --trusted-host "$lan_address" "$@" &
+"$package_root/current/bin/web" --host "$host" --port "$port" --no-open "$@" \
+  --trusted-host "$lan_address" "$public_authority" > >(relay_web_stdout) &
 web_pid=$!
 "$runtime_node" "$proxy_script" &
 proxy_pid=$!

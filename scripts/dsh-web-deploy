@@ -8,6 +8,7 @@ repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 package_script="$repository_root/scripts/package-dsh-web"
 start_script="$repository_root/scripts/dsh-web-start"
 proxy_script="$repository_root/scripts/dsh-web-lan-proxy.mjs"
+notify_script="$repository_root/scripts/dsh-web-notify-start-url.mjs"
 
 for required_file in "$package_script" "$start_script"; do
   if [[ ! -x "$required_file" ]]; then
@@ -15,10 +16,12 @@ for required_file in "$package_script" "$start_script"; do
     exit 1
   fi
 done
-if [[ ! -f "$proxy_script" || -L "$proxy_script" ]]; then
-  echo "missing regular deployment input: $proxy_script" >&2
-  exit 1
-fi
+for required_file in "$proxy_script" "$notify_script"; do
+  if [[ ! -f "$required_file" || -L "$required_file" ]]; then
+    echo "missing regular deployment input: $required_file" >&2
+    exit 1
+  fi
+done
 for command_name in ssh scp sha256sum; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "$command_name is required to deploy DSH Web" >&2
@@ -46,6 +49,7 @@ scp -p "$archive" "$target:$remote_root/dsh-web.tar.gz"
 scp -p "$checksum" "$target:$remote_root/dsh-web.tar.gz.sha256"
 scp -p "$start_script" "$target:$remote_root/dsh-web-start"
 scp -p "$proxy_script" "$target:$remote_root/dsh-web-lan-proxy.mjs"
+scp -p "$notify_script" "$target:$remote_root/dsh-web-notify-start-url.mjs"
 
 printf 'uploaded: %s:%s\n' "$target" "$remote_root"
 printf 'sha256: %s\n' "$(awk '{print $1}' "$checksum")"

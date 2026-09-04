@@ -14,6 +14,7 @@ mkdir -p "$source_root/scripts" "$fixture_root/deploy-bin" "$remote_root"
 cp "$repository_root/scripts/dsh-web-deploy" "$source_root/scripts/dsh-web-deploy"
 cp "$repository_root/scripts/dsh-web-start" "$source_root/scripts/dsh-web-start"
 cp "$repository_root/scripts/dsh-web-lan-proxy.mjs" "$source_root/scripts/dsh-web-lan-proxy.mjs"
+cp "$repository_root/scripts/dsh-web-notify-start-url.mjs" "$source_root/scripts/dsh-web-notify-start-url.mjs"
 chmod +x "$source_root/scripts/dsh-web-deploy" "$source_root/scripts/dsh-web-start"
 cat >"$source_root/scripts/package-dsh-web" <<'EOF'
 #!/usr/bin/env bash
@@ -55,6 +56,7 @@ test -s "$DSH_DEPLOY_PACKAGE_LOG"
 test "$(wc -l <"$DSH_DEPLOY_PACKAGE_LOG")" -eq 1
 cmp "$source_root/scripts/dsh-web-start" "$remote_root/dsh-web-start"
 cmp "$source_root/scripts/dsh-web-lan-proxy.mjs" "$remote_root/dsh-web-lan-proxy.mjs"
+cmp "$source_root/scripts/dsh-web-notify-start-url.mjs" "$remote_root/dsh-web-notify-start-url.mjs"
 test "$(stat -c '%a' "$remote_root/dsh-web.tar.gz")" = 600
 (
   cd "$remote_root"
@@ -63,7 +65,8 @@ test "$(stat -c '%a' "$remote_root/dsh-web.tar.gz")" = 600
 grep -Fq 'fixture.invalid:/home/herman/.local/share/dsh-web-package/dsh-web.tar.gz' "$DSH_DEPLOY_COMMAND_LOG"
 grep -Fq 'fixture.invalid:/home/herman/.local/share/dsh-web-package/dsh-web-start' "$DSH_DEPLOY_COMMAND_LOG"
 grep -Fq 'fixture.invalid:/home/herman/.local/share/dsh-web-package/dsh-web-lan-proxy.mjs' "$DSH_DEPLOY_COMMAND_LOG"
-if grep -Eq 'ssh .*dsh-web-(start|lan-proxy)' "$DSH_DEPLOY_COMMAND_LOG"; then
+grep -Fq 'fixture.invalid:/home/herman/.local/share/dsh-web-package/dsh-web-notify-start-url.mjs' "$DSH_DEPLOY_COMMAND_LOG"
+if grep -Eq 'ssh .*dsh-web-(start|lan-proxy|notify)' "$DSH_DEPLOY_COMMAND_LOG"; then
   echo 'deployment executed the remote start script' >&2
   exit 1
 fi
@@ -102,6 +105,7 @@ test "$DSH_CWD" = "$DSH_HOME/workspace"
 printf 'web' >>"$DSH_START_LOG"
 printf ' %q' "$@" >>"$DSH_START_LOG"
 printf '\n' >>"$DSH_START_LOG"
+printf 'dsh web: http://127.0.0.1:3080/?token=fixture-launch-token\n'
 sleep 0.2
 EOF
 chmod +x "$package_tree/bin/install-plugins" "$package_tree/bin/web"
@@ -117,6 +121,11 @@ cat >"$start_root/dsh-web-lan-proxy.mjs" <<'EOF'
 import fs from 'node:fs'
 fs.appendFileSync(process.env.DSH_START_LOG, 'lan-proxy started\n')
 setInterval(() => {}, 1000)
+EOF
+cat >"$start_root/dsh-web-notify-start-url.mjs" <<'EOF'
+import fs from 'node:fs'
+const input = fs.readFileSync(0, 'utf8').trim()
+fs.appendFileSync(process.env.DSH_START_LOG, `notify-input=${input}\n`)
 EOF
 cat >"$fixture_root/start-bin/corepack" <<'EOF'
 #!/usr/bin/env bash
@@ -147,7 +156,8 @@ grep -Fq 'bundled-node --version' "$DSH_START_LOG"
 grep -Fq 'bundled-node /' "$DSH_START_LOG"
 grep -Fq 'node-pnpm --version' "$DSH_START_LOG"
 grep -Fxq "install DSH_HOME=$home" "$DSH_START_LOG"
-grep -Fq 'web --host 127.0.0.1 --port 3080 --no-open --trusted-host 192.168.6.240' "$DSH_START_LOG"
+grep -Fq 'web --host 127.0.0.1 --port 3080 --no-open --trusted-host 192.168.6.240 dsh.man-her.icu' "$DSH_START_LOG"
+grep -Fxq 'notify-input=http://127.0.0.1:3080/?token=fixture-launch-token' "$DSH_START_LOG"
 grep -Fq 'lan-proxy started' "$DSH_START_LOG"
 test -L "$start_root/current"
 test -x "$start_root/current/bin/web"
@@ -167,7 +177,7 @@ tar -czf "$missing_node_root/dsh-web.tar.gz" -C "$missing_node_tree" dsh-web
   cd "$missing_node_root"
   sha256sum dsh-web.tar.gz >dsh-web.tar.gz.sha256
 )
-cp "$repository_root/scripts/dsh-web-start" "$repository_root/scripts/dsh-web-lan-proxy.mjs" "$missing_node_root/"
+cp "$repository_root/scripts/dsh-web-start" "$repository_root/scripts/dsh-web-lan-proxy.mjs" "$repository_root/scripts/dsh-web-notify-start-url.mjs" "$missing_node_root/"
 if DSH_HOME="$fixture_root/missing-node-home" \
   DSH_WEB_PACKAGE_ROOT="$missing_node_root" \
   "$missing_node_root/dsh-web-start" >"$fixture_root/missing-node.out" 2>"$fixture_root/missing-node.err"; then
@@ -181,7 +191,7 @@ test ! -e "$missing_node_root/current"
 missing_root="$fixture_root/missing-tool-root"
 mkdir -p "$missing_root"
 cp "$start_root/dsh-web.tar.gz" "$start_root/dsh-web.tar.gz.sha256" "$missing_root/"
-cp "$repository_root/scripts/dsh-web-start" "$repository_root/scripts/dsh-web-lan-proxy.mjs" "$missing_root/"
+cp "$repository_root/scripts/dsh-web-start" "$repository_root/scripts/dsh-web-lan-proxy.mjs" "$repository_root/scripts/dsh-web-notify-start-url.mjs" "$missing_root/"
 if DSH_HOME="$fixture_root/missing-home" \
   DSH_WEB_PACKAGE_ROOT="$missing_root" \
   DSH_WEB_PNPM=definitely-missing-pnpm \
