@@ -1,6 +1,6 @@
 [submodule "upstream/deepseek-harness"]
 	path = upstream/deepseek-harness
 	url = https://github.com/deepseek-ai/deepseek-harness.git
-[submodule "liangshen"]
-	path = liangshen
-	url = https://github.com/HYBB-rash/dsh-liangshen.git
+[submodule "upstream/dsh-web"]
+	path = upstream/dsh-web
+	url = https://github.com/zhu1090093659/dsh-web.git
