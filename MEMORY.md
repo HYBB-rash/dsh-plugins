@@ -32,6 +32,7 @@
 
 ## Telegram gateway
 
+- 2026-09-05：本地源码 Web 若需发送启动认证地址，应让 `dsh-web-runtime` 通过 `DSH_WEB_NOTIFY_START_URL=1` 显式复用通知器，并把 `DSH_WEB_PUBLIC_ORIGIN` 设为对应 `http://127.0.0.1:<port>`；默认不开启以隔离 `.dsh-web` 开发服。token 只经 stdin 交给通知器，通知失败不得改变 Web 进程退出状态；不能改用同时带归档切换、LAN proxy、trusted-host 和生产域名的 `dsh-web-start`。
 - 2026-09-05：源码 `scripts/dsh-web-runtime` 用 `DSH_WEB_HOME` 选择本地运行数据，并会据此覆盖 `DSH_HOME`；迁移正式 `~/.dsh` 后从源码入口恢复时必须传 `DSH_WEB_HOME=/home/herman/.dsh`，不能只传 `DSH_HOME`。启动后先核 `/proc/<pid>/environ` 与 cwd，再把 HTTP 200 当作目标实例健康证据。
 - 2026-09-05：对错误 cwd 的压缩 Session 做离线迁移时，先停服并备份 Session、Workspace 状态和投影缓存；每个 `.jsonl.zstd` 是拼接的独立帧，只重压带 checksum 的首个 header 帧，事件帧应原字节保留并以摘要校验。随后移动到新 cwd 对应的 project/session 目录，并从旧 Workspace 的持久成员中精确移除该 Session；启动后让 Gateway 在新路径创建/绑定 Workspace，投影缓存按新 identity 重建。
 - 2026-09-05：Harness 把 Session header 的不可变 `cwd` 作为 Workspace 归属事实，`attachSession()` 会校验路径一致；本地运行入口必须在首次创建 Telegram 会话前设置 `DSH_CWD=$DSH_HOME/workspace` 并从该目录启动。已有错误 cwd 的历史会话不能靠重新 attach 迁移，必须单独做停服、快照和持久化身份迁移。
