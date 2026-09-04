@@ -2196,10 +2196,10 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         with self.subTest(navigate_transition="always_loading_bounded"):
             run_navigation(
                 "following",
-                [_surface_facts("following", loading=1)] * 32,
-                expected_probes=32,
+                [_surface_facts("following", loading=1)] * 64,
+                expected_probes=64,
                 expected_activation=0,
-                expected_sleeps=31,
+                expected_sleeps=63,
                 should_fail=True,
             )
 
@@ -2385,8 +2385,8 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         self.assertLess(sum(clock.sleeps), 5.0)
         self.assertTrue(socket.closed)
 
-    def test_explore_enters_the_first_visible_search_timeline_before_completion(self):
-        """Explore must reach original posts without ranking or exposing a trend query."""
+    def test_explore_waits_for_and_enters_the_first_visible_search_timeline(self):
+        """A realistic slow Explore mount must still reach original posts."""
         module = _require_cli(self)
         evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)
         self.assertIsNotNone(evaluator_type)
@@ -2395,12 +2395,13 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         entry_values = [
             {
                 "pathname": "/explore/tabs/trending",
-                "rootCount": 0,
+                "rootCount": 1,
                 "loadingCount": 1,
                 "eligibleEntryCount": 0,
                 "firstCellOrdinal": -1,
                 "clicked": False,
             },
+        ] * 35 + [
             {
                 "pathname": "/explore/tabs/trending",
                 "rootCount": 1,
@@ -2450,12 +2451,13 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             ["https://x.com/explore/tabs/trending"],
         )
         self.assertEqual(result, {"url": SURFACE_TARGETS["explore"], "body": ""})
-        self.assertEqual(entry_index[0], 2)
-        self.assertEqual(len(expressions), 3)
-        self.assertIn("eligibleEntryCount", expressions[0])
-        self.assertIn("eligibleEntryCount", expressions[1])
-        self.assertNotIn("eligibleEntryCount", expressions[2])
-        self.assertIn(".click()", expressions[1])
+        self.assertEqual(entry_index[0], 36)
+        self.assertEqual(len(expressions), 37)
+        self.assertTrue(all("eligibleEntryCount" in expression for expression in expressions[:-1]))
+        self.assertNotIn("eligibleEntryCount", expressions[-1])
+        self.assertIn(".click()", expressions[-2])
+        self.assertEqual(len(clock.sleeps), 36)
+        self.assertLess(sum(clock.sleeps), 8.0)
         self.assertNotIn("/search?", json.dumps(result, separators=(",", ":")))
         self.assertTrue(socket.closed)
 
