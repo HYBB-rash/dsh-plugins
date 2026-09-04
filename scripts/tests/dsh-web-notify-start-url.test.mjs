@@ -14,9 +14,14 @@ const listen = server => new Promise((resolve, reject) => {
   server.listen(0, '127.0.0.1', () => resolve(server.address().port))
 })
 const close = server => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
-const run = (home, apiOrigin, args = []) => new Promise((resolve, reject) => {
+const run = (home, apiOrigin, args = [], publicOrigin) => new Promise((resolve, reject) => {
   const child = spawn(process.execPath, [script.pathname, ...args], {
-    env: { ...process.env, DSH_HOME: home, DSH_TELEGRAM_API_ORIGIN: apiOrigin },
+    env: {
+      ...process.env,
+      DSH_HOME: home,
+      DSH_TELEGRAM_API_ORIGIN: apiOrigin,
+      ...(publicOrigin === undefined ? {} : { DSH_WEB_PUBLIC_ORIGIN: publicOrigin }),
+    },
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   const stdout = []
@@ -74,6 +79,44 @@ test('sends exactly one public HTTPS startup URL without logging secrets', async
     }])
   } finally {
     await close(server)
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('allows an explicitly configured loopback HTTP startup URL', async () => {
+  const home = await credentialHome()
+  const requests = []
+  const server = http.createServer((request, response) => {
+    const chunks = []
+    request.on('data', chunk => chunks.push(chunk))
+    request.on('end', () => {
+      requests.push({ path: request.url, body: JSON.parse(Buffer.concat(chunks).toString()) })
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end('{"ok":true,"result":{}}')
+    })
+  })
+  const port = await listen(server)
+  try {
+    const result = await run(home, `http://127.0.0.1:${port}`, [], 'http://127.0.0.1:3080')
+    assert.equal(result.code, 0)
+    assertSecretsAbsent(result)
+    assert.deepEqual(requests, [{
+      path: '/bot123:test-bot-token/sendMessage',
+      body: { chat_id: '-10001', text: launchUrl },
+    }])
+  } finally {
+    await close(server)
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('rejects a non-loopback HTTP public origin', async () => {
+  const home = await credentialHome()
+  try {
+    const result = await run(home, 'http://127.0.0.1:9', [], 'http://192.168.1.10:3080')
+    assert.notEqual(result.code, 0)
+    assertSecretsAbsent(result)
+  } finally {
     await rm(home, { recursive: true, force: true })
   }
 })

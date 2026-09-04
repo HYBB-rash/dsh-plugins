@@ -38,7 +38,39 @@ if [[ -n "${default_port:-}" ]]; then
   fi
 fi
 
-exec node --expose-internals "$harness_root/apps/cli/lib/bin.js" \
-  --profile web \
-  --patch "$patch" \
+runtime_command=(
+  node --expose-internals "$harness_root/apps/cli/lib/bin.js"
+  --profile web
+  --patch "$patch"
   "${runtime_args[@]}"
+)
+
+if [[ "${DSH_WEB_NOTIFY_START_URL:-}" != 1 ]]; then
+  exec "${runtime_command[@]}"
+fi
+
+notify_script="$package_root/scripts/dsh-web-notify-start-url.mjs"
+if [[ ! -f "$notify_script" || -L "$notify_script" ]]; then
+  echo 'dsh web: Telegram startup URL notification failed' >&2
+  exec "${runtime_command[@]}"
+fi
+
+relay_web_stdout() {
+  local line launch_url notified=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    printf '%s\n' "$line"
+    if ((notified == 0)) && [[ "$line" =~ ^dsh\ web:\ (http://127\.0\.0\.1:[0-9]+/\?token=[A-Za-z0-9_-]+)$ ]]; then
+      launch_url=${BASH_REMATCH[1]}
+      if ! printf '%s\n' "$launch_url" | node "$notify_script" >/dev/null 2>&1; then
+        echo 'dsh web: Telegram startup URL notification failed' >&2
+      fi
+      notified=1
+    fi
+  done
+}
+
+set +e
+"${runtime_command[@]}" | relay_web_stdout
+runtime_status=${PIPESTATUS[0]}
+set -e
+exit "$runtime_status"

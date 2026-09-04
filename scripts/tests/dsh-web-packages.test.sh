@@ -19,6 +19,7 @@ mkdir -p \
   "$fixture_root/test-bin"
 cp "$repository_root/scripts/dsh-web-install-plugins" "$fixture_root/scripts/dsh-web-install-plugins"
 cp "$repository_root/scripts/dsh-web-runtime" "$fixture_root/scripts/dsh-web-runtime"
+cp "$repository_root/scripts/dsh-web-notify-start-url.mjs" "$fixture_root/scripts/dsh-web-notify-start-url.mjs"
 cp "$repository_root/config/web/portable.patch.yml" "$fixture_root/config/web/portable.patch.yml"
 printf 'console.log("dsh")\n' >"$fixture_root/upstream/deepseek-harness/apps/cli/lib/bin.js"
 printf 'private source credentials\n' >"$fixture_root/config/web/production-credentials/.credentials.yaml"
@@ -98,10 +99,19 @@ set -euo pipefail
 if [[ "${1:-}" == -p ]]; then
   exec "$DSH_WEB_TEST_REAL_NODE" "$@"
 fi
+if [[ " $* " == *dsh-web-notify-start-url.mjs* ]]; then
+  IFS= read -r launch_url
+  printf 'notify stdin=%q\n' "$launch_url" >>"$DSH_WEB_TEST_LOG"
+  exit "${DSH_WEB_TEST_NOTIFY_STATUS:-0}"
+fi
 printf 'env DSH_HOME=%q DSH_CWD=%q PWD=%q\n' "$DSH_HOME" "${DSH_CWD-}" "$PWD" >>"$DSH_WEB_TEST_LOG"
 printf 'node' >>"$DSH_WEB_TEST_LOG"
 printf ' %q' "$@" >>"$DSH_WEB_TEST_LOG"
 printf '\n' >>"$DSH_WEB_TEST_LOG"
+if [[ "${DSH_WEB_TEST_EMIT_LAUNCH_URL:-}" == 1 && " $* " == *apps/cli/lib/bin.js* ]]; then
+  printf '%s\n' 'dsh web: http://127.0.0.1:3080/?token=local-launch-secret'
+  printf '%s\n' 'dsh web: http://127.0.0.1:3080/?token=ignored-second-secret'
+fi
 EOF
 chmod +x \
   "$fixture_root/test-bin/pnpm" \
@@ -217,10 +227,37 @@ if grep -Fq -- '--port 5080' "$DSH_WEB_TEST_LOG"; then
 fi
 grep -Fq "env DSH_HOME=$fixture_root/home DSH_CWD=$fixture_root/home/workspace PWD=$fixture_root/home/workspace" "$DSH_WEB_TEST_LOG"
 test -d "$fixture_root/home/workspace"
+if grep -Fq 'notify stdin=' "$DSH_WEB_TEST_LOG"; then
+  echo 'Web runtime notified Telegram without an explicit opt-in' >&2
+  exit 1
+fi
 if grep -Fq 'pnpm' "$DSH_WEB_TEST_LOG"; then
   echo 'Web runtime rebuilt or installed packages' >&2
   exit 1
 fi
+
+: >"$DSH_WEB_TEST_LOG"
+notify_stdout="$fixture_root/notify.stdout"
+notify_stderr="$fixture_root/notify.stderr"
+notify_status=0
+PATH="$fixture_root/test-bin:$PATH" \
+  DSH_WEB_HOME="$fixture_root/home" \
+  DSH_WEB_NOTIFY_START_URL=1 \
+  DSH_WEB_PUBLIC_ORIGIN=http://127.0.0.1:3080 \
+  DSH_WEB_TEST_EMIT_LAUNCH_URL=1 \
+  DSH_WEB_TEST_NOTIFY_STATUS=9 \
+  "$fixture_root/scripts/dsh-web-runtime" --host 127.0.0.1 --port 3080 --no-open \
+  >"$notify_stdout" 2>"$notify_stderr" || notify_status=$?
+if [[ $notify_status -ne 0 ]]; then
+  echo 'Telegram notification failure terminated the Web runtime' >&2
+  exit 1
+fi
+grep -Fq 'dsh web: http://127.0.0.1:3080/?token=local-launch-secret' "$notify_stdout"
+test "$(grep -Fc 'notify stdin=http://127.0.0.1:3080/\?token=local-launch-secret' "$DSH_WEB_TEST_LOG")" -eq 1 || {
+  echo 'Web runtime did not notify exactly once with its first startup URL' >&2
+  exit 1
+}
+grep -Fq 'dsh web: Telegram startup URL notification failed' "$notify_stderr"
 
 for retired in scripts/dsh-web config/web/cordis.patch.yml; do
   if [[ -e "$repository_root/$retired" ]]; then

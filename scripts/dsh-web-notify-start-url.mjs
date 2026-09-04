@@ -27,7 +27,9 @@ async function main() {
   if (!launchUrl.searchParams.has('token')) throw new Error('missing launch token')
 
   const publicOrigin = new URL(process.env.DSH_WEB_PUBLIC_ORIGIN ?? 'https://dsh.man-her.icu')
-  if (publicOrigin.protocol !== 'https:' || publicOrigin.username !== '' || publicOrigin.password !== ''
+  const allowedProtocol = publicOrigin.protocol === 'https:'
+    || (publicOrigin.protocol === 'http:' && publicOrigin.hostname === '127.0.0.1')
+  if (!allowedProtocol || publicOrigin.username !== '' || publicOrigin.password !== ''
     || publicOrigin.pathname !== '/' || publicOrigin.search !== '' || publicOrigin.hash !== '') {
     throw new Error('invalid public origin')
   }
