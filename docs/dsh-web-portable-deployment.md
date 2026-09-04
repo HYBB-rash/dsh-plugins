@@ -217,7 +217,7 @@ $DSH_WEB_PACKAGE_ROOT/releases/<sha256>/
 `scripts/dsh-web-install-plugins` 在源码树和归档中共用，但行为由目录结构区分：
 
 - 源码模式：构建 Harness 和三个插件，以 `file:` 路径刷新开发 Profile，不安装生产凭据；
-- 归档模式：只安装三个 `.tgz`，使用 `--ignore-scripts`，再把凭据以 `0600` 安装到外部 `$DSH_HOME`。
+- 归档模式：若三个自研插件已安装，先通过 Harness 插件管理器移除，再按 provider 已有、consumer 后追加的顺序安装三个 `.tgz`；安装使用 `--ignore-scripts`，最后把凭据以 `0600` 安装到外部 `$DSH_HOME`。先 remove 再 add 不是清空 Profile，而是避免历史 bundle 顺序把第三方 preset provider 排到 Telegram consumer 后面。
 
 这样本地开发和生产遵循同一种插件安装模型，但生产目标机不编译。
 
