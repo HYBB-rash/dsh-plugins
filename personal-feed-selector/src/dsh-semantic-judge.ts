@@ -6,10 +6,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   BlockAssembler,
   createUserMessage,
-  deepFreeze,
   ReasoningEffortId,
   type GenerateOptions,
 } from '@deepseek-ai/dsh-llm'
+import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {
   PersonalFeedSelectionInput,

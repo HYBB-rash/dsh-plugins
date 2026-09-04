@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   createPersonalContextOwner,
   type PersonalContextActiveFact,
@@ -62,7 +62,7 @@ async function loadFactory(): Promise<Factory> {
 
 function toolCall(request: GenerateOptions, value: unknown, name = request.tools?.[0]?.name): readonly StreamChunk[] {
   const encoded = JSON.stringify(value)
-  const callId = CallId('personal-context-revisions')
+  const callId = ToolCallId('personal-context-revisions')
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
     { type: 'tool-call-delta', index: 0, id: callId, name: name ?? '', argumentsDelta: encoded },

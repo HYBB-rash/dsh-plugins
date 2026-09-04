@@ -1,12 +1,12 @@
 import {
   BlockAssembler,
   createUserMessage,
-  deepFreeze,
   ReasoningEffortId,
   type GenerateOptions,
   type StreamChunk,
   type ToolSchema,
 } from '@deepseek-ai/dsh-llm'
+import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type {
   PersonalContextActiveFact,
   PersonalFeedV2CandidateForJudgment,

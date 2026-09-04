@@ -7,8 +7,9 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
 import AgentRegistry, { installModelSelection } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { CallId, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { ToolCallId, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { summarizeTurn } from '@deepseek-ai/dsh-telegram-gateway'
@@ -88,6 +89,7 @@ async function createHarness(adapter: LlmAdapter): Promise<Context> {
   await context.plugin(SystemPrompt)
   await context.plugin(ToolRuntime)
   await context.plugin(AgentRegistry)
+  await context.plugin(SessionProjectionRegistry)
   await context.plugin(AgentDefaultModelConfig, MODEL_SELECTION)
   await context.plugin(AgentLoop, { agents: [] })
   context.llm.registerAdapter(['wire-test'], adapter)
@@ -96,7 +98,7 @@ async function createHarness(adapter: LlmAdapter): Promise<Context> {
 }
 
 function toolCall(id: string, name: string, value: unknown): StreamChunk[] {
-  const callId = CallId(id)
+  const callId = ToolCallId(id)
   const argumentsText = JSON.stringify(value)
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
@@ -187,7 +189,7 @@ async function runAgent(
     const firstSeq = handle.agent.session.seq
     handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'drive current X run' }], source: { kind: 'plugin', plugin: 'dsh-cron' } }))
     await handle.agent.whenIdle()
-    return summarizeTurn(handle.agent.session.events, firstSeq)
+    return summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq)
   } finally {
     await handle.dispose()
   }

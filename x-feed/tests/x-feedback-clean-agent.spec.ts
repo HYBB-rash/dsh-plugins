@@ -2,8 +2,9 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { CallId, createAssistantMessage, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { ToolCallId, createAssistantMessage, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -42,7 +43,7 @@ function toolCallResponse(
   text?: string,
   reasoning?: string,
 ): StreamChunk[] {
-  const call = CallId(callId)
+  const call = ToolCallId(callId)
   const encoded = JSON.stringify(args)
   const blocks: StreamChunk[] = []
   if (text !== undefined) {
@@ -84,7 +85,7 @@ function duplicateToolCallResponse(
   second: { callId: string; args: unknown },
 ): StreamChunk[] {
   const calls = [first, second].map(({ callId, args }, index) => {
-    const id = CallId(callId)
+    const id = ToolCallId(callId)
     const encoded = JSON.stringify(args)
     return [
       { type: 'block-start', index, blockType: 'tool-call' as const },
@@ -140,6 +141,7 @@ async function harness(adapter: WireAdapter): Promise<Context> {
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(AgentDefaultModelConfig, { provider: 'wire-test', model: 'wire-model' })
   ctx.llm.registerAdapter(['wire-test'], adapter)
@@ -309,7 +311,7 @@ describe('one-shot clean X feedback Agent', () => {
     ctx.on('agent/disposed', ({ agent }) => { disposedAgent = agent })
 
     await expect(runCleanFeedback(ctx, request)).rejects.toThrow(/invalid|unknown|submitted|second pre-step/u)
-    expect(JSON.stringify(disposedAgent?.session.events)).toContain('unknown fields')
+    expect(JSON.stringify(disposedAgent?.session.snapshotEvents())).toContain('unknown fields')
   })
 
   it('fails closed before followup when a global creation listener pollutes prompt and tools', async () => {
@@ -383,7 +385,7 @@ describe('one-shot clean X feedback Agent', () => {
     ctx.on('agent/disposed', ({ agent }) => { disposedAgent = agent })
 
     await expect(runCleanFeedback(ctx, request)).rejects.toThrow(/duplicate|second pre-step|aborted/u)
-    expect(JSON.stringify(disposedAgent?.session.events)).toContain('duplicate X feedback interpretation submission')
+    expect(JSON.stringify(disposedAgent?.session.snapshotEvents())).toContain('duplicate X feedback interpretation submission')
   })
 
   it('fails closed when the real llm/stream seam reports an error', async () => {

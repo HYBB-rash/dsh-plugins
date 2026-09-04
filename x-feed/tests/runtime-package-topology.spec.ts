@@ -32,6 +32,7 @@ const harnessPackages = [
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-session',
   '@deepseek-ai/dsh-tools',
+  '@deepseek-ai/dsh-util-values',
   '@deepseek-ai/schemastery',
 ] as const
 const temporaryDirectories: string[] = []
@@ -103,9 +104,7 @@ describe('release runtime package topology', () => {
   it('scans the final plugin libraries and materializes every declared runtime target including v2 Personal Feed', () => {
     const release = createCleanRelease()
 
-    expect(() => resolveFromPlugin(release, 'dsh-cron', '@deepseek-ai/dsh-home-paths')).toThrow(
-      expect.objectContaining({ code: 'MODULE_NOT_FOUND' }),
-    )
+    expect(existsSync(join(release, 'plugins/node_modules/@deepseek-ai/dsh-home-paths'))).toBe(false)
     expect(installerError('--check', release)).toContain('missing runtime link @deepseek-ai/dsh-home-paths')
 
     expect(runInstaller('--materialize', release)).toMatch(/materialized \d+ runtime links; checked \d+ imports/u)

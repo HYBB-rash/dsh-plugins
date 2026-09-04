@@ -222,7 +222,7 @@ async function assertPromptSurface(agent: Agent): Promise<void> {
 }
 
 function assertCompletedTurn(agent: Agent): void {
-  const event = [...agent.session.events].reverse().find(event => event.type === 'turn/end')
+  const event = agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')
   if (event === undefined || event.type !== 'turn/end') {
     throw new CleanFeedbackAgentError('clean feedback Agent did not finish a turn')
   }

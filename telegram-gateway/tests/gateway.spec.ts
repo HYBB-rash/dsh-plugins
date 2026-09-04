@@ -71,6 +71,7 @@ function gatewayConfig(overrides: Partial<Config> = {}): Config {
 }
 
 function gatewayContext(options: {
+  agentPresets?: boolean
   credentialValues?: Array<string | undefined>
   live?: boolean
   persisted?: boolean
@@ -105,6 +106,7 @@ function gatewayContext(options: {
     const value = credentialValues.shift()
     return value === undefined ? undefined : { value }
   })
+  const mountAgentPreset = vi.fn(async () => ({ id: 'standard' }))
   const services: Record<string, unknown> = {
     agentDefaultModel: { currentSelection: () => ({ provider: 'test-provider', model: 'test-model' }) },
     agents,
@@ -118,6 +120,9 @@ function gatewayContext(options: {
       resolve: resolveCredential,
     },
     appExit: vi.fn(),
+    ...(options.agentPresets === true
+      ? { agentPresets: { mount: mountAgentPreset } }
+      : {}),
   }
   let cleanup: (() => Promise<void>) | undefined
   const sessionEventHandlers = new Map<string, (session: unknown, event: SessionEvent) => void>()
@@ -148,6 +153,7 @@ function gatewayContext(options: {
     },
     services,
     setupContext,
+    mountAgentPreset,
   }
 }
 
@@ -1135,6 +1141,29 @@ describe('gateway lifecycle', () => {
       '✅ 已连接。你可以让我记住、跟进，或执行一件当前事情。',
       '⚠️ 任务出错：E_AGENT: failed',
     ])
+  })
+
+  it('mounts the requested Agent preset before publishing a new Telegram session', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+    const harness = gatewayContext({ agentPresets: true })
+    const lifetime = new AbortController()
+    const http: TelegramHttp = {
+      getMe: async () => ({ id: 9 }),
+      getUpdates: async () => {
+        lifetime.abort()
+        return []
+      },
+      sendMessage: async () => ({ messageId: 1 }),
+    }
+    const config = { ...gatewayConfig(), agentPreset: 'standard' }
+
+    await runGateway(harness.ctx, config, http, lifetime.signal)
+
+    expect(harness.mountAgentPreset).toHaveBeenCalledOnce()
+    expect(harness.mountAgentPreset).toHaveBeenCalledWith(harness.setupContext, 'standard')
+    expect(harness.agents.create).toHaveBeenCalledWith(expect.objectContaining({
+      meta: expect.objectContaining({ agentPreset: 'standard' }),
+    }))
   })
 
   it('reuses a live Agent without disposing it and reports an empty reply', async () => {

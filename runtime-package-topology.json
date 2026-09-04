@@ -62,6 +62,14 @@
       ]
     },
     {
+      "name": "@deepseek-ai/dsh-util-values",
+      "kind": "harness",
+      "requiredBy": [
+        "@herman/personal-feed-selector",
+        "@herman/x-feed"
+      ]
+    },
+    {
       "name": "@deepseek-ai/schemastery",
       "kind": "harness",
       "requiredBy": [

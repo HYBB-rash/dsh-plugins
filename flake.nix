@@ -24,7 +24,9 @@
               openssh
               podman
               procps
-              python3
+              (python3.withPackages (pythonPackages: with pythonPackages; [
+                websocket-client
+              ]))
               util-linux
               zstd
             ];

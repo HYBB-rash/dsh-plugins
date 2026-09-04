@@ -191,7 +191,7 @@ export class OneShotStructuredAgentSurface<T> {
     const agent = exec.agent
     const step = agent === undefined
       ? undefined
-      : [...agent.session.events].reverse().find(event => event.type === 'step/start')
+      : agent.session.snapshotEvents().findLast(event => event.type === 'step/start')
     if (agent === undefined || step === undefined || step.type !== 'step/start' || this.submitted === undefined) {
       this.failSubmission(exec, 'structured Agent cannot record its mechanical DTO outcome')
     }
@@ -343,7 +343,7 @@ export async function runOneShotStructuredAgent<T>(
 }
 
 function assertCompletedTurn(agent: Agent, invalidSubmission: boolean): void {
-  const event = [...agent.session.events].reverse().find(value => value.type === 'turn/end')
+  const event = agent.session.snapshotEvents().findLast(value => value.type === 'turn/end')
   if (event === undefined || event.type !== 'turn/end') {
     throw new OneShotStructuredAgentError('not-completed', 'structured Agent did not finish a turn')
   }

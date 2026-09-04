@@ -1,14 +1,29 @@
 - insert:
+    - id: personal-feed-selector
+      name: './node_modules/@herman/personal-feed-selector/lib/index.js'
+      config:
+        mode: telegram
+        telegramParentSessionId: session-telegram
     - id: telegram-gateway
       name: './node_modules/@deepseek-ai/dsh-telegram-gateway/lib/index.js'
       config:
         sessionId: session-telegram
+        agentPreset: standard
         cwd: !!js process.env.DSH_CWD ?? process.cwd()
+        extensions:
+          - modulePath: '@herman/x-feed'
+            configJson: '{"telegramSessionId":"session-telegram"}'
     - id: dsh-cron
       name: './node_modules/@deepseek-ai/dsh-cron/lib/index.js'
       config:
-        mode: manager
+        mode: scheduler
+        pollIntervalMs: 10000
+        maxConcurrent: 3
+        deliverOnError: true
     - id: dsh-assistant
       name: './node_modules/@deepseek-ai/dsh-assistant/lib/index.js'
       config:
-        mode: web
+        mode: telegram
+        pollIntervalMs: 5000
+        telegramParentSessionId: session-telegram
+        cronControlSocketPath: !!js dshHomePath('storages/dsh-cron/control.sock')

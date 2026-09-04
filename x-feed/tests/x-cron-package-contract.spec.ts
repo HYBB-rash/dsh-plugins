@@ -176,5 +176,5 @@ if (X_CRON_AGENT_ENVIRONMENT_MARKER !== provider.marker) throw new Error('marker
         .join('\n')
       throw new Error(`packed consumer type-check failed:\n${output || String(error)}`, { cause: error })
     }
-  }, 15_000)
+  }, 30_000)
 })

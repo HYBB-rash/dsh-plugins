@@ -32,6 +32,7 @@
   "peerDependencies": {
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-agent-default-model": "*",
+    "@deepseek-ai/dsh-agent-presets": "*",
     "@deepseek-ai/dsh-cmdline": "*",
     "@deepseek-ai/dsh-credentials": "*",
     "@deepseek-ai/dsh-home-paths": "*",
@@ -47,6 +48,7 @@
   "devDependencies": {
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-agent-default-model": "*",
+    "@deepseek-ai/dsh-agent-presets": "*",
     "@deepseek-ai/dsh-cmdline": "*",
     "@deepseek-ai/dsh-credentials": "*",
     "@deepseek-ai/dsh-home-paths": "*",

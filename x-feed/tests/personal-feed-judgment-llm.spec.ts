@@ -1,4 +1,4 @@
-import { CallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type {
   PersonalContextActiveFact,
   PersonalContextSnapshot,
@@ -81,7 +81,7 @@ function toolCall(requestValue: GenerateOptions, value: unknown, name = requestV
 }
 
 function rawToolCall(requestValue: GenerateOptions, encoded: string, name = requestValue.tools?.[0]?.name): readonly StreamChunk[] {
-  const callId = CallId('personal-feed-candidate-judgment')
+  const callId = ToolCallId('personal-feed-candidate-judgment')
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
     { type: 'tool-call-delta', index: 0, id: callId, name: name ?? '', argumentsDelta: encoded },
@@ -92,7 +92,7 @@ function rawToolCall(requestValue: GenerateOptions, encoded: string, name = requ
 
 function reasoningAndToolCall(requestValue: GenerateOptions, value: unknown): readonly StreamChunk[] {
   const encoded = JSON.stringify(value)
-  const callId = CallId('personal-feed-candidate-judgment')
+  const callId = ToolCallId('personal-feed-candidate-judgment')
   return [
     { type: 'block-start', index: 0, blockType: 'reasoning' },
     { type: 'reasoning-delta', index: 0, text: 'internal reasoning' },

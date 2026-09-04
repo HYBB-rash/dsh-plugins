@@ -7,8 +7,9 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
 import AgentRegistry, { installModelSelection } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { CallId, type GenerateOptions, LlmAdapter, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { ToolCallId, type GenerateOptions, LlmAdapter, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -55,7 +56,7 @@ function runner(): { calls: PythonCommandRequest[]; run: (request: PythonCommand
 }
 
 function toolCall(id: string, name: string, value: unknown): StreamChunk[] {
-  const callId = CallId(id)
+  const callId = ToolCallId(id)
   const args = JSON.stringify(value)
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
@@ -120,6 +121,7 @@ async function finalHarness(adapter: LlmAdapter): Promise<Context> {
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(AgentDefaultModelConfig, { provider: 'wire-test', model: 'wire-model' })
   ctx.llm.registerAdapter(['wire-test'], adapter)
@@ -341,7 +343,7 @@ describe('dsh-x-feed/v1 cron provider composition boundary', () => {
         source: { kind: 'plugin', plugin: 'dsh-cron' },
       }))
       await handle.agent.whenIdle()
-      const outcome = summarizeTurn(handle.agent.session.events, firstSeq)
+      const outcome = summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq)
       const finalized = await lease.finalizeOutcome!(outcome)
 
       expect(adapter.requests).toHaveLength(2)
@@ -412,7 +414,7 @@ describe('dsh-x-feed/v1 cron provider composition boundary', () => {
         source: { kind: 'plugin', plugin: 'dsh-cron' },
       }))
       await handle.agent.whenIdle()
-      const finalized = await lease.finalizeOutcome!(summarizeTurn(handle.agent.session.events, firstSeq))
+      const finalized = await lease.finalizeOutcome!(summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq))
 
       expect(adapter.requests).toHaveLength(2)
       expect(finalized.text).toContain('📦 X 洞察 provider title')
@@ -480,7 +482,7 @@ describe('dsh-x-feed/v1 cron provider composition boundary', () => {
         source: { kind: 'plugin', plugin: 'dsh-cron' },
       }))
       await handle.agent.whenIdle()
-      const finalized = await lease.finalizeOutcome!(summarizeTurn(handle.agent.session.events, firstSeq))
+      const finalized = await lease.finalizeOutcome!(summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq))
 
       expect(adapter.requests).toHaveLength(2)
       expect(python.calls.filter(call => call.args.some(arg => arg.endsWith('/x_topic_search.py')))).toHaveLength(1)
@@ -548,7 +550,7 @@ describe('dsh-x-feed/v1 cron provider composition boundary', () => {
         source: { kind: 'plugin', plugin: 'dsh-cron' },
       }))
       await handle.agent.whenIdle()
-      const finalized = await lease.finalizeOutcome!(summarizeTurn(handle.agent.session.events, firstSeq))
+      const finalized = await lease.finalizeOutcome!(summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq))
 
       expect(adapter.requests).toHaveLength(2)
       expect(python.calls.filter(call => call.args.some(arg => arg.endsWith('/x_explorer.py')))).toHaveLength(1)
@@ -660,7 +662,7 @@ describe('dsh-x-feed/v1 cron provider composition boundary', () => {
         source: { kind: 'plugin', plugin: 'dsh-cron' },
       }))
       await handle.agent.whenIdle()
-      const outcome = summarizeTurn(handle.agent.session.events, firstSeq)
+      const outcome = summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq)
       const finalized = await lease.finalizeOutcome?.(outcome)
 
       const plannerRequests = adapter.requests.filter(request => request.system?.includes('planner Agent'))

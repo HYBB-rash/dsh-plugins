@@ -7,8 +7,9 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
 import AgentRegistry, { installModelSelection } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { CallId, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { ToolCallId, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { summarizeTurn } from '@deepseek-ai/dsh-telegram-gateway'
@@ -226,7 +227,7 @@ async function runRound(context: Context, scenario: Scenario, adapter: Invarianc
     const text = label.endsWith('round-1') ? `执行当前 X run ${FIRST_ROUND_MARKER} ${OLD_SESSION_MARKER}` : '执行当前 X run'
     handle.agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'dsh-cron' } }))
     await handle.agent.whenIdle()
-    const outcome = summarizeTurn(handle.agent.session.events, firstSeq)
+    const outcome = summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq)
     const finalized = await lease.finalizeOutcome?.(outcome) as { readonly text: string; readonly error: string | undefined } | undefined
     expect(outcome.error).toBeUndefined()
     expect(outcome.text).toContain('provider title')
@@ -234,7 +235,7 @@ async function runRound(context: Context, scenario: Scenario, adapter: Invarianc
     expect(pythonCalls.filter(request => request.args.includes('prepare-delivery'))).toHaveLength(1)
     return {
       plannerWires: adapter.plannerRequests.slice(beforePlanner), composerWires: adapter.composerRequests.slice(beforeComposer),
-      sessionId: String(sessionId), sessionEvents: JSON.stringify(handle.agent.session.events),
+      sessionId: String(sessionId), sessionEvents: JSON.stringify(handle.agent.session.snapshotEvents()),
     }
   } finally {
     await handle.dispose()
@@ -267,12 +268,12 @@ function readLegacyNoiseSizes(directory: string): Readonly<Record<string, number
 async function createHarness(adapter: InvarianceAdapter): Promise<Context> {
   const context = new Context()
   await context.plugin(LlmRuntime); await context.plugin(SessionStore); await context.plugin(SystemPrompt); await context.plugin(ToolRuntime)
-  await context.plugin(AgentRegistry); await context.plugin(AgentDefaultModelConfig, MODEL_SELECTION); await context.plugin(AgentLoop, { agents: [] })
+  await context.plugin(AgentRegistry); await context.plugin(SessionProjectionRegistry); await context.plugin(AgentDefaultModelConfig, MODEL_SELECTION); await context.plugin(AgentLoop, { agents: [] })
   context.llm.registerAdapter(['wire-test'], adapter); contexts.push(context); return context
 }
 
 function toolCall(id: string, name: string, value: unknown, withReasoning: boolean): StreamChunk[] {
-  const callId = CallId(id); const argumentsText = JSON.stringify(value); const blocks: StreamChunk[] = []
+  const callId = ToolCallId(id); const argumentsText = JSON.stringify(value); const blocks: StreamChunk[] = []
   if (withReasoning) {
     const marker = `${FIRST_ROUND_MARKER} ${OLD_SESSION_MARKER}`
     blocks.push({ type: 'block-start', index: 0, blockType: 'reasoning' }, { type: 'reasoning-delta', index: 0, text: marker }, { type: 'block-end', index: 0, block: { type: 'reasoning', text: marker } })

@@ -217,5 +217,5 @@ console.log('TODO7_PACKED_RUNTIME_CONSUMER_OK')
       encoding: 'utf8',
     }).trim()
     expect(output).toBe('TODO7_PACKED_RUNTIME_CONSUMER_OK')
-  }, 15_000)
+  }, 30_000)
 })

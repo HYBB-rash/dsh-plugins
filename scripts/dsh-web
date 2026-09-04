@@ -8,22 +8,30 @@ harness_root="$root_directory/upstream/deepseek-harness"
 harness_node_modules="$harness_root/node_modules/.pnpm/node_modules"
 harness_tsc="$harness_root/node_modules/.bin/tsc"
 harness_tsdown="$harness_root/node_modules/.bin/tsdown"
-harness_plugins_dir="$DSH_HOME/profiles/web/node_modules/@deepseek-ai"
-harness_plugin_scope="$harness_root/node_modules/.pnpm/node_modules/@deepseek-ai"
+harness_deepseek_scope="$harness_root/node_modules/.pnpm/node_modules/@deepseek-ai"
+harness_herman_scope="$harness_root/node_modules/.pnpm/node_modules/@herman"
+profile_deepseek_scope="$DSH_HOME/profiles/web/node_modules/@deepseek-ai"
+profile_herman_scope="$DSH_HOME/profiles/web/node_modules/@herman"
 
 ensure_local_plugin_links() {
   local plugin
-  for plugin in telegram-gateway dsh-cron dsh-assistant; do
-    if [ -e "$harness_plugin_scope/$plugin" ]; then
-      if [ ! -L "$harness_plugin_scope/$plugin" ]; then
-        echo "❌ $harness_plugin_scope/$plugin is not a symlink" >&2
+  local scope
+  mkdir -p "$harness_deepseek_scope" "$harness_herman_scope"
+  for plugin in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed x-feed; do
+    case "$plugin" in
+      personal-feed-selector|personal-feed|x-feed) scope=$harness_herman_scope ;;
+      *) scope=$harness_deepseek_scope ;;
+    esac
+    if [ -e "$scope/$plugin" ]; then
+      if [ ! -L "$scope/$plugin" ]; then
+        echo "❌ $scope/$plugin is not a symlink" >&2
         return 1
       fi
-      if [ "$(readlink "$harness_plugin_scope/$plugin")" != "$root_directory/$plugin" ]; then
-        ln -sfn "$root_directory/$plugin" "$harness_plugin_scope/$plugin"
+      if [ "$(readlink "$scope/$plugin")" != "$root_directory/$plugin" ]; then
+        ln -sfn "$root_directory/$plugin" "$scope/$plugin"
       fi
     else
-      ln -s "$root_directory/$plugin" "$harness_plugin_scope/$plugin"
+      ln -s "$root_directory/$plugin" "$scope/$plugin"
     fi
   done
 }
@@ -86,15 +94,27 @@ ensure_local_plugin_links
 build_plugin "$root_directory/telegram-gateway"
 build_plugin "$root_directory/dsh-cron"
 build_plugin "$root_directory/dsh-assistant"
+build_plugin "$root_directory/personal-feed-selector"
+build_plugin "$root_directory/personal-feed"
+build_plugin "$root_directory/x-feed"
 
-for installed in "$harness_plugins_dir/dsh-telegram-gateway" "$harness_plugins_dir/dsh-cron" "$harness_plugins_dir/dsh-assistant"; do
+for installed in \
+  "$profile_deepseek_scope/dsh-telegram-gateway" \
+  "$profile_deepseek_scope/dsh-cron" \
+  "$profile_deepseek_scope/dsh-assistant" \
+  "$profile_herman_scope/personal-feed-selector" \
+  "$profile_herman_scope/personal-feed" \
+  "$profile_herman_scope/x-feed"; do
   rm -rf "$installed"
 done
 
 pnpm dsh plugin --profile web add \
   "file:$root_directory/telegram-gateway" \
   "file:$root_directory/dsh-cron" \
-  "file:$root_directory/dsh-assistant"
+  "file:$root_directory/dsh-assistant" \
+  "file:$root_directory/personal-feed-selector" \
+  "file:$root_directory/personal-feed" \
+  "file:$root_directory/x-feed"
 
 install -m 0644 "$root_directory/config/web/cordis.patch.yml" "$DSH_HOME/profiles/web/cordis.patch.yml"
 

@@ -2,8 +2,9 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { CallId, createAssistantMessage, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk, type ToolSchema } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { ToolCallId, createAssistantMessage, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk, type ToolSchema } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { summarizeTurn } from '@deepseek-ai/dsh-telegram-gateway'
@@ -25,7 +26,7 @@ const material: XFeedComposerMaterial = {
 
 function response(value: unknown, callId = 'composer-1'): StreamChunk[] {
   const args = JSON.stringify(value)
-  const id = CallId(callId)
+  const id = ToolCallId(callId)
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
     { type: 'tool-call-delta', index: 0, id, name: SUBMIT_X_CRON_COMPOSER, argumentsDelta: args },
@@ -62,6 +63,7 @@ async function harness(adapter: WireAdapter): Promise<Context> {
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(AgentDefaultModelConfig, { provider: 'wire-test', model: 'wire-model' })
   ctx.llm.registerAdapter(['wire-test'], adapter)
@@ -99,7 +101,7 @@ async function expectRejectedDto(dto: unknown, materialValue: XFeedComposerMater
   const surface = new XFeedComposerAgentSurface({ material: materialValue })
   const { handle, firstSeq } = await drive(ctx, surface)
   try {
-    expect(() => surface.finalizeOutcome(summarizeTurn(handle.agent.session.events, firstSeq))).toThrow(/invalid|submission|outcome|unknown|allowlist|empty/u)
+    expect(() => surface.finalizeOutcome(summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq))).toThrow(/invalid|submission|outcome|unknown|allowlist|empty/u)
     expect(dto).toEqual(original)
     expect(surface.wires).toHaveLength(1)
     expect(adapter.requests).toHaveLength(1)
@@ -151,7 +153,7 @@ describe('scheduler-owned X cron composer Agent surface', () => {
     const surface = new XFeedComposerAgentSurface({ material })
     const { sessionId, handle, firstSeq } = await drive(ctx, surface)
     try {
-      const summarized = summarizeTurn(handle.agent.session.events, firstSeq)
+      const summarized = summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq)
       expect(summarized.text).toBe(JSON.stringify(dto))
       const outcome = surface.finalizeOutcome(summarized)
       expect(outcome).toEqual(dto)
@@ -183,7 +185,7 @@ describe('scheduler-owned X cron composer Agent surface', () => {
     const surface = new XFeedComposerAgentSurface({ material: { ...material, allowedSectionKinds: ['wander'] } })
     const { handle, firstSeq } = await drive(ctx, surface)
     try {
-      const summarized = summarizeTurn(handle.agent.session.events, firstSeq)
+      const summarized = summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq)
       expect(summarized.text).toBe(JSON.stringify(dto))
       expect(surface.finalizeOutcome(summarized)).toEqual(dto)
       expect(surface.wires).toHaveLength(1)
@@ -215,7 +217,7 @@ describe('scheduler-owned X cron composer Agent surface', () => {
     const surface = new XFeedComposerAgentSurface({ material })
     const { handle, firstSeq } = await drive(ctx, surface)
     try {
-      const summarized = summarizeTurn(handle.agent.session.events, firstSeq)
+      const summarized = summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq)
       expect(summarized.text).toBe(JSON.stringify(projected))
       expect(surface.finalizeOutcome(summarized)).toEqual(projected)
       expect(dto).toEqual(original)
@@ -293,7 +295,7 @@ describe('scheduler-owned X cron composer Agent surface', () => {
     const surface = new XFeedComposerAgentSurface({ material: onlineMaterial })
     const { handle, firstSeq } = await drive(ctx, surface)
     try {
-      const summarized = summarizeTurn(handle.agent.session.events, firstSeq)
+      const summarized = summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq)
       expect(summarized.text).toBe(JSON.stringify(projected))
       expect(surface.finalizeOutcome(summarized)).toEqual(projected)
       expect(dto).toEqual(original)
@@ -340,7 +342,7 @@ describe('scheduler-owned X cron composer Agent surface', () => {
     const surface = new XFeedComposerAgentSurface({ material: orphanMaterial })
     const { handle, firstSeq } = await drive(ctx, surface)
     try {
-      const summarized = summarizeTurn(handle.agent.session.events, firstSeq)
+      const summarized = summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq)
       expect(summarized.text).toBe(JSON.stringify(projected))
       expect(surface.finalizeOutcome(summarized)).toEqual(projected)
       expect(dto).toEqual(original)
@@ -377,7 +379,7 @@ describe('scheduler-owned X cron composer Agent surface', () => {
         title: '本轮洞察',
         sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary: '首次摘要' }] }],
       }
-      const summarized = summarizeTurn(handle.agent.session.events, firstSeq)
+      const summarized = summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq)
       expect(summarized.text).toBe(JSON.stringify(projected))
       expect(surface.finalizeOutcome(summarized)).toEqual(projected)
       expect(dto).toEqual(original)
@@ -412,7 +414,7 @@ describe('scheduler-owned X cron composer Agent surface', () => {
         title: '本轮洞察',
         sections: [{ kind: 'highlight', items: [{ itemId: 'item-1', summary: '首次摘要' }] }],
       }
-      const summarized = summarizeTurn(handle.agent.session.events, firstSeq)
+      const summarized = summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq)
       expect(summarized.text).toBe(JSON.stringify(projected))
       expect(surface.finalizeOutcome(summarized)).toEqual(projected)
       expect(dto).toEqual(original)
@@ -493,7 +495,7 @@ describe('scheduler-owned X cron composer Agent surface', () => {
     const surface = new XFeedComposerAgentSurface({ material })
     const { handle, firstSeq } = await drive(ctx, surface)
     try {
-      expect(() => surface.finalizeOutcome(summarizeTurn(handle.agent.session.events, firstSeq))).toThrow(/invalid|submission|outcome|unknown|allowlist/u)
+      expect(() => surface.finalizeOutcome(summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq))).toThrow(/invalid|submission|outcome|unknown|allowlist/u)
       expect(surface.wires).toHaveLength(1)
       expect(adapter.requests).toHaveLength(1)
     } finally {
@@ -522,7 +524,7 @@ describe('scheduler-owned X cron composer Agent surface', () => {
     })
     try {
       expect(adapter.requests).toHaveLength(0)
-      expect(() => surface.finalizeOutcome(summarizeTurn(handle.agent.session.events, firstSeq))).toThrow(/contaminated|outcome|request/u)
+      expect(() => surface.finalizeOutcome(summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq))).toThrow(/contaminated|outcome|request/u)
     } finally {
       surface.dispose()
       await ctx.sessions.flush(handle.agent.session)
@@ -538,7 +540,7 @@ describe('scheduler-owned X cron composer Agent surface', () => {
     const { handle, firstSeq } = await drive(ctx, surface)
     try {
       expect(adapter.requests).toHaveLength(1)
-      const outcome = summarizeTurn(handle.agent.session.events, firstSeq)
+      const outcome = summarizeTurn(handle.agent.session.snapshotEvents(), firstSeq)
       expect(outcome.text).toBe('普通文本但没有 composer DTO')
       expect(() => surface.finalizeOutcome(outcome)).toThrow(/submission|outcome|DTO/u)
     } finally {

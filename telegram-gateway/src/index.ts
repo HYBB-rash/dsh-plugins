@@ -41,6 +41,7 @@ import {
   type ModelSelectionRef,
 } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
@@ -117,6 +118,8 @@ export interface Config {
   allowedChatId?: string
   /** Stable session id used for the fixed conversation. Defaults to `session-telegram`. */
   sessionId: string
+  /** Optional Agent preset for hosts that move model-facing tools behind presets. */
+  agentPreset?: string
   /** Working directory for the agent's bash/filesystem tools. Defaults to the process cwd. */
   cwd?: string
   /** Telegram API base URL. Defaults to https://api.telegram.org. */
@@ -137,6 +140,7 @@ export const Config: z<Config> = z.object({
   token: z.string(),
   allowedChatId: z.string(),
   sessionId: z.string().default('session-telegram'),
+  agentPreset: z.string(),
   cwd: z.string(),
   apiBaseUrl: z.string().default('https://api.telegram.org'),
   pollTimeoutSeconds: z.number().step(1).min(1).max(50).default(30),
@@ -455,9 +459,16 @@ export async function runGateway(
 
   // Reuse a live Agent. Otherwise resume only a materialized session; failures
   // other than absence remain visible instead of falling through to create().
-  const setup: AgentSetup = (agentCtx) => {
+  const setup: AgentSetup = async (agentCtx) => {
     const selected: ModelSelectionRef = { current: selection, assembled: undefined }
     installModelSelection(agentCtx, selected)
+    if (config.agentPreset !== undefined) {
+      const presets = ctx.get('agentPresets')
+      if (presets === undefined) {
+        throw new Error(`telegram-gateway: Agent preset "${config.agentPreset}" requested but agent-presets is unavailable`)
+      }
+      await presets.mount(agentCtx, config.agentPreset)
+    }
   }
   let handle: AgentHandle | undefined
   const live = agents.get(sessionId)
@@ -465,7 +476,12 @@ export async function runGateway(
     const persisted = (await persistence.list({ signal })).some(snapshot => snapshot.header.id === sessionId)
     handle = persisted
       ? await agents.resume({ resumeSessionId: sessionId, agentOptions: { provider: selection.provider, model: selection.model }, setup })
-      : await agents.create({ sessionId, meta: { cwd }, agentOptions: { provider: selection.provider, model: selection.model }, setup })
+      : await agents.create({
+          sessionId,
+          meta: { cwd, ...(config.agentPreset === undefined ? {} : { agentPreset: config.agentPreset }) },
+          agentOptions: { provider: selection.provider, model: selection.model },
+          setup,
+        })
   }
   const agent = live ?? handle!.agent
 
