@@ -13,6 +13,7 @@
 
 ## DSH 助理、Cron 与持久状态
 
+- 2026-09-05：Agent `dispose` 只释放运行句柄，不等于持久 Session 已归档。Cron `per_run` 的闭口应由 Scheduler 在已有唯一有效 finish 后，用确定性 `runId` 哈希身份与 `sessionPersistence.list()` 实体交集调用 Workspace 全局归档；放进周期 poll 可同时补历史、崩溃窗口和临时失败，且不得把归档错误传回业务结果或触发重跑。
 - `focus` 是唯一互斥的用户时间焦点；普通委派 `delegated` 与长期监控 `monitor` 可以并行。任何多项修改若无法唯一定位，必须返回候选并保持零副作用。
 - 时间驱动周期任务由 `dsh-cron` 持有时钟和每轮唤醒；`dsh-assistant` 只保存持续责任、关联任务、结果与异常认知。桥接走正式接口，不能直接改 cron 的 `jobs.jsonl`；只管理用户时间的焦点提醒可由 assistant reminder 负责。
 - 用户的个人待办、`dsh-assistant` 当前责任账本和定时任务是三个不同事实源。`assistant_task_status` 只权威回答当前责任；用户问完整待办时，应按部署 workspace 指引读取个人任务事实，不能由空责任账本推断没有任务。
