@@ -6,21 +6,9 @@ import { describe, expect, it } from 'vitest'
 
 const packageDirectory = resolve(import.meta.dirname, '..')
 const pythonRuntimeFiles = [
-  'python/browser_start.py',
-  'python/insight_engine.py',
-  'python/x_browser.py',
   'python/x_browser_navigation_lock.py',
-  'python/x_explorer.py',
-  'python/x_insight_pipeline.py',
-  'python/x_neighborhood.py',
   'python/x_personal_feed_observer.py',
   'python/x_personal_feed_observer_cli.py',
-  'python/x_paths.py',
-  'python/x_timeline_collector.py',
-  'python/x_timeline_dedup.py',
-  'python/x_timeline_migrate_explore.py',
-  'python/x_timeline_store.py',
-  'python/x_topic_search.py',
 ] as const
 
 describe('x-feed business package contract', () => {
@@ -38,6 +26,7 @@ describe('x-feed business package contract', () => {
     expect(mainSource).toContain('createTrustedFactNavigation')
     expect(mainSource).toContain('TrustedFactNavigationProjector')
     expect(mainSource).toContain('createFactProjectionPreflight')
+    expect(mainSource).not.toContain('createXFeedCronEnvironmentProvider')
     expect(typeSource).toContain('createTrustedFactNavigation')
     expect(typeSource).toContain('NavigationItem')
     expect(typeSource).toContain('createFactProjectionPreflight')
@@ -114,6 +103,7 @@ describe('x-feed business package contract', () => {
       expect(files.some((file) => /^lib\/[^/]+\.js$/.test(file))).toBe(true)
       expect(files.some((file) => /^lib\/types\/.*\.d\.ts$/.test(file))).toBe(true)
       for (const runtimeFile of pythonRuntimeFiles) expect(files).toContain(runtimeFile)
+      expect(new Set(files.filter((file) => file.startsWith('python/')))).toEqual(new Set(pythonRuntimeFiles))
       expect(files.some((file) => /(^|\/)(?:data|storage|storages)(?:\/|$)/.test(file))).toBe(false)
       expect(files.some((file) => /(?:feedback\.jsonl|shown\.jsonl|x_insight_package\.json|\.dsh)/.test(file))).toBe(false)
       expect(files.some((file) => /(?:__pycache__|\.pyc$|(?:^|\/)(?:cache|tests?|fixtures?)(?:\/|$)|(?:^|\/)test_[^/]+$)/.test(file))).toBe(false)

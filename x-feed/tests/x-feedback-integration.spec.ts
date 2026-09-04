@@ -93,7 +93,6 @@ function config(dataDir: string) {
     dataDir,
     personalFeedDataDir: join(dataDir, 'personal-feed'),
     pythonBin: '/usr/bin/python3',
-    pipelinePath: '/tmp/x_insight_pipeline.py',
     telegramSessionId: 'session-telegram',
     feedbackPendingTtlMs: 600_000,
     feedbackTurnTimeoutMs: 30_000,

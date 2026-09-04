@@ -102,7 +102,7 @@ vi.mock('../src/personal-feed/x-surface-observer.ts', () => ({
 }))
 
 vi.mock('../src/config.ts', () => ({
-  resolvePipelinePath: vi.fn(() => '/opt/dsh/runtime/x-feed/python/x_insight_pipeline.py'),
+  resolveObserverCliPath: vi.fn(() => '/opt/dsh/runtime/x-feed/python/x_personal_feed_observer_cli.py'),
   parseXFeedRuntimeConfig: vi.fn((raw: Record<string, unknown>) => Object.freeze({
     dataDir: raw.dataDir,
     personalFeedDataDir: raw.personalFeedDataDir,

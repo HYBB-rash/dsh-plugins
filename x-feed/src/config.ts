@@ -48,11 +48,11 @@ export function resolveDataDir(config: { readonly dataDir?: string }): string {
     : defaultStoreDir(resolveDshHome())
 }
 
-/** Resolve the shipped Python pipeline from either source or bundled output. */
-export function resolvePipelinePath(config: { readonly pipelinePath?: string }): string {
-  if (config.pipelinePath !== undefined && config.pipelinePath !== '') return config.pipelinePath
+/** Resolve the shipped Personal Feed X observer from either source or bundled output. */
+export function resolveObserverCliPath(config: { readonly observerCliPath?: string }): string {
+  if (config.observerCliPath !== undefined && config.observerCliPath !== '') return config.observerCliPath
   const here = fileURLToPath(new URL('.', import.meta.url))
-  return join(here, '..', 'python', 'x_insight_pipeline.py')
+  return join(here, '..', 'python', 'x_personal_feed_observer_cli.py')
 }
 
 function optionalString(input: Readonly<Record<string, unknown>>, key: string): string | undefined {

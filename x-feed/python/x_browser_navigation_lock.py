@@ -12,10 +12,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-import x_paths
 
-
-TIMELINE_BROWSER_LOCK = Path(x_paths.data_dir()) / ".x_timeline_browser.lock"
+_configured_data_dir = os.environ.get("DSH_X_FEED_DATA_DIR", "").strip()
+_data_dir = Path(_configured_data_dir.rstrip("/")) if _configured_data_dir else Path(__file__).resolve().parent.parent / "data"
+TIMELINE_BROWSER_LOCK = _data_dir / ".x_timeline_browser.lock"
 _LOCK_POLL_INTERVAL_SECONDS = 0.05
 
 

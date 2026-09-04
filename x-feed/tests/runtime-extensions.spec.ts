@@ -6,7 +6,7 @@ import {
   installTelegramExtension,
   parseXFeedRuntimeConfig,
   resolveDataDir,
-  resolvePipelinePath,
+  resolveObserverCliPath,
   X_FEED_CONTRACT,
 } from '../src/index.ts'
 import { FileNavigationSnapshotStore } from '../src/navigation/file-navigation-snapshot-store.ts'
@@ -69,7 +69,6 @@ describe('X runtime configuration', () => {
       cronJobId: 'cron-x',
       dataDir: '/custom/data',
       pythonBin: '/custom/python3',
-      pipelinePath: '/custom/x_insight_pipeline.py',
       personalFeedDataDir: '/custom/personal-feed',
       personalFeedRequiredSources: ['x'],
       candidateReportingWindowMs: 300_000,
@@ -81,7 +80,7 @@ describe('X runtime configuration', () => {
       feedbackPendingTtlMs: 600_000,
       feedbackTurnTimeoutMs: 30_000,
     })
-    expect(resolvePipelinePath({}).endsWith('python/x_insight_pipeline.py')).toBe(true)
+    expect(resolveObserverCliPath({}).endsWith('python/x_personal_feed_observer_cli.py')).toBe(true)
   })
 
   it('resolves the Personal Feed directory separately, including its default and type boundary', () => {

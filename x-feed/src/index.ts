@@ -13,7 +13,7 @@ import {
 export {
   parseXFeedRuntimeConfig,
   resolveDataDir,
-  resolvePipelinePath,
+  resolveObserverCliPath,
   type ResolvedXFeedRuntimeConfig,
   type XFeedRuntimeConfig,
 } from './config.ts'
@@ -22,13 +22,6 @@ export {
   createTrustedFactNavigation,
   X_FEED_CONTRACT,
 } from './telegram-extension.ts'
-
-export {
-  createXFeedCronEnvironmentProvider,
-  X_CRON_AGENT_ENVIRONMENT_MARKER,
-  X_CRON_ENVIRONMENT_REQUIREMENTS,
-  type XFeedCronProviderOptions,
-} from './x-cron/provider.ts'
 
 /** Install the X feedback behavior with an isolated clock for this install. */
 export function installTelegramExtension(

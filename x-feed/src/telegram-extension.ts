@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createPersonalContextOwner } from '@herman/personal-feed'
-import { parseXFeedRuntimeConfig, resolvePipelinePath } from './config.ts'
+import { parseXFeedRuntimeConfig, resolveObserverCliPath } from './config.ts'
 import { XFeedbackStore } from './store.ts'
 import { registerXFeedTools } from './tools.ts'
 import { runCleanFeedback } from './x-feedback/clean-agent.ts'
@@ -106,7 +106,7 @@ export async function installTelegramExtensionWithClock(
     owner,
     installSignal: installLifetime.signal,
   })
-  const observerCliPath = join(dirname(resolvePipelinePath({})), 'x_personal_feed_observer_cli.py')
+  const observerCliPath = resolveObserverCliPath({})
   const personalFeedXObserver = createPersonalFeedXSurfaceObserver({
     pythonBin: process.env.DSH_PYTHON_BIN ?? '/usr/bin/python3',
     observerCliPath,

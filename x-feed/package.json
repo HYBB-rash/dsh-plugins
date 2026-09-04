@@ -20,26 +20,13 @@
   "files": [
     "lib/*.js",
     "lib/types/**/*.d.ts",
-    "python/browser_start.py",
-    "python/insight_engine.py",
-    "python/x_browser.py",
     "python/x_browser_navigation_lock.py",
-    "python/x_explorer.py",
-    "python/x_insight_pipeline.py",
-    "python/x_neighborhood.py",
-    "python/x_paths.py",
     "python/x_personal_feed_observer.py",
-    "python/x_personal_feed_observer_cli.py",
-    "python/x_timeline_collector.py",
-    "python/x_timeline_dedup.py",
-    "python/x_timeline_migrate_explore.py",
-    "python/x_timeline_store.py",
-    "python/x_topic_search.py"
+    "python/x_personal_feed_observer_cli.py"
   ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "workspace:*",
     "@deepseek-ai/dsh-agent": "*",
-    "@deepseek-ai/dsh-cron": "*",
     "@deepseek-ai/dsh-home-paths": "*",
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-session": "*",
@@ -52,7 +39,6 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "workspace:*",
     "@deepseek-ai/dsh-agent": "*",
-    "@deepseek-ai/dsh-cron": "*",
     "@deepseek-ai/dsh-home-paths": "*",
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-session": "*",
