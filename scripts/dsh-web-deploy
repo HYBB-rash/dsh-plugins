@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+target=${DSH_WEB_DEPLOY_TARGET:-herman.hermes}
+remote_root=${DSH_WEB_REMOTE_ROOT:-/home/herman/.local/share/dsh-web-package}
+repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+package_script="$repository_root/scripts/package-dsh-web"
+start_script="$repository_root/scripts/dsh-web-start"
+
+for required_file in "$package_script" "$start_script"; do
+  if [[ ! -x "$required_file" ]]; then
+    echo "missing executable deployment input: $required_file" >&2
+    exit 1
+  fi
+done
+for command_name in ssh scp sha256sum; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "$command_name is required to deploy DSH Web" >&2
+    exit 127
+  fi
+done
+
+temporary_root=$(mktemp -d /tmp/dsh-web-deploy.XXXXXX)
+cleanup() { rm -rf -- "$temporary_root"; }
+trap cleanup EXIT
+archive="$temporary_root/dsh-web.tar.gz"
+checksum="$temporary_root/dsh-web.tar.gz.sha256"
+
+"$package_script" "$archive"
+chmod 0600 "$archive"
+(
+  cd "$temporary_root"
+  sha256sum dsh-web.tar.gz >dsh-web.tar.gz.sha256
+)
+chmod 0600 "$checksum"
+
+printf -v remote_root_q '%q' "$remote_root"
+ssh "$target" "install -d -m 0700 $remote_root_q"
+scp -p "$archive" "$target:$remote_root/dsh-web.tar.gz"
+scp -p "$checksum" "$target:$remote_root/dsh-web.tar.gz.sha256"
+scp -p "$start_script" "$target:$remote_root/dsh-web-start"
+
+printf 'uploaded: %s:%s\n' "$target" "$remote_root"
+printf 'sha256: %s\n' "$(awk '{print $1}' "$checksum")"
+printf 'start with: ssh %q %q\n' "$target" "$remote_root/dsh-web-start"

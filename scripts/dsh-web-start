@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+package_root=${DSH_WEB_PACKAGE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
+archive="$package_root/dsh-web.tar.gz"
+checksum="$package_root/dsh-web.tar.gz.sha256"
+releases="$package_root/releases"
+runtime_bin="$package_root/runtime-bin"
+export DSH_HOME=${DSH_HOME:-$HOME/.dsh}
+export DSH_CWD=${DSH_CWD:-$DSH_HOME/workspace}
+host=${DSH_WEB_HOST:-0.0.0.0}
+port=${DSH_WEB_PORT:-3080}
+
+for command_name in node tar sha256sum awk mktemp install mv ln; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "$command_name is required to start DSH Web" >&2
+    exit 127
+  fi
+done
+for required_file in "$archive" "$checksum"; do
+  if [[ ! -f "$required_file" || -L "$required_file" ]]; then
+    echo "missing regular deployment input: $required_file" >&2
+    exit 1
+  fi
+done
+
+pnpm_command=${DSH_WEB_PNPM:-pnpm}
+corepack_command=${DSH_WEB_COREPACK:-corepack}
+if pnpm_path=$(command -v "$pnpm_command" 2>/dev/null); then
+  pnpm_argv=("$pnpm_path")
+elif corepack_path=$(command -v "$corepack_command" 2>/dev/null); then
+  pnpm_argv=("$corepack_path" pnpm)
+else
+  echo 'pnpm is required to install DSH plugins; install pnpm or provide corepack' >&2
+  exit 127
+fi
+
+install -d -m 0700 "$package_root" "$releases" "$runtime_bin" "$DSH_HOME" "$DSH_CWD"
+printf '#!/usr/bin/env bash\nexec' >"$runtime_bin/pnpm"
+printf ' %q' "${pnpm_argv[@]}" >>"$runtime_bin/pnpm"
+printf ' "$@"\n' >>"$runtime_bin/pnpm"
+chmod 0700 "$runtime_bin/pnpm"
+export PATH="$runtime_bin:$PATH"
+
+(
+  cd "$package_root"
+  sha256sum -c "$(basename -- "$checksum")"
+)
+archive_sha=$(sha256sum "$archive" | awk '{print $1}')
+release="$releases/$archive_sha"
+if [[ ! -d "$release" ]]; then
+  temporary_release=$(mktemp -d "$releases/.unpack.XXXXXX")
+  cleanup() { rm -rf -- "$temporary_release"; }
+  trap cleanup EXIT
+  tar --no-same-owner -xzf "$archive" -C "$temporary_release"
+  for required_file in \
+    "$temporary_release/dsh-web/bin/install-plugins" \
+    "$temporary_release/dsh-web/bin/web"; do
+    if [[ ! -x "$required_file" ]]; then
+      echo "archive is missing executable ${required_file#"$temporary_release/"}" >&2
+      exit 1
+    fi
+  done
+  mv "$temporary_release/dsh-web" "$release"
+  rmdir "$temporary_release"
+  trap - EXIT
+fi
+
+"$release/bin/install-plugins"
+ln -sfn "releases/$archive_sha" "$package_root/current.next"
+mv -Tf "$package_root/current.next" "$package_root/current"
+cd "$DSH_CWD"
+exec "$package_root/current/bin/web" --host "$host" --port "$port" --no-open "$@"
