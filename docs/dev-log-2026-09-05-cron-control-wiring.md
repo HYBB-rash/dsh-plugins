@@ -22,6 +22,10 @@
 11. 先增加两个失败测试：同一 Cordis Context 第二次提供 registry 会报重名；同一未变化账本为第二个 job 做 projection 会再次执行 JSON.parse。最初尝试让第二个角色先 `get` 再复用 registry，单 Context 测试转绿，但第二次生产启动证明 Cordis sibling 会禁止重复 `provide`、同时又不能彼此 `get`，这个测试模型不真实。
 12. 收缩角色责任：环境 registry 只属于 scheduler 执行面，manager 控制面不再提供它。先把“manager 启动后 registry 仍不存在”写成失败测试，再移动入口接线，相关 55 项测试通过。`RunLedger` 同时按文件 revision 缓存一次解析结果、跨 job 复用，外部原子替换文件后失效重读。
 13. dsh-cron 全量测试 627 项中 626 项通过，唯一失败为“旧 cron 恢复持久 session”测试。用未包含本次改动的最新 `main` 独立 worktree 复跑同一测试，得到相同失败，确认是基线既有问题，不由本次缓存改动引入；本次相关的测试全部通过，bundle 构建通过。
+14. 第二次生产启动仍因 sibling registry 重名失败，证实“先 get 再复用”不能跨 Cordis sibling 成立。改用 scheduler-only registry 边界、重新构建和上传后，第三次启动成功；运行号 `20260904T182047Z`，监督 PID 3132860，Web PID 3133120。
+15. 生产验证时两个 3080 listener 同时存在，control socket 为 herman 所有的 0600 Unix socket，RPC 返回 `ready=true`、`writer=manager`、协议版本 1。已删除的 `dsh:notion-task-inbox:retry:v1` 仍无 active job。
+16. loopback、允许来源 LAN 和公网未认证 API 分别返回 401，错误 Origin 返回 403；token 首跳 303 并建立 Cookie，认证后页面返回 200。启动 stderr 为 0，诊断环境存在且未产生崩溃报告。
+17. 新进程完成首次账本加载后，空闲 5 秒窗口为 23 次 JSON.parse/秒；随后 45 秒跨过一次任务运行，累计增加 69,486 次，约 1,544 次/秒，同时 runs 由 34,284 增长到 34,286 行。相比旧进程约 84,439 次/秒，含一次文件 revision 更新的观察窗口下降约 55 倍；纯空闲窗口下降约 3,670 倍。该结果与“每个新原子文件版本解析一次、相同版本跨 reload/job 复用”一致，scheduler 仍在真实追加记录。
 
 ## 逻辑链条
 
@@ -51,8 +55,9 @@
 - 新增 manager 角色边界和 ledger 缓存测试修改前均失败，修改后连同 manager/RPC 测试共 55 项通过。
 - dsh-cron bundle 构建通过。
 - dsh-cron 全量：626/627 通过；唯一失败在未改动的 `main` 独立 worktree 中可同样复现，属于既有测试夹具与当前 session persistence 形状不一致。
-- 完整便携部署测试矩阵与生产发布验证待后续时间线补录。
+- 便携部署矩阵通过：deploy、package、packages、有效 Profile、LAN proxy、Telegram 启动通知、shell 语法与 `git diff --check` 全部通过。
+- 生产 release `c1e02fd24301e54bd9ee87b1e20852921b1506e609c5acf78a55a5701924ebd4` 启动成功；监督进程、Web、LAN proxy、两个 listener、RPC socket、HTTP 三层状态、token 登录、诊断环境和 scheduler 账本追加均已验证。
 
 ## 遗留
 
-尚未完成完整部署测试、生产发布和真实 Telegram 用户入口验收。
+真实 Telegram 中由用户发起的 assistant cron 管理对话尚待用户使用时确认。当前约 4 分钟生产观察无退出、stderr 或崩溃报告；解析放大已显著下降，但仅靠短时观察不能证明底层 V8 永不再次崩溃，低写入诊断会继续保留后续证据。
