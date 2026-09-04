@@ -100,7 +100,7 @@ const ONESHOT_GRACE_MS = 120_000
 interface AgentLike {
   session: {
     seq: number
-    events: readonly SessionEvent[]
+    snapshotEvents(): readonly SessionEvent[]
   }
   readonly status?: 'idle' | 'running'
   cancel?(cause: unknown): void
@@ -302,7 +302,7 @@ async function driveTurn(
   }))
   if (!await waitForIdle(agent, signal)) return undefined
   if (signal.aborted) return undefined
-  return summarizeTurn(agent.session.events, firstSeq)
+  return summarizeTurn(agent.session.snapshotEvents(), firstSeq)
 }
 
 /** Deliver text to Telegram, chunking at the 4096-char cap. */

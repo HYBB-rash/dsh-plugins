@@ -28,7 +28,8 @@ vi.mock('@deepseek-ai/dsh-telegram-gateway', async importOriginal => {
   }
 })
 
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import { TelegramApiError } from '@deepseek-ai/dsh-telegram-gateway'
 import { createControlService, createMaintenanceControl } from '../src/control.ts'
 import {
@@ -828,6 +829,70 @@ function onceJob(runAtAgoMs: number): Job {
     createdAt: nowIso(),
   }
 }
+
+describe('real Harness Session compatibility', () => {
+  it('summarizes and delivers a completed turn from the current Session API', async () => {
+    const dir = tempDir()
+    const job: Job = {
+      id: 'real-session-summary',
+      schedule: { kind: 'interval', minutes: 60 },
+      prompt: 'test prompt',
+      deliver: 'telegram',
+      createdAt: nowIso(),
+    }
+    seedJob(dir, job)
+    const session = Session.create(SessionId('session-cron-real-session-summary'))
+    const agent = {
+      session,
+      followup: () => {
+        session.append('turn/start', { turn: 1 })
+        session.append('assistant/message', {
+          stream: [],
+          turn: 1,
+          step: 1,
+          message: createAssistantMessage({
+            content: [{ type: 'text', text: 'real session result' }],
+            source: { provider: 'test', model: 'test' },
+          }),
+        }, { surfaceOp: 'append' })
+        session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      },
+      whenIdle: async () => undefined,
+    }
+    const delivered: string[] = []
+    const runtime = new SchedulerRuntime(
+      {
+        get: (name: string) => {
+          if (name === 'agents') return {
+            get: () => undefined,
+            create: async () => ({ agent, dispose: async () => undefined }),
+          }
+          if (name === 'sessions') return { flush: async () => undefined }
+          if (name === 'sessionPersistence') return { list: async () => [] }
+          if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'test', model: 'test' }) }
+          return undefined
+        },
+        logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+        parallel: async () => undefined,
+      } as never,
+      makeConfig(dir),
+      {} as never,
+      0,
+      new AbortController().signal,
+      { deliverText: async (_http, _chatId, text) => { delivered.push(text); return { state: 'delivered' } } },
+    )
+
+    try {
+      await expect(runtime.runNow({ jobId: job.id, requestKey: 'real-session' }))
+        .resolves.toMatchObject({ ok: true })
+      await waitFor(() => readLines(dir).some(line => line.includes('"event":"finish"')))
+      expect(lastFinish(dir)).toMatchObject({ status: 'success', deliveryState: 'delivered' })
+      expect(delivered).toEqual(['real session result'])
+    } finally {
+      await runtime.dispose()
+    }
+  })
+})
 
 describe('claim ordering', () => {
   it('reserves scheduled jobs before the semaphore queue so runNow rejects a pending sibling', async () => {
