@@ -1,25 +1,21 @@
 /**
- * Telegram outbox pump for dsh-assistant: claim-before-send, at-most-once
+ * Outbox pump for dsh-assistant: claim-before-deliver, at-most-once
  * delivery of reminder and worker-result rows (§12).
  *
  * Order per row: transaction-claim (with a check-in re-validation that the
- * commitment is still active) → HTTP send of every 4096-char chunk →
- * delivered; on failure: failed (no auto-retry), uncertain when an in-flight
- * send was aborted or a later chunk failed after earlier chunks were sent,
- * and stale `claimed` rows from a previous process become uncertain on start
- * (never replayed).
+ * commitment is still active) → one complete-text delivery-port call →
+ * terminal result. Transport details and partial-send classification belong
+ * to the provider; claimed rows are never replayed.
  * @module @deepseek-ai/dsh-assistant
  */
 
-import { chunkText, type TelegramHttp } from '@deepseek-ai/dsh-telegram-gateway'
 import { cleanError } from './domain.ts'
+import type { AssistantTextDeliveryPort } from './delivery-port.ts'
 import { AssistantStore, type OutboxRow } from './store.ts'
 
 export interface OutboxPumpDeps {
   store: AssistantStore
-  http: TelegramHttp
-  chatId: number
-  maxChars?: number
+  delivery: AssistantTextDeliveryPort
   signal: AbortSignal
   now?: () => number
   logger?: { warn(message: string): void }
@@ -106,28 +102,25 @@ export class OutboxPump {
     const signal = this.deps.signal.aborted
       ? controller.signal
       : AbortSignal.any([this.deps.signal, controller.signal])
-    let sent = 0
     try {
-      const chunks = chunkText(outbox.text, this.deps.maxChars ?? 4096)
-      for (const chunk of chunks) {
-        await this.deps.http.sendMessage(this.deps.chatId, chunk, undefined, signal)
-        sent++
+      const result = await this.deps.delivery.deliver({ text: outbox.text, signal })
+      if (result.state === 'delivered') {
+        this.deps.store.finishOutbox(outbox.id, 'delivered', { deliveredAt: result.deliveredAt })
+        this.touchDelivery(outbox, 'delivered')
+      } else {
+        const error = cleanError(result.error)
+        this.deps.store.finishOutbox(outbox.id, result.state, { error })
+        this.touchDelivery(outbox, result.state, error)
       }
-      this.deps.store.finishOutbox(outbox.id, 'delivered', { deliveredAt: iso(this.deps.now) })
-      this.touchDelivery(outbox, 'delivered')
     } catch (error) {
       const aborted = controller.signal.aborted || this.deps.signal.aborted
       const message = cleanError(error)
       if (aborted) {
         this.deps.store.finishOutbox(outbox.id, 'uncertain', { error: 'in-flight send aborted' })
         this.touchDelivery(outbox, 'uncertain', 'aborted')
-      } else if (sent > 0) {
-        // Partial chunks were accepted; the rest cannot be re-sent.
-        this.deps.store.finishOutbox(outbox.id, 'uncertain', { error: `partial delivery: ${message}` })
-        this.touchDelivery(outbox, 'uncertain', message)
       } else {
-        this.deps.store.finishOutbox(outbox.id, 'failed', { error: message })
-        this.touchDelivery(outbox, 'failed', message)
+        this.deps.store.finishOutbox(outbox.id, 'uncertain', { error: message })
+        this.touchDelivery(outbox, 'uncertain', message)
       }
     } finally {
       this.inFlight.delete(outbox.id)

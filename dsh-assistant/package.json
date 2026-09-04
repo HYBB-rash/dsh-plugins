@@ -32,14 +32,11 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "workspace:*",
     "@deepseek-ai/dsh-agent": "*",
-    "@deepseek-ai/dsh-credentials": "*",
     "@deepseek-ai/dsh-home-paths": "*",
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-subagent": "*",
     "@deepseek-ai/dsh-system-prompt": "*",
-    "@deepseek-ai/dsh-cron": "*",
-    "@deepseek-ai/dsh-telegram-gateway": "*",
     "@deepseek-ai/dsh-tools": "*"
   },
   "dependencies": {
@@ -49,15 +46,12 @@
     "@deepseek-ai/cordis": "workspace:*",
     "@deepseek-ai/dsh-util-values": "*",
     "@deepseek-ai/dsh-agent": "*",
-    "@deepseek-ai/dsh-credentials": "*",
     "@deepseek-ai/dsh-home-paths": "*",
     "@deepseek-ai/dsh-llm": "*",
-    "@deepseek-ai/dsh-cron": "*",
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-subagent": "*",
     "@deepseek-ai/dsh-system-prompt": "*",
     "@deepseek-ai/dsh-tool-subagent-report": "*",
-    "@deepseek-ai/dsh-telegram-gateway": "*",
     "@deepseek-ai/dsh-tools": "*"
   }
 }

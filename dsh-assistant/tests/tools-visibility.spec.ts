@@ -18,15 +18,6 @@ import { createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import * as plugin from '../src/index.ts'
 
-// This suite proves scoped tool composition, not Telegram connectivity. Using
-// the real gateway made `mountReal('telegram')` perform a live getMe request,
-// so an unrelated network stall could consume the whole 10-second test budget.
-vi.mock('@deepseek-ai/dsh-telegram-gateway', () => ({
-  createTelegramHttp: () => ({
-    getMe: vi.fn(async () => ({ id: 1, username: 'test' })),
-  }),
-}))
-
 const dirs: string[] = []
 
 function tempDir(): string {
@@ -61,16 +52,11 @@ async function mountReal(mode: 'web' | 'telegram' = 'telegram') {
     interrupt: vi.fn(),
     followup: vi.fn(async () => 'm2'),
   } as never)
-  ctx.provide('credentials', { resolve: async () => ({ value: 't' }) } as never)
   const mounted = await ctx.plugin(plugin, {
     mode,
     storePath: join(tempDir(), 'state.sqlite'),
     pollIntervalMs: 1000,
-    ...mode === 'telegram' ? {
-      token: 't',
-      chatId: '1',
-      telegramParentSessionId: 'session-telegram',
-    } : {},
+    ...mode === 'telegram' ? { telegramParentSessionId: 'session-telegram' } : {},
   } as never)
   return { ctx, rootScope, mounted }
 }

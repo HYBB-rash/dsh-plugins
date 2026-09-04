@@ -21,18 +21,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { TelegramHttp } from '@deepseek-ai/dsh-telegram-gateway'
 import * as plugin from '../src/index.ts'
 import { ASSISTANT_PERSONA, createWorkerNoticeSink, promptSectionText, STABLE_CONTRACT } from '../src/index.ts'
 import { AssistantStore } from '../src/store.ts'
-
-// The Telegram gateway is an integration boundary here; stub it so plugin
-// mount tests are deterministic and never depend on live API availability.
-vi.mock('@deepseek-ai/dsh-telegram-gateway', () => ({
-  createTelegramHttp: () => ({
-    getMe: vi.fn(async () => ({ id: 1, username: 'test' })),
-  }),
-}))
 
 const dirs: string[] = []
 
@@ -169,7 +160,7 @@ async function mount(
   config: { mode: 'web' | 'telegram' },
   agents: Agent[],
   overrides: {
-    credentials?: { resolve(): Promise<{ value: string } | undefined> }
+    deliveryProvider?: unknown
     storePath?: string
   } = {},
 ) {
@@ -194,9 +185,9 @@ async function mount(
     }),
   }
   ctx.provide('subagents', subagents as never)
-  ctx.provide('credentials', (overrides.credentials ?? {
-    resolve: async () => ({ value: 'test-token' }),
-  }) as never)
+  if (overrides.deliveryProvider !== undefined) {
+    ctx.provide('dshTextDeliveryV1' as never, overrides.deliveryProvider as never)
+  }
   ctx.provide('tools', {
     register: (def: { name: string }) => {
       toolRegistry.set(def.name, def)
@@ -210,11 +201,7 @@ async function mount(
     mode: config.mode,
     storePath: overrides.storePath ?? join(tempDir(), 'state.sqlite'),
     pollIntervalMs: 1000,
-    ...config.mode === 'telegram' ? {
-      token: 'test-token',
-      chatId: '12345',
-      telegramParentSessionId: 'session-telegram',
-    } : {},
+    ...config.mode === 'telegram' ? { telegramParentSessionId: 'session-telegram' } : {},
   } as never)
   return { ctx, mounted, registry, toolRegistry, subagents }
 }
@@ -1234,6 +1221,31 @@ describe('D. long-term recognition contract', () => {
 
 
 describe('telegram wiring', () => {
+  it('mounts without a delivery provider and terminally fails a claimed outbox row', async () => {
+    const storePath = join(tempDir(), 'state.sqlite')
+    const seed = new AssistantStore(storePath)
+    const created = seed.createAgentCommitment({ title: '待通知', sourceSurface: 'telegram', now: NOW })
+    if (!created.ok) throw new Error('seed failed')
+    seed.settleWorkerEnd(created.row.id, created.row.revision, {
+      status: 'completed', result: 'done', completedAt: NOW,
+      outboxId: 'missing-provider-outbox', outboxText: '完整结果',
+    })
+    seed.close()
+
+    const { mounted } = await mount({ mode: 'telegram' }, [fakeAgent('session-telegram')], { storePath })
+    await vi.waitFor(() => {
+      const check = new AssistantStore(storePath)
+      try {
+        expect(check.getOutbox('missing-provider-outbox')).toMatchObject({
+          state: 'failed', error: expect.stringContaining('provider'),
+        })
+      } finally {
+        check.close()
+      }
+    })
+    await mounted.dispose()
+  })
+
   it('normalizes a leftover agent commitment to paused on startup and keeps the child id', async () => {
     const storePath = join(tempDir(), 'state.sqlite')
     const seed = new AssistantStore(storePath)

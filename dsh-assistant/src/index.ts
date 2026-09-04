@@ -19,8 +19,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { randomUUID } from 'node:crypto'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { createTelegramHttp } from '@deepseek-ai/dsh-telegram-gateway'
 import z from '@deepseek-ai/schemastery'
 import { boundText, formatLocalTime } from './domain.ts'
 import { createCronBoundMonitorRuntime } from './cron-bound-monitor.ts'
@@ -28,13 +26,19 @@ import { createAssistantCronControlAdapterFromSocket } from './cron-control-adap
 import { startAssistantCronControl } from './cron-composition.ts'
 import { createCronControlUseCase } from './cron-control.ts'
 import { reconcileCronBindings } from './cron-reconciliation.ts'
+import { createAssistantTextDeliveryPort } from './delivery-port.ts'
 import { OutboxPump } from './outbox.ts'
 import { ReminderRuntime } from './reminders.ts'
 import { AssistantStore, defaultStorePath } from './store.ts'
 import { registerAssistantTools, buildStatusOutput, type CronBindingView, type CommitmentView } from './tools.ts'
 import { WorkerController } from './worker.ts'
 import { WebTaskObserver } from './observer.ts'
-import type { CronRunFinishedEvent } from '@deepseek-ai/dsh-cron'
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'dsh-cron/run-finished'(event: unknown): void | Promise<void>
+  }
+}
 
 /** Release health gates use the same public adapter as the running assistant. */
 export {
@@ -135,7 +139,7 @@ export function createWorkerNoticeSink(
 export const name = 'dsh-assistant'
 
 /** Core services required by either mode before activation. */
-export const inject = ['agents', 'tools', 'systemPrompt', 'subagents', 'credentials']
+export const inject = ['agents', 'tools', 'systemPrompt', 'subagents']
 
 /** dsh-assistant configuration (§4.1). */
 export interface Config {
@@ -145,12 +149,6 @@ export interface Config {
   storePath?: string
   /** Reminder scan + outbox poll interval. Default 5000, min 1000. */
   pollIntervalMs?: number
-  /** Telegram API base URL. Defaults to https://api.telegram.org. */
-  apiBaseUrl?: string
-  /** Bot token; falls back to the TELEGRAM_BOT_TOKEN credential reference. */
-  token?: string
-  /** Numeric chat id; falls back to the TELEGRAM_ALLOWED_CHAT_ID credential reference. */
-  chatId?: string
   /** Subagent provider for continuable children. Defaults to `spawn`. */
   subagentProvider?: string
   /** Durable parent session id of the Telegram root. Defaults to `session-telegram`. */
@@ -165,23 +163,11 @@ export const Config: z<Config> = z.object({
   mode: z.union(['web', 'telegram'] as const).default('web'),
   storePath: z.string().default(''),
   pollIntervalMs: z.number().step(1).min(1_000).default(5_000),
-  apiBaseUrl: z.string().default('https://api.telegram.org'),
-  token: z.string(),
-  chatId: z.string(),
   subagentProvider: z.string().default('spawn'),
   telegramParentSessionId: z.string().default('session-telegram'),
   lateReminderAfterMs: z.number().step(1).min(0).default(2 * 60 * 60 * 1000),
   cronControlSocketPath: z.string().default(''),
 })
-
-/** Resolve a config value or its credential reference (env-inherited first). */
-async function resolveSecret(ctx: Context, configured: string | undefined, ref: string): Promise<string | undefined> {
-  if (configured !== undefined && configured !== '') return configured
-  const credentials = ctx.get('credentials')
-  if (credentials === undefined) return undefined
-  const hit = await credentials.resolve(credentialRef(ref))
-  return hit?.value
-}
 
 /** Status labels for the dynamic prompt snapshot. */
 function statusLabel(status: string): string {
@@ -201,6 +187,25 @@ const PROMPT_CLOSED_TITLE_MAX = 160
 function boundedCronReason(value: unknown): string {
   const text = value instanceof Error ? value.message : String(value)
   return text.length > 400 ? `${text.slice(0, 399)}…` : text
+}
+
+function cronRunFinishedValue(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const event = value as Record<string, unknown>
+  const status = event.status
+  const deliveryState = event.deliveryState
+  if (typeof event.jobId !== 'string' || event.jobId === ''
+    || typeof event.runId !== 'string' || event.runId === ''
+    || typeof event.sessionId !== 'string' || event.sessionId === ''
+    || typeof event.scheduledFor !== 'string' || event.scheduledFor === ''
+    || (status !== 'success' && status !== 'error' && status !== 'expired' && status !== 'interrupted')) return undefined
+  if (deliveryState !== undefined
+    && deliveryState !== 'delivered' && deliveryState !== 'silent' && deliveryState !== 'not_requested'
+    && deliveryState !== 'failed' && deliveryState !== 'uncertain') return undefined
+  for (const key of ['deliveredAt', 'deliveryError', 'error'] as const) {
+    if (event[key] !== undefined && typeof event[key] !== 'string') return undefined
+  }
+  return event
 }
 
 function cronBindingPrompt(binding: CronBindingView): string {
@@ -450,8 +455,8 @@ export function promptSectionText(store: AssistantStore, mode: 'web' | 'telegram
 /**
  * Cordis plugin entry: open the shared store (fail loud on schema mismatch),
  * install the contract + tools on every existing and future root, and — in
- * telegram mode — resolve credentials, start the reminder/outbox runtime,
- * and normalize leftover agent commitments.
+ * telegram mode — start the reminder/outbox runtime against an optional host
+ * delivery service and normalize leftover agent commitments.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   await ctx.effect(async () => {
@@ -501,9 +506,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     let disposeCronRunFinished: () => void = () => {}
 
     if (cronMonitor !== undefined) {
-      disposeCronRunFinished = ctx.on('dsh-cron/run-finished', async (event: CronRunFinishedEvent) => {
+      disposeCronRunFinished = ctx.on('dsh-cron/run-finished', async (event: unknown) => {
         try {
-          const result = await cronMonitor.handleRunFinished(event as unknown as Record<string, unknown>)
+          const decoded = cronRunFinishedValue(event)
+          if (decoded === undefined) {
+            ctx.logger.warn('dsh-assistant: ignored malformed Cron run-finished event')
+            return
+          }
+          const result = await cronMonitor.handleRunFinished(decoded)
           if (result.ok === false) {
             ctx.logger.warn(`dsh-assistant: Cron run-finished observation unavailable: ${boundedCronReason(result.message ?? 'observation failed')}`)
           }
@@ -595,29 +605,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     })
 
     if (config.mode === 'telegram') {
-      const token = await resolveSecret(ctx, config.token, 'TELEGRAM_BOT_TOKEN')
-      if (token === undefined || token === '') {
-        throw new Error('dsh-assistant: TELEGRAM_BOT_TOKEN is required (config token or credential reference)')
-      }
-      const chatIdRaw = await resolveSecret(ctx, config.chatId, 'TELEGRAM_ALLOWED_CHAT_ID')
-      const chatId = chatIdRaw !== undefined && chatIdRaw !== '' ? Number(chatIdRaw) : Number.NaN
-      if (!Number.isFinite(chatId)) {
-        throw new Error(`dsh-assistant: invalid allowed chat id "${chatIdRaw ?? ''}" (config chatId or TELEGRAM_ALLOWED_CHAT_ID credential)`)
-      }
-      const http = createTelegramHttp(config.apiBaseUrl ?? 'https://api.telegram.org', token)
-      try {
-        const me = await http.getMe()
-        ctx.logger.info(`dsh-assistant: telegram connected as @${me.username ?? String(me.id)}`)
-      } catch (error) {
-        ctx.logger.warn(`dsh-assistant: getMe transient failure: ${error instanceof Error ? error.message : String(error)}`)
-      }
       const lifetime = new AbortController()
       telegramLifetime = lifetime
+      const delivery = createAssistantTextDeliveryPort(() => (
+        ctx as unknown as { get(key: string): unknown }
+      ).get('dshTextDeliveryV1'))
       const pump = new OutboxPump({
         store,
-        http,
-        chatId,
-        maxChars: 4096,
+        delivery,
         signal: lifetime.signal,
         logger: ctx.logger,
       })

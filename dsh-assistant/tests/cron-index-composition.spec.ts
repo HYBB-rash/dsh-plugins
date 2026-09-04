@@ -21,11 +21,6 @@ const cronAdapterMock = vi.hoisted(() => ({
 }))
 
 vi.mock('../src/cron-control-adapter.ts', () => cronAdapterMock)
-vi.mock('@deepseek-ai/dsh-telegram-gateway', () => ({
-  createTelegramHttp: () => ({
-    getMe: vi.fn(async () => ({ id: 1, username: 'test' })),
-  }),
-}))
 
 const NOW = '2026-08-18T02:00:00.000Z'
 const SOCKET_PATH = '/tmp/dsh-cron-c2b2-control.sock'
@@ -139,7 +134,6 @@ async function mount(
     interrupt: vi.fn(),
     followup: vi.fn(async () => 'message-test'),
   } as never)
-  ctx.provide('credentials', { resolve: async () => ({ value: 'test-token' }) } as never)
   ctx.provide('tools', { register: () => () => {} } as never)
   ctx.provide('systemPrompt', { section: () => () => {} } as never)
 
@@ -147,7 +141,7 @@ async function mount(
     mode,
     storePath,
     pollIntervalMs: 60_000,
-    ...(mode === 'telegram' ? { token: 'test-token', chatId: '12345', telegramParentSessionId: 'session-telegram' } : {}),
+    ...(mode === 'telegram' ? { telegramParentSessionId: 'session-telegram' } : {}),
     ...(options.cronControlSocketPath === undefined ? {} : { cronControlSocketPath: options.cronControlSocketPath }),
   }
   const mounted = options.raw === true
@@ -297,6 +291,31 @@ describe('assistant Cron composition at the real index entry point (first red)',
     }
   })
 
+  it('rejects a structurally invalid run-finished value before reading manager state', async () => {
+    const storePath = tempPath('malformed-run-finished.sqlite')
+    const [binding] = seedBoundMonitors(storePath, 1)
+    if (binding === undefined) throw new Error('binding seed missing')
+    const port = makeCronPort({ getBound: externalRef => managerSnapshot(binding, latestManagerRun(binding)) })
+    cronAdapterMock.createAssistantCronControlAdapterFromSocket.mockReturnValue(port)
+
+    const { ctx, mounted, warning } = await mount('telegram', storePath, { cronControlSocketPath: SOCKET_PATH })
+    try {
+      const before = port.getBound.mock.calls.length
+      await ctx.parallel('dsh-cron/run-finished', {
+        jobId: binding.jobId,
+        runId: 'run-malformed',
+        sessionId: 'session-cron-bound-monitor',
+        scheduledFor: NOW,
+        status: 'mystery',
+        deliveryState: 'delivered',
+      })
+      expect(port.getBound).toHaveBeenCalledTimes(before)
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining('malformed'))
+    } finally {
+      await mounted.dispose()
+    }
+  })
+
   it('removes the run-finished listener on dispose before a later event can read or write', async () => {
     const storePath = tempPath('dispose.sqlite')
     const [binding] = seedBoundMonitors(storePath, 1)
@@ -376,15 +395,12 @@ describe('assistant Cron composition at the real index entry point (first red)',
     const registry = fakeRegistry([fakeAgent()])
     ctx.provide('agents', registry as never)
     ctx.provide('subagents', { startContinuable: vi.fn(), interrupt: vi.fn(), followup: vi.fn() } as never)
-    ctx.provide('credentials', { resolve: async () => ({ value: 'test-token' }) } as never)
     ctx.provide('tools', { register: () => () => {} } as never)
     ctx.provide('systemPrompt', { section: () => () => {} } as never)
     const mounted = await ctx.plugin(plugin, {
       mode: 'telegram',
       storePath,
       pollIntervalMs: 60_000,
-      token: 'test-token',
-      chatId: '12345',
       telegramParentSessionId: 'session-telegram',
       cronControlSocketPath: SOCKET_PATH,
     } as never)

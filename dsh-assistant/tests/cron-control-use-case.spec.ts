@@ -147,7 +147,7 @@ function fakePort(options: {
     ok: true,
     snapshot: {
       externalRef,
-      activeJob: { id: 'job-actual-1', externalRef, schedule: SCHEDULE, prompt: 'monitor', deliver: 'telegram', sessionMode: 'per_run' },
+      activeJob: { id: 'job-actual-1', externalRef, schedule: SCHEDULE, prompt: 'monitor', deliver: 'default', sessionMode: 'per_run' },
       latestRun: null,
     },
   })
