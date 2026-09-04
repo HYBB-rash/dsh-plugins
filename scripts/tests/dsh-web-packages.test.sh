@@ -81,6 +81,7 @@ PATH="$fixture_root/test-bin:$PATH" \
   DSH_WEB_HOME="$fixture_root/home" \
   "$fixture_root/scripts/dsh-web-runtime" --host 127.0.0.1 --port 3080 --no-open
 
+grep -Fq -- 'node --expose-internals' "$DSH_WEB_TEST_LOG"
 grep -Fq -- '--profile web --patch' "$DSH_WEB_TEST_LOG"
 grep -Fq "$fixture_root/config/web/portable.patch.yml" "$DSH_WEB_TEST_LOG"
 grep -Fq -- '--host 127.0.0.1 --port 3080 --no-open' "$DSH_WEB_TEST_LOG"

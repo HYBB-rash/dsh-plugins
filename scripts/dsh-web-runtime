@@ -17,7 +17,7 @@ if ! command -v node >/dev/null 2>&1; then
   exit 127
 fi
 
-exec node "$harness_root/apps/cli/lib/bin.js" \
+exec node --expose-internals "$harness_root/apps/cli/lib/bin.js" \
   --profile web \
   --patch "$patch" \
   "$@"
