@@ -22,13 +22,9 @@
               nodejs_24
               pnpm
               openssh
-              podman
               procps
-              (python3.withPackages (pythonPackages: with pythonPackages; [
-                websocket-client
-              ]))
+              python3
               util-linux
-              zstd
             ];
 
             env = {

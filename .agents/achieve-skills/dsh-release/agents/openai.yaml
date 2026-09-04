@@ -1,6 +1,0 @@
-interface:
-  display_name: "DSH Release"
-  short_description: "Safely operate this repository's DSH Docker releases"
-  default_prompt: "Use $dsh-release to operate this repository's Docker release workflow."
-policy:
-  allow_implicit_invocation: false

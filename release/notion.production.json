@@ -1,8 +1,0 @@
-{
-  "schemaVersion": 1,
-  "apiBase": "https://api.notion.com/v1",
-  "apiVersion": "2026-03-11",
-  "pageId": "3b059c119f80803cb8ace3ead7eefc81",
-  "credentialPath": "/home/herman/.dsh/secrets/notion.token",
-  "inboxPath": "/home/herman/.dsh/storages/task-inbox/inbox.md"
-}
