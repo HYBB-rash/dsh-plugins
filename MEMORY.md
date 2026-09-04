@@ -106,3 +106,4 @@
 - 2026-09-04：从历史 commit 提取业务源码时，要把“提取来源”与“当前仓库清理分支的基线”分开：新仓可从固定历史快照取字节，原仓删除必须基于最新 `origin/main`。若把历史来源 commit 同时当作清理基线，隔离 `dev prepare` 会先暴露历史 profile 与当前 Harness 的兼容问题，既不能证明清理正确，也会把无关历史提交带进任务分支。
 - 2026-09-04：含 native addon 的普通归档不能只按 Harness 的 Node semver 范围判断可移植性；构建端 Node 24 产出的 `.node` 文件在 Node 22 上可能因 V8 symbol 缺失而启动后退出。归档应携带经固定 SHA-256 校验、与构建 ABI 一致的官方 Node runtime，安装、pnpm shim 和 Harness 都只使用该 runtime；应用继续绑定 loopback，LAN 访问由按源地址 fail-closed 的独立代理提供。
 - 2026-09-04：普通 DSH Web 归档部署的完整结构、现场故障链和验证矩阵集中维护在 `docs/dsh-web-portable-deployment.md`；后续打包、上传、重启或排查 LAN/API/token 通知时使用项目 `$dsh-web-deploy`，不要从零重建操作步骤。
+- 2026-09-04：Models 页的 `settings are unavailable in this browser` 是上游 `ui-settings` 明确禁用非 loopback Host settings 的结果，不是 `listProviders` 401/403；不得修改 `upstream/deepseek-harness`。Git reset 也不会清除 ignored 的 `lib/` 构建污染，曾误构建上游后必须从官方源码完整重建并核对实际打包输入。
