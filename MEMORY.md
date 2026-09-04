@@ -100,3 +100,4 @@
 - 2026-09-01：退休未上线的运行包时，先从仍需保留的真实入口切断它的源码依赖，再删除整包和正式接线；镜像包清单、开发挂载、profile manifest、runtime topology、发布夹具与自检必须同步收缩，并保留旧包目录不得出现的负向门。已删除的 cron job 和不再读取的旧账本保持原状，不应为了“清理干净”增加数据迁移或物理删除。
 - 2026-09-01：改正式包集合后，脏工作树的 editable verify 可能被既有 `tsbuildinfo` 和已安装工作区依赖掩盖；本次正式 clean build 才发现五包的 Cordis `"*"` 会解析到 registry 4.0.2，与 Harness workspace 4.0.1 并存，导致 `session/event` 和 `invariants` 模块扩展消失。Harness 内运行包应把 Cordis 的 peer/dev 依赖绑定为 `workspace:*`，并在编译前和镜像 self-test 以真实解析路径证明五包只使用 Harness workspace 的同一份 Cordis；修改包清单后仍须由全新不可变候选验证安装解析。
 - 2026-09-04：直接执行 Harness 的构建后 CLI 时，`--dump-config` 成功不代表插件可加载；其 loader 只有在 Node 带 `--expose-internals` 时才启用 Profile/Harness 的自定义模块解析。启动入口合同必须锁定该 Node 参数，并以隔离 Profile 的真实插件树初始化确认没有 `ERR_MODULE_NOT_FOUND`。
+- 2026-09-04：普通归档部署应把“打包并上传”和“目标机校验、安装、切换、启动”拆成两个入口，上传端不得隐式远程执行。`herman.hermes` 有满足要求的 Node 与 corepack 但没有独立 pnpm；远程启动可在 release 私有目录生成 `corepack pnpm` shim 供 Harness 插件管理器使用，不全局安装依赖，也不形成 dev/prod 代码分支。
