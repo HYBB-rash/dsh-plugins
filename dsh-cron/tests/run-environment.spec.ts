@@ -230,6 +230,17 @@ describe('dsh-cron run environment registry', () => {
     await second.fiber.dispose()
   })
 
+  it('reuses the existing registry when two cron roles share one Cordis context', async () => {
+    const ctx = new Context()
+    const firstRegistry = provideCronAgentEnvironmentRegistry(ctx)
+    const secondRegistry = provideCronAgentEnvironmentRegistry(ctx)
+
+    expect(secondRegistry).toBe(firstRegistry)
+    expect(ctx.get(CRON_AGENT_ENVIRONMENT_REGISTRY)).toBe(firstRegistry)
+
+    await ctx.fiber.dispose()
+  })
+
   it('provides the same registry to a later consumer through the real plugin entry', async () => {
     const storeDir = mkdtempSync(join(tmpdir(), 'dsh-cron-environment-service-'))
     const ctx = new Context()

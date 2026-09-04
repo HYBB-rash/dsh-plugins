@@ -7,7 +7,7 @@
  * @module @deepseek-ai/dsh-cron
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { isValidPreparedDeliveryObject, isValidPreparedObjectId } from './types.ts'
 import type {
@@ -279,6 +279,17 @@ export class JsonlStore {
     return readFileSync(this.file, 'utf8').split('\n')
   }
 
+  /** Stable identity for one immutable-by-rename file snapshot. */
+  revision(): string {
+    try {
+      const stat = statSync(this.file, { bigint: true })
+      return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'absent'
+      throw error
+    }
+  }
+
   /** Atomically append one record: tmp file + rename preserves all history. */
   append(record: unknown): void {
     this.ensureDir()
@@ -384,7 +395,7 @@ export type ParsedRunLine =
   | { readonly kind: 'delivery-attempt-claim'; readonly record: RunDeliveryAttemptClaimRecord }
   | { readonly kind: 'delivery-receipt'; readonly record: RunDeliveryReceiptRecord }
   | { readonly kind: 'environment-prefinish-settle'; readonly record: RunEnvironmentPrefinishSettleRecord }
-  | { readonly kind: 'skip' }
+  | { readonly kind: 'skip'; readonly value?: unknown }
 
 /** V2 finish statuses that are valid ledger events. */
 const VALID_FINISH_STATUSES = new Set(['success', 'error', 'silent', 'expired', 'interrupted'])
@@ -418,9 +429,9 @@ export function parseRunLine(raw: string): ParsedRunLine {
   } catch {
     return { kind: 'skip' }
   }
-  if (typeof value !== 'object' || value === null) return { kind: 'skip' }
+  if (typeof value !== 'object' || value === null) return { kind: 'skip', value }
   const record = value as Record<string, unknown>
-  if (typeof record.jobId !== 'string') return { kind: 'skip' }
+  if (typeof record.jobId !== 'string') return { kind: 'skip', value }
   if (record.schemaVersion === 2) {
       // Strict V2 validation: an event with a bad status, an unparsable
       // required time, an invalid optional nextRunAt, or an empty identifier
@@ -531,7 +542,7 @@ export function parseRunLine(raw: string): ParsedRunLine {
           : { kind: 'environment-prefinish-settle', record: record as unknown as RunEnvironmentPrefinishSettleRecord }
       }
   }
-  return { kind: 'skip' }
+  return { kind: 'skip', value }
 }
 
 /** One job's folded run projection (restart view of the ledger). */
@@ -574,7 +585,7 @@ export interface FoldedJobRuns {
  * Fold one job's run ledger. The recovery nextRunAt is the value of the last
  * supported event that carries one (append order = event order).
  */
-export function foldRunLines(lines: readonly string[], jobId: string): FoldedJobRuns {
+function foldParsedRunLines(lines: readonly ParsedRunLine[], jobId: string): FoldedJobRuns {
   const settled = new Set<string>()
   const claims = new Map<string, RunClaimRecord>()
   const finishes = new Set<string>()
@@ -604,24 +615,22 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
     if (status === 'error') consecutiveExecutionErrors += 1
     else if (status === 'success' || status === 'silent') consecutiveExecutionErrors = 0
   }
-  for (const raw of lines) {
-    const parsed = parseRunLine(raw)
+  for (const parsed of lines) {
     if (parsed.kind === 'skip') {
-      try {
-        const value = JSON.parse(raw) as Record<string, unknown>
-        if (value.jobId === jobId
-          && value.event === 'schedule-reanchor'
-          && isNonEmptyString(value.migrationId)) {
-          invalidScheduleReanchorMigrationIds.add(value.migrationId)
+      const value = parsed.value
+      if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        const record = value as Record<string, unknown>
+        if (record.jobId === jobId
+          && record.event === 'schedule-reanchor'
+          && isNonEmptyString(record.migrationId)) {
+          invalidScheduleReanchorMigrationIds.add(record.migrationId)
         }
-        const lifecycleEvent = value.event === 'claim'
-          || value.event === 'prepared-delivery'
-          || value.event === 'delivery-attempt-claim'
-          || value.event === 'delivery-receipt'
-          || value.event === 'environment-prefinish-settle'
-        if (value.jobId === jobId && lifecycleEvent && isNonEmptyString(value.runId)) invalidLifecycleRunIds.add(value.runId)
-      } catch {
-        // Corrupt lines remain fail-conservative and have no recoverable identity.
+        const lifecycleEvent = record.event === 'claim'
+          || record.event === 'prepared-delivery'
+          || record.event === 'delivery-attempt-claim'
+          || record.event === 'delivery-receipt'
+          || record.event === 'environment-prefinish-settle'
+        if (record.jobId === jobId && lifecycleEvent && isNonEmptyString(record.runId)) invalidLifecycleRunIds.add(record.runId)
       }
       continue
     }
@@ -721,6 +730,10 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
   }
 }
 
+export function foldRunLines(lines: readonly string[], jobId: string): FoldedJobRuns {
+  return foldParsedRunLines(lines.map(parseRunLine), jobId)
+}
+
 /**
  * V2 run ledger: the scheduler's single-writer event book over runs.jsonl.
  * Claim-before-side-effect is enforced by the caller; this class only makes
@@ -728,6 +741,9 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
  */
 export class RunLedger {
   private readonly store: JsonlStore
+  private cachedRevision: string | undefined
+  private cachedLines: readonly ParsedRunLine[] = []
+  private readonly cachedFolds = new Map<string, FoldedJobRuns>()
 
   constructor(storeDir: string) {
     this.store = new JsonlStore(join(storeDir, 'runs.jsonl'))
@@ -735,7 +751,22 @@ export class RunLedger {
 
   /** Fold one job's projection from the current file contents. */
   foldJob(jobId: string): FoldedJobRuns {
-    return foldRunLines(this.store.readLines(), jobId)
+    const revision = this.store.revision()
+    if (revision !== this.cachedRevision) {
+      const rawLines = this.store.readLines()
+      const stableRevision = this.store.revision()
+      if (stableRevision !== revision) {
+        throw new Error('run ledger changed while reading one snapshot')
+      }
+      this.cachedLines = rawLines.map(parseRunLine)
+      this.cachedRevision = revision
+      this.cachedFolds.clear()
+    }
+    const cached = this.cachedFolds.get(jobId)
+    if (cached !== undefined) return cached
+    const folded = foldParsedRunLines(this.cachedLines, jobId)
+    this.cachedFolds.set(jobId, folded)
+    return folded
   }
 
   /**

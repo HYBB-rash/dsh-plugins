@@ -115,3 +115,4 @@
 - 2026-09-05：源码 Web 运行入口的默认应用参数不能注入 `--dump-config` 或 `--dump-default-config`，Harness 明确要求配置导出不携带应用参数。开发默认端口应只在正常启动且调用者未显式传 `--port` 时补入；本机正式部署继续由 `dsh-web-start` 显式固定 3080。
 - 2026-09-05：`pnpm install --ignore-scripts` 后，`pnpm rebuild fs-ext` 可能退出 0 却不生成 `fs_ext.node`；native 验收不能只看命令回执或由 fake rebuild 制造标记，必须执行已定位包自己的 install 脚本，并用当前 Node 实际 `require()` 生成物。
 - 2026-09-05：统一 Web Profile 中 `dsh-cron` 的 scheduler 和 manager 是两个互斥运行角色；只装 scheduler 会让既有任务继续跑，却没有 control socket，导致 `dsh-assistant` 的 cron 管理能力不可用。生产 patch 必须用同一模块的两个实例分别承载执行面和控制面，并让 manager 与 assistant 共享同一个 DSH_HOME socket；配置回归要经过真实 `plugin exec` 与 `--dump-config`，不能只查 YAML 字面。
+- 2026-09-05：生产 Node/V8 SIGSEGV 经 core 和 perf JIT map 收敛到 scheduler `reload` → `RunLedger.foldJob` → `JSON.parse`；34,252 行 `runs.jsonl` 在 8 个 active job 下被每轮重复全量解析，约 45 分钟累计 2.27 亿次。有效 JSON、无 OOM/I/O error 不能排除解析放大。账本 projection 应按原子文件 revision 共享一次解析结果，并用真实大账本的 JSON.parse 计数和崩溃诊断验证，control socket 缺失属于另一独立问题。

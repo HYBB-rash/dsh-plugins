@@ -15,7 +15,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RunLedger } from '../src/store.ts'
 import type {
   RunClaimRecord,
@@ -169,6 +169,34 @@ describe('RunLedger.claimFailureAlert', () => {
 })
 
 describe('RunLedger.foldJob', () => {
+  it('parses one unchanged ledger snapshot only once across job projections', () => {
+    const dir = tempDir()
+    seed(dir, [
+      claim(),
+      claim({
+        jobId: 'cron-b',
+        runId: 'cron-b@2026-08-14T10:00:00.000Z',
+        sessionId: 'session-cron-cron-b',
+      }),
+    ])
+    const ledger = new RunLedger(dir)
+    const parse = vi.spyOn(JSON, 'parse')
+
+    expect(ledger.foldJob('cron-a').claims.has(RUN_ID)).toBe(true)
+    const firstParseCount = parse.mock.calls.length
+    expect(firstParseCount).toBeGreaterThan(0)
+
+    expect(ledger.foldJob('cron-b').claims.has('cron-b@2026-08-14T10:00:00.000Z')).toBe(true)
+    expect(parse.mock.calls).toHaveLength(firstParseCount)
+
+    const writer = new RunLedger(dir)
+    writer.finish(finish())
+    expect(ledger.foldJob('cron-a').interrupted).toEqual([])
+    expect(parse.mock.calls.length).toBeGreaterThan(firstParseCount)
+
+    parse.mockRestore()
+  })
+
   it('once: a claim alone keeps the job settled with no next run', () => {
     const dir = tempDir()
     const ledger = new RunLedger(dir)

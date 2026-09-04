@@ -246,6 +246,14 @@ $DSH_WEB_PACKAGE_ROOT/releases/<sha256>/
 
 现场也发现：代理有活动连接时，Node `server.close()` 可能等待连接自然关闭；监督进程在 20 秒内不一定退出。安全重启必须对**精确识别的当前监督进程树**先发 TERM、有界等待、必要时只对同一棵树 KILL，然后确认 `127.0.0.1:3080` 与 `192.168.6.240:3080` 都已释放，才允许启动下一份。禁止用宽泛 `pkill`，禁止并行起第二份。
 
+### 4.7 现场故障：cron 运行账本重复解析导致 Web 崩溃
+
+**现场现象：** Web 多次在运行一段时间后收到 SIGSEGV。core 与 perf JIT map 都把原生栈收敛到 V8 `JsonParser`，JavaScript 调用链是 scheduler `reload` → `RunLedger.foldJob` → `foldRunLines` → `JSON.parse`。故障时 `runs.jsonl` 有 34,252 行、8 个 active job；旧实现每次为每个 job 单独读取并解析整本账本，一次 reload 至少触发 16 次全量 fold。
+
+**排除项：** 账本每行均为有效 JSON；现场没有 OOM、磁盘写满或 I/O error，低写入诊断本身也没有持续写盘，因此证据不支持“硬盘读写跟不上”。
+
+**修正：** `RunLedger` 以账本的 `dev/ino/size/mtimeNs` 标识一个原子文件版本。每个版本只读取并解析一次，所有 job projection 复用解析结果；原子 rename 产生新版本后缓存立即失效。相同版本不再随 job 数和 reload 次数重复 `JSON.parse`，同时保留文件变化后的重读语义。
+
 ## 5. LAN 白名单代理
 
 `scripts/dsh-web-lan-proxy.mjs` 监听：
