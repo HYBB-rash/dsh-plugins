@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+set -eu
+
+root_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export DSH_HOME="$root_directory/.dsh-web"
+
+cd "$root_directory/upstream/deepseek-harness"
+pnpm install --ignore-scripts
+pnpm run build
+exec node --expose-internals apps/cli/lib/bin.js web "$@"
