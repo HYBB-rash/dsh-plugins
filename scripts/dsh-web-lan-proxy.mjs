@@ -56,6 +56,7 @@ export function createLanProxy({
 
   server.on('upgrade', (request, socket, head) => {
     if (!allowed(socket, allowedClients)) {
+      socket.on('error', () => {})
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
       return
     }

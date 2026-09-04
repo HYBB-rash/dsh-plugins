@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import http from 'node:http'
 import net from 'node:net'
 import test from 'node:test'
@@ -57,6 +58,17 @@ test('proxy forwards an allowed client without rewriting its browser authority',
     await close(proxy)
     await close(upstream)
   }
+})
+
+test('proxy tolerates reset clients while rejecting forbidden WebSocket upgrades', () => {
+  const proxy = createLanProxy({ allowedClients: new Set(['127.0.0.1']) })
+  const resetClient = new EventEmitter()
+  resetClient.remoteAddress = '127.0.0.2'
+  resetClient.end = () => resetClient.emit('error', Object.assign(new Error('write ECONNRESET'), { code: 'ECONNRESET' }))
+
+  assert.doesNotThrow(() => {
+    proxy.emit('upgrade', { socket: resetClient }, resetClient, Buffer.alloc(0))
+  })
 })
 
 test('proxy preserves browser authority on WebSocket upgrades', async () => {
