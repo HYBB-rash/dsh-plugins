@@ -197,7 +197,7 @@ source_a="$test_root/worktree-a"
 source_b="$test_root/worktree-b"
 prepare_source() {
   local source="$1" package profile
-  for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed x-feed; do
+  for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed; do
     mkdir -p "$source/$package"
     printf '%s\n' '{}' >"$source/$package/package.json"
   done
@@ -274,7 +274,7 @@ grep -Fq 'NOTION_PAGE_ID=00000000000000000000000000000001' "$test_root/engine.lo
 
 for source in "$source_a" "$source_b"; do
   grep -Fq "$source/personal-feed:/opt/dsh/harness/local-plugins/personal-feed:rw" "$test_root/engine.log"
-  grep -Fq "$source/personal-feed:/opt/dsh/harness/local-plugins/node_modules/@herman/personal-feed:ro" "$test_root/engine.log"
+  ! grep -Fq "$source/personal-feed:/opt/dsh/harness/local-plugins/node_modules/@herman/personal-feed:ro" "$test_root/engine.log"
 done
 ! grep -Eq '/opt/dsh/harness/node_modules/\.pnpm/node_modules/@herman/personal-feed:(ro|rw)([^[:alnum:]_-]|$)' "$test_root/engine.log"
 

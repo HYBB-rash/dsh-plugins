@@ -80,7 +80,7 @@ function createObserver(
 ) {
   return createPersonalFeedXSurfaceObserver({
     pythonBin: '/usr/bin/python3',
-    observerCliPath: '/opt/dsh/runtime/x-feed/python/x_personal_feed_observer_cli.py',
+    observerCliPath: '/opt/dsh/runtime/personal-feed/python/x_personal_feed_observer_cli.py',
     clock,
     run,
   })
@@ -119,8 +119,8 @@ describe('Personal Feed X surface observer', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0]).toMatchObject({
       file: '/usr/bin/python3',
-      args: ['/opt/dsh/runtime/x-feed/python/x_personal_feed_observer_cli.py', expect.any(String)],
-      cwd: '/opt/dsh/runtime/x-feed/python',
+      args: ['/opt/dsh/runtime/personal-feed/python/x_personal_feed_observer_cli.py', expect.any(String)],
+      cwd: '/opt/dsh/runtime/personal-feed/python',
       timeoutMs: SHANGHAI_DAY_DEADLINE - NOW.getTime(),
       maxBuffer: 1_048_576,
       shell: false,

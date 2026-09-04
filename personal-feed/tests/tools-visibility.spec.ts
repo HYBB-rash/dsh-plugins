@@ -5,7 +5,8 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { installTelegramExtension, X_FEED_CONTRACT } from '../src/index.ts'
+import { installTelegramExtension } from '../src/index.ts'
+import { X_FEED_CONTRACT } from '../src/telegram-extension.ts'
 import { registerXFeedTools } from '../src/tools.ts'
 import { XFeedbackStore } from '../src/store.ts'
 import { mkdtempSync, existsSync, readFileSync, rmSync } from 'node:fs'

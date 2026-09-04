@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   createTrustedFactNavigation,
+} from '../src/telegram-extension.ts'
+import {
   installTelegramExtension,
 } from '../src/index.ts'
 import {

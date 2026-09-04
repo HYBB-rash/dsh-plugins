@@ -1,10 +1,12 @@
 import {
   createPersonalFeedV2CandidateStateOwner,
+} from '../v2/candidate-state-owner.ts'
+import {
   createPersonalFeedV2RequestCoordinator,
   type CreatePersonalFeedV2RequestCoordinatorOptions,
   type PersonalFeedV2R2Port,
   type PersonalFeedV2R5Port,
-} from '@herman/personal-feed'
+} from '../v2/request-coordinator.ts'
 import type { TelegramInboundEnvelope, TelegramInboundResult } from '@deepseek-ai/dsh-telegram-gateway'
 import { createPersonalFeedTelegramRequestHandler } from './telegram-adapter.ts'
 

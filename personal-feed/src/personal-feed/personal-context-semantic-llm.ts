@@ -11,7 +11,7 @@ import type {
   PersonalContextActiveFact,
   PersonalContextSemanticInput,
   PersonalContextSemanticPort,
-} from '@herman/personal-feed'
+} from '../v2/personal-context-owner.ts'
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const TOOL_NAME = 'submit-personal-context-revisions'

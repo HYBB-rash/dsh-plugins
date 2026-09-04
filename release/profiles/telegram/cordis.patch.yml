@@ -38,7 +38,7 @@
         sessionId: session-telegram
         cwd: !!js process.env.DSH_CWD ?? process.cwd()
         extensions:
-          - modulePath: '@herman/x-feed'
+          - modulePath: '@herman/personal-feed'
             configJson: '{"telegramSessionId":"session-telegram"}'
     - id: dsh-cron
       name: '@deepseek-ai/dsh-cron'

@@ -14,7 +14,7 @@ fi
 harness_root="$test_root/harness"
 mkdir -p "$harness_root/vendor/cordis"
 
-for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector x-feed; do
+for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed; do
   package_modules="$harness_root/local-plugins/$package/node_modules/@deepseek-ai"
   mkdir -p "$package_modules"
   ln -s "$harness_root/vendor/cordis" "$package_modules/cordis"

@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import {
   createPersonalFeedV2CandidateStateOwner,
+} from '../src/v2/candidate-state-owner.ts'
+import {
   createPersonalFeedV2RequestCoordinator,
-} from '@herman/personal-feed'
+} from '../src/v2/request-coordinator.ts'
 import { createPersonalFeedXSurfaceObserver } from '../src/personal-feed/x-surface-observer.ts'
 
 describe('Personal Feed X surface to coordinator contract', () => {
@@ -60,7 +62,7 @@ describe('Personal Feed X surface to coordinator contract', () => {
     let judgeCalls = 0
     const surfaceObserver = createPersonalFeedXSurfaceObserver({
       pythonBin: '/usr/bin/python3',
-      observerCliPath: '/opt/dsh/runtime/x-feed/python/x_personal_feed_observer_cli.py',
+      observerCliPath: '/opt/dsh/runtime/personal-feed/python/x_personal_feed_observer_cli.py',
       clock: { now: () => new Date('2026-08-31T02:00:00.000Z') },
       run: async () => {
         observerCalls += 1

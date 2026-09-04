@@ -2569,7 +2569,6 @@ const developmentPackages = Object.freeze([
   'dsh-assistant',
   'personal-feed-selector',
   'personal-feed',
-  'x-feed',
 ])
 
 function editableSourceFingerprint(sourcePath) {
@@ -2602,6 +2601,29 @@ function editableSourceFingerprint(sourcePath) {
       digest.update('symlink\0').update(readlinkSync(path))
     } else if (entry.isFile()) {
       digest.update('file\0').update(readFileSync(path))
+    } else if (entry.isDirectory()) {
+      const staged = run('git', ['-C', sourcePath, 'ls-files', '--stage', '--', relativePath], {
+        capture: true,
+        announce: false,
+        code: exitCodes.safety,
+      })
+      if (!staged.startsWith('160000 ')) {
+        fail(`验证源码含不支持的 Git 输入类型: ${relativePath}`, exitCodes.safety)
+      }
+      const submoduleStatus = run('git', ['-C', path, 'status', '--porcelain=v1', '--untracked-files=all'], {
+        capture: true,
+        announce: false,
+        code: exitCodes.safety,
+      })
+      if (submoduleStatus !== '') {
+        fail(`验证源码含脏 Git 子模块: ${relativePath}`, exitCodes.safety)
+      }
+      const submoduleHead = run('git', ['-C', path, 'rev-parse', 'HEAD'], {
+        capture: true,
+        announce: false,
+        code: exitCodes.safety,
+      })
+      digest.update('gitlink\0').update(submoduleHead)
     } else {
       fail(`验证源码含不支持的 Git 输入类型: ${relativePath}`, exitCodes.safety)
     }
@@ -2658,10 +2680,6 @@ function developmentSourceArgs(sourcePath) {
     }
     args.push('--volume', `${join(sourcePath, packageName)}:/opt/dsh/harness/local-plugins/${packageName}:rw`)
   }
-  args.push(
-    '--volume',
-    `${join(sourcePath, 'personal-feed')}:/opt/dsh/harness/local-plugins/node_modules/@herman/personal-feed:ro`,
-  )
   for (const profile of ['web', 'telegram', 'telegram-test']) {
     args.push(
       '--volume',
@@ -3424,7 +3442,7 @@ function commandDev(options) {
       tests: {
         typeBuildBundle: scope === 'all' ? [...developmentPackages] : [scope],
         typeScript: scope === 'all' ? 'all-mounted-package-suites' : scope,
-        python: scope === 'all' || scope === 'x-feed' ? 'x-feed unittest discover + test_insight_engine' : 'not-applicable',
+        python: scope === 'all' || scope === 'personal-feed' ? 'personal-feed observer unittest discover' : 'not-applicable',
       },
       runtime: verifyRuntime,
     }

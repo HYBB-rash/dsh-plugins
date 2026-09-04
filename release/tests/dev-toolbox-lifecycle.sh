@@ -127,8 +127,8 @@ fake_notion_b="dsh-dev-${key_b:0:12}-fake-notion"
 
 test "$(grep -Fc "exec --interactive --tty --workdir /workspace/dsh-plugins $toolbox_a bash" "$test_root/engine.log")" = 2
 run_dev dev verify --source "$source_a" --candidate "$candidate" >"$test_root/verify-all.json"
-run_dev dev verify --source "$source_a" --candidate "$candidate" --package x-feed >"$test_root/verify-x-feed.json"
-node - <<'NODE' "$test_root/verify-all.json" "$test_root/verify-x-feed.json" "$latest_main"
+run_dev dev verify --source "$source_a" --candidate "$candidate" --package personal-feed >"$test_root/verify-personal-feed.json"
+node - <<'NODE' "$test_root/verify-all.json" "$test_root/verify-personal-feed.json" "$latest_main"
 const fs = require('node:fs')
 const [allPath, focusedPath, latestMain] = process.argv.slice(2)
 const all = JSON.parse(fs.readFileSync(allPath, 'utf8'))
@@ -136,12 +136,12 @@ const focused = JSON.parse(fs.readFileSync(focusedPath, 'utf8'))
 if (all.result !== 'dev-source-verified') throw new Error('missing editable verification receipt')
 if (all.receipt.baseline.pluginsCommit !== latestMain) throw new Error('missing shared-main baseline receipt')
 if (all.receipt.editableSource.scope !== 'all') throw new Error('wrong full verification scope')
-if (focused.receipt.editableSource.scope !== 'x-feed') throw new Error('wrong focused verification scope')
-if (focused.tests.python !== 'x-feed unittest discover + test_insight_engine') throw new Error('focused x-feed must include both Python gates')
+if (focused.receipt.editableSource.scope !== 'personal-feed') throw new Error('wrong focused verification scope')
+if (focused.tests.python !== 'personal-feed observer unittest discover') throw new Error('focused personal-feed must include the observer Python gate')
 if (!all.receipt.editableSource.sourceFingerprint) throw new Error('missing stable source fingerprint')
 NODE
 grep -Fq "exec --workdir /workspace/dsh-plugins $toolbox_a bash /opt/dsh/release-system/scripts/dev-source-verify.sh all" "$test_root/engine.log"
-grep -Fq "exec --workdir /workspace/dsh-plugins $toolbox_a bash /opt/dsh/release-system/scripts/dev-source-verify.sh x-feed" "$test_root/engine.log"
+grep -Fq "exec --workdir /workspace/dsh-plugins $toolbox_a bash /opt/dsh/release-system/scripts/dev-source-verify.sh personal-feed" "$test_root/engine.log"
 set +e
 MOCK_VERIFY_EXIT=23 \
   DSH_RELEASE_STATE_ROOT="$state_root" \

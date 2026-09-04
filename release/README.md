@@ -35,10 +35,8 @@
 # 重新 type/build/bundle 后执行全部 TypeScript 与 Python 测试。
 ./release/dsh dev verify --source "$(git rev-parse --show-toplevel)"
 
-# 内循环只验证一个已挂载包；personal-feed 与 x-feed 都可作为 scope，
-# x-feed 同时包含其 Python 测试。
+# 内循环只验证一个已挂载包；personal-feed 同时包含 X 页面观察器的 Python 测试。
 ./release/dsh dev verify --source "$(git rev-parse --show-toplevel)" --package personal-feed
-./release/dsh dev verify --source "$(git rev-parse --show-toplevel)" --package x-feed
 
 # 任务结束时只删除该 worktree 的容器和隔离数据；共享 main 镜像保留
 ./release/dsh dev down
@@ -150,7 +148,7 @@ Notion 任务入口同样由线上 Harness 维护，准确入口为 `$DSH_HOME/w
 
 开发和预发布都禁止 host network。开发态的 Telegram、Web、cron 和测试 sidecar 只连接无外网内部网络；预发布中不需要 sidecar 的门使用 `--network none`，需要 fake Telegram/Notion 的运行门只使用本次隔离副本的专用内部网络。Harness Web 仍只绑定容器自己的 loopback，健康检查通过容器内 `curl` 完成，不为方便本机浏览器而恢复 host network；若以后需要交互浏览器入口，必须另设显式且只监听宿主 loopback 的受控 relay。Notion 测试只访问通用 fake sidecar 的固定 GET 页面；sidecar 不包含任务同步业务，也不读取 Workspace automation、生产 token 或私人正文。生产容器固定使用 `1000:1000`；本机 rootless Podman 为了让快照副本保持宿主用户可读写，在容器内显示为 uid 0，但仍映射为宿主普通用户，不获得宿主 root 权限。
 
-`dev prepare` 是源码开发入口，不是测试或发版入口。它在准备开始和完成后都会重新 fetch：独立任务分支必须包含最新 `origin/main`，开发基础镜像的插件 commit 也必须精确等于该 `origin/main`；期间 main 一旦更新，就停止并要求 rebase、重建基础镜像和重新准备环境。正式 `build` 和 `release` 也会拒绝任何没有基于最新 `origin/main` 的产品或发版工具 commit。它只下载已有的一致生产快照，不会为开发申请停机或在线生成快照；远端没有快照、摘要不匹配或下载失败都会停止，不会退回合成数据。Harness 始终使用 `harness.lock.json` 的只读固定 commit。六个正式运行包、Skills、Profiles、runtime topology、materializer 和镜像运行脚本都从独立 worktree 可写挂入；`personal-feed` 的源码目录保持可写，同时只在 `x-feed` 的包上下文提供一个只读解析挂载，不进入 Harness 全局解析路径或 profile 目录。镜像根文件系统仍为只读，编译产物留在 worktree 的忽略目录。由于可编辑挂载会遮住镜像内预构建的 `lib`，`prepare` 只快速重新编译六个包，然后检查 Web、假 Telegram、空 cron、真实 Telegram 阻断和镜像身份；它不重复 Vitest 或 Python unittest。需要验证当前未提交源码时，显式执行 `dev verify`：它在 rootless toolbox uid 0 中重做当前范围的 type/build/bundle，避免改变宿主挂载源码的 ownership；随后以 Containerfile 相同的 1000:1000 身份、Harness、Vitest 配置和默认模块解析跑 TypeScript/Python 测试，以保留 chmod 等权限测试语义。验证专用 HOME、npm/XDG cache 与 Python data 均在 toolbox tmpfs 中创建、仅交给 1000:1000 并在结束时清理，且清除外部 `NODE_PATH`，避免污染模块拓扑边界。回执同时列出共享 main 镜像的全量测试回执与本次 editable source 的状态摘要；后者不是可发布候选。生产目录和真实凭据不会被挂载。
+`dev prepare` 是源码开发入口，不是测试或发版入口。它在准备开始和完成后都会重新 fetch：独立任务分支必须包含最新 `origin/main`，开发基础镜像的插件 commit 也必须精确等于该 `origin/main`；期间 main 一旦更新，就停止并要求 rebase、重建基础镜像和重新准备环境。正式 `build` 和 `release` 也会拒绝任何没有基于最新 `origin/main` 的产品或发版工具 commit。它只下载已有的一致生产快照，不会为开发申请停机或在线生成快照；远端没有快照、摘要不匹配或下载失败都会停止，不会退回合成数据。Harness 始终使用 `harness.lock.json` 的只读固定 commit。五个正式运行包、Skills、Profiles、runtime topology、materializer 和镜像运行脚本都从独立 worktree可写挂入；`personal-feed` 的源码目录保持可写，X 页面观察、反馈和收藏只是这个包的内部责任，不再需要跨包解析挂载。镜像根文件系统仍为只读，编译产物留在 worktree 的忽略目录。由于可编辑挂载会遮住镜像内预构建的 `lib`，`prepare` 只快速重新编译五个包，然后检查 Web、假 Telegram、空 cron、真实 Telegram 阻断和镜像身份；它不重复 Vitest 或 Python unittest。需要验证当前未提交源码时，显式执行 `dev verify`：它在 rootless toolbox uid 0 中重做当前范围的 type/build/bundle，避免改变宿主挂载源码的 ownership；随后以 Containerfile 相同的 1000:1000 身份、Harness、Vitest 配置和默认模块解析跑 TypeScript/Python 测试，以保留 chmod 等权限测试语义。验证专用 HOME、npm/XDG cache 与 Python data 均在 toolbox tmpfs 中创建、仅交给 1000:1000 并在结束时清理，且清除外部 `NODE_PATH`，避免污染模块拓扑边界。回执同时列出共享 main 镜像的全量测试回执与本次 editable source 的状态摘要；后者不是可发布候选。生产目录和真实凭据不会被挂载。
 
 ## 退出码
 

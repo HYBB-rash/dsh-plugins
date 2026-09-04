@@ -1,63 +1,10 @@
-export {
-  createPersonalFeedV2RequestCoordinator,
-  personalFeedV2TelegramRequestId,
-  type CreatePersonalFeedV2RequestCoordinatorOptions,
-  type PersonalFeedV2Clock,
-  type PersonalFeedV2IncompleteCategory,
-  type PersonalFeedV2Outcome,
-  type PersonalFeedV2PrepareInput,
-  type PersonalFeedV2PreparedResult,
-  type PersonalFeedV2PrepareResult,
-  type PersonalFeedV2R2Port,
-  type PersonalFeedV2R2Input,
-  type PersonalFeedV2R3Port,
-  type PersonalFeedV2R3Input,
-  type PersonalFeedV2R4Port,
-  type PersonalFeedV2R4Input,
-  type PersonalFeedV2R5Port,
-  type PersonalFeedV2R5Input,
-  type PersonalFeedV2Request,
-  type PersonalFeedV2RequestCoordinator,
-} from './v2/request-coordinator.ts'
+import { installTelegramExtensionWithClock } from './telegram-extension.ts'
 
-export { canonicalizeXStatusIdentity } from './v2/x-status-identity.ts'
-
-export {
-  createPersonalFeedV2CandidateStateOwner,
-  type CreatePersonalFeedV2CandidateStateOwnerOptions,
-  type PersonalFeedV2CandidateForJudgment,
-  type PersonalFeedV2CandidateJudgmentResult,
-  type PersonalFeedV2CandidateProvenance,
-  type PersonalFeedV2CandidateStateClock,
-  type PersonalFeedV2CandidateStateInput,
-  type PersonalFeedV2CandidateStateOwner,
-  type PersonalFeedV2CandidateStateRecord,
-  type PersonalFeedV2CandidateStateResult,
-} from './v2/candidate-state-owner.ts'
-
-export {
-  createPersonalContextOwner,
-  type CreatePersonalContextOwnerOptions,
-  type PersonalContextActiveFact,
-  type PersonalContextAuthorization,
-  type PersonalContextClock,
-  type PersonalContextEvidence,
-  type PersonalContextFact,
-  type PersonalContextFactEvidence,
-  type PersonalContextInterestFact,
-  type PersonalContextKnowledgeFact,
-  type PersonalContextLane,
-  type PersonalContextLaneSnapshot,
-  type PersonalContextLaneSufficiency,
-  type PersonalContextLogRecord,
-  type PersonalContextObserveResult,
-  type PersonalContextOwner,
-  type PersonalContextRequest,
-  type PersonalContextRevision,
-  type PersonalContextSemanticInput,
-  type PersonalContextSemanticPort,
-  type PersonalContextSpan,
-  type PersonalContextSnapshot,
-  type PersonalContextSnapshotResult,
-  type PersonalContextTelegramSource,
-} from './v2/personal-context-owner.ts'
+/** Install the Personal Feed Telegram extension with an isolated clock. */
+export function installTelegramExtension(
+  ctx: Parameters<typeof installTelegramExtensionWithClock>[0],
+  rawConfig: Parameters<typeof installTelegramExtensionWithClock>[1],
+): ReturnType<typeof installTelegramExtensionWithClock> {
+  const clock = Object.freeze({ now: () => new Date() })
+  return installTelegramExtensionWithClock(ctx, rawConfig, clock)
+}

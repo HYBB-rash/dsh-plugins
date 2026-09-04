@@ -11,7 +11,7 @@ fi
 
 expected_cordis="$(readlink -f "$expected_cordis")"
 
-for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector x-feed; do
+for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed; do
   package_cordis="$harness_root/local-plugins/$package/node_modules/@deepseek-ai/cordis"
   if [[ ! -e "$package_cordis" ]]; then
     echo "$package is missing @deepseek-ai/cordis" >&2

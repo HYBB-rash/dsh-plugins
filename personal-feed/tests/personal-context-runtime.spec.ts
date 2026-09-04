@@ -2,7 +2,7 @@ import type {
   TelegramInboundEnvelope,
   TelegramInboundResult,
 } from '@deepseek-ai/dsh-telegram-gateway'
-import type { PersonalContextOwner } from '@herman/personal-feed'
+import type { PersonalContextOwner } from '../src/v2/personal-context-owner.ts'
 import { describe, expect, it, vi } from 'vitest'
 import { createPersonalContextTelegramRuntime } from '../src/personal-feed/personal-context-telegram-runtime.ts'
 

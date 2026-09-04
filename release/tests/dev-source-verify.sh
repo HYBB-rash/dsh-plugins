@@ -11,14 +11,14 @@ harness_root="$test_root/harness"
 fake_bin="$test_root/fake-bin"
 log="$test_root/commands.log"
 real_bash="$(command -v bash)"
-mkdir -p "$source_root/.git" "$source_root/x-feed/python" "$fake_bin" "$harness_root/node_modules/.bin" "$harness_root/node_modules/vitest"
+mkdir -p "$source_root/.git" "$source_root/personal-feed/python" "$fake_bin" "$harness_root/node_modules/.bin" "$harness_root/node_modules/vitest"
 printf '%s\n' '{}' >"$source_root/runtime-package-topology.json"
 
-for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed x-feed; do
+for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed; do
   mkdir -p "$harness_root/local-plugins/$package/src" "$harness_root/local-plugins/$package/tests"
   printf '%s\n' '{}' >"$harness_root/local-plugins/$package/package.json"
 done
-mkdir -p "$harness_root/local-plugins/x-feed/python"
+mkdir -p "$harness_root/local-plugins/personal-feed/python"
 
 for tool in tsc tsdown; do
   cat >"$harness_root/node_modules/.bin/$tool" <<'EOF'
@@ -78,11 +78,11 @@ NODE_PATH='/must-not-reach-test-resolver' \
 MOCK_VERIFY_LOG="$log" \
   "$script" all
 
-test "$(grep -Fc 'build tool=tsc setpriv_marker=' "$log")" = 12
-test "$(grep -Fc 'build tool=tsdown setpriv_marker=' "$log")" = 6
-test "$(grep -Fc 'setpriv args=--reuid=1000 --regid=1000 --init-groups' "$log")" = 26
-test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 10
-test "$(grep -Fc 'python setpriv_marker=1000' "$log")" = 14
+test "$(grep -Fc 'build tool=tsc setpriv_marker=' "$log")" = 10
+test "$(grep -Fc 'build tool=tsdown setpriv_marker=' "$log")" = 5
+test "$(grep -Fc 'setpriv args=--reuid=1000 --regid=1000 --init-groups' "$log")" = 25
+test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 9
+test "$(grep -Fc 'python setpriv_marker=1000' "$log")" = 13
 test "$(grep -Fc 'chown args=-R 1000:1000' "$log")" = 3
 grep -q 'build tool=tsc setpriv_marker= node_path=unset' "$log"
 grep -q 'build tool=tsdown setpriv_marker= node_path=unset' "$log"
@@ -91,7 +91,6 @@ grep -q 'python setpriv_marker=1000 .*node_path=unset' "$log"
 grep -q 'python setpriv_marker=1000 .*data=/tmp/dsh-editable-verify' "$log"
 grep -q 'python setpriv_marker=1000 .*pycache=/tmp/dsh-editable-verify.*/python-pycache ' "$log"
 grep -q 'python .*args=-m unittest discover -p test_x_\*\.py' "$log"
-grep -q 'python .*args=-m unittest test_insight_engine.py' "$log"
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/test_workspace_migration.py' "$log"
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/credential-notion.py' "$log"
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/notion-page-check.py' "$log"
@@ -104,7 +103,7 @@ grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/notion-inbox-i
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/notion-https-compat.py' "$log"
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/test_scrub_preflight_state.py' "$log"
 grep -q 'python .*data=unset .*args=/opt/dsh/release-system/tests/test_workspace_migration_content.py' "$log"
-test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 10
+test "$(grep -Fc 'vitest setpriv_marker=1000' "$log")" = 9
 test "$(grep -Fc 'args=--test /opt/dsh/release-system/tests/assistant-cron-health.mjs' "$log")" = 1
 test "$(grep -Fc 'args=--test /opt/dsh/release-system/tests/fake-notion.mjs' "$log")" = 1
 test "$(grep -Fc 'args=--test /opt/dsh/release-system/tests/inspect-cron-reanchor.mjs' "$log")" = 1
@@ -112,12 +111,12 @@ test "$(grep -Fc 'args=/opt/dsh/release-system/tests/validate-assistant-state.mj
 test "$(grep -Fc 'bash args=/opt/dsh/release-system/tests/harness-notion-automation-command.sh' "$log")" = 1
 test "$(grep -Fc 'bash args=/opt/dsh/release-system/tests/engine-lock.sh' "$log")" = 1
 test "$(grep -Fc 'bash args=/opt/dsh/release-system/tests/production-operation-lock.sh' "$log")" = 1
-test ! -e "$source_root/x-feed/python/__pycache__"
+test ! -e "$source_root/personal-feed/python/__pycache__"
 verify_home="$(sed -n 's/^vitest .* home=\([^ ]*\) .*/\1/p' "$log" | head -n 1)"
 test -n "$verify_home"
 test ! -e "$(dirname "$verify_home")"
 
-test "$(sed -n 's/^packages=(//p' "$script")" = 'telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed x-feed)'
+test "$(sed -n 's/^packages=(//p' "$script")" = 'telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed)'
 
 focused_personal_log="$test_root/focused-personal-feed.log"
 PATH="$fake_bin:$PATH" \
@@ -125,14 +124,6 @@ NODE_PATH='/must-not-reach-test-resolver' \
 MOCK_VERIFY_LOG="$focused_personal_log" \
   "$script" personal-feed
 test "$(grep -Fc 'vitest setpriv_marker=1000' "$focused_personal_log")" = 1
-test "$(grep -c '^python ' "$focused_personal_log")" = 0
-
-focused_x_feed_log="$test_root/focused-x-feed.log"
-PATH="$fake_bin:$PATH" \
-NODE_PATH='/must-not-reach-test-resolver' \
-MOCK_VERIFY_LOG="$focused_x_feed_log" \
-  "$script" x-feed
-test "$(grep -Fc 'vitest setpriv_marker=1000' "$focused_x_feed_log")" = 1
-test "$(grep -c '^python ' "$focused_x_feed_log")" -gt 0
+test "$(grep -c '^python ' "$focused_personal_log")" -gt 0
 
 printf 'editable verification identity-phase mock passed\n'

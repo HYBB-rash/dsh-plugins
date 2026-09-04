@@ -1,9 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
-import {
-  personalFeedV2TelegramRequestId,
-  type PersonalContextOwner,
-  type PersonalContextRequest,
-} from '@herman/personal-feed'
+import { personalFeedV2TelegramRequestId } from '../v2/request-coordinator.ts'
+import type { PersonalContextOwner, PersonalContextRequest } from '../v2/personal-context-owner.ts'
 import { isExplicitPersonalFeedRequest } from './telegram-adapter.ts'
 
 export interface PersonalContextTelegramRuntimeOptions {

@@ -2,9 +2,11 @@ import { ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai
 import type {
   PersonalContextActiveFact,
   PersonalContextSnapshot,
+} from '../src/v2/personal-context-owner.ts'
+import type {
   PersonalFeedV2R5Input,
   PersonalFeedV2R5Port,
-} from '@herman/personal-feed'
+} from '../src/v2/request-coordinator.ts'
 import { describe, expect, it, vi } from 'vitest'
 
 type JudgmentFactory = (options: {

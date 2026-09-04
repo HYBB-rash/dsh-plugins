@@ -7,7 +7,7 @@ import {
   type PersonalContextActiveFact,
   type PersonalContextSemanticInput,
   type PersonalContextSemanticPort,
-} from '@herman/personal-feed'
+} from '../src/v2/personal-context-owner.ts'
 import { describe, expect, it, vi } from 'vitest'
 
 type Factory = (options: {

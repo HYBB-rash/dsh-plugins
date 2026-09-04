@@ -13,8 +13,10 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createPersonalContextOwner as currentFactory,
+} from '../src/v2/personal-context-owner.ts'
+import {
   personalFeedV2TelegramRequestId,
-} from '../src/index.ts'
+} from '../src/v2/request-coordinator.ts'
 
 type Source = {
   readonly kind: 'telegram_inbound'

@@ -3,7 +3,7 @@ import type {
   TelegramInboundEnvelope,
   TelegramInboundResult,
 } from '@deepseek-ai/dsh-telegram-gateway'
-import type { PersonalFeedV2RequestCoordinator } from '@herman/personal-feed'
+import type { PersonalFeedV2RequestCoordinator } from '../v2/request-coordinator.ts'
 
 export type PersonalFeedTelegramAdapterContext = Pick<Context, 'on'>
 

@@ -637,7 +637,7 @@ grep -q 'unset NODE_PATH' "$repo_root/release/scripts/dev-source-verify.sh"
 grep -q 'mktemp -d /tmp/dsh-editable-verify' "$repo_root/release/scripts/dev-source-verify.sh"
 grep -q 'setpriv --reuid=1000 --regid=1000 --init-groups' "$repo_root/release/scripts/dev-source-verify.sh"
 grep -q 'PYTHONPYCACHEPREFIX="$python_pycache"' "$repo_root/release/scripts/dev-source-verify.sh"
-grep -q "python3 -m unittest test_insight_engine.py" "$repo_root/release/scripts/dev-source-verify.sh"
+grep -q "python3 -m unittest discover" "$repo_root/release/scripts/dev-source-verify.sh"
 grep -q 'build-identity=rootless-toolbox-uid-0; test-identity=1000:1000' "$repo_root/release/scripts/dev-source-verify.sh"
 "$repo_root/release/tests/dev-source-verify.sh"
 "$repo_root/release/tests/runtime-module-identity.sh"
@@ -651,8 +651,8 @@ grep -Fq '"@herman/personal-feed"' "$repo_root/release/profiles/telegram/package
 grep -Fq '"@herman/personal-feed"' "$repo_root/release/profiles/telegram-test/package.json"
 ! grep -Fq '"@herman/personal-feed"' "$repo_root/release/profiles/web/package.json"
 grep -Fq 'personal-feed' "$repo_root/release/scripts/self-test.sh"
-! grep -Eq '(^|[^[:alnum:]_-])personal-feed([^[:alnum:]_-]|$)' "$repo_root/release/scripts/check-runtime-module-identity.sh"
-! rg -Fq 'createCronEnvironmentExtension' "$repo_root/x-feed/src"
+grep -Eq '(^|[^[:alnum:]_-])personal-feed([^[:alnum:]_-]|$)' "$repo_root/release/scripts/check-runtime-module-identity.sh"
+test ! -d "$repo_root/x-feed"
 ! grep -Eq '(^|[^[:alnum:]_-])personal-feed([^[:alnum:]_-]|$)' "$repo_root/dsh-cron/src/environment-modules.ts"
 python3 - "$repo_root/release/profiles/telegram/cordis.patch.yml" "$repo_root/release/profiles/telegram-test/cordis.patch.yml" <<'PY'
 import pathlib, sys
@@ -668,15 +668,15 @@ PY
 python3 - "$repo_root/runtime-package-topology.json" "$repo_root/release/profiles/telegram/cordis.patch.yml" <<'PY'
 import json, pathlib, sys
 topology = json.loads(pathlib.Path(sys.argv[1]).read_text())
-personal_feed = next(target for target in topology['targets'] if target['name'] == '@herman/personal-feed')
-assert personal_feed['kind'] == 'release'
-assert personal_feed['releaseDirectory'] == 'personal-feed'
-assert '@herman/x-feed' in personal_feed.get('requiredBy', [])
+assert all(target['name'] != '@herman/personal-feed' for target in topology['targets'])
+assert all('@herman/x-feed' not in target.get('requiredBy', []) for target in topology['targets'])
+gateway_target = next(target for target in topology['targets'] if target['name'] == '@deepseek-ai/dsh-telegram-gateway')
+assert '@herman/personal-feed' in gateway_target.get('requiredBy', [])
 profile = pathlib.Path(sys.argv[2]).read_text()
 cron = profile.split('    - id: dsh-cron\n', 1)[1].split('\n    - id:', 1)[0]
 gateway = profile.split('    - id: telegram-gateway\n', 1)[1].split('\n    - id:', 1)[0]
-assert "modulePath: '@herman/x-feed'" not in cron
-assert "modulePath: '@herman/x-feed'" in gateway
+assert "modulePath: '@herman/personal-feed'" not in cron
+assert "modulePath: '@herman/personal-feed'" in gateway
 PY
 grep -q 'runtime.toolbox' "$repo_root/release/cli.mjs"
 grep -q "'toolbox'" "$repo_root/release/cli.mjs"

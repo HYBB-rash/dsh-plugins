@@ -40,12 +40,12 @@ for package in dsh-telegram-gateway dsh-cron dsh-assistant; do
   mkdir -p "$fixture_root/web-home/profiles/web/node_modules/@deepseek-ai/$package/lib"
   printf '%s\n' "$package" >"$fixture_root/web-home/profiles/web/node_modules/@deepseek-ai/$package/lib/index.js"
 done
-for package in personal-feed-selector personal-feed x-feed; do
+for package in personal-feed-selector personal-feed; do
   mkdir -p "$fixture_root/web-home/profiles/web/node_modules/@herman/$package/lib"
   printf '%s\n' "$package" >"$fixture_root/web-home/profiles/web/node_modules/@herman/$package/lib/index.js"
 done
-mkdir -p "$fixture_root/web-home/profiles/web/node_modules/@herman/x-feed/python"
-printf 'print("x-feed")\n' >"$fixture_root/web-home/profiles/web/node_modules/@herman/x-feed/python/runtime.py"
+mkdir -p "$fixture_root/web-home/profiles/web/node_modules/@herman/personal-feed/python"
+printf 'print("personal-feed")\n' >"$fixture_root/web-home/profiles/web/node_modules/@herman/personal-feed/python/x_personal_feed_observer_cli.py"
 
 for command in pnpm tsc tsdown; do
   cat >"$fixture_root/forbidden-bin/$command" <<EOF
@@ -76,8 +76,7 @@ for expected in \
   dsh-web/profile/web/node_modules/@deepseek-ai/dsh-assistant/lib/index.js \
   dsh-web/profile/web/node_modules/@herman/personal-feed-selector/lib/index.js \
   dsh-web/profile/web/node_modules/@herman/personal-feed/lib/index.js \
-  dsh-web/profile/web/node_modules/@herman/x-feed/lib/index.js \
-  dsh-web/profile/web/node_modules/@herman/x-feed/python/runtime.py; do
+  dsh-web/profile/web/node_modules/@herman/personal-feed/python/x_personal_feed_observer_cli.py; do
   grep -Fxq "$expected" "$fixture_root/files.txt" || {
     echo "archive is missing $expected" >&2
     exit 1

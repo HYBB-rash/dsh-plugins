@@ -7,14 +7,16 @@ import {
   type ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
+import type { PersonalContextActiveFact } from '../v2/personal-context-owner.ts'
 import type {
-  PersonalContextActiveFact,
   PersonalFeedV2CandidateForJudgment,
   PersonalFeedV2CandidateJudgmentResult,
+} from '../v2/candidate-state-owner.ts'
+import type {
   PersonalFeedV2R5Input,
   PersonalFeedV2R5Port,
-} from '@herman/personal-feed'
-import { canonicalizeXStatusIdentity } from '@herman/personal-feed'
+} from '../v2/request-coordinator.ts'
+import { canonicalizeXStatusIdentity } from '../v2/x-status-identity.ts'
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const TOOL_NAME = 'submit-personal-feed-candidate-judgment'

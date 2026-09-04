@@ -4,11 +4,15 @@ import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   installTelegramExtension,
+} from '../src/index.ts'
+import {
   parseXFeedRuntimeConfig,
   resolveDataDir,
   resolveObserverCliPath,
+} from '../src/config.ts'
+import {
   X_FEED_CONTRACT,
-} from '../src/index.ts'
+} from '../src/telegram-extension.ts'
 import { FileNavigationSnapshotStore } from '../src/navigation/file-navigation-snapshot-store.ts'
 
 afterEach(() => {

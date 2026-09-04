@@ -1,6 +1,6 @@
 {
   "name": "@herman/personal-feed",
-  "description": "Source-neutral Personal Feed v2 business scope runtime",
+  "description": "Private Personal Feed business runtime and Telegram extension",
   "version": "0.1.0-rc.1",
   "private": true,
   "type": "module",
@@ -19,6 +19,31 @@
   },
   "files": [
     "lib/*.js",
-    "lib/types/**/*.d.ts"
-  ]
+    "lib/types/**/*.d.ts",
+    "python/x_browser_navigation_lock.py",
+    "python/x_personal_feed_observer.py",
+    "python/x_personal_feed_observer_cli.py"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "workspace:*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-home-paths": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-telegram-gateway": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-util-values": "*"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "workspace:*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-home-paths": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-session-projection": "*",
+    "@deepseek-ai/dsh-system-prompt": "*",
+    "@deepseek-ai/dsh-telegram-gateway": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-util-values": "*"
+  }
 }

@@ -11,7 +11,7 @@
         agentPreset: standard
         cwd: !!js process.env.DSH_CWD ?? process.cwd()
         extensions:
-          - modulePath: '@herman/x-feed'
+          - modulePath: '@herman/personal-feed'
             configJson: '{"telegramSessionId":"session-telegram"}'
     - id: dsh-cron
       name: './node_modules/@deepseek-ai/dsh-cron/lib/index.js'

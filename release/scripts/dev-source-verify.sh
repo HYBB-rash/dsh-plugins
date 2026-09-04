@@ -3,12 +3,12 @@ set -Eeuo pipefail
 
 source_root=/workspace/dsh-plugins
 harness_root=/opt/dsh/harness
-packages=(telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed x-feed)
+packages=(telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed)
 requested_package="${1:-all}"
 
 case "$requested_package" in
   all) selected_packages=("${packages[@]}") ;;
-  telegram-gateway|dsh-cron|dsh-assistant|personal-feed-selector|personal-feed|x-feed)
+  telegram-gateway|dsh-cron|dsh-assistant|personal-feed-selector|personal-feed)
     selected_packages=("$requested_package")
     ;;
   *)
@@ -66,19 +66,19 @@ for package in "${selected_packages[@]}"; do
   fi
 done
 
-if [[ " ${selected_packages[*]} " == *' x-feed '* ]]; then
+if [[ " ${selected_packages[*]} " == *' personal-feed '* ]]; then
   python_data="$verify_root/python-data"
   python_pycache="$verify_root/python-pycache"
   mkdir -p "$python_data" "$python_pycache"
   chown -R 1000:1000 "$python_data" "$python_pycache"
   chmod 700 "$python_data" "$python_pycache"
   (
-    cd "$harness_root/local-plugins/x-feed/python"
+    cd "$harness_root/local-plugins/personal-feed/python"
     setpriv --reuid=1000 --regid=1000 --init-groups \
       env HOME="$verify_root/home" npm_config_cache="$verify_root/cache/npm" \
       XDG_CACHE_HOME="$verify_root/cache/xdg" DSH_X_FEED_DATA_DIR="$python_data" \
       PYTHONPYCACHEPREFIX="$python_pycache" PYTHONWARNINGS=ignore \
-      bash -c "python3 -m unittest discover -p 'test_x_*.py' && python3 -m unittest test_insight_engine.py"
+      python3 -m unittest discover -p 'test_x_*.py'
   )
 fi
 

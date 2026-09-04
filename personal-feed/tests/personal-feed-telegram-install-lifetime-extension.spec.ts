@@ -41,7 +41,7 @@ afterEach(() => {
   while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true })
 })
 
-vi.mock('@herman/personal-feed', () => ({
+vi.mock('../src/v2/personal-context-owner.ts', () => ({
   createPersonalContextOwner: vi.fn((options: unknown) => {
     state.contextOwnerOptions.push(options)
     const owner = Object.freeze({ observe: vi.fn(), snapshot: vi.fn() })
@@ -102,7 +102,7 @@ vi.mock('../src/personal-feed/x-surface-observer.ts', () => ({
 }))
 
 vi.mock('../src/config.ts', () => ({
-  resolveObserverCliPath: vi.fn(() => '/opt/dsh/runtime/x-feed/python/x_personal_feed_observer_cli.py'),
+  resolveObserverCliPath: vi.fn(() => '/opt/dsh/runtime/personal-feed/python/x_personal_feed_observer_cli.py'),
   parseXFeedRuntimeConfig: vi.fn((raw: Record<string, unknown>) => Object.freeze({
     dataDir: raw.dataDir,
     personalFeedDataDir: raw.personalFeedDataDir,
@@ -181,7 +181,7 @@ describe('Personal Feed Telegram install composition', () => {
 
     expect(state.observerOptions).toStrictEqual([{
       pythonBin: '/nix/store/test-python/bin/python3',
-      observerCliPath: '/opt/dsh/runtime/x-feed/python/x_personal_feed_observer_cli.py',
+      observerCliPath: '/opt/dsh/runtime/personal-feed/python/x_personal_feed_observer_cli.py',
       clock,
     }])
     expect(state.semanticOptions).toHaveLength(1)
