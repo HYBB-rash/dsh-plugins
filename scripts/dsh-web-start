@@ -25,23 +25,7 @@ for required_file in "$archive" "$checksum"; do
   fi
 done
 
-pnpm_command=${DSH_WEB_PNPM:-pnpm}
-corepack_command=${DSH_WEB_COREPACK:-corepack}
-if pnpm_path=$(command -v "$pnpm_command" 2>/dev/null); then
-  pnpm_argv=("$pnpm_path")
-elif corepack_path=$(command -v "$corepack_command" 2>/dev/null); then
-  pnpm_argv=("$corepack_path" pnpm)
-else
-  echo 'pnpm is required to install DSH plugins; install pnpm or provide corepack' >&2
-  exit 127
-fi
-
 install -d -m 0700 "$package_root" "$releases" "$runtime_bin" "$DSH_HOME" "$DSH_CWD"
-printf '#!/usr/bin/env bash\nexec' >"$runtime_bin/pnpm"
-printf ' %q' "${pnpm_argv[@]}" >>"$runtime_bin/pnpm"
-printf ' "$@"\n' >>"$runtime_bin/pnpm"
-chmod 0700 "$runtime_bin/pnpm"
-export PATH="$runtime_bin:$PATH"
 
 (
   cd "$package_root"
@@ -66,6 +50,51 @@ if [[ ! -d "$release" ]]; then
   rmdir "$temporary_release"
   trap - EXIT
 fi
+
+pnpm_command=${DSH_WEB_PNPM:-pnpm}
+corepack_command=${DSH_WEB_COREPACK:-corepack}
+if pnpm_path=$(command -v "$pnpm_command" 2>/dev/null); then
+  pnpm_argv=("$pnpm_path")
+elif corepack_path=$(command -v "$corepack_command" 2>/dev/null); then
+  package_manager=$(node -e '
+    const fs = require("node:fs")
+    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).packageManager
+    if (typeof value !== "string" || !/^pnpm@[0-9]+\.[0-9]+\.[0-9]+$/.test(value)) process.exit(1)
+    process.stdout.write(value)
+  ' "$release/harness/package.json") || {
+    echo 'packaged Harness does not declare a pinned pnpm version' >&2
+    exit 1
+  }
+  pnpm_version=${package_manager#pnpm@}
+  manager_dir="$package_root/package-managers/pnpm-$pnpm_version"
+  pnpm_entry="$manager_dir/bin/pnpm.cjs"
+  if [[ ! -f "$pnpm_entry" || -L "$pnpm_entry" ]]; then
+    temporary_manager=$(mktemp -d "$package_root/.pnpm.XXXXXX")
+    cleanup_manager() { rm -rf -- "$temporary_manager"; }
+    trap cleanup_manager EXIT
+    "$corepack_path" pack "$package_manager" -o "$temporary_manager/pnpm.tgz" >/dev/null
+    tar --no-same-owner -xzf "$temporary_manager/pnpm.tgz" -C "$temporary_manager"
+    extracted_entry="$temporary_manager/pnpm/$pnpm_version/bin/pnpm.cjs"
+    if [[ ! -f "$extracted_entry" || -L "$extracted_entry" ]]; then
+      echo "corepack package is missing pnpm/$pnpm_version/bin/pnpm.cjs" >&2
+      exit 1
+    fi
+    install -d -m 0700 "$package_root/package-managers"
+    mv "$temporary_manager/pnpm/$pnpm_version" "$manager_dir"
+    rm -rf -- "$temporary_manager"
+    trap - EXIT
+  fi
+  pnpm_argv=("$(command -v node)" "$pnpm_entry")
+else
+  echo 'pnpm is required to install DSH plugins; install pnpm or provide corepack' >&2
+  exit 127
+fi
+
+printf '#!/usr/bin/env bash\nexec' >"$runtime_bin/pnpm"
+printf ' %q' "${pnpm_argv[@]}" >>"$runtime_bin/pnpm"
+printf ' "$@"\n' >>"$runtime_bin/pnpm"
+chmod 0700 "$runtime_bin/pnpm"
+export PATH="$runtime_bin:$PATH"
 
 "$release/bin/install-plugins"
 ln -sfn "releases/$archive_sha" "$package_root/current.next"
