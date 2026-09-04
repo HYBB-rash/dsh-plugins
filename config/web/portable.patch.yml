@@ -1,0 +1,20 @@
+# Versioned runtime overrides for the portable Web package.
+- id: telegram-gateway
+  config:
+    sessionId: session-telegram
+    agentPreset: standard
+    cwd: !!js process.env.DSH_CWD ?? process.cwd()
+
+- id: dsh-cron
+  config:
+    mode: scheduler
+    pollIntervalMs: 10000
+    maxConcurrent: 3
+    deliverOnError: true
+
+- id: dsh-assistant
+  config:
+    mode: telegram
+    pollIntervalMs: 5000
+    telegramParentSessionId: session-telegram
+    cronControlSocketPath: !!js dshHomePath('storages/dsh-cron/control.sock')

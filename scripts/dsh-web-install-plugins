@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+package_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+: "${DSH_HOME:?set DSH_HOME to an external writable directory}"
+
+if ! command -v node >/dev/null 2>&1; then
+  echo 'node is required to install DSH plugins' >&2
+  exit 127
+fi
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo 'pnpm is required to install DSH plugins' >&2
+  exit 127
+fi
+
+plugin_archives=()
+for pattern in \
+  'deepseek-ai-dsh-telegram-gateway-*.tgz' \
+  'deepseek-ai-dsh-cron-*.tgz' \
+  'deepseek-ai-dsh-assistant-*.tgz'; do
+  matches=("$package_root"/plugins/$pattern)
+  if [[ ${#matches[@]} -ne 1 || ! -f "${matches[0]}" ]]; then
+    echo "expected exactly one $pattern under $package_root/plugins" >&2
+    exit 1
+  fi
+  plugin_archives+=("${matches[0]}")
+done
+
+exec node "$package_root/harness/apps/cli/lib/bin.js" \
+  plugin --profile web add --ignore-scripts "${plugin_archives[@]}"

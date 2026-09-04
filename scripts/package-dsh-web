@@ -8,20 +8,23 @@ fi
 
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 harness_root="$repository_root/upstream/deepseek-harness"
-profile_root="${DSH_WEB_HOME:-$repository_root/.dsh-web}/profiles/web"
 output=$(realpath -m -- "$1")
 
 required_files=(
   "$harness_root/apps/cli/lib/bin.js"
   "$harness_root/apps/web/dist/index.html"
   "$harness_root/.dsh-build/client-build-environment.json"
-  "$profile_root/cordis.patch.yml"
-  "$profile_root/node_modules/@deepseek-ai/dsh-telegram-gateway/lib/index.js"
-  "$profile_root/node_modules/@deepseek-ai/dsh-cron/lib/index.js"
-  "$profile_root/node_modules/@deepseek-ai/dsh-assistant/lib/index.js"
-  "$profile_root/node_modules/@herman/personal-feed/lib/index.js"
-  "$profile_root/node_modules/@herman/personal-feed/python/x_personal_feed_observer_cli.py"
+  "$repository_root/config/web/portable.patch.yml"
+  "$repository_root/scripts/dsh-web-install-plugins"
+  "$repository_root/scripts/dsh-web-runtime"
 )
+for plugin in telegram-gateway dsh-cron dsh-assistant; do
+  required_files+=(
+    "$repository_root/$plugin/package.json"
+    "$repository_root/$plugin/cordis.patch.yml"
+    "$repository_root/$plugin/lib/index.js"
+  )
+done
 for required_file in "${required_files[@]}"; do
   if [[ ! -f "$required_file" ]]; then
     echo "missing built artifact: $required_file" >&2
@@ -30,20 +33,30 @@ for required_file in "${required_files[@]}"; do
 done
 
 mkdir -p -- "$(dirname -- "$output")"
-temporary_output=$(mktemp "$(dirname -- "$output")/.dsh-web-package.XXXXXX.tar.gz")
-cleanup() { rm -f -- "$temporary_output"; }
+temporary_root=$(mktemp -d "$(dirname -- "$output")/.dsh-web-package.XXXXXX")
+temporary_output="$temporary_root/archive.tar.gz"
+cleanup() { rm -rf -- "$temporary_root"; }
 trap cleanup EXIT
+
+mkdir -p "$temporary_root/dsh-web/plugins" "$temporary_root/dsh-web/config" "$temporary_root/dsh-web/bin"
+install -m 0644 "$repository_root/config/web/portable.patch.yml" "$temporary_root/dsh-web/config/web.patch.yml"
+install -m 0755 "$repository_root/scripts/dsh-web-install-plugins" "$temporary_root/dsh-web/bin/install-plugins"
+install -m 0755 "$repository_root/scripts/dsh-web-runtime" "$temporary_root/dsh-web/bin/web"
+
+for plugin in telegram-gateway dsh-cron dsh-assistant; do
+  (cd "$repository_root/$plugin" && pnpm pack --pack-destination "$temporary_root/dsh-web/plugins" >/dev/null)
+done
 
 tar -czf "$temporary_output" \
   --exclude='.git' \
   --exclude='.env' \
   --exclude='.env.*' \
   --transform='s|^deepseek-harness|dsh-web/harness|' \
-  --transform='s|^web|dsh-web/profile/web|' \
   -C "$repository_root/upstream" deepseek-harness \
-  -C "$(dirname -- "$profile_root")" web
+  -C "$temporary_root" dsh-web/plugins dsh-web/config dsh-web/bin
 mv -f -- "$temporary_output" "$output"
 trap - EXIT
+rm -rf -- "$temporary_root"
 
 printf 'archive: %s\n' "$output"
 printf 'sha256: %s\n' "$(sha256sum "$output" | awk '{print $1}')"

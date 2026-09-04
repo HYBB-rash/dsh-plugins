@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+package_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+: "${DSH_HOME:?set DSH_HOME to an external writable directory}"
+
+if ! command -v node >/dev/null 2>&1; then
+  echo 'node is required to run DSH Web' >&2
+  exit 127
+fi
+
+exec node "$package_root/harness/apps/cli/lib/bin.js" \
+  --profile web \
+  --patch "$package_root/config/web.patch.yml" \
+  "$@"
