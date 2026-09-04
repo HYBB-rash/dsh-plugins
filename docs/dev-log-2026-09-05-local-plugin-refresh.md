@@ -17,6 +17,8 @@
 
 最后用最终脚本完整安装实际 `.dsh-web`。命令退出 0，三个插件的 `lib/index.js` 均与源码逐字节一致，合成配置中三个 bundle 各出现一次。没有由本任务启动或重启 Web；端口 3080 的现有监听者来自另一个 `dsh-plugins-wave13-main-integrate` 工作树，不属于本次 Profile。
 
+获得用户临时运行授权后，使用当前工作树的 `.dsh-web` 在 `127.0.0.1:3081` 启动真实运行时。新版 gateway 启动后把 `session-telegram` 加入路径为 `/home/herman/Projects/dsh-plugins` 的既有 Workspace；该 Workspace 原有另一个会话仍在。会话投影仍显示标题 `Getting started`、`cwd=/home/herman/Projects/dsh-plugins`、9 轮历史。验证完成后以 Ctrl-C 停止临时进程，3081 端口已释放，另一个工作树占用的 3080 未受影响。
+
 ## 逻辑链条
 
 `file:` 依赖的地址和版本没有变化时，实际 hoisted Profile 上的 `plugin add --force` 和 `plugin update --force` 都可能被 pnpm 判定为无需重新复制。单次版本 bump 只能绕过一次，直接复制 `node_modules` 又会绕过 Harness/pnpm 的状态所有权，因此均被否决。
@@ -39,7 +41,8 @@ Harness 已公开支持 `plugin remove` 和 `plugin add`，所以最终方案没
 - `git diff --check` 通过。
 - 最终脚本针对实际 `.dsh-web` 退出 0；Telegram、cron、assistant 的源码和 Profile `lib/index.js` SHA 分别完全一致。
 - `scripts/dsh-web-runtime --dump-config` 显示 `telegram-gateway`、`dsh-cron`、`dsh-assistant` 各一次。
+- 当前工作树真实运行时在 3081 启动后，`workspace.json` 中目标 Workspace 的 `sessionIds` 包含原 `session-telegram`；会话投影保持原 cwd、标题和 9 轮历史。停止后 3081 无监听，3080 的其他工作树进程未变化。
 
 ## 遗留
 
-当前只完成安装字节验证，没有启动本任务的本地 Web，也没有进行真实 Telegram 验收。`session-telegram` 仍未写入当前 `.dsh-web/storages/workspace.json`；需要在明确启动许可下运行当前工作树的 Web，才能触发新版 gateway 的历史会话归组并验证真实消息续接。
+本地启动已经验证历史会话归组，但没有从 Telegram 客户端发送一条新消息，因此“真实消息继续进入同一 session”仍需用户侧消息验收。没有发布或修改生产环境。
