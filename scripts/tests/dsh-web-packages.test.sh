@@ -11,7 +11,10 @@ mkdir -p \
   "$fixture_root/config/web" \
   "$fixture_root/upstream/deepseek-harness/apps/cli/lib" \
   "$fixture_root/upstream/deepseek-harness/node_modules/.bin" \
-  "$fixture_root/upstream/deepseek-harness/node_modules/.pnpm/node_modules/@deepseek-ai" \
+  "$fixture_root/upstream/deepseek-harness/node_modules/@types/node" \
+  "$fixture_root/upstream/deepseek-harness/node_modules/tsdown" \
+  "$fixture_root/upstream/deepseek-harness/node_modules/.pnpm/node_modules/@deepseek-ai/cordis" \
+  "$fixture_root/upstream/deepseek-harness/node_modules/.pnpm/fs-ext@2.1.1/node_modules/fs-ext/build/Release" \
   "$fixture_root/config/web/production-credentials/secrets" \
   "$fixture_root/test-bin"
 cp "$repository_root/scripts/dsh-web-install-plugins" "$fixture_root/scripts/dsh-web-install-plugins"
@@ -21,14 +24,29 @@ printf 'console.log("dsh")\n' >"$fixture_root/upstream/deepseek-harness/apps/cli
 printf 'private source credentials\n' >"$fixture_root/config/web/production-credentials/.credentials.yaml"
 printf 'private source notion token\n' >"$fixture_root/config/web/production-credentials/secrets/notion.token"
 
+declare -A package_names=(
+  [telegram-gateway]=@deepseek-ai/dsh-telegram-gateway
+  [dsh-cron]=@deepseek-ai/dsh-cron
+  [dsh-assistant]=@deepseek-ai/dsh-assistant
+)
 for package in telegram-gateway dsh-cron dsh-assistant; do
   mkdir -p "$fixture_root/$package"
+  printf '{"name":"%s"}\n' "${package_names[$package]}" >"$fixture_root/$package/package.json"
 done
+printf '{"packageManager":"pnpm@11.7.0"}\n' >"$fixture_root/upstream/deepseek-harness/package.json"
+fs_ext_root="$fixture_root/upstream/deepseek-harness/node_modules/.pnpm/fs-ext@2.1.1/node_modules/fs-ext"
+printf '{"name":"fs-ext","scripts":{"install":"node-gyp configure build"}}\n' >"$fs_ext_root/package.json"
 
 for compiler in tsc tsdown; do
   cat >"$fixture_root/upstream/deepseek-harness/node_modules/.bin/$compiler" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+for dependency in @types/node @deepseek-ai/cordis tsdown; do
+  if [[ ! -e "node_modules/$dependency" ]]; then
+    echo "compiler cannot resolve $dependency from $PWD/node_modules" >&2
+    exit 42
+  fi
+done
 mkdir -p lib/types
 : >lib/index.js
 EOF
@@ -38,32 +56,86 @@ done
 cat >"$fixture_root/test-bin/pnpm" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+echo 'nested Harness build used PATH pnpm 11.22 instead of declared pnpm 11.7.0' >&2
+exit 43
+EOF
+cat >"$fixture_root/test-bin/pnpm-declared" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
 printf 'pnpm' >>"$DSH_WEB_TEST_LOG"
 printf ' %q' "$@" >>"$DSH_WEB_TEST_LOG"
 printf '\n' >>"$DSH_WEB_TEST_LOG"
+if [[ "${1:-}" == run && "${2:-}" == build ]]; then
+  pnpm --filter @deepseek-ai/dsh-web-frontend run build
+fi
+EOF
+cat >"$fixture_root/test-bin/corepack" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == pnpm || "${1:-}" == pnpm@11.7.0 ]]; then
+  shift
+  exec pnpm-declared "$@"
+fi
+echo "unexpected corepack command: $*" >&2
+exit 2
+EOF
+cat >"$fixture_root/test-bin/npm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'npm' >>"$DSH_WEB_TEST_LOG"
+printf ' %q' "$@" >>"$DSH_WEB_TEST_LOG"
+printf '\n' >>"$DSH_WEB_TEST_LOG"
+if [[ "$PWD" != "$DSH_WEB_TEST_FS_EXT" || "${1:-}" != run || "${2:-}" != install ]]; then
+  echo "unexpected npm command in $PWD: $*" >&2
+  exit 44
+fi
+mkdir -p build/Release
+: >build/Release/fs_ext.node
 EOF
 cat >"$fixture_root/test-bin/node" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" == -p ]]; then
+  exec "$DSH_WEB_TEST_REAL_NODE" "$@"
+fi
 printf 'env DSH_HOME=%q DSH_CWD=%q PWD=%q\n' "$DSH_HOME" "${DSH_CWD-}" "$PWD" >>"$DSH_WEB_TEST_LOG"
 printf 'node' >>"$DSH_WEB_TEST_LOG"
 printf ' %q' "$@" >>"$DSH_WEB_TEST_LOG"
 printf '\n' >>"$DSH_WEB_TEST_LOG"
 EOF
-chmod +x "$fixture_root/test-bin/pnpm" "$fixture_root/test-bin/node"
+chmod +x \
+  "$fixture_root/test-bin/pnpm" \
+  "$fixture_root/test-bin/pnpm-declared" \
+  "$fixture_root/test-bin/corepack" \
+  "$fixture_root/test-bin/npm" \
+  "$fixture_root/test-bin/node"
 
 export DSH_WEB_TEST_LOG="$fixture_root/commands.log"
+export DSH_WEB_TEST_REAL_NODE DSH_WEB_TEST_FS_EXT
+DSH_WEB_TEST_REAL_NODE=$(command -v node)
+DSH_WEB_TEST_FS_EXT=$fs_ext_root
+install_status=0
 PATH="$fixture_root/test-bin:$PATH" \
   DSH_WEB_HOME="$fixture_root/home" \
-  "$fixture_root/scripts/dsh-web-install-plugins"
+  "$fixture_root/scripts/dsh-web-install-plugins" || install_status=$?
+if [[ $install_status -ne 0 ]]; then
+  echo "source installer failed to expose the complete dependency view" >&2
+fi
+if [[ ! -f "$fixture_root/upstream/deepseek-harness/node_modules/.pnpm/fs-ext@2.1.1/node_modules/fs-ext/build/Release/fs_ext.node" ]]; then
+  echo 'source installer did not build the allowlisted fs-ext native addon' >&2
+  install_status=1
+fi
+if [[ $install_status -ne 0 ]]; then
+  exit "$install_status"
+fi
 
 for package in telegram-gateway dsh-cron dsh-assistant; do
   test -f "$fixture_root/$package/lib/index.js" || {
     echo "installer did not build $package" >&2
     exit 1
   }
-  test "$(readlink "$fixture_root/upstream/deepseek-harness/node_modules/.pnpm/node_modules/@deepseek-ai/$package")" = "$fixture_root/$package" || {
-    echo "installer did not link $package into the Harness workspace" >&2
+  test "$(readlink "$fixture_root/$package/node_modules/@deepseek-ai/${package_names[$package]#@deepseek-ai/}")" = "$fixture_root/$package" || {
+    echo "installer did not link ${package_names[$package]} into the plugin build view" >&2
     exit 1
   }
   grep -Fq "file:$fixture_root/$package" "$DSH_WEB_TEST_LOG" || {
@@ -73,6 +145,7 @@ for package in telegram-gateway dsh-cron dsh-assistant; do
 done
 
 grep -Fq 'pnpm install --ignore-scripts' "$DSH_WEB_TEST_LOG"
+grep -Fq 'npm run install' "$DSH_WEB_TEST_LOG"
 grep -Fq 'pnpm run build' "$DSH_WEB_TEST_LOG"
 grep -Fq 'plugin --profile web add --ignore-scripts --force' "$DSH_WEB_TEST_LOG"
 if grep -Fq 'plugin --profile web remove' "$DSH_WEB_TEST_LOG"; then
