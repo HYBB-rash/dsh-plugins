@@ -112,3 +112,4 @@
 - 2026-09-04：Models 页的 `settings are unavailable in this browser` 是上游 `ui-settings` 明确禁用非 loopback Host settings 的结果，不是 `listProviders` 401/403；不得修改 `upstream/deepseek-harness`。Git reset 也不会清除 ignored 的 `lib/` 构建污染，曾误构建上游后必须从官方源码完整重建并核对实际打包输入。
 - 2026-09-05：源码模式的本地 Web Profile 使用 hoisted `file:` 依赖时，同版本同路径下 `plugin add --force` 与 `plugin update --force` 都可能退出 0、显示 `Already up to date`，却保留旧插件字节；刷新必须经 Harness 先移除实际已安装的本地插件再重新添加，并以源码/Profile 哈希和重复安装测试验证，不能用临时新路径 Profile 的成功替代真实既有 Profile 证据。
 - 2026-09-05：源码 Web 运行入口的默认应用参数不能注入 `--dump-config` 或 `--dump-default-config`，Harness 明确要求配置导出不携带应用参数。开发默认端口应只在正常启动且调用者未显式传 `--port` 时补入；本机正式部署继续由 `dsh-web-start` 显式固定 3080。
+- 2026-09-05：`pnpm install --ignore-scripts` 后，`pnpm rebuild fs-ext` 可能退出 0 却不生成 `fs_ext.node`；native 验收不能只看命令回执或由 fake rebuild 制造标记，必须执行已定位包自己的 install 脚本，并用当前 Node 实际 `require()` 生成物。
