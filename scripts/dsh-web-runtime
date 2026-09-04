@@ -6,6 +6,7 @@ if [[ -d "$package_root/upstream/deepseek-harness" ]]; then
   export DSH_HOME="${DSH_WEB_HOME:-$package_root/.dsh-web}"
   harness_root="$package_root/upstream/deepseek-harness"
   patch="$package_root/config/web/portable.patch.yml"
+  default_port=5080
 else
   : "${DSH_HOME:?set DSH_HOME to an external writable directory}"
   harness_root="$package_root/harness"
@@ -17,7 +18,22 @@ if ! command -v node >/dev/null 2>&1; then
   exit 127
 fi
 
+runtime_args=("$@")
+if [[ -n "${default_port:-}" ]]; then
+  add_default_port=true
+  for argument in "${runtime_args[@]}"; do
+    if [[ "$argument" == --port || "$argument" == --port=* \
+      || "$argument" == --dump-config || "$argument" == --dump-default-config ]]; then
+      add_default_port=false
+      break
+    fi
+  done
+  if [[ "$add_default_port" == true ]]; then
+    runtime_args+=(--port "$default_port")
+  fi
+fi
+
 exec node --expose-internals "$harness_root/apps/cli/lib/bin.js" \
   --profile web \
   --patch "$patch" \
-  "$@"
+  "${runtime_args[@]}"

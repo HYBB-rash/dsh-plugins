@@ -110,12 +110,37 @@ fi
 : >"$DSH_WEB_TEST_LOG"
 PATH="$fixture_root/test-bin:$PATH" \
   DSH_WEB_HOME="$fixture_root/home" \
+  "$fixture_root/scripts/dsh-web-runtime"
+
+grep -Fq -- '--port 5080' "$DSH_WEB_TEST_LOG" || {
+  echo 'source Web runtime did not default to port 5080' >&2
+  exit 1
+}
+
+: >"$DSH_WEB_TEST_LOG"
+PATH="$fixture_root/test-bin:$PATH" \
+  DSH_WEB_HOME="$fixture_root/home" \
+  "$fixture_root/scripts/dsh-web-runtime" --dump-config
+
+grep -Fq -- '--dump-config' "$DSH_WEB_TEST_LOG"
+if grep -Fq -- '--port 5080' "$DSH_WEB_TEST_LOG"; then
+  echo 'source Web runtime passed its default port to a config dump' >&2
+  exit 1
+fi
+
+: >"$DSH_WEB_TEST_LOG"
+PATH="$fixture_root/test-bin:$PATH" \
+  DSH_WEB_HOME="$fixture_root/home" \
   "$fixture_root/scripts/dsh-web-runtime" --host 127.0.0.1 --port 3080 --no-open
 
 grep -Fq -- 'node --expose-internals' "$DSH_WEB_TEST_LOG"
 grep -Fq -- '--profile web --patch' "$DSH_WEB_TEST_LOG"
 grep -Fq "$fixture_root/config/web/portable.patch.yml" "$DSH_WEB_TEST_LOG"
 grep -Fq -- '--host 127.0.0.1 --port 3080 --no-open' "$DSH_WEB_TEST_LOG"
+if grep -Fq -- '--port 5080' "$DSH_WEB_TEST_LOG"; then
+  echo 'source Web runtime ignored an explicit port override' >&2
+  exit 1
+fi
 if grep -Fq 'pnpm' "$DSH_WEB_TEST_LOG"; then
   echo 'Web runtime rebuilt or installed packages' >&2
   exit 1
