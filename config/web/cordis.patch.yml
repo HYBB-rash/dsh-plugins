@@ -1,0 +1,14 @@
+- insert:
+    - id: telegram-gateway
+      name: './node_modules/@deepseek-ai/dsh-telegram-gateway/lib/index.js'
+      config:
+        sessionId: session-telegram
+        cwd: !!js process.env.DSH_CWD ?? process.cwd()
+    - id: dsh-cron
+      name: './node_modules/@deepseek-ai/dsh-cron/lib/index.js'
+      config:
+        mode: manager
+    - id: dsh-assistant
+      name: './node_modules/@deepseek-ai/dsh-assistant/lib/index.js'
+      config:
+        mode: web

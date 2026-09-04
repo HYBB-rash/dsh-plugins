@@ -1,0 +1,101 @@
+#!/usr/bin/env sh
+set -eu
+
+root_directory=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+export DSH_HOME="${DSH_WEB_HOME:-$root_directory/.dsh-web}"
+
+harness_root="$root_directory/upstream/deepseek-harness"
+harness_node_modules="$harness_root/node_modules/.pnpm/node_modules"
+harness_tsc="$harness_root/node_modules/.bin/tsc"
+harness_tsdown="$harness_root/node_modules/.bin/tsdown"
+harness_plugins_dir="$DSH_HOME/profiles/web/node_modules/@deepseek-ai"
+harness_plugin_scope="$harness_root/node_modules/.pnpm/node_modules/@deepseek-ai"
+
+ensure_local_plugin_links() {
+  local plugin
+  for plugin in telegram-gateway dsh-cron dsh-assistant; do
+    if [ -e "$harness_plugin_scope/$plugin" ]; then
+      if [ ! -L "$harness_plugin_scope/$plugin" ]; then
+        echo "❌ $harness_plugin_scope/$plugin is not a symlink" >&2
+        return 1
+      fi
+      if [ "$(readlink "$harness_plugin_scope/$plugin")" != "$root_directory/$plugin" ]; then
+        ln -sfn "$root_directory/$plugin" "$harness_plugin_scope/$plugin"
+      fi
+    else
+      ln -s "$root_directory/$plugin" "$harness_plugin_scope/$plugin"
+    fi
+  done
+}
+
+ensure_local_node_modules() {
+  plugin_directory=$1
+  target=$2
+
+  existing=$(readlink "$plugin_directory/node_modules" 2>/dev/null || true)
+
+  if [ "$existing" = "$target" ]; then
+    return 0
+  fi
+
+  if [ -e "$plugin_directory/node_modules" ]; then
+    if [ ! -L "$plugin_directory/node_modules" ]; then
+      echo "❌ $plugin_directory/node_modules is not a symlink; refusing to overwrite" >&2
+      return 1
+    fi
+    rm -f "$plugin_directory/node_modules"
+  fi
+
+  ln -sfn "$target" "$plugin_directory/node_modules"
+}
+
+build_plugin() {
+  plugin_directory=$1
+
+  ensure_local_node_modules "$plugin_directory" "$harness_node_modules"
+
+  rm -rf "$plugin_directory/lib" "$plugin_directory/tsconfig.tsbuildinfo"
+
+  if ! (cd "$plugin_directory" && "$harness_tsc" -b); then
+    echo "❌ failed initial tsc build for $(basename "$plugin_directory")" >&2
+    return 1
+  fi
+
+  if ! (cd "$plugin_directory" && "$harness_tsdown"); then
+    echo "❌ failed tsdown bundle for $(basename "$plugin_directory")" >&2
+    return 1
+  fi
+
+  if ! (cd "$plugin_directory" && "$harness_tsc" -b); then
+    echo "❌ failed post-bundle tsc build for $(basename "$plugin_directory")" >&2
+    return 1
+  fi
+
+  if [ ! -f "$plugin_directory/lib/index.js" ]; then
+    echo "❌ missing $plugin_directory/lib/index.js after bundle" >&2
+    return 1
+  fi
+}
+
+cd "$harness_root"
+pnpm install --ignore-scripts
+pnpm run build
+
+ensure_local_plugin_links
+
+build_plugin "$root_directory/telegram-gateway"
+build_plugin "$root_directory/dsh-cron"
+build_plugin "$root_directory/dsh-assistant"
+
+for installed in "$harness_plugins_dir/dsh-telegram-gateway" "$harness_plugins_dir/dsh-cron" "$harness_plugins_dir/dsh-assistant"; do
+  rm -rf "$installed"
+done
+
+pnpm dsh plugin --profile web add \
+  "file:$root_directory/telegram-gateway" \
+  "file:$root_directory/dsh-cron" \
+  "file:$root_directory/dsh-assistant"
+
+install -m 0644 "$root_directory/config/web/cordis.patch.yml" "$DSH_HOME/profiles/web/cordis.patch.yml"
+
+exec node --expose-internals apps/cli/lib/bin.js web "$@"
