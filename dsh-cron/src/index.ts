@@ -231,25 +231,25 @@ export async function applyManager(ctx: Context, config: Config): Promise<void> 
  * Telegram gateway package.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
-  const registry = provideCronAgentEnvironmentRegistry(ctx)
-  const preparedDeliveryBindings = config.preparedDeliveryBindings ?? []
-  if (preparedDeliveryBindings.length > 0) {
-    ctx.effect(
-      () => registry.register(createPreparedDeliveryEnvironmentProvider({ bindings: preparedDeliveryBindings })),
-      'dsh-cron.prepared-delivery-provider()',
-    )
-  }
-  const environmentModules = config.environmentModules ?? []
-  if (environmentModules.length > 0) {
-    const providers = await loadCronEnvironmentModules(ctx, environmentModules)
-    for (const provider of providers) {
+  if (config.mode === 'scheduler') {
+    const registry = provideCronAgentEnvironmentRegistry(ctx)
+    const preparedDeliveryBindings = config.preparedDeliveryBindings ?? []
+    if (preparedDeliveryBindings.length > 0) {
       ctx.effect(
-        () => registry.register(provider),
-        `dsh-cron.environment-module(${provider.marker})`,
+        () => registry.register(createPreparedDeliveryEnvironmentProvider({ bindings: preparedDeliveryBindings })),
+        'dsh-cron.prepared-delivery-provider()',
       )
     }
-  }
-  if (config.mode === 'scheduler') {
+    const environmentModules = config.environmentModules ?? []
+    if (environmentModules.length > 0) {
+      const providers = await loadCronEnvironmentModules(ctx, environmentModules)
+      for (const provider of providers) {
+        ctx.effect(
+          () => registry.register(provider),
+          `dsh-cron.environment-module(${provider.marker})`,
+        )
+      }
+    }
     const { applyScheduler } = await import('./scheduler.ts')
     await applyScheduler(ctx, {
       storeDir: resolveStoreDir(config),

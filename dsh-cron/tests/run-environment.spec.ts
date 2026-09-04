@@ -230,25 +230,12 @@ describe('dsh-cron run environment registry', () => {
     await second.fiber.dispose()
   })
 
-  it('reuses the existing registry when two cron roles share one Cordis context', async () => {
-    const ctx = new Context()
-    const firstRegistry = provideCronAgentEnvironmentRegistry(ctx)
-    const secondRegistry = provideCronAgentEnvironmentRegistry(ctx)
-
-    expect(secondRegistry).toBe(firstRegistry)
-    expect(ctx.get(CRON_AGENT_ENVIRONMENT_REGISTRY)).toBe(firstRegistry)
-
-    await ctx.fiber.dispose()
-  })
-
-  it('provides the same registry to a later consumer through the real plugin entry', async () => {
+  it('keeps the scheduler environment registry out of the manager control role', async () => {
     const storeDir = mkdtempSync(join(tmpdir(), 'dsh-cron-environment-service-'))
     const ctx = new Context()
     try {
       await applyCron(ctx, { mode: 'manager', storeDir } as never)
-      const consumerRegistry = ctx.get(CRON_AGENT_ENVIRONMENT_REGISTRY)
-      expect(consumerRegistry).toBeDefined()
-      expect(consumerRegistry).toBe(ctx.get(CRON_AGENT_ENVIRONMENT_REGISTRY))
+      expect(ctx.get(CRON_AGENT_ENVIRONMENT_REGISTRY)).toBeUndefined()
     } finally {
       await ctx.fiber.dispose()
       rmSync(storeDir, { recursive: true, force: true })

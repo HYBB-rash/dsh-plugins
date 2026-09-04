@@ -792,16 +792,13 @@ export function createCronAgentEnvironmentRegistry(
 }
 
 /**
- * Provide one registry in the current Cordis service tree. Multiple dsh-cron
- * role instances in the same profile share it; Cordis still owns the
- * providing fiber's lifetime and there is no process-global fallback.
+ * Provide a registry in the current Cordis fiber. Cordis owns its lifetime;
+ * there is intentionally no process-global registry or hidden fallback.
  */
 export function provideCronAgentEnvironmentRegistry(
   ctx: Context,
   initialProviders: readonly CronAgentEnvironmentProvider[] = [],
 ): CronAgentEnvironmentRegistry {
-  const existing = ctx.get(CRON_AGENT_ENVIRONMENT_REGISTRY)
-  if (existing !== undefined) return existing
   const registry = createCronAgentEnvironmentRegistry(initialProviders)
   ctx.provide(CRON_AGENT_ENVIRONMENT_REGISTRY, registry)
   return registry

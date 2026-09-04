@@ -19,14 +19,15 @@
 8. 第一版候选上传后，生产真实启动在切换 release 后失败。错误明确指出第二个 cron 实例重复注册 `cronAgentEnvironmentRegistry`；没有 Web 或代理进程存活，因此没有并行启动第二份。
 9. 同期取得的 02:01 崩溃 core 与 perf JIT map 把原始 503 收敛到 scheduler `reload` → `RunLedger.foldJob` → `foldRunLines` → `JSON.parse`。这证明 control socket 是独立配置问题，不能解释原始 SIGSEGV。
 10. 现场 `runs.jsonl` 为 12,692,500 字节、34,252 行且全部 JSON 有效，8 个 active job。旧 `reload` 至少为每个任务 fold 两遍，单轮至少 548,032 次 JSON.parse；低写入采样记录显示崩溃进程约 44 分 50 秒累计 227,140,196 次 JSON.parse，现场没有 OOM、磁盘写满或 I/O error。
-11. 先增加两个失败测试：同一 Cordis Context 第二次提供 registry 会报重名；同一未变化账本为第二个 job 做 projection 会再次执行 JSON.parse。随后让双角色复用已有 registry，并让 `RunLedger` 按文件 revision 缓存一次解析结果、跨 job 复用；两个测试转绿，外部原子替换文件后也会失效重读。
-12. dsh-cron 全量测试 627 项中 626 项通过，唯一失败为“旧 cron 恢复持久 session”测试。用未包含本次改动的最新 `main` 独立 worktree 复跑同一测试，得到相同失败，确认是基线既有问题，不由本次缓存改动引入；本次相关的 40 项测试全部通过，bundle 构建通过。
+11. 先增加两个失败测试：同一 Cordis Context 第二次提供 registry 会报重名；同一未变化账本为第二个 job 做 projection 会再次执行 JSON.parse。最初尝试让第二个角色先 `get` 再复用 registry，单 Context 测试转绿，但第二次生产启动证明 Cordis sibling 会禁止重复 `provide`、同时又不能彼此 `get`，这个测试模型不真实。
+12. 收缩角色责任：环境 registry 只属于 scheduler 执行面，manager 控制面不再提供它。先把“manager 启动后 registry 仍不存在”写成失败测试，再移动入口接线，相关 55 项测试通过。`RunLedger` 同时按文件 revision 缓存一次解析结果、跨 job 复用，外部原子替换文件后失效重读。
+13. dsh-cron 全量测试 627 项中 626 项通过，唯一失败为“旧 cron 恢复持久 session”测试。用未包含本次改动的最新 `main` 独立 worktree 复跑同一测试，得到相同失败，确认是基线既有问题，不由本次缓存改动引入；本次相关的测试全部通过，bundle 构建通过。
 
 ## 逻辑链条
 
 `dsh-cron` 的 `scheduler` 与 `manager` 是互斥角色：前者轮询并执行任务，后者注册管理工具并创建 RPC socket。把现有实例直接改成 manager 会修复助手管理但停止所有定时执行，因此不可接受。给插件新增“组合模式”会扩大 API 和测试面，也没有当前必要性。最小修正是在同一 Cordis Profile 中装载两个命名实例，各自承担一个既有角色。
 
-双实例需要共享的环境 registry 是 Cordis 服务树级单例。重复 `provide` 会让第二个实例启动失败；改为先读取已存在服务、没有时才提供，既保留单实例行为，也允许两个角色在同一 Profile 中协作。
+环境 registry 服务只被 scheduler 的运行环境解析和恢复使用，manager 的工具与控制 RPC 不消费它。Cordis sibling 既不能读取彼此的私有服务，又会拒绝同名服务重复注册，所以“两个实例共享 registry”并不是可行边界；正确修正是只让 scheduler 提供，manager 不注册。
 
 原始 SIGSEGV 与 control socket 没有同根因证据。core 的原生栈和 JIT 调用链都指向运行账本解析；因此另行修复解析放大。没有改变 JSONL 格式、事件折叠规则或写入协议，只把同一个原子文件版本的解析结果作为内部缓存。文件由 tmp + rename 原子更新，`dev/ino/size/mtimeNs` 任一变化都会丢弃缓存；若读取期间版本变化则失败关闭，不返回撕裂投影。
 
@@ -35,7 +36,7 @@
 ## 改动
 
 - `config/web/portable.patch.yml`：增加 `dsh-cron-manager` 实例，并接到 assistant 使用的控制 socket。
-- `dsh-cron/src/run-environment.ts`：同一 Cordis 服务树中的 cron 角色复用 registry。
+- `dsh-cron/src/index.ts`：环境 registry 和 provider 只在 scheduler 角色中装载，manager 不再重复注册。
 - `dsh-cron/src/store.ts`：按原子文件版本缓存 runs ledger 的一次解析结果和各 job projection。
 - `dsh-cron/tests/run-environment.spec.ts`、`dsh-cron/tests/run-ledger.spec.ts`：覆盖双角色共享服务、跨 job 单次解析和文件更新失效。
 - `scripts/tests/self-describing-plugins.test.sh`：锁定四个有效实例、两个 cron 角色和共享 socket。
@@ -47,7 +48,7 @@
 - 修改前：`nix develop -c bash scripts/tests/self-describing-plugins.test.sh` 失败，明确报告缺少 `dsh-cron-manager`。
 - 修改后：同一测试通过。
 - `dsh-cron/tests/managed-command-bindings.spec.ts` 与 `dsh-cron/tests/control-a1-rpc.spec.ts` 共 16 项通过。
-- 新增 registry/ledger 测试修改前均失败，修改后连同相关文件共 40 项通过。
+- 新增 manager 角色边界和 ledger 缓存测试修改前均失败，修改后连同 manager/RPC 测试共 55 项通过。
 - dsh-cron bundle 构建通过。
 - dsh-cron 全量：626/627 通过；唯一失败在未改动的 `main` 独立 worktree 中可同样复现，属于既有测试夹具与当前 session persistence 形状不一致。
 - 完整便携部署测试矩阵与生产发布验证待后续时间线补录。
