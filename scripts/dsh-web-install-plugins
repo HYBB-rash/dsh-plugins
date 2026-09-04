@@ -172,6 +172,21 @@ for pattern in \
   plugin_archives+=("${matches[0]}")
 done
 
+installed_packages=()
+for package in \
+  @deepseek-ai/dsh-telegram-gateway \
+  @deepseek-ai/dsh-cron \
+  @deepseek-ai/dsh-assistant; do
+  installed="$DSH_HOME/profiles/web/node_modules/$package"
+  if [[ -e "$installed" || -L "$installed" ]]; then
+    installed_packages+=("$package")
+  fi
+done
+if [[ ${#installed_packages[@]} -gt 0 ]]; then
+  node "$package_root/harness/apps/cli/lib/bin.js" \
+    plugin --profile web remove "${installed_packages[@]}"
+fi
+
 node "$package_root/harness/apps/cli/lib/bin.js" \
   plugin --profile web add --ignore-scripts "${plugin_archives[@]}"
 

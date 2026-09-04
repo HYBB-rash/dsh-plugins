@@ -175,15 +175,28 @@ done
 mkdir -p "$fixture_root/runtime-bin" "$fixture_root/home"
 cat >"$fixture_root/runtime-bin/node" <<'EOF'
 #!/usr/bin/env bash
-printf 'node' >"$DSH_RUNTIME_TEST_LOG"
+printf 'node' >>"$DSH_RUNTIME_TEST_LOG"
 printf ' %q' "$@" >>"$DSH_RUNTIME_TEST_LOG"
 printf '\n' >>"$DSH_RUNTIME_TEST_LOG"
 EOF
 chmod +x "$fixture_root/runtime-bin/node"
 export DSH_RUNTIME_TEST_LOG="$fixture_root/runtime.log"
+for package in dsh-telegram-gateway dsh-cron dsh-assistant; do
+  mkdir -p "$fixture_root/home/profiles/web/node_modules/@deepseek-ai/$package"
+done
 PATH="$fixture_root/runtime-bin:$PATH" DSH_HOME="$fixture_root/home" \
   "$unpacked/dsh-web/bin/install-plugins"
+if ! grep -Fq 'plugin --profile web remove @deepseek-ai/dsh-telegram-gateway @deepseek-ai/dsh-cron @deepseek-ai/dsh-assistant' "$DSH_RUNTIME_TEST_LOG"; then
+  echo 'portable installer did not remove installed source plugins before adding their archives' >&2
+  exit 1
+fi
 grep -Fq 'plugin --profile web add --ignore-scripts' "$DSH_RUNTIME_TEST_LOG"
+remove_line=$(grep -Fn 'plugin --profile web remove' "$DSH_RUNTIME_TEST_LOG" | cut -d: -f1)
+add_line=$(grep -Fn 'plugin --profile web add' "$DSH_RUNTIME_TEST_LOG" | cut -d: -f1)
+if [[ "$remove_line" -ge "$add_line" ]]; then
+  echo 'portable installer did not remove installed source plugins before adding their archives' >&2
+  exit 1
+fi
 cmp "$production_credentials/.credentials.yaml" "$fixture_root/home/.credentials.yaml"
 cmp "$production_credentials/secrets/notion.token" "$fixture_root/home/secrets/notion.token"
 test "$(stat -c '%a' "$fixture_root/home/.credentials.yaml")" = 600
