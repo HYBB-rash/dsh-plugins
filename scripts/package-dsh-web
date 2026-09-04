@@ -10,7 +10,38 @@ fi
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 harness_root="$repository_root/upstream/deepseek-harness"
 production_credentials=${DSH_WEB_PRODUCTION_CREDENTIALS:-$repository_root/config/web/production-credentials}
+node_version=v24.19.0
+node_archive=node-v24.19.0-linux-x64.tar.xz
+node_archive_sha256=14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647
 output=$(realpath -m -- "$1")
+
+if [[ -n ${DSH_WEB_NODE_RUNTIME:-} ]]; then
+  node_runtime=$DSH_WEB_NODE_RUNTIME
+else
+  runtime_cache="$repository_root/.cache/dsh-web-runtime"
+  node_runtime="$runtime_cache/node-v24.19.0-linux-x64"
+  if [[ ! -x "$node_runtime/bin/node" ]]; then
+    command -v curl >/dev/null 2>&1 || { echo 'curl is required to fetch the portable Node runtime' >&2; exit 127; }
+    install -d -m 0700 "$runtime_cache"
+    temporary_runtime=$(mktemp -d "$runtime_cache/.node.XXXXXX")
+    cleanup_runtime() { rm -rf -- "$temporary_runtime"; }
+    trap cleanup_runtime EXIT
+    curl -fsS "https://nodejs.org/dist/$node_version/$node_archive" -o "$temporary_runtime/$node_archive"
+    printf '%s  %s\n' "$node_archive_sha256" "$temporary_runtime/$node_archive" | sha256sum -c - >/dev/null
+    tar -xJf "$temporary_runtime/$node_archive" -C "$temporary_runtime"
+    mv "$temporary_runtime/node-v24.19.0-linux-x64" "$node_runtime"
+    rm -rf -- "$temporary_runtime"
+    trap - EXIT
+  fi
+fi
+if [[ ! -f "$node_runtime/bin/node" || -L "$node_runtime/bin/node" || ! -x "$node_runtime/bin/node" ]]; then
+  echo "missing regular portable Node executable: $node_runtime/bin/node" >&2
+  exit 1
+fi
+if [[ $("$node_runtime/bin/node" --version) != "$node_version" ]]; then
+  echo "portable Node runtime must be $node_version" >&2
+  exit 1
+fi
 
 credential_files=(
   "$production_credentials/.credentials.yaml"
@@ -52,6 +83,7 @@ cleanup() { rm -rf -- "$temporary_root"; }
 trap cleanup EXIT
 
 mkdir -p "$temporary_root/dsh-web/plugins" "$temporary_root/dsh-web/config" "$temporary_root/dsh-web/bin"
+cp -a "$node_runtime" "$temporary_root/dsh-web/runtime-node"
 install -d -m 0700 "$temporary_root/dsh-web/production-credentials/secrets"
 install -m 0600 "$production_credentials/.credentials.yaml" "$temporary_root/dsh-web/production-credentials/.credentials.yaml"
 install -m 0600 "$production_credentials/secrets/notion.token" "$temporary_root/dsh-web/production-credentials/secrets/notion.token"
@@ -69,7 +101,7 @@ tar -czf "$temporary_output" \
   --exclude='.env.*' \
   --transform='s|^deepseek-harness|dsh-web/harness|' \
   -C "$repository_root/upstream" deepseek-harness \
-  -C "$temporary_root" dsh-web/plugins dsh-web/config dsh-web/production-credentials dsh-web/bin
+  -C "$temporary_root" dsh-web/plugins dsh-web/config dsh-web/runtime-node dsh-web/production-credentials dsh-web/bin
 chmod 0600 "$temporary_output"
 mv -f -- "$temporary_output" "$output"
 trap - EXIT

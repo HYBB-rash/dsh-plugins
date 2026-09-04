@@ -99,9 +99,20 @@ EOF
 printf 'dsh-fake-notion-token-v1' >"$production_credentials/secrets/notion.token"
 chmod 0600 "$production_credentials/.credentials.yaml" "$production_credentials/secrets/notion.token"
 
+runtime_node="$fixture_root/runtime-node"
+mkdir -p "$runtime_node/bin"
+real_node=$(command -v node)
+cat >"$runtime_node/bin/node" <<EOF
+#!/usr/bin/env bash
+if [[ \${1:-} == --version ]]; then echo v24.19.0; exit 0; fi
+exec "$real_node" "\$@"
+EOF
+chmod +x "$runtime_node/bin/node"
+
 archive="$fixture_root/dsh-web.tar.gz"
 PATH="$fixture_root/forbidden-bin:$PATH" \
   DSH_WEB_PRODUCTION_CREDENTIALS="$production_credentials" \
+  DSH_WEB_NODE_RUNTIME="$runtime_node" \
   "$source_root/scripts/package-dsh-web" "$archive"
 test -f "$archive"
 test "$(stat -c '%a' "$archive")" = 600
@@ -114,6 +125,7 @@ for expected in \
   dsh-web/harness/packages/example/index.js \
   dsh-web/harness/vendor/example/index.js \
   dsh-web/harness/.dsh-build/client-build-environment.json \
+  dsh-web/runtime-node/bin/node \
   dsh-web/plugins/deepseek-ai-dsh-telegram-gateway-0.1.0.tgz \
   dsh-web/plugins/deepseek-ai-dsh-cron-0.2.0.tgz \
   dsh-web/plugins/deepseek-ai-dsh-assistant-0.3.0.tgz \
@@ -137,6 +149,8 @@ unpacked="$fixture_root/unpacked"
 mkdir -p "$unpacked"
 tar -xzf "$archive" -C "$unpacked"
 cmp "$source_root/upstream/deepseek-harness/apps/cli/lib/bin.js" "$unpacked/dsh-web/harness/apps/cli/lib/bin.js"
+test -x "$unpacked/dsh-web/runtime-node/bin/node"
+test "$("$unpacked/dsh-web/runtime-node/bin/node" --version)" = v24.19.0
 cmp "$source_root/config/web/portable.patch.yml" "$unpacked/dsh-web/config/web.patch.yml"
 cmp "$source_root/scripts/dsh-web-install-plugins" "$unpacked/dsh-web/bin/install-plugins"
 cmp "$source_root/scripts/dsh-web-runtime" "$unpacked/dsh-web/bin/web"

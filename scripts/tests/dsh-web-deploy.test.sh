@@ -70,11 +70,23 @@ fi
 start_root="$fixture_root/start-root"
 package_tree="$fixture_root/package-tree/dsh-web"
 home="$fixture_root/home"
-mkdir -p "$package_tree/bin" "$home/workspace" "$fixture_root/start-bin"
+mkdir -p "$package_tree/bin" "$package_tree/harness" "$package_tree/runtime-node/bin" "$home/workspace" "$fixture_root/start-bin"
+cat >"$package_tree/harness/package.json" <<'EOF'
+{"packageManager":"pnpm@11.7.0"}
+EOF
+real_node=$(command -v node)
+cat >"$package_tree/runtime-node/bin/node" <<EOF
+#!/usr/bin/env bash
+printf 'bundled-node %s\\n' "\${1:-}" >>"\$DSH_START_LOG"
+if [[ \${1:-} == --version ]]; then echo v24.19.0; exit 0; fi
+exec "$real_node" "\$@"
+EOF
+chmod +x "$package_tree/runtime-node/bin/node"
 cat >"$package_tree/bin/install-plugins" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 test "$DSH_HOME" = "$DSH_START_EXPECTED_HOME"
+test "$(node --version)" = v24.19.0
 command -v pnpm >/dev/null
 pnpm --version >/dev/null
 printf 'install DSH_HOME=%s\n' "$DSH_HOME" >>"$DSH_START_LOG"
@@ -100,10 +112,18 @@ chmod +x "$start_root/dsh-web-start"
 cat >"$fixture_root/start-bin/corepack" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ ${1:-} == pnpm ]]; then shift; fi
-printf 'corepack-pnpm' >>"$DSH_START_LOG"
-printf ' %q' "$@" >>"$DSH_START_LOG"
-printf '\n' >>"$DSH_START_LOG"
+if [[ ${1:-} != pack || ${2:-} != pnpm@11.7.0 || ${3:-} != -o || -z ${4:-} ]]; then
+  echo 'corepack must package pinned pnpm instead of executing it' >&2
+  exit 88
+fi
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/pnpm/11.7.0/bin"
+cat >"$tmp/pnpm/11.7.0/bin/pnpm.cjs" <<'JS'
+const fs = require('node:fs')
+fs.appendFileSync(process.env.DSH_START_LOG, `node-pnpm ${process.argv.slice(2).join(' ')}\n`)
+JS
+tar -czf "$4" -C "$tmp" pnpm
 EOF
 chmod +x "$fixture_root/start-bin/corepack"
 export DSH_START_LOG="$fixture_root/start.log"
@@ -114,9 +134,11 @@ PATH="$fixture_root/start-bin:$PATH" \
   DSH_WEB_PNPM=definitely-missing-pnpm \
   "$start_root/dsh-web-start"
 
-grep -Fq 'corepack-pnpm --version' "$DSH_START_LOG"
+grep -Fq 'bundled-node --version' "$DSH_START_LOG"
+grep -Fq 'bundled-node /' "$DSH_START_LOG"
+grep -Fq 'node-pnpm --version' "$DSH_START_LOG"
 grep -Fxq "install DSH_HOME=$home" "$DSH_START_LOG"
-grep -Fq 'web --host 0.0.0.0 --port 3080 --no-open' "$DSH_START_LOG"
+grep -Fq 'web --host 127.0.0.1 --port 3080 --no-open' "$DSH_START_LOG"
 test -L "$start_root/current"
 test -x "$start_root/current/bin/web"
 if grep -Fq 'package-dsh-web' "$DSH_START_LOG"; then
@@ -124,7 +146,28 @@ if grep -Fq 'package-dsh-web' "$DSH_START_LOG"; then
   exit 1
 fi
 
-# A host without pnpm or corepack must fail before unpacking or installation.
+# A package without its ABI-matched Node must fail before installation.
+missing_node_root="$fixture_root/missing-node-root"
+missing_node_tree="$fixture_root/missing-node-tree"
+mkdir -p "$missing_node_root" "$missing_node_tree"
+cp -a "$package_tree" "$missing_node_tree/dsh-web"
+rm -rf "$missing_node_tree/dsh-web/runtime-node"
+tar -czf "$missing_node_root/dsh-web.tar.gz" -C "$missing_node_tree" dsh-web
+(
+  cd "$missing_node_root"
+  sha256sum dsh-web.tar.gz >dsh-web.tar.gz.sha256
+)
+cp "$repository_root/scripts/dsh-web-start" "$missing_node_root/dsh-web-start"
+if DSH_HOME="$fixture_root/missing-node-home" \
+  DSH_WEB_PACKAGE_ROOT="$missing_node_root" \
+  "$missing_node_root/dsh-web-start" >"$fixture_root/missing-node.out" 2>"$fixture_root/missing-node.err"; then
+  echo 'remote starter succeeded without bundled Node' >&2
+  exit 1
+fi
+grep -Fq 'bundled Node' "$fixture_root/missing-node.err"
+test ! -e "$missing_node_root/current"
+
+# A host without pnpm or corepack must fail before installation.
 missing_root="$fixture_root/missing-tool-root"
 mkdir -p "$missing_root"
 cp "$start_root/dsh-web.tar.gz" "$start_root/dsh-web.tar.gz.sha256" "$missing_root/"
