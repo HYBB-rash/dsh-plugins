@@ -5,6 +5,7 @@ umask 077
 package_root=${DSH_WEB_PACKAGE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
 archive="$package_root/dsh-web.tar.gz"
 checksum="$package_root/dsh-web.tar.gz.sha256"
+proxy_script="$package_root/dsh-web-lan-proxy.mjs"
 releases="$package_root/releases"
 runtime_bin="$package_root/runtime-bin"
 export DSH_HOME=${DSH_HOME:-$HOME/.dsh}
@@ -18,7 +19,7 @@ for command_name in tar sha256sum awk mktemp install mv ln; do
     exit 127
   fi
 done
-for required_file in "$archive" "$checksum"; do
+for required_file in "$archive" "$checksum" "$proxy_script"; do
   if [[ ! -f "$required_file" || -L "$required_file" ]]; then
     echo "missing regular deployment input: $required_file" >&2
     exit 1
@@ -111,4 +112,21 @@ export PATH="$runtime_bin:$PATH"
 ln -sfn "releases/$archive_sha" "$package_root/current.next"
 mv -Tf "$package_root/current.next" "$package_root/current"
 cd "$DSH_CWD"
-exec "$package_root/current/bin/web" --host "$host" --port "$port" --no-open "$@"
+"$package_root/current/bin/web" --host "$host" --port "$port" --no-open "$@" &
+web_pid=$!
+"$runtime_node" "$proxy_script" &
+proxy_pid=$!
+
+stop_children() {
+  trap - INT TERM
+  kill "$web_pid" "$proxy_pid" 2>/dev/null || true
+  wait "$web_pid" "$proxy_pid" 2>/dev/null || true
+}
+trap 'stop_children; exit 143' INT TERM
+set +e
+wait -n "$web_pid" "$proxy_pid"
+status=$?
+set -e
+trap - INT TERM
+stop_children
+exit "$status"
