@@ -99,3 +99,4 @@
 - 2026-09-01：profile 启动时 `ensure` 受管 command binding，并由普通 Agent 的 `cron_list` 隐藏、`cron_delete` 按不存在处理，才能同时建立启动恢复和运行期所有权；必须用真实配置解析、隔离候选启动和 tombstone 后重启测试覆盖这条链。上述证据齐全后，生产发布只需等待通用 cron 控制面就绪并做真实业务验收，不应再复制一套绑定 argv、入口哈希和回执结构的 Notion 专用发布闸门。
 - 2026-09-01：退休未上线的运行包时，先从仍需保留的真实入口切断它的源码依赖，再删除整包和正式接线；镜像包清单、开发挂载、profile manifest、runtime topology、发布夹具与自检必须同步收缩，并保留旧包目录不得出现的负向门。已删除的 cron job 和不再读取的旧账本保持原状，不应为了“清理干净”增加数据迁移或物理删除。
 - 2026-09-01：改正式包集合后，脏工作树的 editable verify 可能被既有 `tsbuildinfo` 和已安装工作区依赖掩盖；本次正式 clean build 才发现五包的 Cordis `"*"` 会解析到 registry 4.0.2，与 Harness workspace 4.0.1 并存，导致 `session/event` 和 `invariants` 模块扩展消失。Harness 内运行包应把 Cordis 的 peer/dev 依赖绑定为 `workspace:*`，并在编译前和镜像 self-test 以真实解析路径证明五包只使用 Harness workspace 的同一份 Cordis；修改包清单后仍须由全新不可变候选验证安装解析。
+- 2026-09-04：从历史 commit 提取业务源码时，要把“提取来源”与“当前仓库清理分支的基线”分开：新仓可从固定历史快照取字节，原仓删除必须基于最新 `origin/main`。若把历史来源 commit 同时当作清理基线，隔离 `dev prepare` 会先暴露历史 profile 与当前 Harness 的兼容问题，既不能证明清理正确，也会把无关历史提交带进任务分支。
