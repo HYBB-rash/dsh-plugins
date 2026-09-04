@@ -51,4 +51,8 @@ portable 启动器优先使用归档携带的 Node，而不是碰巧从宿主 `P
 
 ## 遗留
 
-代码尚未合并或部署到 3080 常驻服务。现有服务不会在重启前获得新 `PATH`；停服、部署、重启和真实 Agent 验收仍是独立授权步骤。
+任务分支先与本地 `main` 的九个既有提交和最新 `origin/main` 合流，再把 CLI 修复变基到集成点；完整发布测试矩阵通过后，本地与远端 `main` 均快进到 `0a285d9`。
+
+生产普通归档 SHA-256 为 `aa1acc8bb3be7aa334156ba1ccc38a5ec226da21882987ffe85ebbf187d2e6d6`，run id 为 `20260904T202217Z-cli-path`。远端 `current` 指向该 release；监督进程持续存活，loopback/LAN 两个 `3080` listener 正常，stderr 无 ABI、fatal 或通知错误。归档内 `dsh --version` 输出 `0.1.3-alpha.1`，Web 进程 `PATH` 以 release 的 `bin` 开头。loopback token 登录为 200，loopback/LAN/域名无会话 API 为 401，错误 Origin 和非白名单代理访问为 403。
+
+本机长期 checkout 在部署前已有未提交的业务配置：把 `standard/session-telegram` 切为 `liangshen/session-telegram-liangshen`。主线快进保留了该 diff，但本地部署入口按合同拒绝脏工作树，因此本机 3080 服务尚未重启加载 CLI PATH 修复。该配置应提交为正式配置还是只作本地临时状态，仍需用户决定。Telegram 是否实际收到新 HTTPS 登录 URL及真实 Agent 对话中的 CLI 调用仍待用户确认。
