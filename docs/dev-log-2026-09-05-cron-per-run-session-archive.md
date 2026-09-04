@@ -22,7 +22,9 @@
 11. 远端上传归档 `3e758c8a…c5715` 后，精确停止原 portable 监督进程树并确认两个 3080 监听释放。停机状态下备份 Workspace、112 个候选、147 个 Session 文件及 membership；物理文件摘要为 `fc573aec…3433a8c`。新版首次轮询只把这 112 个 ID 加入全局 archived set，Workspace tables 和 147 个文件逐字节未变。
 12. 前两次远端启动都曾短时监听后无显式 stderr 退出；一次 transient user-systemd 诊断又因错误传入私有 pnpm wrapper 形成自调用，尚未启动 Web 即被精确停止，没有作为最终运行方式保留。恢复启动器的 Corepack 选择后，日志给出了真正的确定性错误：Telegram gateway 解析 `liangshen` preset 时，provider 尚未挂载。
 13. 对比 Profile 发现本机 bundle 顺序为 `liangshen → assistant → cron → telegram`，远端历史顺序却是三个自研插件在前、`liangshen` 在后。源码安装分支已有“先 remove、再 add”规则，portable 分支只有 add，因而保留错误历史顺序。先新增真实归档安装测试并观察到“portable installer did not remove installed source plugins”的预期红灯，再给 portable 分支补同一刷新规则，测试转绿。
-14. 现场发现另一个未推送任务已让本地 `main` 前进 8 个提交。为避免把无关改动夹带进远端，本任务没有改写或推送那 8 个提交，而是让 `origin/main` 仅从归档实现快进到顺序修复 `4e2a185`。重新上传归档 `e2059f45…90cf15`，以现役 `nohup + dsh-web-start` 启动 run `20260904T200750Z`；最终 Profile 顺序稳定，portable 监督进程和双监听持续存活。
+14. 现场发现另一个未推送任务已让本地 `main` 前进 8 个提交。为避免把无关改动夹带进远端，本任务没有改写或推送那 8 个提交，而是让 `origin/main` 仅从归档实现快进到顺序修复 `4e2a185`。重新上传归档 `e2059f45…90cf15`，以现役 `nohup + dsh-web-start` 启动 run `20260904T200750Z`，Profile 顺序与双监听当时正常。
+15. 延迟复核后发现该进程树已退出。无 stderr、coredump、OOM 或 kernel kill 证据；并发完成的一个新 `per_run error` 因进程停止而尚未归档。同一时间段另一主线任务正在执行远端发布；因此先前的进程消失不能当作服务自行崩溃证据。一次前台观测启动也在新发布开始前十余秒结束，只能证明监督脚本会在某个子进程结束后闭口，不能单独定位根因。
+16. 期间 `origin/main` 继续正常前进到 `cc42464`，且包含本任务的 `e0080e1`。另一主线任务发布了最新普通归档 `aa1acc8b…e6d6`，run id 为 `20260904T202217Z-cli-path`。只读核对确认该包内 `dsh-cron` 含有 `per_run` 归档协调器；启动首轮已将上述新 `per_run error` 补归档，archived set 从 113 增加到 114，没有修改它的 Session 或 membership。本任务分支随后变基到该最新主线，没有覆盖并发发布。
 
 ## 逻辑链条
 
@@ -55,8 +57,9 @@
 - 本机正式部署：`dsh-web-local.service` active，`127.0.0.1:3080` 单监听；token 登录 303→Cookie 200；归档错误日志为空；Workspace 备份位于 `/home/herman/.dsh/recovery/cron-per-run-session-archive-20260904T193747Z/local`。
 - 远端历史收敛：archived set 从 1 增至 113，新增集合严格等于冻结的 112 个候选；原 16 个 membership 不变，96 个原未分组会话因归档不再显示；Workspace tables 未变。
 - 远端 Session 完整性：112 个目录、147 个普通文件、9,573,075 字节，物理 manifest 仍为 `fc573aeca24f5ef57c222eadff83de92e85fbdcfd2f9add735507b5183433a8c`。
-- 远端运行：归档 SHA 为 `e2059f4565565f90e67fb220b9ff686ec5be898d7191c6af58e95fa95990cf15`；run id 为 `20260904T200750Z`，监督 PID 为 `3146728`；loopback/LAN 两个 3080 listener 正常，连续观察超过 3 分钟。
-- 远端 HTTP：token 登录 303→Cookie 200；LAN 与公网域名无会话 API 为 401；跨 Origin 和非白名单来源均为 403；stderr 为 0，未发现 preset、ABI、通知或归档错误。
+- 远端最终运行包：最新主线普通归档 SHA 为 `aa1acc8bb3be7aa334156ba1ccc38a5ec226da21882987ffe85ebbf187d2e6d6`，run id 为 `20260904T202217Z-cli-path`；包内 `dsh-cron` 已确认包含本任务的归档逻辑。监督 PID `3151381` 连续存活超过 10 分钟，loopback/LAN 双 3080 监听稳定，stderr 为 0。
+- 远端 HTTP：token 登录 303→Cookie 200；loopback/LAN/公网域名的无会话 API 均为 401；跨 Origin 和非白名单来源均为 403。
+- 远端后续新增的一个真实 `per_run error` 已在下次启动首轮自动归档；archived set 总数由原来的 1 加历史 112，再增加该 1 个到 114。这是对“崩溃/重启窗口后由后续 poll 补偿”的现场验证。
 - `git diff --check` 通过。
 - 多 Agent 复杂度复核：现有 Scheduler 串行驱动已提供单飞保证，不增加第二套锁或状态，复杂度预算仍为 C1 一个长期规则，结论 `PASS`。
 - 独立最终审查：`BLOCKER` 为 0；核心历史归档测试已改走公开的 Scheduler 启动/轮询路径，账本故障测试也不再替换私有字段。
