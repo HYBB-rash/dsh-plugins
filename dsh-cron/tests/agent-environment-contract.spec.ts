@@ -24,7 +24,7 @@ const BASE_SPEC: BoundCronSpec = {
   prompt: 'bounded environment prompt',
   deliver: 'telegram',
   sessionMode: 'per_run',
-  agentEnvironment: 'dsh-x-feed/v1',
+  agentEnvironment: 'dsh-business/v1',
 }
 
 function jobLines(dir: string): unknown[] {
@@ -75,7 +75,7 @@ describe('generic agent environment marker contract', () => {
     expect(foldJobLog([marked]).active).toEqual([expect.objectContaining({
       id: 'marked-agent',
       sessionMode: 'per_run',
-      agentEnvironment: 'dsh-x-feed/v1',
+      agentEnvironment: 'dsh-business/v1',
     })])
   })
 
@@ -88,8 +88,8 @@ describe('generic agent environment marker contract', () => {
       },
     }],
     ['command kind', { kind: 'command', command: { argv: ['/bin/true'], timeoutSeconds: 1, outputMaxBytes: 100 } }],
-    ['blank marker', { agentEnvironment: ' dsh-x-feed/v1 ' }],
-    ['noncanonical marker', { agentEnvironment: 'DSH-X-FEED/V1' }],
+    ['blank marker', { agentEnvironment: ' dsh-business/v1 ' }],
+    ['noncanonical marker', { agentEnvironment: 'DSH-BUSINESS/V1' }],
   ])('isolates invalid replay rows (%s) instead of activating them', (_label, extra) => {
     const raw = {
       op: 'create',
@@ -118,14 +118,14 @@ describe('generic agent environment marker contract', () => {
       { ...BASE_SPEC, sessionMode: 'persistent' as never },
       {
         ...BASE_SPEC,
-        agentEnvironment: 'dsh-x-feed/v1',
+        agentEnvironment: 'dsh-business/v1',
         gate: {
           kind: 'nonempty_stdout',
           command: { argv: ['/bin/true'], timeoutSeconds: 1, outputMaxBytes: 100 },
         },
       },
-      { ...BASE_SPEC, agentEnvironment: ' dsh-x-feed/v1 ' },
-      { ...BASE_SPEC, agentEnvironment: 'DSH-X-FEED/V1' },
+      { ...BASE_SPEC, agentEnvironment: ' dsh-business/v1 ' },
+      { ...BASE_SPEC, agentEnvironment: 'DSH-BUSINESS/V1' },
     ]
     for (const spec of invalid) {
       const response = await service.ensureBound(spec)
@@ -140,12 +140,12 @@ describe('generic agent environment marker contract', () => {
     const response = await service.ensureBound(BASE_SPEC) as ControlSuccessResponse
     expect(response.ok).toBe(true)
     expect(response.snapshot.activeJob).toMatchObject({
-      agentEnvironment: 'dsh-x-feed/v1',
+      agentEnvironment: 'dsh-business/v1',
       sessionMode: 'per_run',
     })
     expect(jobLines(dir)[0]).toMatchObject({
       op: 'create',
-      agentEnvironment: 'dsh-x-feed/v1',
+      agentEnvironment: 'dsh-business/v1',
       sessionMode: 'per_run',
     })
 
@@ -154,12 +154,12 @@ describe('generic agent environment marker contract', () => {
       cooldownMinutes: 30,
     }) as ControlSuccessResponse
     expect(updated.snapshot.activeJob).toMatchObject({
-      agentEnvironment: 'dsh-x-feed/v1',
+      agentEnvironment: 'dsh-business/v1',
       sessionMode: 'per_run',
     })
     expect(jobLines(dir).at(-1)).toMatchObject({
       op: 'create',
-      agentEnvironment: 'dsh-x-feed/v1',
+      agentEnvironment: 'dsh-business/v1',
       sessionMode: 'per_run',
       failureAlert: { after: 2, cooldownMinutes: 30 },
     })
@@ -173,7 +173,7 @@ describe('generic agent environment marker contract', () => {
       schedule: { kind: 'interval', minutes: 5 },
       command: { argv: ['/bin/true'], timeoutSeconds: 1, outputMaxBytes: 100 },
       deliver: 'silent',
-      agentEnvironment: 'dsh-x-feed/v1',
+      agentEnvironment: 'dsh-business/v1',
     } as never)
     expect(response).toMatchObject({ ok: false, errorCode: 'invalid_request', operation: 'ensure-bound-command' })
     expect(jobLines(dir)).toEqual([])
@@ -197,7 +197,7 @@ describe('generic agent environment marker contract', () => {
       prompt: 'invalid marker row',
       deliver: 'silent',
       sessionMode: 'persistent',
-      agentEnvironment: 'dsh-x-feed/v1',
+      agentEnvironment: 'dsh-business/v1',
       createdAt: '2026-08-20T00:00:01.000Z',
     } as never)
     expect(store.fold().active).toEqual([expect.objectContaining({ id: 'same-id', prompt: 'valid prior row' })])

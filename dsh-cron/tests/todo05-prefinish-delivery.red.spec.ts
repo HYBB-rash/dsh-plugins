@@ -10,7 +10,7 @@
  * This suite proves only dsh-cron's technical prepared/attempt/receipt/
  * prefinish/finish lifecycle through public scheduler/provider seams. C20's
  * receiver/carrier is dsh-cron's RunOpportunityLifecycle; C21/C23 remain the
- * later Personal Feed-to-run collaboration mapping and are deliberately not
+ * later business-to-run collaboration mapping and are deliberately not
  * claimed here.
  */
 

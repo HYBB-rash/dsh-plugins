@@ -365,8 +365,8 @@ describe('cron-bound monitor does not create an assistant worker (first red)', (
         },
       },
     })
-    await expect(runtime.handleRunFinished({ jobId: 'x-feed-job', runId: 'run-x' })).resolves.toMatchObject({ ok: true, ignored: true })
-    expect(bindingLookups).toEqual(['x-feed-job'])
+    await expect(runtime.handleRunFinished({ jobId: 'business-job', runId: 'run-business' })).resolves.toMatchObject({ ok: true, ignored: true })
+    expect(bindingLookups).toEqual(['business-job'])
     expect(getBoundCalls).toEqual([])
     expect(observations).toEqual([])
 

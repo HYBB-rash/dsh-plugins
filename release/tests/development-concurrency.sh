@@ -197,7 +197,7 @@ source_a="$test_root/worktree-a"
 source_b="$test_root/worktree-b"
 prepare_source() {
   local source="$1" package profile
-  for package in telegram-gateway dsh-cron dsh-assistant personal-feed; do
+  for package in telegram-gateway dsh-cron dsh-assistant; do
     mkdir -p "$source/$package"
     printf '%s\n' '{}' >"$source/$package/package.json"
   done
@@ -273,10 +273,10 @@ grep -Fq 'NOTION_API_BASE=http://fake-notion:8081/v1' "$test_root/engine.log"
 grep -Fq 'NOTION_PAGE_ID=00000000000000000000000000000001' "$test_root/engine.log"
 
 for source in "$source_a" "$source_b"; do
-  grep -Fq "$source/personal-feed:/opt/dsh/harness/local-plugins/personal-feed:rw" "$test_root/engine.log"
-  ! grep -Fq "$source/personal-feed:/opt/dsh/harness/local-plugins/node_modules/@herman/personal-feed:ro" "$test_root/engine.log"
+  for package in telegram-gateway dsh-cron dsh-assistant; do
+    grep -Fq "$source/$package:/opt/dsh/harness/local-plugins/$package:rw" "$test_root/engine.log"
+  done
 done
-! grep -Eq '/opt/dsh/harness/node_modules/\.pnpm/node_modules/@herman/personal-feed:(ro|rw)([^[:alnum:]_-]|$)' "$test_root/engine.log"
 
 python3 - "$test_root/engine.log" "$source_a" "$source_b" <<'PY'
 import pathlib, sys
@@ -285,8 +285,6 @@ log, source_a, source_b = map(pathlib.Path, sys.argv[1:])
 for line in log.read_text(encoding='utf-8').splitlines():
     if str(source_a) in line and str(source_b) in line:
         raise SystemExit(f"crossed worktree source mounts: {line}")
-    if '/opt/dsh/harness/local-profiles/' in line and '/node_modules/@herman/personal-feed:' in line:
-        raise SystemExit(f"unexpected profile Personal Feed mount: {line}")
 PY
 
 run_dev dev down --source "$source_a" >"$test_root/down-a.json"

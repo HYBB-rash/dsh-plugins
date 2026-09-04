@@ -2567,7 +2567,6 @@ const developmentPackages = Object.freeze([
   'telegram-gateway',
   'dsh-cron',
   'dsh-assistant',
-  'personal-feed',
 ])
 
 function editableSourceFingerprint(sourcePath) {
@@ -3435,7 +3434,7 @@ function commandDev(options) {
       tests: {
         typeBuildBundle: scope === 'all' ? [...developmentPackages] : [scope],
         typeScript: scope === 'all' ? 'all-mounted-package-suites' : scope,
-        python: scope === 'all' || scope === 'personal-feed' ? 'personal-feed observer unittest discover' : 'not-applicable',
+        python: scope === 'all' ? 'release-system-suites' : 'not-applicable',
       },
       runtime: verifyRuntime,
     }

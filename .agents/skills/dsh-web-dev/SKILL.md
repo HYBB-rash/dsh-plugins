@@ -92,7 +92,7 @@ done
 
 ## 清理旧版 Profile
 
-若安装报错指向已删除的 `personal-feed-selector`、`x-feed` 或其他旧 `file:` 依赖：
+若安装报错指向已经删除的旧 `file:` 依赖：
 
 1. 先确认本地 Web 进程已停止；
 2. 检查 `${DSH_WEB_HOME:-$PWD/.dsh-web}/profiles/web/package.json`，确认它确实是旧脚本生成的 Profile；

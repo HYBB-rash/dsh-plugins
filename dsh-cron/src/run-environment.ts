@@ -272,7 +272,7 @@ export interface CronAgentEnvironmentSkip {
 export type CronAgentEnvironmentPrepareValue = CronAgentEnvironmentLease | CronAgentEnvironmentSkip
 
 export interface CronAgentEnvironmentProvider {
-  /** Stable persisted marker, e.g. `x-feed/v1`; never inferred from a prompt. */
+  /** Stable persisted marker, e.g. `business/v1`; never inferred from a prompt. */
   readonly marker: string
   /** Generic job constraints checked before `prepare` is called. */
   readonly requirements: CronAgentEnvironmentRequirements

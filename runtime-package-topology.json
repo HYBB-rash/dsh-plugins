@@ -6,8 +6,7 @@
       "kind": "harness",
       "requiredBy": [
         "@deepseek-ai/dsh-cron",
-        "@deepseek-ai/dsh-telegram-gateway",
-        "@herman/personal-feed"
+        "@deepseek-ai/dsh-telegram-gateway"
       ]
     },
     {
@@ -25,8 +24,7 @@
       "requiredBy": [
         "@deepseek-ai/dsh-assistant",
         "@deepseek-ai/dsh-cron",
-        "@deepseek-ai/dsh-telegram-gateway",
-        "@herman/personal-feed"
+        "@deepseek-ai/dsh-telegram-gateway"
       ]
     },
     {
@@ -34,8 +32,7 @@
       "kind": "harness",
       "requiredBy": [
         "@deepseek-ai/dsh-cron",
-        "@deepseek-ai/dsh-telegram-gateway",
-        "@herman/personal-feed"
+        "@deepseek-ai/dsh-telegram-gateway"
       ]
     },
     {
@@ -44,8 +41,7 @@
       "requiredBy": [
         "@deepseek-ai/dsh-assistant",
         "@deepseek-ai/dsh-cron",
-        "@deepseek-ai/dsh-telegram-gateway",
-        "@herman/personal-feed"
+        "@deepseek-ai/dsh-telegram-gateway"
       ]
     },
     {
@@ -53,15 +49,7 @@
       "kind": "harness",
       "requiredBy": [
         "@deepseek-ai/dsh-assistant",
-        "@deepseek-ai/dsh-cron",
-        "@herman/personal-feed"
-      ]
-    },
-    {
-      "name": "@deepseek-ai/dsh-util-values",
-      "kind": "harness",
-      "requiredBy": [
-        "@herman/personal-feed"
+        "@deepseek-ai/dsh-cron"
       ]
     },
     {
@@ -87,8 +75,7 @@
       "releaseDirectory": "telegram-gateway",
       "requiredBy": [
         "@deepseek-ai/dsh-assistant",
-        "@deepseek-ai/dsh-cron",
-        "@herman/personal-feed"
+        "@deepseek-ai/dsh-cron"
       ]
     }
   ]

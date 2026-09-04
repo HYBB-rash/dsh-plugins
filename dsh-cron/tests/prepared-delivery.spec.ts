@@ -33,7 +33,7 @@ describe('prepared-delivery environment', () => {
       return { stdout: '{"ok":true}', stderr: '' }
     })
     const provider = createPreparedDeliveryEnvironmentProvider({
-      bindings: [{ jobId: 'job-a', driver: DRIVER, cwd: '/srv/x-feed' }],
+      bindings: [{ jobId: 'job-a', driver: DRIVER, cwd: '/srv/business' }],
       execFile,
     })
     const lease = await provider.prepare({
@@ -87,7 +87,7 @@ describe('prepared-delivery environment', () => {
       1,
       '/usr/bin/python3',
       ['/opt/business-driver.py', expect.any(String)],
-      expect.objectContaining({ cwd: '/srv/x-feed', timeout: 30_000, maxBuffer: 4_096 }),
+      expect.objectContaining({ cwd: '/srv/business', timeout: 30_000, maxBuffer: 4_096 }),
     )
     expect(toolDisposed).toBe(true)
     expect(promptDisposed).toBe(true)

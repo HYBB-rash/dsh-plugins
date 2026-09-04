@@ -1,4 +1,0 @@
-interface:
-  display_name: "Personal Feed"
-  short_description: "请求个人 Feed，并处理 X 内容反馈与本地收藏"
-  default_prompt: "使用 $personal-feed 获取我的 Personal Feed，或处理当前 X 内容的反馈与收藏。"
