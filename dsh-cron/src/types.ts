@@ -16,8 +16,8 @@ export type ScheduleSpec =
   | { readonly kind: 'interval'; readonly minutes: number }
   | { readonly kind: 'once'; readonly runAt: string }
 
-/** Delivery channel for a job's result. */
-export type DeliverChannel = 'telegram' | 'silent'
+/** Delivery policy for a job's result. */
+export type DeliverChannel = 'default' | 'silent'
 
 /** Session lifetime persisted on a job; legacy rows default to persistent. */
 export type JobSessionMode = 'persistent' | 'per_run'
@@ -66,7 +66,7 @@ export interface CommandGate {
 /**
  * Per-job execution-failure notification policy. This throttles only the
  * scheduler's error notice; it never retries the business command/Agent turn
- * and it does not reinterpret a Telegram delivery failure as an execution
+ * and it does not reinterpret a delivery failure as an execution
  * failure.
  */
 export interface FailureAlertPolicy {
@@ -228,7 +228,7 @@ export type RunTrigger = 'scheduled' | 'manual'
 
 /**
  * V2 ledger event: a durable claim persisted BEFORE any Agent, tool, or
- * Telegram side effect. A claimed run must never be re-executed after a
+ * delivery side effect. A claimed run must never be re-executed after a
  * restart, even if its finish never landed.
  */
 export interface RunClaimRecord {
@@ -251,7 +251,7 @@ export interface RunClaimRecord {
 }
 
 /**
- * Durable claim for one failure-alert attempt. It lands before Telegram is
+ * Durable claim for one failure-alert attempt. It lands before delivery is
  * touched, so a scheduler restart or an ambiguous send cannot bypass the
  * per-job cooldown and cause an immediate duplicate notice.
  */
@@ -379,11 +379,11 @@ export type RunHistoryRecord = RunEventRecord
 /**
  * Generic terminal-outcome event emitted by the scheduler AFTER a finish
  * append has truly persisted (§8). A matching environment settlement
- * callback may act on it, but the cron success/error and the Telegram
- * delivery are already final and must not be reverted or re-sent.
+ * callback may act on it, but the cron success/error and delivery are already
+ * final and must not be reverted or re-sent.
  *
  * The event deliberately excludes the cron prompt, the model's full output,
- * Telegram tokens/chat ids, and any user message or assistant context.
+ * transport credentials, and any user message or assistant context.
  */
 export interface CronRunFinishedEvent {
   readonly jobId: string

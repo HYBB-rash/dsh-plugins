@@ -1,42 +1,42 @@
 {
   "requests": [
     {
-      "protocolVersion": 1,
+      "protocolVersion": 2,
       "operation": "ensure-bound",
       "spec": {
         "externalRef": "external:placeholder",
         "schedule": { "kind": "interval", "minutes": 5 },
         "prompt": "placeholder prompt",
-        "deliver": "telegram",
+        "deliver": "default",
         "cwd": "placeholder-cwd",
         "sessionMode": "per_run"
       }
     },
     {
-      "protocolVersion": 1,
+      "protocolVersion": 2,
       "operation": "replace-bound",
       "spec": {
         "externalRef": "external:placeholder",
         "schedule": { "kind": "interval", "minutes": 5 },
         "prompt": "placeholder prompt",
-        "deliver": "telegram",
+        "deliver": "default",
         "cwd": "placeholder-cwd",
         "sessionMode": "per_run"
       }
     },
     {
-      "protocolVersion": 1,
+      "protocolVersion": 2,
       "operation": "delete-bound",
       "externalRef": "external:placeholder"
     },
     {
-      "protocolVersion": 1,
+      "protocolVersion": 2,
       "operation": "get-bound",
       "externalRef": "external:placeholder"
     }
   ],
   "health": {
-    "protocolVersion": 1,
+    "protocolVersion": 2,
     "writer": "manager",
     "ready": true
   },
@@ -49,7 +49,7 @@
     "deliveryState": "silent"
   },
   "successResponse": {
-    "protocolVersion": 1,
+    "protocolVersion": 2,
     "ok": true,
     "operation": "get-bound",
     "snapshot": {
@@ -59,7 +59,7 @@
         "externalRef": "external:placeholder",
         "schedule": { "kind": "interval", "minutes": 5 },
         "prompt": "placeholder prompt",
-        "deliver": "telegram",
+        "deliver": "default",
         "cwd": "placeholder-cwd",
         "sessionMode": "per_run",
         "createdAt": "2026-08-18T00:00:00.000Z"
@@ -76,28 +76,28 @@
   },
   "errorResponses": [
     {
-      "protocolVersion": 1,
+      "protocolVersion": 2,
       "ok": false,
       "operation": "get-bound",
       "errorCode": "invalid_request",
       "message": "placeholder error"
     },
     {
-      "protocolVersion": 1,
+      "protocolVersion": 2,
       "ok": false,
       "operation": "ensure-bound",
       "errorCode": "binding_conflict",
       "message": "placeholder error"
     },
     {
-      "protocolVersion": 1,
+      "protocolVersion": 2,
       "ok": false,
       "operation": "replace-bound",
       "errorCode": "persistence_uncertain",
       "message": "placeholder error"
     },
     {
-      "protocolVersion": 1,
+      "protocolVersion": 2,
       "ok": false,
       "operation": "delete-bound",
       "errorCode": "internal_error",

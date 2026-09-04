@@ -3,7 +3,7 @@
  *
  * `jobs.jsonl` is append-only (create/delete tombstones), folded on read;
  * `runs.jsonl` is append-only audit history. All writes are atomic:
- * write-to-tmp + rename (same convention as the telegram offset store).
+ * write-to-tmp + rename.
  * @module @deepseek-ai/dsh-cron
  */
 
@@ -109,7 +109,7 @@ function parseCreateJobWithFailure(raw: string): ParsedCreateJob | undefined {
     return undefined
   }
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  const record = value as Record<string, unknown>
+  let record = value as Record<string, unknown>
   if (record.op !== 'create') return undefined
 
   const id = typeof record.id === 'string' && record.id.trim() !== '' ? record.id : undefined
@@ -117,17 +117,20 @@ function parseCreateJobWithFailure(raw: string): ParsedCreateJob | undefined {
   if (typeof record.schedule !== 'object' || record.schedule === null || Array.isArray(record.schedule)) {
     return invalidCreate('invalid_create', 'create row requires a schedule object.', id)
   }
-  if (record.deliver !== 'telegram' && record.deliver !== 'silent') {
+  if (record.deliver !== 'default' && record.deliver !== 'silent' && record.deliver !== 'telegram') {
     return invalidCreate('invalid_create', 'create row has an invalid delivery channel.', id)
   }
+  // Legacy rows used a transport name as a domain value. Normalize only the
+  // in-memory decoded value; reading jobs.jsonl never rewrites the file.
+  if (record.deliver === 'telegram') record = { ...record, deliver: 'default' }
   if (record.externalRef !== undefined && typeof record.externalRef !== 'string') {
     return invalidCreate('invalid_create', 'create row externalRef must be a string.', id)
   }
   if (record.failureAlert !== undefined && !isFailureAlertPolicy(record.failureAlert)) {
     return invalidCreate('invalid_create', 'create row failureAlert is invalid.', id)
   }
-  if (record.failureAlert !== undefined && record.deliver !== 'telegram') {
-    return invalidCreate('invalid_create', 'failureAlert requires Telegram delivery.', id)
+  if (record.failureAlert !== undefined && record.deliver !== 'default') {
+    return invalidCreate('invalid_create', 'failureAlert requires default delivery.', id)
   }
 
   if (record.kind === 'command') {
@@ -888,7 +891,7 @@ export class RunLedger {
   }
 
   /**
-   * Claim one failure-alert side effect before Telegram is touched. The same
+   * Claim one failure-alert side effect before the delivery provider is touched. The same
    * run id is idempotent, and a failed append throws so the caller fails
    * closed without sending.
    */

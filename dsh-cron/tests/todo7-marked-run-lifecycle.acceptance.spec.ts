@@ -73,7 +73,7 @@ function seedJob(directory: string, job: Job): void {
   new JobStore(directory).append({ op: 'create', ...job })
 }
 
-function markedJob(id: string, deliver: Job['deliver'] = 'telegram'): Job {
+function markedJob(id: string, deliver: Job['deliver'] = 'default'): Job {
   return {
     id,
     schedule: { kind: 'once', runAt: new Date(Date.now() - 60_000).toISOString() },
@@ -88,9 +88,6 @@ function markedJob(id: string, deliver: Job['deliver'] = 'telegram'): Job {
 function schedulerConfig(directory: string, deliverOnError = true): SchedulerConfig {
   return {
     storeDir: directory,
-    apiBaseUrl: 'https://api.telegram.org',
-    tokenRef: 'TELEGRAM_BOT_TOKEN',
-    chatIdRef: 'TELEGRAM_ALLOWED_CHAT_ID',
     pollIntervalMs: 60_000,
     maxConcurrent: 3,
     deliverOnError,
@@ -217,18 +214,16 @@ function runMarkedJob(
       finish: options.finish,
     }) as never,
     schedulerConfig(directory, options.deliverOnError ?? true),
-    {} as never,
-    123,
     controller.signal,
     {
       driveTurn: async (agent, _prompt, _sessions, signal) => {
         options.order.push('drive')
         return options.driveTurn?.(agent as RunAgent, signal) ?? { text: '' }
       },
-      deliverText: async (_http, _chatId, text) => {
+      deliverText: async (text) => {
         options.order.push('deliver')
         options.delivered.push(text)
-        return { state: 'delivered', messageId: options.delivered.length }
+        return { state: 'delivered', deliveredAt: new Date().toISOString()}
       },
     },
   )
@@ -569,13 +564,13 @@ describe('generic marked Agent run lifecycle acceptance', () => {
       finish: () => { order.push('finish') },
       failCleanup: true,
     }) as never
-    const runtime = new SchedulerRuntime(context, schedulerConfig(directory), {} as never, 123, new AbortController().signal, {
+    const runtime = new SchedulerRuntime(context, schedulerConfig(directory), new AbortController().signal, {
       driveTurn: async (agent, _prompt, _sessions) => {
         order.push('drive')
         agent.status = 'running'
         return { text: 'success body must not be delivered' }
       },
-      deliverText: async (_http, _chatId, text) => { order.push('deliver'); delivered.push(text); return { state: 'delivered', messageId: 1 } },
+      deliverText: async (text) => { order.push('deliver'); delivered.push(text); return { state: 'delivered', deliveredAt: new Date().toISOString()} },
     })
     runtime.start()
     try {

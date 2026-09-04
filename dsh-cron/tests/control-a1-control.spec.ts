@@ -37,7 +37,7 @@ const SPEC: BoundCronSpec = {
   externalRef: 'external:placeholder',
   schedule: { kind: 'interval', minutes: 5 },
   prompt: 'placeholder prompt',
-  deliver: 'telegram',
+  deliver: 'default',
   cwd: 'placeholder-cwd',
   sessionMode: 'per_run',
 }
@@ -68,7 +68,7 @@ const COMMAND_SPEC: BoundCronCommandSpec = {
     timeoutSeconds: 120,
     outputMaxBytes: 4_096,
   },
-  deliver: 'telegram',
+  deliver: 'default',
   cwd: '/srv/monitor',
 }
 
@@ -219,7 +219,7 @@ describe('Lane A1 control service binding lifecycle', () => {
         sessionMode: 'per_run',
         schedule: { kind: 'interval', minutes: 5 },
         prompt,
-        deliver: 'telegram',
+        deliver: 'default',
         createdAt: '2026-08-20T00:00:00.000Z',
       })
     }
@@ -302,7 +302,7 @@ describe('Lane A1 control service binding lifecycle', () => {
     expect(activeCommandJob(first)).toMatchObject({
       externalRef: COMMAND_SPEC.externalRef,
       command: COMMAND_SPEC.command,
-      deliver: 'telegram',
+      deliver: 'default',
     })
     expect(activeCommandJob(second)).toEqual(activeCommandJob(first))
     expect(activeCommandJob(read)).toEqual(activeCommandJob(first))
@@ -333,7 +333,7 @@ describe('Lane A1 control service binding lifecycle', () => {
     expect(activeJob(agent)).toMatchObject({ failureAlert: FAILURE_ALERT, sessionMode: 'per_run' })
     expect(activeJob(sameAgent)).toEqual(activeJob(agent))
     expect(activeJob(sameAgentWithReorderedPolicy)).toEqual(activeJob(agent))
-    expect(activeCommandJob(command)).toMatchObject({ failureAlert: FAILURE_ALERT, deliver: 'telegram' })
+    expect(activeCommandJob(command)).toMatchObject({ failureAlert: FAILURE_ALERT, deliver: 'default' })
     expect(agentConflict).toMatchObject({ ok: false, errorCode: 'binding_conflict' })
     expect(commandConflict).toMatchObject({ ok: false, errorCode: 'binding_conflict' })
     expect(jobLines(dir).filter(line => (line as { op?: string }).op === 'create')).toHaveLength(2)
@@ -563,7 +563,7 @@ describe('Lane A1 control service binding lifecycle', () => {
       sessionMode: 'persistent',
       schedule: { kind: 'interval', minutes: 30 },
       prompt: 'unbound prompt',
-      deliver: 'telegram',
+      deliver: 'default',
       createdAt: '2026-08-28T00:00:00.000Z',
     })
 
@@ -576,7 +576,7 @@ describe('Lane A1 control service binding lifecycle', () => {
         sessionMode: 'persistent',
         schedule: { kind: 'interval', minutes: 30 },
         prompt: 'unbound prompt',
-        deliver: 'telegram',
+        deliver: 'default',
         createdAt: '2026-08-28T00:00:00.000Z',
       },
     ]))

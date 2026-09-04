@@ -54,7 +54,7 @@ type ControlFixture = {
 
 const fixture = JSON.parse(
   // The frozen fixture is read-only evidence; this test does not modify it.
-  readFileSync(new URL('./fixtures/control-v1.json', import.meta.url), 'utf8'),
+  readFileSync(new URL('./fixtures/control-v2.json', import.meta.url), 'utf8'),
 ) as ControlFixture
 
 const SPEC = (fixture.requests.find(request => request.operation === 'ensure-bound') as Extract<
@@ -81,7 +81,7 @@ const ALERT_COMMAND_SPEC: BoundCronCommandSpec = {
   externalRef: 'external:alert-command-placeholder',
   schedule: { kind: 'cron', expr: '1-59/2 * * * *' },
   command: { argv: ['/bin/false'], timeoutSeconds: 30, outputMaxBytes: 4_096 },
-  deliver: 'telegram',
+  deliver: 'default',
   failureAlert: { after: 2, cooldownMinutes: 30 },
 }
 
@@ -322,8 +322,8 @@ describe('Lane A1 narrow control RPC', () => {
     })
     const clear = await client.updateBoundFailureAlert('external:alert-command-placeholder', null)
 
-    expect(set).toMatchObject({ protocolVersion: 1, ok: true, operation: 'update-bound-failure-alert' })
-    expect(clear).toMatchObject({ protocolVersion: 1, ok: true, operation: 'update-bound-failure-alert' })
+    expect(set).toMatchObject({ protocolVersion: 2, ok: true, operation: 'update-bound-failure-alert' })
+    expect(clear).toMatchObject({ protocolVersion: 2, ok: true, operation: 'update-bound-failure-alert' })
     expect(fake.calls.updateBoundFailureAlert).toBe(2)
     await server.dispose()
   })
@@ -335,23 +335,23 @@ describe('Lane A1 narrow control RPC', () => {
     await server.listen()
 
     const invalidRequests = [
-      { protocolVersion: 1, operation: 'unknown-operation' },
+      { protocolVersion: 2, operation: 'unknown-operation' },
       { protocolVersion: 99, operation: 'get-bound', externalRef: 'external:placeholder' },
-      { protocolVersion: 1, operation: 'ensure-bound', spec: { externalRef: '', sessionMode: 'persistent' } },
-      { protocolVersion: 1, operation: 'ensure-bound', spec: { ...SPEC, schedule: { kind: 'cron', expr: '60 * * * *' } } },
-      { protocolVersion: 1, operation: 'replace-bound', spec: { ...SPEC, schedule: { kind: 'interval', minutes: 0 } } },
-      { protocolVersion: 1, operation: 'ensure-bound', spec: { ...SPEC, schedule: { kind: 'once', runAt: 'not-a-date' } } },
-      { protocolVersion: 1, operation: 'ensure-bound', spec: { ...SPEC, gate: { kind: 'business-specific-gate', command: { argv: ['x'], timeoutSeconds: 1, outputMaxBytes: 1 } } } },
-      { protocolVersion: 1, operation: 'ensure-bound', spec: { ...SPEC, gate: { kind: 'nonempty_stdout', command: { argv: [], timeoutSeconds: 1, outputMaxBytes: 1 } } } },
-      { protocolVersion: 1, operation: 'ensure-bound', spec: { ...SPEC, failureAlert: { after: 0, cooldownMinutes: 30 } } },
-      { protocolVersion: 1, operation: 'ensure-bound-command', spec: { ...ALERT_COMMAND_SPEC, deliver: 'silent' } },
-      { protocolVersion: 1, operation: 'update-bound-failure-alert', externalRef: '', failureAlert: null },
-      { protocolVersion: 1, operation: 'update-bound-failure-alert', externalRef: 'external:placeholder' },
-      { protocolVersion: 1, operation: 'update-bound-failure-alert', externalRef: 'external:placeholder', failureAlert: { after: 0, cooldownMinutes: 30 } },
+      { protocolVersion: 2, operation: 'ensure-bound', spec: { externalRef: '', sessionMode: 'persistent' } },
+      { protocolVersion: 2, operation: 'ensure-bound', spec: { ...SPEC, schedule: { kind: 'cron', expr: '60 * * * *' } } },
+      { protocolVersion: 2, operation: 'replace-bound', spec: { ...SPEC, schedule: { kind: 'interval', minutes: 0 } } },
+      { protocolVersion: 2, operation: 'ensure-bound', spec: { ...SPEC, schedule: { kind: 'once', runAt: 'not-a-date' } } },
+      { protocolVersion: 2, operation: 'ensure-bound', spec: { ...SPEC, gate: { kind: 'business-specific-gate', command: { argv: ['x'], timeoutSeconds: 1, outputMaxBytes: 1 } } } },
+      { protocolVersion: 2, operation: 'ensure-bound', spec: { ...SPEC, gate: { kind: 'nonempty_stdout', command: { argv: [], timeoutSeconds: 1, outputMaxBytes: 1 } } } },
+      { protocolVersion: 2, operation: 'ensure-bound', spec: { ...SPEC, failureAlert: { after: 0, cooldownMinutes: 30 } } },
+      { protocolVersion: 2, operation: 'ensure-bound-command', spec: { ...ALERT_COMMAND_SPEC, deliver: 'silent' } },
+      { protocolVersion: 2, operation: 'update-bound-failure-alert', externalRef: '', failureAlert: null },
+      { protocolVersion: 2, operation: 'update-bound-failure-alert', externalRef: 'external:placeholder' },
+      { protocolVersion: 2, operation: 'update-bound-failure-alert', externalRef: 'external:placeholder', failureAlert: { after: 0, cooldownMinutes: 30 } },
     ]
     for (const requestBody of invalidRequests) {
       const response = await rawRpc(socketPath, requestBody)
-      expect(response.body).toMatchObject({ protocolVersion: 1, ok: false, errorCode: 'invalid_request' })
+      expect(response.body).toMatchObject({ protocolVersion: 2, ok: false, errorCode: 'invalid_request' })
     }
     expect(fake.calls).toEqual({
       ensureBound: 0,

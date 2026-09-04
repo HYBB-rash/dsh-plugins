@@ -113,11 +113,11 @@ describe('cron_create', () => {
       .rejects.toThrow(/invalid arguments/)
   })
 
-  it('defaults deliver to telegram', async () => {
+  it('defaults deliver to the neutral delivery port', async () => {
     const { tools, toolCtx, rootCtx } = fakeScope()
     registerCronTools(rootCtx as never, toolCtx as never, new JobStore(tempDir()))
     const result = await tools.get('cron_create')!.execute({ prompt: 'hi', schedule: { kind: 'interval', minutes: 5 } }, execSession)
-    expect(result).toMatchObject({ deliver: 'telegram' })
+    expect(result).toMatchObject({ deliver: 'default' })
   })
 
   it('returns persistence_uncertain when the append fails', async () => {
@@ -139,7 +139,7 @@ describe('cron_list', () => {
   it('lists active jobs in creation order', async () => {
     const dir = tempDir()
     const store = new JobStore(dir)
-    store.append({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 5 }, prompt: 'a', deliver: 'telegram', createdAt: '2026-08-14T00:00:00.000Z' })
+    store.append({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 5 }, prompt: 'a', deliver: 'default', createdAt: '2026-08-14T00:00:00.000Z' })
     store.append({ op: 'create', id: 'cron-b', schedule: { kind: 'once', runAt: '2026-08-20T00:00:00.000Z' }, prompt: 'b', deliver: 'silent', createdAt: '2026-08-14T00:00:01.000Z' })
     const { tools, toolCtx, rootCtx } = fakeScope()
     registerCronTools(rootCtx as never, toolCtx as never, store)
@@ -162,7 +162,7 @@ describe('cron_delete', () => {
   it('tombstones an existing job and removes it from the fold', async () => {
     const dir = tempDir()
     const store = new JobStore(dir)
-    store.append({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 5 }, prompt: 'a', deliver: 'telegram', createdAt: '2026-08-14T00:00:00.000Z' })
+    store.append({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 5 }, prompt: 'a', deliver: 'default', createdAt: '2026-08-14T00:00:00.000Z' })
     const { tools, toolCtx, rootCtx } = fakeScope()
     registerCronTools(rootCtx as never, toolCtx as never, store)
     const result = await tools.get('cron_delete')!.execute({ id: 'cron-a' }, execSession)

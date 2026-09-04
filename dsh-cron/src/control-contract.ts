@@ -165,9 +165,9 @@ export interface DshCronMaintenanceControl {
 }
 
 /** The only control protocol version understood by this package. */
-export const CONTROL_PROTOCOL_VERSION = 1 as const
+export const CONTROL_PROTOCOL_VERSION = 2 as const
 
-/** The complete v1 RPC operation vocabulary. */
+/** The complete v2 RPC operation vocabulary. */
 export const CONTROL_RPC_OPERATIONS = [
   'ensure-bound',
   'replace-bound',
@@ -193,7 +193,7 @@ export interface BoundCronSpec {
   readonly externalRef: string
   readonly schedule: ScheduleSpec
   readonly prompt: string
-  readonly deliver: 'telegram'
+  readonly deliver: 'default'
   readonly cwd?: string
   readonly sessionMode: 'per_run'
   /** Optional exact provider-owned per-run Agent environment marker. */
@@ -213,7 +213,7 @@ export interface BoundCronCommandSpec {
   readonly externalRef: string
   readonly schedule: ScheduleSpec
   readonly command: CommandPayload
-  readonly deliver: 'telegram' | 'silent'
+  readonly deliver: 'default' | 'silent'
   /** Optional throttled execution-failure notification policy. */
   readonly failureAlert?: FailureAlertPolicy
   readonly cwd?: string
@@ -285,7 +285,7 @@ export type ActiveCronJobInspection =
       readonly externalRef?: string
       readonly schedule: ScheduleSpec
       readonly command: CommandPayload
-      readonly deliver: 'telegram' | 'silent'
+      readonly deliver: 'default' | 'silent'
       readonly cwd?: string
       readonly failureAlert?: FailureAlertPolicy
     }
@@ -304,7 +304,7 @@ export interface ControlHealthResponse {
   readonly ready: true
 }
 
-/** Base fields carried by every v1 control request. */
+/** Base fields carried by every v2 control request. */
 interface ControlRequestBase {
   readonly protocolVersion: typeof CONTROL_PROTOCOL_VERSION
 }
@@ -363,7 +363,7 @@ export interface UpdateBoundFailureAlertRequest extends ControlRequestBase {
   readonly failureAlert: FailureAlertPolicy | null
 }
 
-/** The complete v1 request union; health is an HTTP endpoint, not an RPC op. */
+/** The complete v2 request union; health is an HTTP endpoint, not an RPC op. */
 export type ControlRequest =
   | EnsureBoundRequest
   | ReplaceBoundRequest
@@ -374,7 +374,7 @@ export type ControlRequest =
   | GetBoundCommandRequest
   | UpdateBoundFailureAlertRequest
 
-/** A successful v1 operation response. */
+/** A successful v2 operation response. */
 export interface ControlSuccessResponse {
   readonly protocolVersion: typeof CONTROL_PROTOCOL_VERSION
   readonly ok: true
@@ -405,7 +405,7 @@ export type ControlErrorCode =
   | 'persistence_uncertain'
   | 'internal_error'
 
-/** A failed v1 operation response. */
+/** A failed v2 operation response. */
 export interface ControlErrorResponse {
   readonly protocolVersion: typeof CONTROL_PROTOCOL_VERSION
   readonly ok: false
@@ -414,7 +414,7 @@ export interface ControlErrorResponse {
   readonly message: string
 }
 
-/** Every v1 RPC response is either a bounded success or bounded wire error. */
+/** Every v2 RPC response is either a bounded success or bounded wire error. */
 export type ControlResponse =
   | ControlSuccessResponse
   | CommandControlSuccessResponse
@@ -435,7 +435,7 @@ export interface DshCronControlClientError {
   readonly operation?: ControlRpcOperation
 }
 
-/** Local typed client for the v1 manager operations and readiness. */
+/** Local typed client for the v2 manager operations and readiness. */
 export interface DshCronControlClient {
   ensureBound(spec: BoundCronSpec): Promise<ControlResponse | DshCronControlClientError>
   replaceBound(spec: BoundCronSpec): Promise<ControlResponse | DshCronControlClientError>

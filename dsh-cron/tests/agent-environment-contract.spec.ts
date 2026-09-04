@@ -22,7 +22,7 @@ const BASE_SPEC: BoundCronSpec = {
   externalRef: 'external:agent-environment',
   schedule: { kind: 'interval', minutes: 5 },
   prompt: 'bounded environment prompt',
-  deliver: 'telegram',
+  deliver: 'default',
   sessionMode: 'per_run',
   agentEnvironment: 'dsh-business/v1',
 }
@@ -46,7 +46,7 @@ describe('generic agent environment marker contract', () => {
       id: 'legacy-agent',
       schedule: { kind: 'interval', minutes: 5 },
       prompt: 'legacy prompt',
-      deliver: 'telegram',
+      deliver: 'default',
       createdAt: '2026-08-20T00:00:00.000Z',
     })
     const marked = JSON.stringify({
@@ -66,7 +66,7 @@ describe('generic agent environment marker contract', () => {
         id: 'legacy-agent',
         schedule: { kind: 'interval', minutes: 5 },
         prompt: 'legacy prompt',
-        deliver: 'telegram',
+        deliver: 'default',
         sessionMode: 'persistent',
         createdAt: '2026-08-20T00:00:00.000Z',
       }],

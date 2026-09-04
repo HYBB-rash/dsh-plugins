@@ -43,7 +43,7 @@ type ControlFixture = {
 }
 
 const fixture = JSON.parse(
-  readFileSync(new URL('./fixtures/control-v1.json', import.meta.url), 'utf8'),
+  readFileSync(new URL('./fixtures/control-v2.json', import.meta.url), 'utf8'),
 ) as ControlFixture
 
 const [ensureRequest, replaceRequest, deleteRequest, getRequest] = fixture.requests
@@ -87,7 +87,7 @@ type UnexpectedClientMethods = Exclude<keyof DshCronControlClient, RequiredClien
 type MissingClientMethods = Exclude<RequiredClientMethods, keyof DshCronControlClient>
 
 // These assignments are compile-time locks: an added or removed public key
-// must be reviewed explicitly instead of silently widening the v1 contract.
+// must be reviewed explicitly instead of silently widening the v2 contract.
 const BOUND_SPEC_KEYS: ExactKeys<
   BoundCronSpec,
   'externalRef' | 'schedule' | 'prompt' | 'deliver' | 'cwd' | 'sessionMode' | 'gate' | 'failureAlert' | 'agentEnvironment'
@@ -113,12 +113,12 @@ type ReadinessResponse = DshCronControlClient['readiness'] extends (...args: nev
   : never
 const fixtureHealthAsReadiness: ReadinessResponse = fixture.health
 
-describe('dsh-cron control contract v1', () => {
+describe('dsh-cron control contract v2', () => {
   it('freezes the protocol version and GET health response', () => {
-    expect(CONTROL_PROTOCOL_VERSION).toBe(1)
+    expect(CONTROL_PROTOCOL_VERSION).toBe(2)
     expect(CONTROL_HEALTH_METHOD).toBe('GET')
     expect(CONTROL_HEALTH_PATH).toBe('/health')
-    expect(fixture.health).toEqual({ protocolVersion: 1, writer: 'manager', ready: true })
+    expect(fixture.health).toEqual({ protocolVersion: 2, writer: 'manager', ready: true })
     expect(fixtureHealthAsReadiness).toEqual(fixture.health)
   })
 
@@ -149,7 +149,7 @@ describe('dsh-cron control contract v1', () => {
   it('requires externalRef and explicit per_run on a bound spec', () => {
     expect(BOUND_SPEC).toMatchObject({
       externalRef: 'external:placeholder',
-      deliver: 'telegram',
+      deliver: 'default',
       sessionMode: 'per_run',
       schedule: { kind: 'interval', minutes: 5 },
     })
@@ -163,7 +163,7 @@ describe('dsh-cron control contract v1', () => {
 
   it('freezes successful responses and the bounded wire error vocabulary', () => {
     expect(fixture.successResponse).toMatchObject({
-      protocolVersion: 1,
+      protocolVersion: 2,
       ok: true,
       operation: 'get-bound',
       snapshot: {
@@ -181,10 +181,10 @@ describe('dsh-cron control contract v1', () => {
       'persistence_uncertain',
       'internal_error',
     ])
-    expect(fixture.errorResponses.every(error => error.protocolVersion === 1 && error.ok === false)).toBe(true)
+    expect(fixture.errorResponses.every(error => error.protocolVersion === 2 && error.ok === false)).toBe(true)
   })
 
-  it('keeps the v1 client surface closed and key-stable', () => {
+  it('keeps the v2 client surface closed and key-stable', () => {
     expect(BOUND_SPEC_KEYS).toBe(true)
     expect(RUN_SNAPSHOT_KEYS).toBe(true)
     expect(BOUND_SNAPSHOT_KEYS).toBe(true)

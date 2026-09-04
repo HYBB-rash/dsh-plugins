@@ -66,11 +66,11 @@ function validateSchedule(value: unknown): { schedule: ScheduleSpec } | CronTool
   return { code: 'invalid_schedule', message: 'schedule.kind must be "cron", "interval", or "once".' }
 }
 
-/** Validate the deliver channel, defaulting to telegram. */
+/** Validate the neutral delivery policy, defaulting to the configured provider. */
 function validateDeliver(value: unknown): { deliver: DeliverChannel } | CronToolError {
-  if (value === undefined) return { deliver: 'telegram' }
-  if (value === 'telegram' || value === 'silent') return { deliver: value }
-  return { code: 'invalid_deliver', message: 'deliver must be "telegram" or "silent".' }
+  if (value === undefined) return { deliver: 'default' }
+  if (value === 'default' || value === 'silent') return { deliver: value }
+  return { code: 'invalid_deliver', message: 'deliver must be "default" or "silent".' }
 }
 
 /** Deterministic model content for every canonical value. */
@@ -148,10 +148,10 @@ export function registerCronTools(rootCtx: Context, toolCtx: Context, store: Job
       name: 'cron_create',
       description:
         'Create one unattended cron job that runs a prompt in its own session and delivers '
-        + 'the result to Telegram. Supply a non-empty prompt and exactly one schedule: '
+        + 'the result through the configured delivery provider. Supply a non-empty prompt and exactly one schedule: '
         + 'cron with a 5-field expression (minute hour day-of-month month day-of-week), '
         + 'interval with a positive minutes count, or once with an RFC 3339 runAt. '
-        + 'deliver defaults to telegram; use "silent" to record the run without delivery.',
+        + 'the default delivery policy is "default"; use "silent" to record the run without delivery.',
       parameters: {
         prompt: {
           type: 'string',
@@ -190,8 +190,8 @@ export function registerCronTools(rootCtx: Context, toolCtx: Context, store: Job
         },
         deliver: {
           type: 'string',
-          enum: ['telegram', 'silent'],
-          description: 'Where to deliver the run result. Defaults to telegram.',
+          enum: ['default', 'silent'],
+          description: 'Whether to use the default delivery provider. Defaults to default.',
         },
         cwd: {
           type: 'string',

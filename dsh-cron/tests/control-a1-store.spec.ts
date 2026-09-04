@@ -57,7 +57,7 @@ describe('Lane A1 job identity persistence', () => {
       sessionMode: 'per_run',
       schedule: { kind: 'interval', minutes: 5 },
       prompt: 'placeholder prompt',
-      deliver: 'telegram',
+      deliver: 'default',
       createdAt: '2026-08-18T00:00:00.000Z',
     })
     appendRaw(store, {
@@ -65,7 +65,7 @@ describe('Lane A1 job identity persistence', () => {
       id: 'job-old',
       schedule: { kind: 'interval', minutes: 5 },
       prompt: 'legacy placeholder prompt',
-      deliver: 'telegram',
+      deliver: 'default',
       createdAt: '2026-08-17T00:00:00.000Z',
     })
 
@@ -94,7 +94,7 @@ describe('Lane A1 job identity persistence', () => {
       schedule: { kind: 'interval', minutes: 5 },
       prompt: 'fixed prompt',
       gate,
-      deliver: 'telegram',
+      deliver: 'default',
       createdAt: '2026-08-18T00:00:00.000Z',
     })
     for (const [id, sessionMode, badGate] of [
@@ -108,7 +108,7 @@ describe('Lane A1 job identity persistence', () => {
         schedule: { kind: 'interval', minutes: 5 },
         prompt: 'must be rejected',
         gate: badGate,
-        deliver: 'telegram',
+        deliver: 'default',
         createdAt: '2026-08-18T00:00:00.000Z',
       })
     }
@@ -128,7 +128,7 @@ describe('Lane A1 job identity persistence', () => {
       sessionMode: 'per_run',
       schedule: { kind: 'cron', expr: '4 * * * *' },
       prompt: 'fixed prompt',
-      deliver: 'telegram',
+      deliver: 'default',
       failureAlert,
       createdAt: '2026-08-20T00:00:00.000Z',
     })
@@ -139,13 +139,13 @@ describe('Lane A1 job identity persistence', () => {
       externalRef: 'external:alert-command',
       schedule: { kind: 'interval', minutes: 2 },
       command: { argv: ['/bin/false'], timeoutSeconds: 30, outputMaxBytes: 4_096 },
-      deliver: 'telegram',
+      deliver: 'default',
       failureAlert,
       createdAt: '2026-08-20T00:00:00.000Z',
     })
     for (const [id, deliver, policy] of [
-      ['job-alert-zero', 'telegram', { after: 0, cooldownMinutes: 30 }],
-      ['job-alert-no-cooldown', 'telegram', { after: 2, cooldownMinutes: 0 }],
+      ['job-alert-zero', 'default', { after: 0, cooldownMinutes: 30 }],
+      ['job-alert-no-cooldown', 'default', { after: 2, cooldownMinutes: 0 }],
       ['job-alert-silent', 'silent', failureAlert],
     ] as const) {
       appendRaw(store, {
@@ -180,7 +180,7 @@ describe('Lane A1 job identity persistence', () => {
         kind: 'nonempty_stdout',
         command: { argv: ['/bin/true'], timeoutSeconds: 30, outputMaxBytes: 4_096 },
       },
-      deliver: 'telegram',
+      deliver: 'default',
       cwd: '/srv/fixed',
       createdAt: '2026-08-20T00:00:00.000Z',
     } as const
@@ -242,7 +242,7 @@ describe('Lane A1 job identity persistence', () => {
       sessionMode: 'persistent',
       schedule: { kind: 'interval', minutes: 5 },
       prompt: 'first placeholder prompt',
-      deliver: 'telegram',
+      deliver: 'default',
       createdAt: '2026-08-17T00:00:00.000Z',
     })
     appendRaw(store, {

@@ -33,7 +33,7 @@ function legacy(dir: string, overrides: Record<string, unknown> = {}): void {
     id: 'job-x-primary',
     schedule: { kind: 'interval', minutes: 60 },
     prompt: 'a prompt that must never be exposed by the migration state',
-    deliver: 'telegram',
+    deliver: 'default',
     createdAt: '2026-08-21T00:00:00.000Z',
     ...overrides,
   })
@@ -125,7 +125,7 @@ describe('local maintenance Agent binding CAS', () => {
     new JsonlStore(join(dir, 'jobs.jsonl')).append({
       op: 'create', kind: 'command', id: 'command-job', externalRef: PRIMARY,
       schedule: { kind: 'interval', minutes: 60 }, command: { argv: ['/bin/true'], timeoutSeconds: 1, outputMaxBytes: 1 },
-      deliver: 'telegram', createdAt: '2026-08-21T00:00:00.000Z',
+      deliver: 'default', createdAt: '2026-08-21T00:00:00.000Z',
     })
     const control = createMaintenanceControl({ storeDir: dir })
     const before = lines(dir)

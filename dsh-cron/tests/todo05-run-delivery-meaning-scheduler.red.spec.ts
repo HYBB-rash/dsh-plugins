@@ -52,16 +52,13 @@ function temporaryDirectory(prefix: string): string {
 function schedulerConfig(storeDir: string): SchedulerConfig {
   return {
     storeDir,
-    apiBaseUrl: 'https://api.telegram.org',
-    tokenRef: 'TELEGRAM_BOT_TOKEN',
-    chatIdRef: 'TELEGRAM_ALLOWED_CHAT_ID',
     pollIntervalMs: 60_000,
     maxConcurrent: 1,
     deliverOnError: false,
   }
 }
 
-function futureMarkedJob(id: string, deliver: 'silent' | 'telegram' = 'telegram'): Job {
+function futureMarkedJob(id: string, deliver: 'silent' | 'default' = 'default'): Job {
   return {
     id,
     schedule: { kind: 'once', runAt: new Date(Date.now() + 60 * 60_000).toISOString() },
@@ -323,7 +320,7 @@ function preparedLease(
 describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
   it('durably records C1 before the live pre-finish hook and never lets the hook outrun it', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c1-live-')
-    const job = futureMarkedJob('scheduler-c1-live', 'telegram')
+    const job = futureMarkedJob('scheduler-c1-live', 'default')
     seedJob(storeDir, job)
     let meaningPort: CronAgentEnvironmentPrepareContext['runDeliveryMeaningPort']
     let hookCalls = 0
@@ -364,8 +361,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive' }),
@@ -394,7 +389,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('durably records C1 before claim-only recovery settlement', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c1-claim-only-')
-    const job = futureMarkedJob('scheduler-c1-claim-only', 'telegram')
+    const job = futureMarkedJob('scheduler-c1-claim-only', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -449,8 +444,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive' }),
@@ -479,7 +472,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('rejects an accepted C1 result whose receipt differs from the durable receipt', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c1-wrong-receipt-')
-    const job = futureMarkedJob('scheduler-c1-wrong-receipt', 'telegram')
+    const job = futureMarkedJob('scheduler-c1-wrong-receipt', 'default')
     seedJob(storeDir, job)
     let hookCalls = 0
     let sends = 0
@@ -512,8 +505,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive' }),
@@ -545,7 +536,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('injects the exact live claim port before provider prepare and holds without it', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-live-port-')
-    const job = futureMarkedJob('scheduler-live-port', 'telegram')
+    const job = futureMarkedJob('scheduler-live-port', 'default')
     seedJob(storeDir, job)
     const prepareContexts: CronAgentEnvironmentPrepareContext[] = []
     let driveCalls = 0
@@ -568,12 +559,10 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => { driveCalls++; return { text: 'must not drive' } },
-        deliverText: async () => { sendCalls++; return { state: 'delivered' } },
+        deliverText: async () => { sendCalls++; return { state: 'delivered', deliveredAt: new Date().toISOString() } },
       },
     )
     runtime.start()
@@ -631,7 +620,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
   ] as const)('%s holds an opted-in live claim before provider side effects', async (_name, mode) => {
     const storeDir = temporaryDirectory(`todo05-scheduler-service-${mode ?? 'missing'}-`)
     const serviceDir = mode === undefined ? undefined : temporaryDirectory('todo05-scheduler-service-independent-')
-    const job = futureMarkedJob(`scheduler-service-${mode ?? 'missing'}`, 'telegram')
+    const job = futureMarkedJob(`scheduler-service-${mode ?? 'missing'}`, 'default')
     seedJob(storeDir, job)
     let prepareCalls = 0
     let sendCalls = 0
@@ -651,8 +640,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed?.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       { driveTurn: async () => { driveCalls++; return { text: 'must not drive' } }, deliverText: async () => { sendCalls++ } },
     )
@@ -710,8 +697,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, undefined),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
     )
     runtime.start()
@@ -731,7 +716,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('preserves the prepared provider path when meaning opt-in is absent', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-prepared-legacy-')
-    const job = futureMarkedJob('scheduler-prepared-legacy', 'telegram')
+    const job = futureMarkedJob('scheduler-prepared-legacy', 'default')
     seedJob(storeDir, job)
     const contexts: CronAgentEnvironmentPrepareContext[] = []
     let sends = 0
@@ -753,10 +738,8 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, undefined),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
-      { driveTurn: async () => ({ text: 'must not drive' }), deliverText: async () => { sends++; return { state: 'delivered' } } },
+      { driveTurn: async () => ({ text: 'must not drive' }), deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     runtime.start()
     try {
@@ -778,7 +761,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('injects the exact claim-only recovery port before provider recovery', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-claim-only-port-')
-    const job = futureMarkedJob('scheduler-claim-only-port', 'telegram')
+    const job = futureMarkedJob('scheduler-claim-only-port', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -812,8 +795,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive' }), deliverText: async () => ({ state: 'delivered' }) },
     )
@@ -868,7 +849,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('records C1 before existing-prepared recovery settlement', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-existing-port-')
-    const job = futureMarkedJob('scheduler-existing-port', 'telegram')
+    const job = futureMarkedJob('scheduler-existing-port', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -966,8 +947,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       { driveTurn: async () => { drives++; return { text: 'must not drive' } }, deliverText: async () => { sends++ } },
     )
@@ -1014,7 +993,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('does not settle existing-prepared recovery when ack exists before C1 meaning', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c1-ack-before-meaning-')
-    const job = futureMarkedJob('scheduler-c1-ack-before-meaning', 'telegram')
+    const job = futureMarkedJob('scheduler-c1-ack-before-meaning', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -1127,8 +1106,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       { driveTurn: async () => { drives++; return { text: 'must not drive' } }, deliverText: async () => { sends++ } },
     )
@@ -1155,7 +1132,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('holds a live run when owner B is corrupted before C1 and does not call pre-finish', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c1-live-corrupt-')
-    const job = futureMarkedJob('scheduler-c1-live-corrupt', 'telegram')
+    const job = futureMarkedJob('scheduler-c1-live-corrupt', 'default')
     seedJob(storeDir, job)
     let hookCalls = 0
     let sends = 0
@@ -1186,8 +1163,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive' }),
@@ -1230,7 +1205,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('holds claim-only recovery when owner B is corrupted before C1 and does not settle', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c1-recovery-corrupt-')
-    const job = futureMarkedJob('scheduler-c1-recovery-corrupt', 'telegram')
+    const job = futureMarkedJob('scheduler-c1-recovery-corrupt', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -1275,8 +1250,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive' }),
@@ -1318,7 +1291,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('calls live provider bind only after prepared row and before transport', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-live-bind-')
-    const job = futureMarkedJob('scheduler-live-bind', 'telegram')
+    const job = futureMarkedJob('scheduler-live-bind', 'default')
     seedJob(storeDir, job)
     const bindContexts: Array<{ readonly preparedDelivery: PreparedDeliveryObject; readonly runDeliveryMeaningPort: unknown }> = []
     const bindResults: unknown[] = []
@@ -1357,8 +1330,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive' }), deliverText: async () => { sends++ } },
     )
@@ -1395,7 +1366,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('calls claim-only ready bind after appending prepared and before transport', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-recovery-bind-')
-    const job = futureMarkedJob('scheduler-recovery-bind', 'telegram')
+    const job = futureMarkedJob('scheduler-recovery-bind', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -1449,8 +1420,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       { driveTurn: async () => { drives++; return { text: 'must not drive' } }, deliverText: async () => { sends++ } },
     )
@@ -1484,7 +1453,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('calls existing-prepared bind before recovery transport', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-existing-bind-')
-    const job = futureMarkedJob('scheduler-existing-bind', 'telegram')
+    const job = futureMarkedJob('scheduler-existing-bind', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -1546,8 +1515,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive' }), deliverText: async () => { sends++ } },
     )
@@ -1580,7 +1547,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('holds claim-only ready recovery when the provider bind hook is a no-op', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-recovery-bind-noop-')
-    const job = futureMarkedJob('scheduler-recovery-bind-noop', 'telegram')
+    const job = futureMarkedJob('scheduler-recovery-bind-noop', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -1624,8 +1591,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       { driveTurn: async () => { drives++; return { text: 'must not drive' } }, deliverText: async () => { sends++ } },
     )
@@ -1658,7 +1623,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('holds existing-prepared recovery when the real port rejects invalid business refs', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-existing-bind-rejected-')
-    const job = futureMarkedJob('scheduler-existing-bind-rejected', 'telegram')
+    const job = futureMarkedJob('scheduler-existing-bind-rejected', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -1719,8 +1684,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       { driveTurn: async () => { drives++; return { text: 'must not drive' } }, deliverText: async () => { sends++ } },
     )
@@ -1761,7 +1724,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     ['bind hook returns a forged accepted result without calling the port', 'fake-accepted'],
   ] as const)('holds a live prepared run when provider B binding is %s', async (_name, mode) => {
     const storeDir = temporaryDirectory(`todo05-scheduler-bind-negative-${mode}-`)
-    const job = futureMarkedJob(`scheduler-bind-negative-${mode}`, 'telegram')
+    const job = futureMarkedJob(`scheduler-bind-negative-${mode}`, 'default')
     seedJob(storeDir, job)
     let bindCalls = 0
     let sends = 0
@@ -1793,8 +1756,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       { driveTurn: async () => { drives++; return { text: 'must not drive' } }, deliverText: async () => { sends++ } },
     )
@@ -1860,7 +1821,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('requires live pre-finish to commit C2 before technical acknowledgement and finish', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c2-live-positive-')
-    const job = futureMarkedJob('scheduler-c2-live-positive', 'telegram')
+    const job = futureMarkedJob('scheduler-c2-live-positive', 'default')
     seedJob(storeDir, job)
     let hookCalls = 0
     let commitResult: unknown
@@ -1894,8 +1855,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'scheduler c2 live output' }),
@@ -1920,7 +1879,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('holds a live run when pre-finish forges accepted without committing C2', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c2-live-forged-')
-    const job = futureMarkedJob('scheduler-c2-live-forged', 'telegram')
+    const job = futureMarkedJob('scheduler-c2-live-forged', 'default')
     seedJob(storeDir, job)
     let hookCalls = 0
     let sends = 0
@@ -1951,8 +1910,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => { drives++; return { text: 'must not drive' } },
@@ -1986,7 +1943,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('holds a live run when C2 commit fails after the real B owner is corrupted', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c2-live-corrupt-')
-    const job = futureMarkedJob('scheduler-c2-live-corrupt', 'telegram')
+    const job = futureMarkedJob('scheduler-c2-live-corrupt', 'default')
     seedJob(storeDir, job)
     let commitResult: unknown
     let sends = 0
@@ -2022,8 +1979,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive' }),
@@ -2057,7 +2012,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('rechecks the real C2 owner after the hook and holds when that owner is corrupted', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c2-live-post-corrupt-')
-    const job = futureMarkedJob('scheduler-c2-live-post-corrupt', 'telegram')
+    const job = futureMarkedJob('scheduler-c2-live-post-corrupt', 'default')
     seedJob(storeDir, job)
     let commitResult: unknown
     let sends = 0
@@ -2093,8 +2048,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive' }),
@@ -2127,7 +2080,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('holds claim-only recovery when settlement forges accepted without committing C2', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c2-recovery-forged-')
-    const job = futureMarkedJob('scheduler-c2-recovery-forged', 'telegram')
+    const job = futureMarkedJob('scheduler-c2-recovery-forged', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -2171,8 +2124,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive' }),
@@ -2204,7 +2155,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('holds existing-prepared recovery when settlement forges accepted without committing C2', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c2-existing-forged-')
-    const job = futureMarkedJob('scheduler-c2-existing-forged', 'telegram')
+    const job = futureMarkedJob('scheduler-c2-existing-forged', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -2255,8 +2206,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive' }),
@@ -2288,7 +2237,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('allows claim-only recovery to finish after the provider commits real C2', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c2-recovery-positive-')
-    const job = futureMarkedJob('scheduler-c2-recovery-positive', 'telegram')
+    const job = futureMarkedJob('scheduler-c2-recovery-positive', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -2334,8 +2283,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'scheduler c2 recovery positive output' }),
@@ -2360,7 +2307,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('does not resend an existing receipt when recovery replays real C2', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c2-existing-positive-')
-    const job = futureMarkedJob('scheduler-c2-existing-positive', 'telegram')
+    const job = futureMarkedJob('scheduler-c2-existing-positive', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -2415,8 +2362,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive' }),
@@ -2442,7 +2387,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('holds an existing receipt recovery when C2 is missing instead of acking or resending', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c2-existing-missing-')
-    const job = futureMarkedJob('scheduler-c2-existing-missing', 'telegram')
+    const job = futureMarkedJob('scheduler-c2-existing-missing', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -2495,8 +2440,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive' }),
@@ -2526,7 +2469,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('fails closed when existing ack and finish precede missing C2', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c2-existing-ack-before-')
-    const job = futureMarkedJob('scheduler-c2-existing-ack-before', 'telegram')
+    const job = futureMarkedJob('scheduler-c2-existing-ack-before', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -2609,8 +2552,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive' }),
@@ -2687,8 +2628,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, undefined),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
     )
     runtime.start()
@@ -2707,7 +2646,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('holds a prepared finish-only terminal run before a new manual claim', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c2-finish-only-')
-    const job = futureMarkedJob('scheduler-c2-finish-only', 'telegram')
+    const job = futureMarkedJob('scheduler-c2-finish-only', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -2790,8 +2729,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, await realFactory(storeDir)),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive' }),
@@ -2824,7 +2761,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('does not append finish when existing receipt and ack precede missing C2', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c2-existing-ack-no-finish-')
-    const job = futureMarkedJob('scheduler-c2-existing-ack-no-finish', 'telegram')
+    const job = futureMarkedJob('scheduler-c2-existing-ack-no-finish', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -2884,8 +2821,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(registry, observed.factory),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive' }),
@@ -2919,7 +2854,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
 
   it('holds a manual downgrade when a finished prepared owner is no longer opted in', async () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c2-manual-downgrade-')
-    const job = futureMarkedJob('scheduler-c2-manual-downgrade', 'telegram')
+    const job = futureMarkedJob('scheduler-c2-manual-downgrade', 'default')
     seedJob(storeDir, job)
     const claim: RunClaimRecord = {
       schemaVersion: 2,
@@ -2966,8 +2901,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(createCronAgentEnvironmentRegistry([provider]), undefined),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => { drives++; return { text: 'must not drive' } },
@@ -3002,7 +2935,7 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const storeDir = temporaryDirectory('todo05-scheduler-c2-scheduled-due-')
     const now = Date.now()
     const job = {
-      ...futureMarkedJob('scheduler-c2-scheduled-due', 'telegram'),
+      ...futureMarkedJob('scheduler-c2-scheduled-due', 'default'),
       schedule: { kind: 'interval' as const, minutes: 1 },
       createdAt: new Date(now - 180_000).toISOString(),
     }
@@ -3054,8 +2987,6 @@ describe('TODO05 scheduler-owned run-scoped meaning port RED', () => {
     const runtime = new SchedulerRuntime(
       schedulerContext(createCronAgentEnvironmentRegistry([provider]), await realFactory(storeDir)),
       schedulerConfig(storeDir),
-      {} as never,
-      0,
       new AbortController().signal,
       {
         driveTurn: async () => { drives++; return { text: 'must not drive' } },

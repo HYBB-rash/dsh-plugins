@@ -19,7 +19,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { TelegramApiError } from '@deepseek-ai/dsh-telegram-gateway'
 import {
   CRON_AGENT_ENVIRONMENT_REGISTRY,
   createCronAgentEnvironmentRegistry,
@@ -94,9 +93,6 @@ function validDeliveryRecord(
 function baseConfig(directory: string): SchedulerConfig {
   return {
     storeDir: directory,
-    apiBaseUrl: 'https://api.telegram.org',
-    tokenRef: 'TELEGRAM_BOT_TOKEN',
-    chatIdRef: 'TELEGRAM_ALLOWED_CHAT_ID',
     pollIntervalMs: 60_000,
     maxConcurrent: 1,
     deliverOnError: true,
@@ -108,7 +104,7 @@ function dueOnceJob(id: string, overrides: Partial<Extract<Job, { readonly kind?
     id,
     schedule: { kind: 'once', runAt: new Date(Date.now() - 60_000).toISOString() },
     prompt: 'TODO05 formal feed body',
-    deliver: 'telegram',
+    deliver: 'default',
     createdAt: new Date().toISOString(),
     ...overrides,
   }
@@ -296,8 +292,6 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => ({ messageId: 1 }) } as never,
-      1,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive', error: undefined }) },
     )
@@ -373,8 +367,13 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const runtime = new SchedulerRuntime(
       contextFor(events, registry),
       baseConfig(directory),
+      new AbortController().signal,
       {
-        sendMessage: async (_chatId: number, body: string) => {
+        driveTurn: async () => {
+          driveCalls++
+          return { text: 'forbidden legacy outcome must not be delivered', error: undefined }
+        },
+        deliverText: async (body: string) => {
           order.push('transport')
           deliveredBodies.push(body)
           observed.preparedBeforeTransport = records(directory).some(
@@ -385,15 +384,7 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
           observed.attemptClaimBeforeTransport = records(directory).some(
             record => record.event === DELIVERY_ATTEMPT_CLAIM_EVENT,
           )
-          return { messageId: 1 }
-        },
-      } as never,
-      1,
-      new AbortController().signal,
-      {
-        driveTurn: async () => {
-          driveCalls++
-          return { text: 'forbidden legacy outcome must not be delivered', error: undefined }
+          return { state: 'delivered', deliveredAt: new Date().toISOString() }
         },
       },
     )
@@ -459,10 +450,8 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'legacy must not run', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     runtime.start()
     try {
@@ -495,8 +484,6 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => ({ messageId: 1 }) } as never,
-      1,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive', error: undefined }) },
     )
@@ -529,8 +516,6 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => ({ messageId: 1 }) } as never,
-      1,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive', error: undefined }) },
     )
@@ -561,8 +546,6 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => ({ messageId: 1 }) } as never,
-      1,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive', error: undefined }) },
     )
@@ -595,8 +578,6 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => ({ messageId: 1 }) } as never,
-      1,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive', error: undefined }) },
     )
@@ -627,8 +608,6 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => ({ messageId: 1 }) } as never,
-      1,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive', error: undefined }) },
     )
@@ -664,8 +643,6 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => ({ messageId: 1 }) } as never,
-      1,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive', error: undefined }) },
     )
@@ -694,8 +671,6 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => ({ messageId: 1 }) } as never,
-      1,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive', error: undefined }) },
     )
@@ -724,8 +699,6 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => ({ messageId: 1 }) } as never,
-      1,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive', error: undefined }) },
     )
@@ -770,8 +743,6 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([partialProvider])),
       baseConfig(directory),
-      { sendMessage: async () => ({ messageId: 1 }) } as never,
-      1,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive', error: undefined }) },
     )
@@ -824,10 +795,8 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const runtime = new SchedulerRuntime(
       contextFor(events, createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: prepared.text, error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     runtime.start()
     if (options.waitForFinish !== false) {
@@ -961,10 +930,8 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const makeRuntime = () => new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     const first = makeRuntime()
     try {
@@ -1168,8 +1135,6 @@ describe('TODO05 technical durable pre-finish lifecycle', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive', error: undefined }) },
     )
@@ -1217,10 +1182,8 @@ describe('TODO05 prepared early-return lease guard', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       abort.signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     runtime.start()
     try {
@@ -1238,89 +1201,6 @@ describe('TODO05 prepared early-return lease guard', () => {
     } finally {
       await runtime.dispose()
     }
-  })
-})
-
-describe('TODO05 object-level chunk receipts through dsh-cron delivery seam', () => {
-  async function runChunkCase(
-    name: string,
-    sendMessage: (call: number) => Promise<{ readonly messageId?: number }>,
-  ): Promise<{ readonly directory: string; readonly records: Array<Record<string, unknown>>; readonly finish: Record<string, unknown>; readonly sends: number; readonly objectId: string }> {
-    const directory = temporaryDirectory()
-    const prepared = { objectId: `formal:${name}`, text: 'x'.repeat(4_990) }
-    seedJob(directory, markedJob(name, { prompt: prepared.text }))
-    const events: Array<{ readonly name: string; readonly payload: unknown }> = []
-    let sends = 0
-    const provider = providerWithLease(() => ({
-      preparedDelivery: prepared,
-      setupAgent: async () => undefined,
-      verifySurface: async () => undefined,
-      settleDeliveryBeforeFinish: async () => ({ status: 'accepted' as const }),
-      dispose: async () => undefined,
-    }), {
-      settleRecoveredDelivery: async () => ({ status: 'accepted' as const }),
-    })
-    const runtime = new SchedulerRuntime(
-      contextFor(events, createCronAgentEnvironmentRegistry([provider])),
-      baseConfig(directory),
-      { sendMessage: async () => sendMessage(sends++) } as never,
-      1,
-      new AbortController().signal,
-      { driveTurn: async () => ({ text: 'legacy must not run', error: undefined }) },
-    )
-    runtime.start()
-    try {
-      await waitFor(() => records(directory).some(record => record.event === 'finish'))
-      const finish = records(directory).find(record => record.event === 'finish')
-      if (finish === undefined) throw new Error(`missing finish for ${name}`)
-      return { directory, records: records(directory), finish, sends, objectId: prepared.objectId }
-    } finally {
-      await runtime.dispose()
-    }
-  }
-
-  it('all chunks accepted is Delivered and persists one object receipt', async () => {
-    const result = await runChunkCase('todo05-chunks-delivered', async call => ({ messageId: call + 1 }))
-    expect(result.sends).toBe(2)
-    expect(result.finish.deliveryState).toBe('delivered')
-    expect(result.finish.event).toBe('finish')
-    expect(result.records.filter(record => record.event === DELIVERY_RECEIPT_EVENT)).toHaveLength(1)
-    expect(result.records.find(record => record.event === DELIVERY_RECEIPT_EVENT)?.objectId)
-      .toBe(result.objectId)
-    expect(result.records).toEqual(expect.arrayContaining([
-      expect.objectContaining({ event: DELIVERY_RECEIPT_EVENT, deliveryState: 'delivered' }),
-    ]))
-  })
-
-  it('zero accepted chunks with explicit fatal failure is Failed', async () => {
-    const result = await runChunkCase('todo05-chunks-failed', async () => {
-      throw new TelegramApiError('fatal', 'bot revoked')
-    })
-    expect(result.sends).toBe(1)
-    expect(result.finish.deliveryState).toBe('failed')
-  })
-
-  it.each([
-    ['fatal', new TelegramApiError('fatal', 'second chunk rejected')],
-    ['retry/429', new TelegramApiError('retry', 'rate limited')],
-    ['ambiguous network error', new Error('network connection reset')],
-  ] as const)('any accepted chunk followed by %s is Uncertain and never Failed', async (name, error) => {
-    const result = await runChunkCase(`todo05-chunks-partial-${name}`, async call => {
-      if (call === 0) return { messageId: 1 }
-      throw error
-    })
-    expect(result.sends).toBe(2)
-    expect(result.finish.deliveryState).toBe('uncertain')
-  })
-
-  it.each([
-    ['TelegramApiError retry/429', async () => { throw new TelegramApiError('retry', 'rate limited') }],
-    ['ordinary 5xx/network error', async () => { throw new Error('HTTP 503 or connection reset') }],
-    ['timeout', async () => { throw new DOMException('request timed out', 'TimeoutError') }],
-    ['missing trusted message id', async () => ({})],
-  ] as const)('zero accepted chunks with %s is Uncertain', async (_name, sendMessage) => {
-    const result = await runChunkCase(`todo05-chunks-${_name}`, sendMessage)
-    expect(result.finish.deliveryState).toBe('uncertain')
   })
 })
 
@@ -1367,36 +1247,37 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => {
-        const beforeTransport = records(directory)
-        expect(beforeTransport).toEqual(expect.arrayContaining([
-          expect.objectContaining({
-            event: PREPARED_DELIVERY_EVENT,
-            objectId: prepared.objectId,
-            text: prepared.text,
-            jobId: claim.jobId,
-            runId: claim.runId,
-            sessionId: claim.sessionId,
-            scheduledFor: claim.scheduledFor,
-          }),
-          expect.objectContaining({
-            event: DELIVERY_ATTEMPT_CLAIM_EVENT,
-            objectId: prepared.objectId,
-            jobId: claim.jobId,
-            runId: claim.runId,
-            sessionId: claim.sessionId,
-            scheduledFor: claim.scheduledFor,
-          }),
-        ]))
-        expect(beforeTransport.some(record => record.event === DELIVERY_RECEIPT_EVENT)).toBe(false)
-        expect(beforeTransport.some(record => record.event === ENVIRONMENT_PREFINISH_SETTLE_EVENT)).toBe(false)
-        expect(beforeTransport.some(record => record.event === 'finish')).toBe(false)
-        sends++
-        return { messageId: 1 }
-      } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      {
+        driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } },
+        deliverText: async () => {
+          const beforeTransport = records(directory)
+          expect(beforeTransport).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+              event: PREPARED_DELIVERY_EVENT,
+              objectId: prepared.objectId,
+              text: prepared.text,
+              jobId: claim.jobId,
+              runId: claim.runId,
+              sessionId: claim.sessionId,
+              scheduledFor: claim.scheduledFor,
+            }),
+            expect.objectContaining({
+              event: DELIVERY_ATTEMPT_CLAIM_EVENT,
+              objectId: prepared.objectId,
+              jobId: claim.jobId,
+              runId: claim.runId,
+              sessionId: claim.sessionId,
+              scheduledFor: claim.scheduledFor,
+            }),
+          ]))
+          expect(beforeTransport.some(record => record.event === DELIVERY_RECEIPT_EVENT)).toBe(false)
+          expect(beforeTransport.some(record => record.event === ENVIRONMENT_PREFINISH_SETTLE_EVENT)).toBe(false)
+          expect(beforeTransport.some(record => record.event === 'finish')).toBe(false)
+          sends++
+          return { state: 'delivered', deliveredAt: new Date().toISOString() }
+        },
+      },
     )
     runtime.start()
     try {
@@ -1457,10 +1338,8 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const runtime = new SchedulerRuntime(
       contextFor(events, createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
 
     const flushScheduler = async (): Promise<void> => {
@@ -1564,10 +1443,8 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const makeRuntime = () => new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     const first = makeRuntime()
     first.start()
@@ -1647,10 +1524,8 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     runtime.start()
     try {
@@ -1704,10 +1579,8 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     runtime.start()
     try {
@@ -1756,8 +1629,6 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider]), warnings),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
       {
         driveTurn: async () => ({ text: 'must not drive', error: undefined }),
@@ -1822,10 +1693,8 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     runtime.start()
     try {
@@ -1883,10 +1752,8 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const makeRuntime = () => new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     const runtime = makeRuntime()
     runtime.start()
@@ -1952,10 +1819,8 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     runtime.start()
     try {
@@ -2022,10 +1887,8 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     runtime.start()
     try {
@@ -2088,10 +1951,8 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const makeRuntime = () => new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     const first = makeRuntime()
     let firstDisposed = false
@@ -2176,10 +2037,8 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     runtime.start()
     try {
@@ -2236,8 +2095,6 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => ({ messageId: 1 }) } as never,
-      1,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'must not drive', error: undefined }) },
     )
@@ -2281,10 +2138,8 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([provider])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     runtime.start()
     try {
@@ -2349,10 +2204,8 @@ describe('TODO05 claim-to-prepared crash-gap recovery RED seam', () => {
     const runtime = new SchedulerRuntime(
       contextFor([], createCronAgentEnvironmentRegistry([providerBase])),
       baseConfig(directory),
-      { sendMessage: async () => { sends++; return { messageId: 1 } } } as never,
-      1,
       new AbortController().signal,
-      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } } },
+      { driveTurn: async () => { drives++; return { text: 'must not drive', error: undefined } }, deliverText: async () => { sends++; return { state: 'delivered', deliveredAt: new Date().toISOString() } } },
     )
     runtime.start()
     try {
@@ -2391,8 +2244,6 @@ describe('TODO05 legacy compatibility guard', () => {
     const runtime = new SchedulerRuntime(
       contextFor(events, createCronAgentEnvironmentRegistry([legacyProvider])),
       baseConfig(directory),
-      { sendMessage: async () => ({ messageId: 1 }) } as never,
-      1,
       new AbortController().signal,
       { driveTurn: async () => ({ text: 'legacy body', error: undefined }) },
     )

@@ -1,7 +1,7 @@
 /**
  * dsh-cron scheduler role: reload the job log, derive a live timer
- * state, execute due jobs with unattended agents, deliver results to
- * Telegram, and append every run to the audit log.
+ * state, execute due jobs with unattended agents, optionally deliver results
+ * through the host's text-delivery service, and append every run to the audit log.
  *
  * Timing semantics follow Hermes `cron/jobs.py`:
  * - grace window = half the schedule period, clamped to [120s, 2h];
@@ -27,19 +27,10 @@ import {
   type ModelSelectionRef,
 } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-workspace'
-import {
-  chunkText,
-  createTelegramHttp,
-  summarizeTurn,
-  TelegramApiError,
-  type TelegramHttp,
-  type TurnOutcome,
-} from '@deepseek-ai/dsh-telegram-gateway'
 import { computeGraceSeconds, nextAfter, nextRunAfter, parseCron } from './cron.ts'
 import {
   CRON_AGENT_ENVIRONMENT_REGISTRY,
@@ -96,7 +87,7 @@ function perRunSessionId(runId: string): string {
 /** One-shot grace window, mirroring Hermes ONESHOT_GRACE_SECONDS. */
 const ONESHOT_GRACE_MS = 120_000
 
-/** Loose agent surface for driving one turn (same contract as the gateway). */
+/** Loose agent surface for driving one turn. */
 interface AgentLike {
   session: {
     seq: number
@@ -114,6 +105,30 @@ interface DeliveryObservation {
   readonly state: SchedulerDeliveryState
   readonly deliveredAt?: string
   readonly error?: string
+}
+
+/** Outcome of one locally driven Agent turn. */
+interface TurnOutcome {
+  readonly text: string
+  readonly error: string | undefined
+}
+
+/** Consumer-owned view of the optional host delivery service. */
+type DshTextDeliveryResult =
+  | { readonly state: 'delivered'; readonly deliveredAt: string }
+  | { readonly state: 'failed'; readonly error: string }
+  | { readonly state: 'uncertain'; readonly error: string }
+
+interface DshTextDeliveryV1 {
+  readonly protocolVersion: 1
+  deliver(input: {
+    readonly text: string
+    readonly signal: AbortSignal
+  }): Promise<DshTextDeliveryResult>
+}
+
+type DynamicServiceContext = {
+  get(name: string): unknown
 }
 
 const CRON_RECEIPT_REQUIRED_KEYS = [
@@ -262,15 +277,6 @@ export class AgentRunLease {
   }
 }
 
-/** Resolve a config value or its credential reference (env-inherited first). */
-async function resolveSecret(ctx: Context, configured: string | undefined, ref: string): Promise<string | undefined> {
-  if (configured !== undefined && configured !== '') return configured
-  const credentials = ctx.get('credentials')
-  if (credentials === undefined) return undefined
-  const hit = await credentials.resolve(credentialRef(ref))
-  return hit?.value
-}
-
 /** Wait for an Agent to become idle without holding plugin disposal open. */
 async function waitForIdle(agent: AgentLike, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return false
@@ -285,6 +291,32 @@ async function waitForIdle(agent: AgentLike, signal: AbortSignal): Promise<boole
   } finally {
     signal.removeEventListener('abort', onAbort)
   }
+}
+
+/** Aggregate the last assistant text and terminal error for this turn only. */
+function summarizeTurn(events: readonly SessionEvent[], firstSeq: number): TurnOutcome {
+  let started = false
+  let text = ''
+  let error: string | undefined
+  for (const event of events) {
+    if (event.seq < firstSeq) continue
+    if (event.type === 'turn/start') {
+      started = true
+      continue
+    }
+    if (!started) continue
+    if (event.type === 'assistant/message') {
+      const joined = event.data.message.content
+        .filter(block => block.type === 'text')
+        .map(block => block.text)
+        .join('')
+      if (joined !== '') text = joined
+    }
+    if (event.type === 'turn/end' && event.data.reason.kind === 'error') {
+      error = `${event.data.reason.error.code}: ${event.data.reason.error.message}`
+    }
+  }
+  return { text, error }
 }
 
 /** Drive one turn through the fixed job session and return the outcome. */
@@ -305,29 +337,22 @@ async function driveTurn(
   return summarizeTurn(agent.session.snapshotEvents(), firstSeq)
 }
 
-/** Deliver text to Telegram, chunking at the 4096-char cap. */
-async function deliverText(
-  http: TelegramHttp,
-  chatId: number,
-  text: string,
-  signal?: AbortSignal,
-): Promise<DeliveryObservation> {
-  let accepted = 0
-  try {
-    for (const chunk of chunkText(text, 4096)) {
-      const message = await http.sendMessage(chatId, chunk, undefined, signal)
-      if (!Number.isSafeInteger(message?.messageId)) {
-        throw new Error('sendMessage failed: response omitted message_id')
-      }
-      accepted++
-    }
-  } catch (error) {
-    if (accepted > 0) return { state: 'uncertain', error: boundedDeliveryError(error) }
-    throw error
+/** Resolve the provider for every attempt so service disposal is observed. */
+function resolveDeliveryService(ctx: Context): DshTextDeliveryV1 | undefined {
+  const value = (ctx as unknown as DynamicServiceContext).get('dshTextDeliveryV1')
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const service = value as Record<string, unknown>
+  if (service.protocolVersion !== 1 || typeof service.deliver !== 'function') return undefined
+  return value as DshTextDeliveryV1
+}
+
+/** Invoke the optional host provider once with the complete text. */
+async function deliverText(ctx: Context, text: string, signal: AbortSignal): Promise<unknown> {
+  const service = resolveDeliveryService(ctx)
+  if (service === undefined) {
+    return { state: 'failed', error: 'dshTextDeliveryV1 service is unavailable or incompatible' }
   }
-  // The scheduler only needs the terminal delivery state and must never use a
-  // partial chunk result to retry the whole message.
-  return { state: 'delivered', deliveredAt: new Date().toISOString() }
+  return service.deliver({ text, signal })
 }
 
 /** Keep delivery evidence bounded before it enters the durable ledger/event. */
@@ -337,33 +362,32 @@ function boundedDeliveryError(error: unknown): string {
   return trimmed.length > 400 ? `${trimmed.slice(0, 400)}…` : trimmed
 }
 
-/** Classify transport failures without ever retrying an ambiguous send. */
+/** A provider throw is ambiguous because the side effect may have happened. */
 function classifyDeliveryError(error: unknown): DeliveryObservation {
-  const message = boundedDeliveryError(error)
-  if (error instanceof TelegramApiError && error.kind === 'fatal') {
-    return { state: 'failed', error: message }
-  }
-  return { state: 'uncertain', error: message }
+  return { state: 'uncertain', error: boundedDeliveryError(error) }
 }
 
-/** Accept the test seam and the gateway's successful message result. */
+function isNonBlankDeliveryEvidence(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+/** Accept only the terminal shapes promised by protocol v1. */
 function normalizeDeliveryResult(result: unknown): DeliveryObservation {
-  if (result === undefined) return { state: 'delivered', deliveredAt: new Date().toISOString() }
   if (typeof result !== 'object' || result === null) {
     return { state: 'uncertain', error: 'delivery returned an unrecognized result' }
   }
   const value = result as Record<string, unknown>
-  if (value.state === 'delivered') {
+  if (value.state === 'delivered' && isNonBlankDeliveryEvidence(value.deliveredAt)) {
     return {
       state: 'delivered',
-      deliveredAt: typeof value.deliveredAt === 'string' ? value.deliveredAt : new Date().toISOString(),
+      deliveredAt: value.deliveredAt,
     }
   }
-  if (value.state === 'rejected' || value.state === 'failed') {
-    return { state: 'failed', error: boundedDeliveryError(value.error ?? value.reason ?? 'delivery rejected') }
+  if (value.state === 'failed' && isNonBlankDeliveryEvidence(value.error)) {
+    return { state: 'failed', error: boundedDeliveryError(value.error) }
   }
-  if (value.state === 'uncertain') {
-    return { state: 'uncertain', error: boundedDeliveryError(value.reason ?? value.error ?? 'delivery outcome uncertain') }
+  if (value.state === 'uncertain' && isNonBlankDeliveryEvidence(value.error)) {
+    return { state: 'uncertain', error: boundedDeliveryError(value.error) }
   }
   return { state: 'uncertain', error: 'delivery returned an unrecognized result' }
 }
@@ -378,10 +402,8 @@ export type DriveTurn = (
 
 /** Test seam: deliver text (production default is the module fn). */
 export type DeliverText = (
-  http: TelegramHttp,
-  chatId: number,
   text: string,
-  signal?: AbortSignal,
+  signal: AbortSignal,
 ) => Promise<unknown>
 
 /** The only process-launch fields consumed by the shell-free executor. */
@@ -400,7 +422,7 @@ function commandError(message: string): TurnOutcome {
 /**
  * Direct argv executor for command jobs.  stdout is the only user-visible
  * payload; stderr is deliberately discarded so diagnostics never leak into a
- * Telegram delivery.  A timeout, abort, nonzero exit, or output cap is an
+ * delivery. A timeout, abort, nonzero exit, or output cap is an
  * execution error and never falls through to an Agent retry.
  */
 async function runCommand(invocation: CommandInvocation, signal: AbortSignal): Promise<TurnOutcome> {
@@ -607,11 +629,6 @@ class Semaphore {
 /** The scheduler's validated configuration slice. */
 export interface SchedulerConfig {
   storeDir: string
-  apiBaseUrl: string
-  token?: string
-  chatId?: string
-  tokenRef: string
-  chatIdRef: string
   pollIntervalMs: number
   maxConcurrent: number
   deliverOnError: boolean
@@ -648,8 +665,6 @@ export class SchedulerRuntime implements RunNowPort {
   constructor(
     private readonly ctx: Context,
     config: SchedulerConfig,
-    private readonly http: TelegramHttp,
-    private readonly chatId: number,
     private readonly signal: AbortSignal,
     deps: SchedulerRuntimeDeps = {},
   ) {
@@ -659,7 +674,7 @@ export class SchedulerRuntime implements RunNowPort {
     this.semaphore = new Semaphore(config.maxConcurrent)
     this.deliverOnError = config.deliverOnError
     this.driveTurn = deps.driveTurn ?? driveTurn
-    this.deliverText = deps.deliverText ?? deliverText
+    this.deliverText = deps.deliverText ?? ((text, signal) => deliverText(ctx, text, signal))
     this.runCommand = deps.runCommand ?? runCommand
   }
 
@@ -1945,7 +1960,7 @@ export class SchedulerRuntime implements RunNowPort {
   /** One delivery attempt; classification is terminal and never retries. */
   private async attemptDelivery(text: string): Promise<DeliveryObservation> {
     try {
-      const result = await this.deliverText(this.http, this.chatId, text, this.signal)
+      const result = await this.deliverText(text, this.signal)
       return normalizeDeliveryResult(result)
     } catch (error: unknown) {
       return classifyDeliveryError(error)
@@ -1970,7 +1985,7 @@ export class SchedulerRuntime implements RunNowPort {
   /**
    * Execute one due trigger. Order is fixed by the V1.1 contract:
    *   1. derive the stable runId and the crash-recovery nextRunAt;
-   *   2. persist the claim — BEFORE any Agent, tool, or Telegram side effect;
+   *   2. persist the claim — BEFORE any Agent, tool, or delivery side effect;
    *   3. a failed claim aborts the whole run; an already-claimed trigger is
    *      skipped and the ledger's recovery anchor is adopted;
    *   4. only then acquire the agent, drive the turn, deliver, and finish.
@@ -2013,7 +2028,7 @@ export class SchedulerRuntime implements RunNowPort {
     try {
       claimed = this.ledger.claim(claimRecord) === 'claimed'
     } catch (error) {
-      // Claim write failed: fail closed — no Agent/tool/Telegram side effect.
+      // Claim write failed: fail closed — no Agent/tool/delivery side effect.
       // Back off in-process (schedule time and trigger identity untouched) so
       // driveOnce does not re-wake this due job at the 1ms minimum timer.
       state.claimRetryNotBefore = Date.now() + CLAIM_RETRY_DELAY_MS
@@ -2121,7 +2136,7 @@ export class SchedulerRuntime implements RunNowPort {
       if (skipped) {
         // A typed provider skip is already a successful terminal outcome. It
         // deliberately bypasses Agent creation, setup, verification, drive,
-        // finalization, and Telegram delivery.
+        // finalization, and delivery.
       } else if (preparedDelivery !== undefined) {
         // The provider owns the exact text. No Agent is allowed to replace it.
       } else if (job.kind === 'command') {
@@ -2238,7 +2253,7 @@ export class SchedulerRuntime implements RunNowPort {
 
     if (errorText !== undefined) {
       let delivery: DeliveryObservation = { state: 'not_requested' }
-      if (this.deliverOnError && !outcomeFinalizationFailed && job.deliver === 'telegram') {
+      if (this.deliverOnError && !outcomeFinalizationFailed && job.deliver === 'default') {
         if (job.failureAlert === undefined) {
           // Compatibility: jobs without a policy keep the historical
           // notify-on-every-execution-error behavior.
@@ -2252,7 +2267,7 @@ export class SchedulerRuntime implements RunNowPort {
           const cooldownElapsed = lastClaimAt === undefined
             || finishedAt - lastClaimAt >= job.failureAlert.cooldownMinutes * 60_000
           if (thresholdReached && cooldownElapsed) {
-            // Claim-before-side-effect: even a crash or ambiguous Telegram
+            // Claim-before-side-effect: even a crash or ambiguous delivery
             // outcome starts the durable cooldown and is never retried for
             // this run id.
             const claimedAt = new Date().toISOString()
@@ -2407,8 +2422,8 @@ export class SchedulerRuntime implements RunNowPort {
 }
 
 /**
- * Mount the scheduler lifecycle. Resolves credentials first (fails fast on a
- * missing token), validates the token with getMe, then starts the runtime.
+ * Mount the scheduler lifecycle. The optional delivery provider is resolved
+ * only when a run actually requests delivery.
  * @param ctx - plugin context carrying core services.
  * @param config - validated scheduler configuration.
  */
@@ -2418,26 +2433,9 @@ export async function applyScheduler(
   composition: { readonly installRunNow?: (port: RunNowPort) => void | (() => void) } = {},
 ): Promise<void> {
   await ctx.effect(async () => {
-    const token = await resolveSecret(ctx, config.token, config.tokenRef)
-    if (token === undefined || token === '') {
-      throw new Error('dsh-cron: TELEGRAM_BOT_TOKEN is required (config token or credential reference)')
-    }
-    const chatIdRaw = await resolveSecret(ctx, config.chatId, config.chatIdRef)
-    const chatId = chatIdRaw !== undefined && chatIdRaw !== '' ? Number(chatIdRaw) : Number.NaN
-    if (!Number.isFinite(chatId)) {
-      throw new Error(`dsh-cron: invalid allowed chat id "${chatIdRaw ?? ''}" (config chatId or ${config.chatIdRef} credential)`)
-    }
-    const http = createTelegramHttp(config.apiBaseUrl, token)
-    try {
-      const me = await http.getMe()
-      ctx.logger.info(`dsh-cron: scheduler connected as @${me.username ?? String(me.id)}`)
-    } catch (error: unknown) {
-      ctx.logger.warn(`dsh-cron: getMe transient failure: ${error instanceof Error ? error.message : String(error)}`)
-    }
-
     provideCronRunDeliveryMeaningPortFactory(ctx, { storeDir: config.storeDir })
     const lifetime = new AbortController()
-    const runtime = new SchedulerRuntime(ctx, config, http, chatId, lifetime.signal)
+    const runtime = new SchedulerRuntime(ctx, config, lifetime.signal)
     runtime.start()
     const disposeRunNow = composition.installRunNow?.(runtime)
     const pollTimer = setInterval(() => runtime.requestDrive(), config.pollIntervalMs)

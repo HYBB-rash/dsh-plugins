@@ -2,8 +2,8 @@ import { defineConfig } from 'tsdown'
 
 /**
  * dsh-cron ships one Node plugin entry. Declarations come from `tsc -b`
- * (dts: false), matching every package. The scheduler half is a dynamic
- * import so the manager profile never loads the Telegram gateway package.
+ * (dts: false), matching every package. The scheduler half remains a dynamic
+ * import so the manager profile does not load scheduler-only runtime code.
  */
 export default defineConfig({
   entry: ['lib/types/index.js'],

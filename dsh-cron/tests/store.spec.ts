@@ -33,14 +33,14 @@ describe('foldJobLog', () => {
 
   it('keeps a single create active', () => {
     const folded = foldJobLog([
-      JSON.stringify({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 5 }, prompt: 'hi', deliver: 'telegram', createdAt: '2026-08-14T00:00:00.000Z' }),
+      JSON.stringify({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 5 }, prompt: 'hi', deliver: 'default', createdAt: '2026-08-14T00:00:00.000Z' }),
     ])
     expect(folded.active.map(job => job.id)).toEqual(['cron-a'])
     expect(folded.seenIds).toEqual(['cron-a'])
   })
 
   it('removes a job after a delete tombstone but keeps it seen', () => {
-    const create = JSON.stringify({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 5 }, prompt: 'hi', deliver: 'telegram', createdAt: '2026-08-14T00:00:00.000Z' })
+    const create = JSON.stringify({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 5 }, prompt: 'hi', deliver: 'default', createdAt: '2026-08-14T00:00:00.000Z' })
     const del = JSON.stringify({ op: 'delete', id: 'cron-a', deletedAt: '2026-08-14T00:01:00.000Z' })
     const folded = foldJobLog([create, del])
     expect(folded.active).toEqual([])
@@ -48,7 +48,7 @@ describe('foldJobLog', () => {
   })
 
   it('lets the last create win for the same id', () => {
-    const first = JSON.stringify({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 5 }, prompt: 'first', deliver: 'telegram', createdAt: '2026-08-14T00:00:00.000Z' })
+    const first = JSON.stringify({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 5 }, prompt: 'first', deliver: 'default', createdAt: '2026-08-14T00:00:00.000Z' })
     const second = JSON.stringify({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 10 }, prompt: 'second', deliver: 'silent', createdAt: '2026-08-14T00:01:00.000Z' })
     const folded = foldJobLog([first, second])
     expect(folded.active).toHaveLength(1)
@@ -63,14 +63,14 @@ describe('foldJobLog', () => {
   })
 
   it('skips corrupt JSON lines without breaking valid ones', () => {
-    const good = JSON.stringify({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 5 }, prompt: 'hi', deliver: 'telegram', createdAt: '2026-08-14T00:00:00.000Z' })
+    const good = JSON.stringify({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 5 }, prompt: 'hi', deliver: 'default', createdAt: '2026-08-14T00:00:00.000Z' })
     const folded = foldJobLog(['{not json', good, 'garbage'])
     expect(folded.active.map(job => job.id)).toEqual(['cron-a'])
   })
 
   it('skips invalid creates (missing prompt, non-string id)', () => {
-    const noPrompt = JSON.stringify({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 5 }, prompt: '  ', deliver: 'telegram', createdAt: '2026-08-14T00:00:00.000Z' })
-    const noId = JSON.stringify({ op: 'create', schedule: { kind: 'interval', minutes: 5 }, prompt: 'hi', deliver: 'telegram', createdAt: '2026-08-14T00:00:00.000Z' })
+    const noPrompt = JSON.stringify({ op: 'create', id: 'cron-a', schedule: { kind: 'interval', minutes: 5 }, prompt: '  ', deliver: 'default', createdAt: '2026-08-14T00:00:00.000Z' })
+    const noId = JSON.stringify({ op: 'create', schedule: { kind: 'interval', minutes: 5 }, prompt: 'hi', deliver: 'default', createdAt: '2026-08-14T00:00:00.000Z' })
     const folded = foldJobLog([noPrompt, noId])
     expect(folded.active).toEqual([])
   })
@@ -97,7 +97,7 @@ describe('JobStore', () => {
   it('round-trips append and fold', () => {
     const store = new JobStore(tempDir())
     store.append({ op: 'create', id: 'cron-a', schedule: { kind: 'cron', expr: '0 8 * * *' }, prompt: 'morning', deliver: 'silent', createdAt: '2026-08-14T00:00:00.000Z' })
-    store.append({ op: 'create', id: 'cron-b', schedule: { kind: 'once', runAt: '2026-08-20T00:00:00.000Z' }, prompt: 'one', deliver: 'telegram', createdAt: '2026-08-14T00:00:01.000Z' })
+    store.append({ op: 'create', id: 'cron-b', schedule: { kind: 'once', runAt: '2026-08-20T00:00:00.000Z' }, prompt: 'one', deliver: 'default', createdAt: '2026-08-14T00:00:01.000Z' })
     store.append({ op: 'delete', id: 'cron-b', deletedAt: '2026-08-14T00:00:02.000Z' })
     const folded = store.fold()
     expect(folded.active.map(job => job.id)).toEqual(['cron-a'])

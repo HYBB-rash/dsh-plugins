@@ -224,7 +224,7 @@ export function isValidBoundCronSpec(value: unknown): value is BoundCronSpec {
   if (!isObject(value)) return false
   if (typeof value.externalRef !== 'string' || value.externalRef.trim() === '') return false
   if (typeof value.prompt !== 'string' || value.prompt.trim() === '') return false
-  if (value.deliver !== 'telegram' || value.sessionMode !== 'per_run') return false
+  if (value.deliver !== 'default' || value.sessionMode !== 'per_run') return false
   if (value.kind !== undefined || value.command !== undefined) return false
   if (value.cwd !== undefined && typeof value.cwd !== 'string') return false
   if (value.agentEnvironment !== undefined && !isCanonicalAgentEnvironmentMarker(value.agentEnvironment)) return false
@@ -257,11 +257,11 @@ export function isValidBoundCronCommandSpec(value: unknown): value is BoundCronC
   if (!isObject(value)) return false
   if (typeof value.externalRef !== 'string' || value.externalRef.trim() === '') return false
   if (value.agentEnvironment !== undefined) return false
-  if (value.deliver !== 'telegram' && value.deliver !== 'silent') return false
+  if (value.deliver !== 'default' && value.deliver !== 'silent') return false
   if (value.cwd !== undefined && typeof value.cwd !== 'string') return false
   if (!isValidCommandPayload(value.command)) return false
   if (value.failureAlert !== undefined && !isValidFailureAlertPolicy(value.failureAlert)) return false
-  if (value.failureAlert !== undefined && value.deliver !== 'telegram') return false
+  if (value.failureAlert !== undefined && value.deliver !== 'default') return false
   if (!isObject(value.schedule) || typeof value.schedule.kind !== 'string') return false
   if (value.schedule.kind === 'cron') {
     if (typeof value.schedule.expr !== 'string' || value.schedule.expr.trim() === '') return false
@@ -284,7 +284,7 @@ function errorResponse(
   operation?: ControlRpcOperation,
 ): ControlErrorResponse {
   return {
-    protocolVersion: 1,
+    protocolVersion: 2,
     ok: false,
     ...(operation === undefined ? {} : { operation }),
     errorCode,
@@ -293,20 +293,20 @@ function errorResponse(
 }
 
 function successResponse(operation: 'ensure-bound' | 'replace-bound' | 'delete-bound' | 'get-bound', snapshot: BoundCronSnapshot): ControlSuccessResponse {
-  return { protocolVersion: 1, ok: true, operation, snapshot }
+  return { protocolVersion: 2, ok: true, operation, snapshot }
 }
 
 function commandSuccessResponse(
   operation: 'ensure-bound-command' | 'replace-bound-command' | 'get-bound-command',
   snapshot: BoundCronCommandSnapshot,
 ): ControlResponse {
-  return { protocolVersion: 1, ok: true, operation, snapshot }
+  return { protocolVersion: 2, ok: true, operation, snapshot }
 }
 
 function failureAlertSuccessResponse(
   snapshot: BoundCronSnapshot | BoundCronCommandSnapshot,
 ): FailureAlertControlSuccessResponse {
-  return { protocolVersion: 1, ok: true, operation: 'update-bound-failure-alert', snapshot }
+  return { protocolVersion: 2, ok: true, operation: 'update-bound-failure-alert', snapshot }
 }
 
 function sameOptionalString(left: string | undefined, right: string | undefined): boolean {
@@ -346,13 +346,13 @@ function sameCommandSpec(job: BoundCronCommandJobView, spec: BoundCronCommandSpe
 
 function asBoundJob(job: Job | undefined): BoundCronJobView | undefined {
   if (job === undefined || job.kind === 'command' || job.externalRef === undefined) return undefined
-  if (job.deliver !== 'telegram' || job.sessionMode !== 'per_run') return undefined
+  if (job.deliver !== 'default' || job.sessionMode !== 'per_run') return undefined
   return {
     id: job.id,
     externalRef: job.externalRef,
     schedule: job.schedule,
     prompt: job.prompt,
-    deliver: 'telegram',
+    deliver: 'default',
     ...(job.cwd === undefined ? {} : { cwd: job.cwd }),
     sessionMode: 'per_run',
     ...(job.agentEnvironment === undefined ? {} : { agentEnvironment: job.agentEnvironment }),
@@ -429,7 +429,7 @@ function normalizeCreateSpec(spec: BoundCronSpec): {
   readonly sessionMode: JobSessionMode
   readonly schedule: BoundCronSpec['schedule']
   readonly prompt: string
-  readonly deliver: 'telegram'
+  readonly deliver: 'default'
   readonly cwd?: string
   readonly gate?: CommandGate
   readonly agentEnvironment?: AgentEnvironmentMarker
@@ -444,7 +444,7 @@ function normalizeCreateSpec(spec: BoundCronSpec): {
     sessionMode: spec.sessionMode,
     schedule: spec.schedule,
     prompt: spec.prompt,
-    deliver: 'telegram',
+    deliver: 'default',
     ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
     ...(spec.agentEnvironment === undefined ? {} : { agentEnvironment: spec.agentEnvironment }),
     ...(spec.gate === undefined ? {} : { gate: spec.gate }),
@@ -563,7 +563,7 @@ export function createControlService(config: ControlServiceConfig): DshCronContr
       externalRef: entry.externalRef,
       schedule: entry.schedule,
       prompt: entry.prompt,
-      deliver: 'telegram',
+      deliver: 'default',
       ...(entry.cwd === undefined ? {} : { cwd: entry.cwd }),
       sessionMode: 'per_run',
       ...(entry.agentEnvironment === undefined ? {} : { agentEnvironment: entry.agentEnvironment }),
@@ -673,8 +673,8 @@ export function createControlService(config: ControlServiceConfig): DshCronContr
       )
     }
     const current = matches[0]!
-    if (failureAlert !== null && current.deliver !== 'telegram') {
-      return errorResponse('invalid_request', 'Failure alerts require Telegram delivery.', operation)
+    if (failureAlert !== null && current.deliver !== 'default') {
+      return errorResponse('invalid_request', 'Failure alerts require default delivery.', operation)
     }
     const requested = failureAlert === null ? undefined : failureAlert
     const currentSnapshot = current.kind === 'command' ? commandSnapshot(externalRef) : snapshot(externalRef)
@@ -691,8 +691,8 @@ export function createControlService(config: ControlServiceConfig): DshCronContr
     return failureAlertSuccessResponse(current.kind === 'command' ? commandSnapshot(externalRef) : snapshot(externalRef))
   }
 
-  async function readiness(): Promise<{ readonly protocolVersion: 1; readonly writer: 'manager'; readonly ready: true }> {
-    return { protocolVersion: 1, writer: 'manager', ready: true }
+  async function readiness(): Promise<{ readonly protocolVersion: 2; readonly writer: 'manager'; readonly ready: true }> {
+    return { protocolVersion: 2, writer: 'manager', ready: true }
   }
 
   return {

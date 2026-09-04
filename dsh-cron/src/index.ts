@@ -6,14 +6,14 @@
  * - `mode: manager` — web profile. Registers the `cron_create` /
  *   `cron_list` / `cron_delete` model tools on every future root agent and is
  *   the single writer of `jobs.jsonl`.
- * - `mode: scheduler` — telegram profile. Reads `jobs.jsonl`, derives a live
+ * - `mode: scheduler` — execution profile. Reads `jobs.jsonl`, derives a live
  *   timer projection with Hermes grace/fast-forward semantics, executes due
  *   jobs through unattended `session-cron-<jobId>` agents, delivers results
- *   to Telegram through an independent `createTelegramHttp` face, and appends
+ *   through an optional host delivery service, and appends
  *   every run to `runs.jsonl`.
  *
- * The scheduler half is imported dynamically so the manager profile never
- * loads the Telegram gateway package.
+ * The scheduler half is imported dynamically so the manager profile does not
+ * load scheduler runtime dependencies.
  * @module @deepseek-ai/dsh-cron
  */
 
@@ -50,7 +50,7 @@ export type {
   PreparedDeliveryObject,
 } from './types.ts'
 
-/** Public manager control contract, kept free of scheduler/gateway imports. */
+/** Public manager control contract, kept free of scheduler/provider imports. */
 export * from './control-contract.ts'
 /** Local, offline maintenance port; it is not exposed through online RPC. */
 export { createMaintenanceControl } from './control.ts'
@@ -58,7 +58,7 @@ export type { MaintenanceControlConfig } from './control.ts'
 /** Public Unix-socket client for the manager control contract. */
 export { createControlRpcClient }
 export type { ControlRpcClientConfig } from './control-rpc.ts'
-/** Stopped-writer release preflight uses the same v1 control service and RPC. */
+/** Stopped-writer release preflight uses the same v2 control service and RPC. */
 export { createControlService, inspectActiveJobs } from './control.ts'
 export { createControlRpcServer } from './control-rpc.ts'
 export type { ControlServiceConfig } from './control.ts'
@@ -71,18 +71,12 @@ export * from './prepared-delivery.ts'
 export * from './environment-modules.ts'
 
 /** Services required by either role before activation. */
-export const inject = ['agents', 'sessions', 'tools', 'agentDefaultModel', 'credentials', 'loader', 'workspaceRegistry']
+export const inject = ['agents', 'sessions', 'tools', 'agentDefaultModel', 'loader', 'workspaceRegistry']
 
 /** dsh-cron configuration. */
 export interface Config {
-  /** Which role this profile runs: manager (web) or scheduler (telegram). */
+  /** Which role this profile runs: manager (web) or scheduler (execution). */
   mode: 'manager' | 'scheduler'
-  /** Telegram API base URL. Defaults to https://api.telegram.org. */
-  apiBaseUrl?: string
-  /** Telegram bot token; falls back to the TELEGRAM_BOT_TOKEN credential reference. */
-  token?: string
-  /** Numeric Telegram chat id; falls back to the TELEGRAM_ALLOWED_CHAT_ID credential reference. */
-  chatId?: string
   /** Job-log poll interval for the scheduler. Defaults to 10s. */
   pollIntervalMs?: number
   /** Scheduler concurrency cap for due jobs. Defaults to 3. */
@@ -111,9 +105,6 @@ export interface Config {
 
 export const Config: z<Config> = z.object({
   mode: z.union(['manager', 'scheduler'] as const).default('manager'),
-  apiBaseUrl: z.string().default('https://api.telegram.org'),
-  token: z.string(),
-  chatId: z.string(),
   pollIntervalMs: z.number().step(1).min(1_000).default(10_000),
   maxConcurrent: z.number().step(1).min(1).default(3),
   deliverOnError: z.boolean().default(true),
@@ -131,7 +122,7 @@ export const Config: z<Config> = z.object({
       timeoutSeconds: z.number().step(1).min(1),
       outputMaxBytes: z.number().step(1).min(1),
     }),
-    deliver: z.union(['telegram', 'silent'] as const),
+    deliver: z.union(['default', 'silent'] as const),
     failureAlert: (z.object({
       after: z.number().step(1).min(1),
       cooldownMinutes: z.number().step(1).min(1),
@@ -227,8 +218,7 @@ export async function applyManager(ctx: Context, config: Config): Promise<void> 
 
 /**
  * Cordis plugin entry: dispatch to the configured role.
- * The scheduler half is loaded lazily so manager profiles never import the
- * Telegram gateway package.
+ * The scheduler half is loaded lazily so manager profiles stay lightweight.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   if (config.mode === 'scheduler') {
@@ -253,11 +243,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     const { applyScheduler } = await import('./scheduler.ts')
     await applyScheduler(ctx, {
       storeDir: resolveStoreDir(config),
-      apiBaseUrl: config.apiBaseUrl ?? 'https://api.telegram.org',
-      ...(config.token === undefined ? {} : { token: config.token }),
-      ...(config.chatId === undefined ? {} : { chatId: config.chatId }),
-      tokenRef: 'TELEGRAM_BOT_TOKEN',
-      chatIdRef: 'TELEGRAM_ALLOWED_CHAT_ID',
       pollIntervalMs: config.pollIntervalMs ?? 10_000,
       maxConcurrent: config.maxConcurrent ?? 3,
       deliverOnError: config.deliverOnError ?? true,

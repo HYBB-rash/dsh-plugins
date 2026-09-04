@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-cron",
-  "description": "Global unattended cron automation: schedule agent jobs and deliver results to Telegram",
+  "description": "Global unattended cron automation: schedule jobs and optionally deliver results",
   "version": "0.1.0-rc.5",
   "publishConfig": {
     "access": "public"
@@ -32,12 +32,10 @@
   "peerDependencies": {
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-agent-default-model": "*",
-    "@deepseek-ai/dsh-credentials": "*",
     "@deepseek-ai/dsh-home-paths": "*",
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-session-persistence": "*",
-    "@deepseek-ai/dsh-telegram-gateway": "*",
     "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/dsh-workspace": "*",
     "@deepseek-ai/cordis": "workspace:*"
@@ -48,12 +46,10 @@
   "devDependencies": {
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-agent-default-model": "*",
-    "@deepseek-ai/dsh-credentials": "*",
     "@deepseek-ai/dsh-home-paths": "*",
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-session-persistence": "*",
-    "@deepseek-ai/dsh-telegram-gateway": "*",
     "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/dsh-workspace": "*",
     "@deepseek-ai/cordis": "workspace:*"
