@@ -94,7 +94,9 @@ def _x_page(value):
         or parsed.fragment
     ):
         return False
-    if parsed.path in {"/home", "/explore", "/explore/tabs/trending"}:
+    if parsed.path == "/home":
+        return not parsed.query or parsed.query == "feed=following"
+    if parsed.path in {"/explore", "/explore/tabs/trending"}:
         return not parsed.query
     if parsed.path != "/search":
         return False
@@ -836,7 +838,11 @@ class _MechanicalCdpEvaluator:
                 return value
 
             method, params = self._command(action, surface, stable_id)
-            socket = websocket.create_connection(ws_url, timeout=remaining())
+            socket = websocket.create_connection(
+                ws_url,
+                timeout=remaining(),
+                suppress_origin=True,
+            )
             socket.settimeout(remaining())
 
             def exchange(command_id, command_method, command_params, ready=False):

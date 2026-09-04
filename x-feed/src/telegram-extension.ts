@@ -108,7 +108,7 @@ export async function installTelegramExtensionWithClock(
   })
   const observerCliPath = join(dirname(resolvePipelinePath({})), 'x_personal_feed_observer_cli.py')
   const personalFeedXObserver = createPersonalFeedXSurfaceObserver({
-    pythonBin: '/usr/bin/python3',
+    pythonBin: process.env.DSH_PYTHON_BIN ?? '/usr/bin/python3',
     observerCliPath,
     clock: installClock,
   })

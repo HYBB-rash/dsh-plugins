@@ -24,6 +24,7 @@ const roots: string[] = []
 
 afterEach(() => {
   vi.clearAllMocks()
+  vi.unstubAllEnvs()
   state.contextOwnerOptions.length = 0
   state.contextOwners.length = 0
   state.semanticOptions.length = 0
@@ -168,6 +169,7 @@ function fixture() {
 
 describe('Personal Feed Telegram install composition', () => {
   it('uses one facts owner and registers source, feedback, then the one Feed handler without history or bootstrap', async () => {
+    vi.stubEnv('DSH_PYTHON_BIN', '/nix/store/test-python/bin/python3')
     const value = fixture()
     const clock = Object.freeze({ now: () => new Date('2026-09-01T00:00:00.000Z') })
     const { installTelegramExtensionWithClock } = await import('../src/telegram-extension.ts')
@@ -178,7 +180,7 @@ describe('Personal Feed Telegram install composition', () => {
     )
 
     expect(state.observerOptions).toStrictEqual([{
-      pythonBin: '/usr/bin/python3',
+      pythonBin: '/nix/store/test-python/bin/python3',
       observerCliPath: '/opt/dsh/runtime/x-feed/python/x_personal_feed_observer_cli.py',
       clock,
     }])

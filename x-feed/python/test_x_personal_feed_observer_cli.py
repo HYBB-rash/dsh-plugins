@@ -863,6 +863,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
 
         def create_connection(url, timeout=None, **kwargs):
             self.assertEqual(url, ws_url)
+            self.assertIs(kwargs.get("suppress_origin"), True)
             raw_value = _response_value(current_action[0], current_surface[0])
             if current_action[0] == "navigate":
                 raw_value = _surface_facts(current_surface[0])
@@ -2472,6 +2473,20 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                 "type": "page",
                 "url": "https://x.com/search?q=synthetic-topic&src=trend_click",
                 "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/search-page",
+            })
+        )
+
+    def test_existing_browser_reuses_the_following_home_tab_left_by_x(self):
+        """X appends its own following-feed query to the reusable home tab."""
+        module = _require_cli(self)
+        browser_type = getattr(module, "_ExistingCdpBrowser", None)
+        self.assertIsNotNone(browser_type)
+        browser = browser_type(clock=mock.Mock(), deadline_epoch_ms=10_000)
+        self.assertTrue(
+            browser.is_x_tab({
+                "type": "page",
+                "url": "https://x.com/home?feed=following",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/home-page",
             })
         )
 

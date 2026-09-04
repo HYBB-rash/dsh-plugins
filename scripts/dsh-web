@@ -4,6 +4,11 @@ set -eu
 root_directory=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 export DSH_HOME="${DSH_WEB_HOME:-$root_directory/.dsh-web}"
 
+if [ -z "${DSH_PYTHON_BIN:-}" ]; then
+  DSH_PYTHON_BIN=$(command -v python3)
+  export DSH_PYTHON_BIN
+fi
+
 harness_root="$root_directory/upstream/deepseek-harness"
 harness_node_modules="$harness_root/node_modules/.pnpm/node_modules"
 harness_tsc="$harness_root/node_modules/.bin/tsc"
