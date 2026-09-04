@@ -2319,7 +2319,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
         self.assertTrue(socket.closed)
 
     def test_snapshot_waits_for_transient_loading_before_returning_candidates(self):
-        """A first loading frame must not turn a healthy surface into failed."""
+        """A slow card mount must not turn a healthy surface into failed."""
         module = _require_cli(self)
         evaluator_type = getattr(module, "_MechanicalCdpEvaluator", None)
         self.assertIsNotNone(evaluator_type)
@@ -2343,7 +2343,7 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
             "cells": [{"candidates": [candidate]}],
             "emptyFacts": _empty_facts("for_you", loadingCount=1),
         }
-        values = [loading, loading, ready]
+        values = [loading] * 20 + [ready]
         frame_index = [0]
 
         def frame_factory(request, response_id, _value):
@@ -2379,8 +2379,8 @@ class TestPersonalFeedObserverCli(unittest.TestCase):
                 "explicitEmpty": False,
             },
         )
-        self.assertEqual(frame_index[0], 3)
-        self.assertEqual(len(clock.sleeps), 2)
+        self.assertEqual(frame_index[0], 21)
+        self.assertEqual(len(clock.sleeps), 20)
         self.assertTrue(all(delay > 0 for delay in clock.sleeps))
         self.assertLess(sum(clock.sleeps), 5.0)
         self.assertTrue(socket.closed)
