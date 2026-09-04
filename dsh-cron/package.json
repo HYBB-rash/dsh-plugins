@@ -21,8 +21,14 @@
   },
   "files": [
     "lib/*.js",
-    "lib/types/**/*.d.ts"
+    "lib/types/**/*.d.ts",
+    "cordis.patch.yml"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-agent-default-model": "*",

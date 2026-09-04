@@ -1,0 +1,4 @@
+# Register dsh-assistant; profile layers select Web or Telegram behavior.
+- insert:
+    - id: dsh-assistant
+      name: '@deepseek-ai/dsh-assistant'

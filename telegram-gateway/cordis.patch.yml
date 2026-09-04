@@ -1,0 +1,4 @@
+# Register the Telegram gateway; profile layers own environment-specific configuration.
+- insert:
+    - id: telegram-gateway
+      name: '@deepseek-ai/dsh-telegram-gateway'

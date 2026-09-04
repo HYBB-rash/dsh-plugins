@@ -1,0 +1,4 @@
+# Register dsh-cron; profile layers select manager or scheduler mode.
+- insert:
+    - id: dsh-cron
+      name: '@deepseek-ai/dsh-cron'
