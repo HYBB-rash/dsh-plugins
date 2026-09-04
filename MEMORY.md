@@ -108,3 +108,4 @@
 - 2026-09-04：普通 DSH Web 归档部署的完整结构、现场故障链和验证矩阵集中维护在 `docs/dsh-web-portable-deployment.md`；后续打包、上传、重启或排查 LAN/API/token 通知时使用项目 `$dsh-web-deploy`，不要从零重建操作步骤。
 - 2026-09-04：Models 页的 `settings are unavailable in this browser` 是上游 `ui-settings` 明确禁用非 loopback Host settings 的结果，不是 `listProviders` 401/403；不得修改 `upstream/deepseek-harness`。Git reset 也不会清除 ignored 的 `lib/` 构建污染，曾误构建上游后必须从官方源码完整重建并核对实际打包输入。
 - 2026-09-05：源码模式的本地 Web Profile 使用 hoisted `file:` 依赖时，同版本同路径下 `plugin add --force` 与 `plugin update --force` 都可能退出 0、显示 `Already up to date`，却保留旧插件字节；刷新必须经 Harness 先移除实际已安装的本地插件再重新添加，并以源码/Profile 哈希和重复安装测试验证，不能用临时新路径 Profile 的成功替代真实既有 Profile 证据。
+- 2026-09-05：源码 Web 运行入口的默认应用参数不能注入 `--dump-config` 或 `--dump-default-config`，Harness 明确要求配置导出不携带应用参数。开发默认端口应只在正常启动且调用者未显式传 `--port` 时补入；本机正式部署继续由 `dsh-web-start` 显式固定 3080。

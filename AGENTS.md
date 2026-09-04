@@ -32,6 +32,8 @@
 
 涉及 Harness、`telegram-gateway`、`dsh-cron`、`dsh-assistant`、Web Profile、插件注册或本地 Web 开发服时，先读取并遵循 `$dsh-web-dev`。本地开发固定使用两段式入口：`./scripts/dsh-web-install-plugins` 负责构建和安装，`./scripts/dsh-web-runtime` 只负责启动；不得恢复已清退的 `scripts/dsh-web`，不得直接维护 Profile 的 `node_modules` 或手工登记 bundle。开发与传输包必须使用同一份 Harness、插件构建产物、Web patch 和 runtime 脚本；生产包唯一允许的环境差异是打包阶段附加 Git 忽略的线上凭据数据。
 
+本机正式部署固定占用 `3080`；源码开发服默认使用 `5080`，避免与正式部署争抢端口。临时验收需要其他端口时必须显式传入 `--port`，不得改变正式部署的 `3080`。
+
 ## 发布入口与隔离
 
 `herman.hermes` 唯一现役发布入口是普通 `tar.gz` Web 部署。先读取并遵循 `$dsh-web-deploy` 与 `docs/dsh-web-portable-deployment.md`；只使用 `scripts/package-dsh-web`、`scripts/dsh-web-deploy` 和远端 `dsh-web-start`，上传与启动必须分离。旧 Docker/OCI `release/dsh` 系统已退役，不得恢复 `release/`、容器发布入口或与普通归档并行的第二套生产流程。

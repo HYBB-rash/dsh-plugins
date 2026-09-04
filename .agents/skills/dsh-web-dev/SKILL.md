@@ -61,7 +61,7 @@ description: 在 dsh-plugins 仓库中安装、刷新和启动本地 DSH Web 开
 1. 使用 `${DSH_WEB_HOME:-$PWD/.dsh-web}` 作为 `DSH_HOME`；
 2. 安装并构建 Harness；
 3. 构建 `telegram-gateway`、`dsh-cron`、`dsh-assistant`；
-4. 通过 Harness 的 `plugin --profile web add --ignore-scripts --force` 刷新三个本地插件；
+4. 已安装的本地插件先通过 Harness 移除，再以 `plugin --profile web add --ignore-scripts --force` 刷新三个本地插件；
 5. 让插件自己的 `dsh.bundle.patch` 自动登记到 Web Profile。
 
 不要直接写 `$DSH_HOME/profiles/web/node_modules`，不要手改 `dsh.profile.bundles` 代替插件安装器，也不要恢复已清退的组合入口 `scripts/dsh-web`。
@@ -74,10 +74,12 @@ description: 在 dsh-plugins 仓库中安装、刷新和启动本地 DSH Web 开
 ./scripts/dsh-web-runtime
 ```
 
+源码开发入口无显式端口时默认监听 `5080`；本机正式部署由 `dsh-web-start` 明确使用 `3080`，两者不得混用。
+
 参数会原样传给 Harness，例如：
 
 ```bash
-./scripts/dsh-web-runtime --host 127.0.0.1 --port 3080 --no-open
+./scripts/dsh-web-runtime --host 127.0.0.1 --port 5080 --no-open
 ```
 
 该入口只启动运行时，不构建、不安装插件。源码模式使用 `config/web/portable.patch.yml`；运行目录默认是 `.dsh-web`，可用 `DSH_WEB_HOME=/path/to/home` 隔离多个本地环境。
@@ -87,7 +89,7 @@ VS Code 中对应两个任务：
 1. `DSH: Install Web Plugins (source)`
 2. `DSH: Start Web (source)`
 
-不要把二者重新合并成一个任务。
+第二个任务不传端口，因此使用开发默认值 `5080`。不要把二者重新合并成一个任务。
 
 ## 无副作用验证
 
