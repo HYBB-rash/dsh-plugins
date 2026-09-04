@@ -23,7 +23,24 @@ description: 在 dsh-plugins 仓库中安装、刷新和启动本地 DSH Web 开
 
 1. 阅读仓库 `AGENTS.md`，检索 `MEMORY.md` 中与本次问题相关的记录。
 2. 检查 Git 分支和工作树，保留用户的无关改动。
-3. 从仓库根目录进入开发环境：
+3. 每个本地 Web 开发任务都使用独立任务分支：
+
+   ```bash
+   git fetch origin
+   git checkout -b <task-branch> origin/main
+   ```
+
+   不要在 `main` 上开发，也不要从未更新的本地 `main` 创建任务分支。一个任务只用一个分支；任务在该分支本地验收通过后才能合回主线。
+4. 开发过程中，只要 `origin/main` 可能推进，就尽早把当前任务分支变基到最新主线：
+
+   ```bash
+   git fetch origin
+   git rebase origin/main
+   ```
+
+   解决冲突后继续 `git rebase --continue`，并重新做本地验收。不要用 merge commit 把主线同步进任务分支。
+5. 任务完成后，先在任务分支完成本地验收；合回 `main` 后删除任务分支，本地必删，推过远端则远端也删，保持工作树干净。
+6. 从仓库根目录进入开发环境：
 
    ```bash
    nix develop
