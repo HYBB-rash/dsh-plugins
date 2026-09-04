@@ -35,6 +35,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import {
   installModelSelection,
+  type Agent,
   type AgentHandle,
   type AgentSetup,
   type ModelSelectionRef,
@@ -230,21 +231,6 @@ export function createOffsetStore(file: string): OffsetStore {
   }
 }
 
-/**
- * Drive one message through the fixed session and return the assistant text.
- * The agent handle is typed loosely here to keep the loop independent of the
- * concrete Agent surface; the runtime guarantee comes from the create/resume
- * contract (session.seq, followup, whenIdle).
- */
-interface AgentLike {
-  session: {
-    seq: number
-    events: readonly SessionEvent[]
-  }
-  followup(message: unknown): void
-  whenIdle(): Promise<void>
-}
-
 /** Result of one driven turn: outcome plus the turn's feedback handle. */
 interface DrivenTurn {
   /** Summarized outcome when the turn completed; undefined when it was interrupted. */
@@ -266,7 +252,7 @@ interface DrivenTurn {
  */
 async function driveTurn(
   ctx: Context,
-  agent: AgentLike,
+  agent: Agent,
   text: string,
   sessions: { flush(session: unknown): Promise<void> },
   signal: AbortSignal,
@@ -298,7 +284,7 @@ async function driveTurn(
     }
     if (signal.aborted) return { outcome: undefined, failure: undefined, feedback }
     completed = true
-    return { outcome: summarizeTurn(agent.session.events, firstSeq), failure: undefined, feedback }
+    return { outcome: summarizeTurn(agent.session.snapshotEvents(), firstSeq), failure: undefined, feedback }
   } finally {
     disposeListener()
     // 未完成的本轮不再有 finish()/fail()：停掉 timer，👀 留给 dispose 路径清理。
@@ -307,7 +293,7 @@ async function driveTurn(
 }
 
 /** Wait for an Agent to become idle without holding plugin disposal open. */
-async function waitForIdle(agent: AgentLike, signal: AbortSignal): Promise<boolean> {
+async function waitForIdle(agent: Agent, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return false
   let onAbort!: () => void
   const aborted = new Promise<void>((resolve) => {
@@ -476,12 +462,12 @@ export async function runGateway(
   let handle: AgentHandle | undefined
   const live = agents.get(sessionId)
   if (live === undefined) {
-    const persisted = (await persistence.list(signal)).some(header => header.id === sessionId)
+    const persisted = (await persistence.list({ signal })).some(snapshot => snapshot.header.id === sessionId)
     handle = persisted
       ? await agents.resume({ resumeSessionId: sessionId, agentOptions: { provider: selection.provider, model: selection.model }, setup })
       : await agents.create({ sessionId, meta: { cwd }, agentOptions: { provider: selection.provider, model: selection.model }, setup })
   }
-  const agent = (live ?? handle!.agent) as unknown as AgentLike
+  const agent = live ?? handle!.agent
 
   const offsetDir = config.offsetDir !== ''
     ? config.offsetDir

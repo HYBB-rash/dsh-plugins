@@ -63,7 +63,11 @@ function gatewayConfig(overrides: Partial<Config> = {}): Config {
 function gatewayContext() {
   const dispose = vi.fn(async () => {})
   const agent = {
-    session: { seq: 0, events: [] as SessionEvent[] },
+    session: {
+      seq: 0,
+      events: [] as SessionEvent[],
+      snapshotEvents() { return this.events },
+    },
     followup: vi.fn(),
     whenIdle: vi.fn(async () => {}),
   }

@@ -82,7 +82,11 @@ function gatewayContext(options: {
 } = {}) {
   const dispose = vi.fn(async () => {})
   const agent = {
-    session: { seq: 0, events: [] as SessionEvent[] },
+    session: {
+      seq: 0,
+      events: [] as SessionEvent[],
+      snapshotEvents() { return this.events },
+    },
     followup: vi.fn(),
     whenIdle: vi.fn(async () => {}),
   }
@@ -107,7 +111,7 @@ function gatewayContext(options: {
     sessions: { flush: vi.fn(async () => {}) },
     sessionPersistence: {
       list: vi.fn(async () => options.persisted === true
-        ? [{ id: 'session-telegram' }]
+        ? [{ header: { id: 'session-telegram' } }]
         : []),
     },
     credentials: {
