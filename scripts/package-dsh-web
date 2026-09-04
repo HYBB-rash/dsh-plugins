@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 if [[ $# -ne 1 ]]; then
   echo "usage: $0 <output.tar.gz>" >&2
@@ -8,7 +9,19 @@ fi
 
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 harness_root="$repository_root/upstream/deepseek-harness"
+production_credentials=${DSH_WEB_PRODUCTION_CREDENTIALS:-$repository_root/config/web/production-credentials}
 output=$(realpath -m -- "$1")
+
+credential_files=(
+  "$production_credentials/.credentials.yaml"
+  "$production_credentials/secrets/notion.token"
+)
+for credential_file in "${credential_files[@]}"; do
+  if [[ ! -f "$credential_file" || -L "$credential_file" ]]; then
+    echo "missing regular production credential: $credential_file" >&2
+    exit 1
+  fi
+done
 
 required_files=(
   "$harness_root/apps/cli/lib/bin.js"
@@ -39,6 +52,9 @@ cleanup() { rm -rf -- "$temporary_root"; }
 trap cleanup EXIT
 
 mkdir -p "$temporary_root/dsh-web/plugins" "$temporary_root/dsh-web/config" "$temporary_root/dsh-web/bin"
+install -d -m 0700 "$temporary_root/dsh-web/production-credentials/secrets"
+install -m 0600 "$production_credentials/.credentials.yaml" "$temporary_root/dsh-web/production-credentials/.credentials.yaml"
+install -m 0600 "$production_credentials/secrets/notion.token" "$temporary_root/dsh-web/production-credentials/secrets/notion.token"
 install -m 0644 "$repository_root/config/web/portable.patch.yml" "$temporary_root/dsh-web/config/web.patch.yml"
 install -m 0755 "$repository_root/scripts/dsh-web-install-plugins" "$temporary_root/dsh-web/bin/install-plugins"
 install -m 0755 "$repository_root/scripts/dsh-web-runtime" "$temporary_root/dsh-web/bin/web"
@@ -53,7 +69,8 @@ tar -czf "$temporary_output" \
   --exclude='.env.*' \
   --transform='s|^deepseek-harness|dsh-web/harness|' \
   -C "$repository_root/upstream" deepseek-harness \
-  -C "$temporary_root" dsh-web/plugins dsh-web/config dsh-web/bin
+  -C "$temporary_root" dsh-web/plugins dsh-web/config dsh-web/production-credentials dsh-web/bin
+chmod 0600 "$temporary_output"
 mv -f -- "$temporary_output" "$output"
 trap - EXIT
 rm -rf -- "$temporary_root"

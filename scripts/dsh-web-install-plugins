@@ -75,6 +75,16 @@ if ! command -v pnpm >/dev/null 2>&1; then
   exit 127
 fi
 
+credentials_root="$package_root/production-credentials"
+for credential_file in \
+  "$credentials_root/.credentials.yaml" \
+  "$credentials_root/secrets/notion.token"; do
+  if [[ ! -f "$credential_file" || -L "$credential_file" ]]; then
+    echo "missing regular bundled production credential: $credential_file" >&2
+    exit 1
+  fi
+done
+
 plugin_archives=()
 for pattern in \
   'deepseek-ai-dsh-telegram-gateway-*.tgz' \
@@ -88,5 +98,9 @@ for pattern in \
   plugin_archives+=("${matches[0]}")
 done
 
-exec node "$package_root/harness/apps/cli/lib/bin.js" \
+node "$package_root/harness/apps/cli/lib/bin.js" \
   plugin --profile web add --ignore-scripts "${plugin_archives[@]}"
+
+install -d -m 0700 "$DSH_HOME" "$DSH_HOME/secrets"
+install -m 0600 "$credentials_root/.credentials.yaml" "$DSH_HOME/.credentials.yaml"
+install -m 0600 "$credentials_root/secrets/notion.token" "$DSH_HOME/secrets/notion.token"

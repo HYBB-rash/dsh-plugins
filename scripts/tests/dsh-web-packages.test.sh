@@ -12,11 +12,14 @@ mkdir -p \
   "$fixture_root/upstream/deepseek-harness/apps/cli/lib" \
   "$fixture_root/upstream/deepseek-harness/node_modules/.bin" \
   "$fixture_root/upstream/deepseek-harness/node_modules/.pnpm/node_modules/@deepseek-ai" \
+  "$fixture_root/config/web/production-credentials/secrets" \
   "$fixture_root/test-bin"
 cp "$repository_root/scripts/dsh-web-install-plugins" "$fixture_root/scripts/dsh-web-install-plugins"
 cp "$repository_root/scripts/dsh-web-runtime" "$fixture_root/scripts/dsh-web-runtime"
 cp "$repository_root/config/web/portable.patch.yml" "$fixture_root/config/web/portable.patch.yml"
 printf 'console.log("dsh")\n' >"$fixture_root/upstream/deepseek-harness/apps/cli/lib/bin.js"
+printf 'private source credentials\n' >"$fixture_root/config/web/production-credentials/.credentials.yaml"
+printf 'private source notion token\n' >"$fixture_root/config/web/production-credentials/secrets/notion.token"
 
 for package in telegram-gateway dsh-cron dsh-assistant; do
   mkdir -p "$fixture_root/$package"
@@ -71,6 +74,10 @@ done
 grep -Fq 'pnpm install --ignore-scripts' "$DSH_WEB_TEST_LOG"
 grep -Fq 'pnpm run build' "$DSH_WEB_TEST_LOG"
 grep -Fq 'plugin --profile web add --ignore-scripts --force' "$DSH_WEB_TEST_LOG"
+if [[ -e "$fixture_root/home/.credentials.yaml" || -e "$fixture_root/home/secrets/notion.token" ]]; then
+  echo 'source installer copied production credentials into the development profile' >&2
+  exit 1
+fi
 if grep -Fq -- '--patch' "$DSH_WEB_TEST_LOG"; then
   echo 'plugin installer also started the Web runtime' >&2
   exit 1

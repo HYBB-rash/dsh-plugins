@@ -27,6 +27,7 @@ __pycache__/
 *-shm
 
 # Local credentials; keep documented templates versioned
+config/web/production-credentials/
 .env
 .env.*
 !.env.example

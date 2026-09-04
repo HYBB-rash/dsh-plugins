@@ -76,10 +76,35 @@ EOF
   chmod +x "$fixture_root/forbidden-bin/$command"
 done
 
+missing_archive="$fixture_root/missing-credentials.tar.gz"
+if PATH="$fixture_root/forbidden-bin:$PATH" \
+  DSH_WEB_PRODUCTION_CREDENTIALS="$fixture_root/missing-production-credentials" \
+  "$source_root/scripts/package-dsh-web" "$missing_archive" \
+  >"$fixture_root/missing-credentials.out" 2>"$fixture_root/missing-credentials.err"; then
+  echo 'packaging succeeded without production credentials' >&2
+  exit 1
+fi
+test ! -e "$missing_archive"
+grep -Fq "$fixture_root/missing-production-credentials/.credentials.yaml" "$fixture_root/missing-credentials.err"
+
+production_credentials="$fixture_root/production-credentials"
+mkdir -p "$production_credentials/secrets"
+cat >"$production_credentials/.credentials.yaml" <<'EOF'
+version: 1
+refs:
+  DEEPSEEK_API_KEY: test-key
+  TELEGRAM_BOT_TOKEN: test-token
+  TELEGRAM_ALLOWED_CHAT_ID: '1'
+EOF
+printf 'dsh-fake-notion-token-v1' >"$production_credentials/secrets/notion.token"
+chmod 0600 "$production_credentials/.credentials.yaml" "$production_credentials/secrets/notion.token"
+
 archive="$fixture_root/dsh-web.tar.gz"
 PATH="$fixture_root/forbidden-bin:$PATH" \
+  DSH_WEB_PRODUCTION_CREDENTIALS="$production_credentials" \
   "$source_root/scripts/package-dsh-web" "$archive"
 test -f "$archive"
+test "$(stat -c '%a' "$archive")" = 600
 
 tar -tzf "$archive" >"$fixture_root/files.txt"
 for expected in \
@@ -93,6 +118,8 @@ for expected in \
   dsh-web/plugins/deepseek-ai-dsh-cron-0.2.0.tgz \
   dsh-web/plugins/deepseek-ai-dsh-assistant-0.3.0.tgz \
   dsh-web/config/web.patch.yml \
+  dsh-web/production-credentials/.credentials.yaml \
+  dsh-web/production-credentials/secrets/notion.token \
   dsh-web/bin/install-plugins \
   dsh-web/bin/web; do
   grep -Fxq "$expected" "$fixture_root/files.txt" || {
@@ -109,6 +136,10 @@ fi
 unpacked="$fixture_root/unpacked"
 mkdir -p "$unpacked"
 tar -xzf "$archive" -C "$unpacked"
+cmp "$source_root/upstream/deepseek-harness/apps/cli/lib/bin.js" "$unpacked/dsh-web/harness/apps/cli/lib/bin.js"
+cmp "$source_root/config/web/portable.patch.yml" "$unpacked/dsh-web/config/web.patch.yml"
+cmp "$source_root/scripts/dsh-web-install-plugins" "$unpacked/dsh-web/bin/install-plugins"
+cmp "$source_root/scripts/dsh-web-runtime" "$unpacked/dsh-web/bin/web"
 for plugin_archive in "$unpacked/dsh-web/plugins"/*.tgz; do
   contents=$(tar -tzf "$plugin_archive")
   for expected in package/package.json package/cordis.patch.yml package/lib/index.js; do
@@ -117,6 +148,14 @@ for plugin_archive in "$unpacked/dsh-web/plugins"/*.tgz; do
       exit 1
     }
   done
+  case "$(basename "$plugin_archive")" in
+    deepseek-ai-dsh-telegram-gateway-*) source_plugin=telegram-gateway ;;
+    deepseek-ai-dsh-cron-*) source_plugin=dsh-cron ;;
+    deepseek-ai-dsh-assistant-*) source_plugin=dsh-assistant ;;
+    *) echo "unexpected plugin archive: $plugin_archive" >&2; exit 1 ;;
+  esac
+  tar -xOzf "$plugin_archive" package/lib/index.js >"$fixture_root/packed-plugin.js"
+  cmp "$source_root/$source_plugin/lib/index.js" "$fixture_root/packed-plugin.js"
 done
 
 mkdir -p "$fixture_root/runtime-bin" "$fixture_root/home"
@@ -131,6 +170,10 @@ export DSH_RUNTIME_TEST_LOG="$fixture_root/runtime.log"
 PATH="$fixture_root/runtime-bin:$PATH" DSH_HOME="$fixture_root/home" \
   "$unpacked/dsh-web/bin/install-plugins"
 grep -Fq 'plugin --profile web add --ignore-scripts' "$DSH_RUNTIME_TEST_LOG"
+cmp "$production_credentials/.credentials.yaml" "$fixture_root/home/.credentials.yaml"
+cmp "$production_credentials/secrets/notion.token" "$fixture_root/home/secrets/notion.token"
+test "$(stat -c '%a' "$fixture_root/home/.credentials.yaml")" = 600
+test "$(stat -c '%a' "$fixture_root/home/secrets/notion.token")" = 600
 for plugin_archive in "$unpacked/dsh-web/plugins"/*.tgz; do
   grep -Fq "$plugin_archive" "$DSH_RUNTIME_TEST_LOG"
 done
