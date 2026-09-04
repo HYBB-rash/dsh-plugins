@@ -55,4 +55,8 @@ portable 启动器优先使用归档携带的 Node，而不是碰巧从宿主 `P
 
 生产普通归档 SHA-256 为 `aa1acc8bb3be7aa334156ba1ccc38a5ec226da21882987ffe85ebbf187d2e6d6`，run id 为 `20260904T202217Z-cli-path`。远端 `current` 指向该 release；监督进程持续存活，loopback/LAN 两个 `3080` listener 正常，stderr 无 ABI、fatal 或通知错误。归档内 `dsh --version` 输出 `0.1.3-alpha.1`，Web 进程 `PATH` 以 release 的 `bin` 开头。loopback token 登录为 200，loopback/LAN/域名无会话 API 为 401，错误 Origin 和非白名单代理访问为 403。
 
-本机长期 checkout 在部署前已有未提交的业务配置：把 `standard/session-telegram` 切为 `liangshen/session-telegram-liangshen`。主线快进保留了该 diff，但本地部署入口按合同拒绝脏工作树，因此本机 3080 服务尚未重启加载 CLI PATH 修复。该配置应提交为正式配置还是只作本地临时状态，仍需用户决定。Telegram 是否实际收到新 HTTPS 登录 URL及真实 Agent 对话中的 CLI 调用仍待用户确认。
+本机长期 checkout 在部署前已有未提交的业务配置：把 `standard/session-telegram` 切为 `liangshen/session-telegram-liangshen`。主线快进保留了该 diff，首次本地部署入口因脏工作树未继续。用户随后明确要求无人部署时继续部署；现场确认无部署进程，且本机修复文件已到位，因此保留现用配置，仅重启既有 `dsh-web-local.service` 加载 PATH，不重新安装或改写业务配置。
+
+2026-09-05 04:29:48 CST，本机服务重启成功，监督 PID 为 `2052514`、Web PID 为 `2052523`。从 Web 新进程的实际环境执行 `command -v dsh` 得到 `/home/herman/Projects/dsh-plugins-web-local/bin/dsh`，`dsh --version` 输出 `0.1.3-alpha.1`。配置重启前后 SHA-256 均为 `7514d1667a3c4d162389c97e33eb69ab92c7f845f9b3959a0d81ea66bc54af4c`；服务 active/running、NRestarts 为 0，认证跳转为 303、携带会话访问页面为 200，无会话 API 为 401，启动日志未发现模块缺失、ABI、fatal 或 Telegram 启动通知失败。同期生产仍指向上述归档，域名无会话 API 为 401。
+
+本地和生产的 CLI PATH 修复均已生效；Telegram 是否实际收到新 HTTPS 登录 URL及真实 Agent 对话中的 CLI 调用仍未进行端到端确认，不将基础运行检查等同于完整业务验收。
