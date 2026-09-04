@@ -103,12 +103,18 @@ export interface SubagentsApi {
     targetSessionId: SessionId,
     authority: { kind: 'user'; parentSessionId: SessionId } | { kind: 'ancestor'; agent: Agent },
   ): void
-  followup(
+  followup?: (
     parent: Agent,
     childId: SessionId,
     content: ContentBlock[],
     options: { source: { kind: 'plugin'; plugin: string }; signal: AbortSignal },
-  ): Promise<MessageId>
+  ) => Promise<MessageId>
+  sendMessage?: (
+    sender: Agent,
+    targetId: SessionId,
+    content: ContentBlock[],
+    options: { signal: AbortSignal },
+  ) => Promise<MessageId>
 }
 
 /** Default child persona: focus on the delegation, never manage commitments. */
@@ -660,11 +666,11 @@ export class WorkerController {
         continue
       }
       try {
-        await this.deps.subagents.followup(
+        await this.sendFollowup(
           agent,
           SessionId(candidate.workerSessionId),
           [{ type: 'text', text: buildMonitorRoundPrompt(snapshot) }],
-          { source: { kind: 'plugin', plugin: 'dsh-assistant' }, signal },
+          signal,
         )
         if (signal.aborted || this.stopping) return
         const deadline = Date.now() + handshakeTimeoutMs
@@ -691,6 +697,25 @@ export class WorkerController {
         }
       }
     }
+  }
+
+  /** Send a follow-up prompt to an existing continuable child, supporting both API shapes. */
+  private async sendFollowup(
+    parent: Agent,
+    childId: SessionId,
+    content: ContentBlock[],
+    signal: AbortSignal,
+  ): Promise<MessageId> {
+    if (this.deps.subagents.followup !== undefined) {
+      return this.deps.subagents.followup(parent, childId, content, {
+        source: { kind: 'plugin', plugin: 'dsh-assistant' },
+        signal,
+      })
+    }
+    if (this.deps.subagents.sendMessage !== undefined) {
+      return this.deps.subagents.sendMessage(parent, childId, content, { signal })
+    }
+    throw new Error('dsh-subagent runtime missing followup/sendMessage support')
   }
 
   private failMonitorRecovery(row: CommitmentRow, reason: string): void {
@@ -799,14 +824,11 @@ export class WorkerController {
     const res = this.deps.store.resumeAgent(commitment.id, commitment.revision)
     if (!res.ok) return { ok: false, ...writeResultToToolError(res) }
     try {
-      await this.deps.subagents.followup(
+      await this.sendFollowup(
         agent,
         SessionId(commitment.workerSessionId),
         [{ type: 'text', text: buildResumeText(direction) }],
-        {
-          source: { kind: 'plugin', plugin: 'dsh-assistant' },
-          signal: signal ?? new AbortController().signal,
-        },
+        signal ?? new AbortController().signal,
       )
     } catch (error) {
       const message = cleanError(error)

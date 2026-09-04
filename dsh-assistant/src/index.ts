@@ -34,6 +34,7 @@ import { AssistantStore, defaultStorePath } from './store.ts'
 import { registerAssistantTools, buildStatusOutput, type CronBindingView, type CommitmentView } from './tools.ts'
 import { WorkerController } from './worker.ts'
 import { WebTaskObserver } from './observer.ts'
+import type { CronRunFinishedEvent } from '@deepseek-ai/dsh-cron'
 
 /** Release health gates use the same public adapter as the running assistant. */
 export {
@@ -500,7 +501,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     let disposeCronRunFinished: () => void = () => {}
 
     if (cronMonitor !== undefined) {
-      disposeCronRunFinished = ctx.on('dsh-cron/run-finished', async event => {
+      disposeCronRunFinished = ctx.on('dsh-cron/run-finished', async (event: CronRunFinishedEvent) => {
         try {
           const result = await cronMonitor.handleRunFinished(event as unknown as Record<string, unknown>)
           if (result.ok === false) {
