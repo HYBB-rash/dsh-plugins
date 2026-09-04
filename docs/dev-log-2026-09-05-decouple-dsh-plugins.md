@@ -5,7 +5,7 @@
 
 ## 目标
 
-让三个插件可以分别构建、安装和启动，源码、测试、清单、声明文件和 bundle 不再引用兄弟插件。Telegram 传输只由 gateway 负责；cron 只负责调度、执行和账本；assistant 只通过自己定义的端口使用可选投递服务和 cron control v2。Harness/Cordis 继续作为三个插件共同的宿主实例。本次只交付本地候选分支，不修改 `upstream/`，不启动 Web 或真实 Telegram，不部署、合并或推送。
+让三个插件可以分别构建、安装和启动，源码、测试、清单、声明文件和 bundle 不再引用兄弟插件。Telegram 传输只由 gateway 负责；cron 只负责调度、执行和账本；assistant 只通过自己定义的端口使用可选投递服务和 cron control v2。Harness/Cordis 继续作为三个插件共同的宿主实例。初始授权只交付本地候选分支；用户随后单独授权合并到本地 `main` 并启动本地 Web 验收。全程不修改 `upstream/`，不推送、不远端部署。
 
 ## 时间线
 
@@ -21,6 +21,9 @@
 10. 变基后的完整 Cron 测试首次暴露一个新回归：主线新增归档测试仍按旧构造函数参数调用，实际没有使用测试注入的 `driveTurn`。迁移八处新增测试到新构造签名，并让投递 seam 返回合法 v1 结果；聚焦用例和最终全套随后通过。没有为旧内部构造签名增加生产兼容层。
 11. 在 `/tmp/dsh-web-decouple-acceptance.bN3FXT` 作为隔离 `DSH_WEB_HOME` 执行真实插件安装和 `--dump-config`。Harness 和三包 clean build、Profile remove→add、配置展开均成功；没有启动 Web 服务。
 12. 首次盲审收口期间，本机 `main` 又前进到 `d413868`，其中 `972123a` 修复 Cron 对当前 Harness `Session.snapshotEvents()` 的读取并增加真实 Session 回归。再次变基，保留该生产修复，把新增测试同步迁移为 `deliver:'default'` 和本地投递端口签名；在 `/tmp/dsh-web-decouple-final.zdgnK5` 重跑完整测试、clean build、隔离安装与配置展开后，盲审关闭基线漂移阻塞并最终判定 `PASS`。
+13. 用户追加授权后，将候选分支快进合入本地 `main`。`.gitignore` 不再隐藏旧合成依赖树后，长期 checkout 暴露出历史 `.dsh-plugin-node_modules`；核实其中只有生成的依赖软链接后，将它可恢复地移动到 `/tmp/dsh-plugins-web-local-retired-node-modules-20260905`，没有删除业务数据。
+14. 运行 `scripts/dsh-web-local-deploy`，完成 Harness、三插件重建、真实 Profile 刷新、配置展开和 3080 启动。部署后恰逢 Home Manager 自动更新激活远端 generation；该 generation 不含本机尚未提交的 `dsh-web-local` 声明，因此激活器明确停止并移除了 unit。`nix-agent diff` 显示直接切换当前本地配置会连带降级 Codex、Claude、Thunderbird 等无关软件，故否决整套切换，改为只链接已构建的同一份 `dsh-web-local.service` 并重新启动。
+15. 验收过程中 `origin/main` 新增 `4e2a185`，改动便携安装器的稳定刷新顺序。将本地八个提交整体变基到该最新主线，无冲突；插件源码和 bundle 字节未变。随后在合并后的主线重跑三包测试、结构门禁、真实 HTTP 认证、Cron control v2 health、Profile 哈希和持续运行检查。
 
 ## 逻辑链条
 
@@ -51,9 +54,15 @@
 - 根脚本：`dsh-web-packages.test.sh`、`self-describing-plugins.test.sh`、`package-dsh-web.test.sh` 全部通过；安装、runtime、打包脚本通过 `bash -n`；`git diff --check` 通过。
 - 隔离安装：三个 bundle 均由同一 Harness 构建入口生成并成功加入 Profile；`--dump-config` 展开出 assistant、cron scheduler/manager 和 gateway 的既有 portable 配置，没有旧 token/chatId/apiBaseUrl 配置。
 - 上游边界：`git -C upstream/deepseek-harness status --short --untracked-files=no` 为空，没有修改上游源码。
+- 本地 `main`：已包含 `origin/main=4e2a185` 与本次重构，工作树干净；没有 push。
+- 本地 Web：`dsh-web-local.service` 为 `active/running`、`NRestarts=0`，仅监听 `127.0.0.1:3080`；未认证 API 为 401，认证 token 交换为 303，带 cookie 的真实 `settings/describe` 为 200 并返回 15 个 namespace。
+- 运行协作面：`~/.dsh/storages/dsh-cron/control.sock` 返回 `protocolVersion:2`、`writer:manager`、`ready:true`；重启后 journal 没有插件加载、模块解析、provider、冲突或崩溃错误。
+- 安装产物：Profile 的三个 `file:` 都指向长期 `main` checkout，Gateway、Cron、Assistant 的源码 bundle 与 Profile 安装 bundle SHA-256 分别一致；三包 `node_modules` 均解析到同一 Harness 虚拟层，旧 `.dsh-plugin-node_modules` 不存在。
+- 合并后复验：Gateway 7 文件、155 项全过；Cron 26 文件、644 项全过；Assistant 21 文件、354 项全过，唯一未加载 suite 仍是既有 Harness 测试夹具缺包。结构门禁再次通过。
 
 ## 遗留
 
 - Assistant 的 `tools-visibility.spec.ts` 仍依赖当前 Harness checkout 不提供的 `@deepseek-ai/dsh-tool-subagent-report`；该失败在改动前已复现，不由本次重构引入，也不能靠重新建立插件间依赖修复。
-- 未执行真实 Web 启动、Telegram 实发、生产数据读取、部署、合并、推送或生产验收；这些动作继续等待单独授权。
+- 已执行本机 3080 Web 启动与只读运行验收；既有启动 URL 通知流程随服务启动运行，但没有额外调用 gateway 发测试消息，也没有提前触发 cron 或改写生产数据。
+- 未执行 push、远端部署、远端 Telegram/cron/模型/Notion 业务验收或生产验收；这些动作继续等待单独授权。
 - 仓内只发现 assistant 这个 control 消费者，因此本次只提供 v2。若未来部署前发现真实外部 v1 客户端，应作为新的兼容需求单独处理。

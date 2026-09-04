@@ -34,6 +34,7 @@
 ## Telegram gateway
 
 - 2026-09-05：本机 3080 的代码更新统一使用 `scripts/dsh-web-local-deploy`，不要手搓 stop/install/start，也不要使用 VM 的 `dsh-web-deploy` / `dsh-web-start`。源 worktree 必须干净且提交可快进 unit `ExecStart` 指向的 `main` checkout；脚本先停服，再快进长期 checkout、运行安装器并验收后启动，失败保持停机。未提交或分叉代码只在 `.dsh-web:5080` 开发服验证。
+- 2026-09-05：本机 `dsh-web-local` 的 Home Manager 声明若只存在于未提交工作树，自动更新激活远端 generation 时会把 unit 当作已移除并停止。恢复前先用 `nix-agent diff` 检查整套切换是否夹带无关版本回退；若有，不要为恢复单个服务切换整套 Home Manager，可只链接同一配置已构建出的 unit，并尽快把声明纳入其所属配置生命周期。
 - 2026-09-05：本地源码 Web 若需发送启动认证地址，应让 `dsh-web-runtime` 通过 `DSH_WEB_NOTIFY_START_URL=1` 显式复用通知器，并把 `DSH_WEB_PUBLIC_ORIGIN` 设为对应 `http://127.0.0.1:<port>`；默认不开启以隔离 `.dsh-web` 开发服。token 只经 stdin 交给通知器，通知失败不得改变 Web 进程退出状态；不能改用同时带归档切换、LAN proxy、trusted-host 和生产域名的 `dsh-web-start`。
 - 2026-09-05：源码 `scripts/dsh-web-runtime` 用 `DSH_WEB_HOME` 选择本地运行数据，并会据此覆盖 `DSH_HOME`；迁移正式 `~/.dsh` 后从源码入口恢复时必须传 `DSH_WEB_HOME=/home/herman/.dsh`，不能只传 `DSH_HOME`。启动后先核 `/proc/<pid>/environ` 与 cwd，再把 HTTP 200 当作目标实例健康证据。
 - 2026-09-05：对错误 cwd 的压缩 Session 做离线迁移时，先停服并备份 Session、Workspace 状态和投影缓存；每个 `.jsonl.zstd` 是拼接的独立帧，只重压带 checksum 的首个 header 帧，事件帧应原字节保留并以摘要校验。随后移动到新 cwd 对应的 project/session 目录，并从旧 Workspace 的持久成员中精确移除该 Session；启动后让 Gateway 在新路径创建/绑定 Workspace，投影缓存按新 identity 重建。
