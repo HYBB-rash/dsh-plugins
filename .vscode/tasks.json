@@ -4,7 +4,7 @@
     {
       "label": "DSH: Start Web (source)",
       "type": "shell",
-      "command": "${workspaceFolder}/dsh-web",
+      "command": "${workspaceFolder}/scripts/dsh-web",
       "options": {
         "cwd": "${workspaceFolder}"
       },
