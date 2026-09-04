@@ -654,7 +654,15 @@ grep -Fq 'personal-feed' "$repo_root/release/scripts/self-test.sh"
 grep -Eq '(^|[^[:alnum:]_-])personal-feed([^[:alnum:]_-]|$)' "$repo_root/release/scripts/check-runtime-module-identity.sh"
 test ! -d "$repo_root/x-feed"
 test ! -d "$repo_root/personal-feed-selector"
+test ! -d "$repo_root/skills/x-feed"
 test ! -d "$repo_root/skills/personal-feed-selector"
+test -f "$repo_root/skills/personal-feed/SKILL.md"
+test -f "$repo_root/skills/personal-feed/agents/openai.yaml"
+grep -Fq 'personal_feed_record_feedback' "$repo_root/skills/personal-feed/SKILL.md"
+grep -Fq 'personal_feed_list_saved' "$repo_root/skills/personal-feed/SKILL.md"
+! rg -n "name: 'x_feed_|x_feed_record_feedback|x_feed_list_saved|personal_feed_select_attention" \
+  "$repo_root/personal-feed/src" "$repo_root/config" "$repo_root/release/profiles" \
+  "$repo_root/scripts"
 ! rg -n '@herman/personal-feed-selector|personal_feed_select_attention|id: personal-feed-selector' \
   "$repo_root/config" "$repo_root/release/profiles" "$repo_root/release/Containerfile" \
   "$repo_root/release/cli.mjs" "$repo_root/release/scripts" "$repo_root/scripts" \

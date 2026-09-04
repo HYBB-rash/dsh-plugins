@@ -6,10 +6,10 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { installTelegramExtension } from '../src/index.ts'
-import { X_FEED_CONTRACT } from '../src/telegram-extension.ts'
-import { registerXFeedTools } from '../src/tools.ts'
+import { PERSONAL_FEED_TELEGRAM_CONTRACT } from '../src/telegram-extension.ts'
+import { registerPersonalFeedTools } from '../src/tools.ts'
 import { XFeedbackStore } from '../src/store.ts'
-import { mkdtempSync, existsSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -104,21 +104,27 @@ afterEach(() => {
 })
 
 describe('root isolation (§10.3)', () => {
-  it('旧工具 rating 在执行器最前面稳定拒绝且零写入，save/unsave 仍可用', async () => {
+  it('收藏工具只公开 save/unsave，账本读写语义保持不变', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-x-feed-tools-'))
     try {
       const store = new XFeedbackStore(dir)
-      const definitions: Array<{ name: string; execute?: (args: Record<string, unknown>) => Promise<unknown> }> = []
-      registerXFeedTools({
+      const definitions: Array<{
+        name: string
+        parameters?: { properties?: { operation?: { enum?: string[] } } }
+        execute?: (args: Record<string, unknown>) => Promise<unknown>
+      }> = []
+      registerPersonalFeedTools({
         tools: { register: (definition: unknown) => {
-          definitions.push(definition as { name: string; execute?: (args: Record<string, unknown>) => Promise<unknown> })
+          definitions.push(definition as typeof definitions[number])
           return () => undefined
         } },
       }, { store, logger: { warn: () => undefined } })
-      const feedback = definitions.find(definition => definition.name === 'x_feed_record_feedback')!
-      const rejected = await feedback.execute!({ operation: 'dislike', url: 'https://x.com/u/1', note: '旧评价' })
-      expect(rejected).toMatchObject({ ok: false, code: 'rating_requires_clean_feedback' })
-      expect(existsSync(join(dir, 'feedback.jsonl'))).toBe(false)
+      const feedback = definitions.find(definition => definition.name === 'personal_feed_record_feedback')!
+      expect(feedback.parameters?.properties?.operation?.enum).toEqual(['save', 'unsave'])
+      expect(definitions.map(definition => definition.name)).toEqual([
+        'personal_feed_record_feedback',
+        'personal_feed_list_saved',
+      ])
 
       const saved = await feedback.execute!({ operation: 'save', url: 'https://twitter.com/u/1?utm_source=test', title: '标题', note: '收藏理由' })
       expect(saved).toMatchObject({ ok: true, event: { operation: 'save', canonicalUrl: 'https://x.com/u/1' } })
@@ -144,7 +150,7 @@ describe('root isolation (§10.3)', () => {
       },
     }
 
-    expect(() => registerXFeedTools(toolCtx, { store: {} as XFeedbackStore, logger: { warn: vi.fn() } }))
+    expect(() => registerPersonalFeedTools(toolCtx, { store: {} as XFeedbackStore, logger: { warn: vi.fn() } }))
       .toThrow(registrationError)
     expect(firstStop).toHaveBeenCalledOnce()
     expect(toolCtx.tools.register).toHaveBeenCalledTimes(2)
@@ -163,7 +169,7 @@ describe('root isolation (§10.3)', () => {
       },
     }
 
-    const dispose = registerXFeedTools(toolCtx, { store: {} as XFeedbackStore, logger: { warn: vi.fn() } })
+    const dispose = registerPersonalFeedTools(toolCtx, { store: {} as XFeedbackStore, logger: { warn: vi.fn() } })
     dispose()
     dispose()
 
@@ -187,14 +193,14 @@ describe('root isolation (§10.3)', () => {
       },
     }
 
-    const dispose = registerXFeedTools(toolCtx, { store: {} as XFeedbackStore, logger: { warn: vi.fn() } })
+    const dispose = registerPersonalFeedTools(toolCtx, { store: {} as XFeedbackStore, logger: { warn: vi.fn() } })
     expect(() => dispose()).toThrow(disposerError)
     expect(order).toEqual(['tool2', 'tool1'])
     expect(() => dispose()).toThrow(disposerError)
     expect(order).toEqual(['tool2', 'tool1'])
   })
 
-  it('session-telegram 看得到两项 x_feed_* 工具和合同', async () => {
+  it('session-telegram 只看到两项 personal_feed_* 工具和合同', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'x-feed-isolation-a-'))
     const telegram = makeAgent('session-telegram', [], [])
     const tools: string[] = []
@@ -206,9 +212,10 @@ describe('root isolation (§10.3)', () => {
         dataDir,
         personalFeedDataDir: join(dataDir, 'personal-feed'),
       })
-      expect(tools).toEqual(expect.arrayContaining(['x_feed_record_feedback', 'x_feed_list_saved']))
+      expect(tools).toEqual(['personal_feed_record_feedback', 'personal_feed_list_saved'])
+      expect(tools.some(name => name.startsWith('x_feed_'))).toBe(false)
       expect(tools.filter(name => /personal.?context|semantic|submission/u.test(name))).toEqual([])
-      expect(sections).toContain('x-feed:contract')
+      expect(sections).toContain('personal-feed:contract')
       await dispose()
     } finally {
       rmSync(dataDir, { recursive: true, force: true })
@@ -267,9 +274,10 @@ describe('root isolation (§10.3)', () => {
       const future = makeAgent('session-telegram', tools, sections)
       harness.agents.push(future)
       harness.createdHandlers[0]!({ agent: future.agent })
-      expect(tools).toEqual(expect.arrayContaining(['x_feed_record_feedback', 'x_feed_list_saved']))
+      expect(tools).toEqual(['personal_feed_record_feedback', 'personal_feed_list_saved'])
+      expect(tools.some(name => name.startsWith('x_feed_'))).toBe(false)
       expect(tools.filter(name => /personal.?context|semantic|submission/u.test(name))).toEqual([])
-      expect(sections).toContain('x-feed:contract')
+      expect(sections).toContain('personal-feed:contract')
       const cronTools: string[] = []
       const cronSections: string[] = []
       const futureCron = makeAgent('session-cron-cron-x-1', cronTools, cronSections)
@@ -312,8 +320,8 @@ describe('root isolation (§10.3)', () => {
   })
 
   it('合同文本包含定位与歧义规则', () => {
-    expect(X_FEED_CONTRACT).toContain('你指哪一条？')
-    expect(X_FEED_CONTRACT).toContain('x_feed_record_feedback')
-    expect(X_FEED_CONTRACT).toContain('不进长期 canary memory')
+    expect(PERSONAL_FEED_TELEGRAM_CONTRACT).toContain('你指哪一条？')
+    expect(PERSONAL_FEED_TELEGRAM_CONTRACT).toContain('personal_feed_record_feedback')
+    expect(PERSONAL_FEED_TELEGRAM_CONTRACT).toContain('不进长期 canary memory')
   })
 })

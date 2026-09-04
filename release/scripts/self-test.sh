@@ -140,7 +140,7 @@ if rg --fixed-strings '/opt/dsh/automations' "$tmp_home/.dsh/AGENTS.md"; then
   printf '%s\n' 'workspace instructions still advertise repository-owned automations' >&2
   exit 1
 fi
-for skill in explore-opportunity personal-task-list x-feed; do
+for skill in explore-opportunity personal-feed personal-task-list; do
   test -L "$tmp_home/.dsh/skills/$skill"
   test "$(readlink "$tmp_home/.dsh/skills/$skill")" = "/opt/dsh/plugins-src/skills/$skill"
 done

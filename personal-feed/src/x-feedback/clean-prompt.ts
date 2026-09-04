@@ -144,6 +144,6 @@ export const CLEAN_FEEDBACK_REQUEST_PREFIX = '当前一次性 X 反馈请求（�
 export function createCleanFeedbackMessage(request: CleanFeedbackRequest): UserMessage {
   return createUserMessage({
     content: [{ type: 'text', text: `${CLEAN_FEEDBACK_REQUEST_PREFIX}\n${JSON.stringify(request)}` }],
-    source: { kind: 'plugin', plugin: 'x-feed' },
+    source: { kind: 'plugin', plugin: 'personal-feed' },
   })
 }

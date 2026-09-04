@@ -334,7 +334,7 @@ describe('single Personal Context semantic boundary', () => {
 
     await expect(semantic.revise(Object.freeze({ ...input, rawText: 'PRIVATE_BODY_CANARY' })))
       .rejects.toThrow('personal context semantic response is invalid')
-    expect(warn).toHaveBeenCalledWith('x-feed: personal context semantic failed (unexpected-finish)')
+    expect(warn).toHaveBeenCalledWith('personal-feed: personal context semantic failed (unexpected-finish)')
     expect(JSON.stringify(warn.mock.calls)).not.toContain('PRIVATE_BODY_CANARY')
   })
 

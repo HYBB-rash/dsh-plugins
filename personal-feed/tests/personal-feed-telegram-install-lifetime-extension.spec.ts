@@ -103,7 +103,7 @@ vi.mock('../src/personal-feed/x-surface-observer.ts', () => ({
 
 vi.mock('../src/config.ts', () => ({
   resolveObserverCliPath: vi.fn(() => '/opt/dsh/runtime/personal-feed/python/x_personal_feed_observer_cli.py'),
-  parseXFeedRuntimeConfig: vi.fn((raw: Record<string, unknown>) => Object.freeze({
+  parsePersonalFeedRuntimeConfig: vi.fn((raw: Record<string, unknown>) => Object.freeze({
     dataDir: raw.dataDir,
     personalFeedDataDir: raw.personalFeedDataDir,
     telegramSessionId: 'telegram-session',
@@ -121,7 +121,7 @@ vi.mock('../src/x-feedback/telegram-adapter.ts', () => ({
 }))
 
 vi.mock('../src/store.ts', () => ({ XFeedbackStore: class { readonly append = vi.fn() } }))
-vi.mock('../src/tools.ts', () => ({ registerXFeedTools: vi.fn(() => vi.fn()) }))
+vi.mock('../src/tools.ts', () => ({ registerPersonalFeedTools: vi.fn(() => vi.fn()) }))
 vi.mock('../src/x-feedback/clean-agent.ts', () => ({ runCleanFeedback: vi.fn() }))
 vi.mock('../src/x-feedback/feedback-effect-adapter.ts', () => ({ FeedbackEffectAdapter: class { } }))
 vi.mock('../src/x-feedback/pending-store.ts', () => ({ InMemoryPendingStore: class { } }))

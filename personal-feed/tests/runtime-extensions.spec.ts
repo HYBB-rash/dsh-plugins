@@ -6,12 +6,12 @@ import {
   installTelegramExtension,
 } from '../src/index.ts'
 import {
-  parseXFeedRuntimeConfig,
+  parsePersonalFeedRuntimeConfig,
   resolveDataDir,
   resolveObserverCliPath,
 } from '../src/config.ts'
 import {
-  X_FEED_CONTRACT,
+  PERSONAL_FEED_TELEGRAM_CONTRACT,
 } from '../src/telegram-extension.ts'
 import { FileNavigationSnapshotStore } from '../src/navigation/file-navigation-snapshot-store.ts'
 
@@ -69,7 +69,7 @@ describe('X runtime configuration', () => {
   })
 
   it('resolves only the Telegram feedback and bookmark fields used by the formal extension', () => {
-    const config = parseXFeedRuntimeConfig({
+    const config = parsePersonalFeedRuntimeConfig({
       cronJobId: 'cron-x',
       dataDir: '/custom/data',
       pythonBin: '/custom/python3',
@@ -89,16 +89,16 @@ describe('X runtime configuration', () => {
 
   it('resolves the Personal Feed directory separately, including its default and type boundary', () => {
     process.env.DSH_HOME = '/tmp/dsh-home'
-    expect(parseXFeedRuntimeConfig({}).personalFeedDataDir)
+    expect(parsePersonalFeedRuntimeConfig({}).personalFeedDataDir)
       .toBe('/tmp/dsh-home/storages/personal-feed')
-    expect(parseXFeedRuntimeConfig({ personalFeedDataDir: '/custom/personal-feed' }).personalFeedDataDir)
+    expect(parsePersonalFeedRuntimeConfig({ personalFeedDataDir: '/custom/personal-feed' }).personalFeedDataDir)
       .toBe('/custom/personal-feed')
-    expect(() => parseXFeedRuntimeConfig({ personalFeedDataDir: 42 })).toThrow('personalFeedDataDir')
+    expect(() => parsePersonalFeedRuntimeConfig({ personalFeedDataDir: 42 })).toThrow('personalFeedDataDir')
   })
 
   it('rejects invalid fields that remain part of the X runtime contract', () => {
-    expect(() => parseXFeedRuntimeConfig({ feedbackTurnTimeoutMs: 0 })).toThrow('feedbackTurnTimeoutMs')
-    expect(() => parseXFeedRuntimeConfig({ dataDir: 42 })).toThrow('dataDir')
+    expect(() => parsePersonalFeedRuntimeConfig({ feedbackTurnTimeoutMs: 0 })).toThrow('feedbackTurnTimeoutMs')
+    expect(() => parsePersonalFeedRuntimeConfig({ dataDir: 42 })).toThrow('dataDir')
   })
 })
 
@@ -170,7 +170,7 @@ describe('Telegram extension boundary', () => {
         dataDir,
         personalFeedDataDir: join(dataDir, 'personal-feed'),
       }))
-        .rejects.toThrow('x-feed: trusted-fact navigation not-ready: navigation disk unavailable')
+        .rejects.toThrow('personal-feed: trusted-fact navigation not-ready: navigation disk unavailable')
       expect(harness.handlers).toEqual([])
       expect(harness.logs.error.some(message => message.includes('not-ready'))).toBe(true)
     } finally {
@@ -181,15 +181,15 @@ describe('Telegram extension boundary', () => {
 
 describe('feedback context contract', () => {
   it('keeps feedback narrow and leaves ordinary non-X messages alone', () => {
-    expect(X_FEED_CONTRACT).toContain('没有 X 线索的普通对话')
-    expect(X_FEED_CONTRACT).toContain('按普通对话回应，不调用 x_feed 工具，也不强行追问')
-    expect(X_FEED_CONTRACT).toContain('Telegram 引用块只提供定位上下文，当前用户消息才是用户的新指令')
-    expect(X_FEED_CONTRACT).toContain('引用报告有多个 X URL')
-    expect(X_FEED_CONTRACT).toContain('不能调用工具写账本')
-    expect(X_FEED_CONTRACT).toContain('收藏或取消收藏时，先定位目标，再调用 x_feed_record_feedback')
-    expect(X_FEED_CONTRACT).toContain('喜欢/不喜欢由 Telegram clean feedback 与 TrustedFact 链处理')
-    expect(X_FEED_CONTRACT).toContain('不因为反馈创建当前承诺、cron 或后台 worker')
-    expect(X_FEED_CONTRACT).not.toContain('dsh-explore')
-    expect(X_FEED_CONTRACT).not.toContain('research_read_page')
+    expect(PERSONAL_FEED_TELEGRAM_CONTRACT).toContain('没有 X 线索的普通对话')
+    expect(PERSONAL_FEED_TELEGRAM_CONTRACT).toContain('按普通对话回应，不调用 personal_feed 工具，也不强行追问')
+    expect(PERSONAL_FEED_TELEGRAM_CONTRACT).toContain('Telegram 引用块只提供定位上下文，当前用户消息才是用户的新指令')
+    expect(PERSONAL_FEED_TELEGRAM_CONTRACT).toContain('引用报告有多个 X URL')
+    expect(PERSONAL_FEED_TELEGRAM_CONTRACT).toContain('不能调用工具写账本')
+    expect(PERSONAL_FEED_TELEGRAM_CONTRACT).toContain('收藏或取消收藏时，先定位目标，再调用 personal_feed_record_feedback')
+    expect(PERSONAL_FEED_TELEGRAM_CONTRACT).toContain('喜欢/不喜欢由 Telegram clean feedback 与 TrustedFact 链处理')
+    expect(PERSONAL_FEED_TELEGRAM_CONTRACT).toContain('不因为反馈创建当前承诺、cron 或后台 worker')
+    expect(PERSONAL_FEED_TELEGRAM_CONTRACT).not.toContain('dsh-explore')
+    expect(PERSONAL_FEED_TELEGRAM_CONTRACT).not.toContain('research_read_page')
   })
 })

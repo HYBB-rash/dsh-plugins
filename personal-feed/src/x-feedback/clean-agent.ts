@@ -188,7 +188,7 @@ function createSubmissionTool(
 function createDriverMessage(): ReturnType<typeof createUserMessage> {
   return createUserMessage({
     content: [{ type: 'text', text: 'clean feedback driver' }],
-    source: { kind: 'plugin', plugin: 'x-feed' },
+    source: { kind: 'plugin', plugin: 'personal-feed' },
   })
 }
 

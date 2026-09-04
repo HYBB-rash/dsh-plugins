@@ -16,7 +16,7 @@
  *
  * This is a local read-later list, not an X account operation, and not the
  * long-term canary memory.
- * @module @herman/x-feed
+ * @module @herman/personal-feed
  */
 
 import {
@@ -193,7 +193,7 @@ export class XFeedbackStore {
         if (typeof parsed !== 'object' || parsed === null || parsed.operation === undefined) continue
         events.push(parsed)
       } catch {
-        warn?.(`x-feed: skipping corrupt feedback.jsonl line: ${trimmed.slice(0, 120)}`)
+        warn?.(`personal-feed: skipping corrupt feedback.jsonl line: ${trimmed.slice(0, 120)}`)
       }
     }
     return events
@@ -284,7 +284,7 @@ export class XFeedbackStore {
     try {
       const written = writeSync(descriptor, line, undefined, 'utf8')
       if (written !== Buffer.byteLength(line)) {
-        throw new Error(`x-feed: incomplete feedback append (${written}/${Buffer.byteLength(line)} bytes)`)
+        throw new Error(`personal-feed: incomplete feedback append (${written}/${Buffer.byteLength(line)} bytes)`)
       }
       fsyncSync(descriptor)
     } finally {

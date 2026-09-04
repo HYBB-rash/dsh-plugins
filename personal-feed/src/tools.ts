@@ -1,10 +1,10 @@
 /**
- * X feed model tools (§10.2), registered ONLY on the Telegram interactive
- * root: `x_feed_record_feedback` and `x_feed_list_saved`.
+ * Personal Feed model tools, registered ONLY on the Telegram interactive
+ * root: `personal_feed_record_feedback` and `personal_feed_list_saved`.
  *
  * Feedback goes to the local append-only ledger, never to the X account,
  * never to long-term canary memory, and never creates commitments/cron jobs.
- * @module @herman/x-feed
+ * @module @herman/personal-feed
  */
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
@@ -16,20 +16,20 @@ import {
   type XFeedbackEvent,
 } from './store.ts'
 
-/** Input of x_feed_record_feedback. */
+/** Input of personal_feed_record_feedback. */
 export interface RecordFeedbackInput {
-  operation: 'like' | 'dislike' | 'save' | 'unsave'
+  operation: 'save' | 'unsave'
   url?: string
   title?: string
   note?: string
 }
 
-/** Output of x_feed_record_feedback. */
+/** Output of personal_feed_record_feedback. */
 export type RecordFeedbackOutput =
   | { readonly ok: true; readonly event: XFeedbackEvent }
   | { readonly ok: false; readonly code: string; readonly message: string }
 
-/** Output of x_feed_list_saved. */
+/** Output of personal_feed_list_saved. */
 export interface ListSavedOutput {
   readonly items: SavedItem[]
 }
@@ -50,14 +50,14 @@ function toToolError(result: FeedbackWriteResult): RecordFeedbackOutput {
 }
 
 /** Register both tools on the tool context of the interactive root. */
-export function registerXFeedTools(
+export function registerPersonalFeedTools(
   toolCtx: { tools: { register(def: unknown): () => void } },
   deps: { store: XFeedbackStore; logger: { warn(message: string): void } },
 ): () => void {
   const disposers: Array<() => void> = []
 
   disposers.push(toolCtx.tools.register(defineTool({
-    name: 'x_feed_record_feedback',
+    name: 'personal_feed_record_feedback',
     description:
       '记录用户对 X 信息流具体内容的收藏/取消收藏（Harness 本地收藏账本）。'
       + 'like/dislike 不得通过本工具写入；必须由 Telegram clean feedback 与 TrustedFact 链处理。'
@@ -70,9 +70,9 @@ export function registerXFeedTools(
     parameters: {
       operation: {
         type: 'string',
-        enum: ['like', 'dislike', 'save', 'unsave'],
+        enum: ['save', 'unsave'],
         required: true,
-        description: '兼容旧 schema；正常执行只接受 save/unsave。like/dislike 会稳定拒绝并引导 clean feedback。',
+        description: '收藏时传 save，取消收藏时传 unsave。',
       },
       url: { type: 'string', description: '明确指向具体推文时传（引用里只有一个 X URL 时可以直接定位）。' },
       title: { type: 'string', description: '能从引用消息可靠还原标题时传。' },
@@ -104,13 +104,6 @@ export function registerXFeedTools(
     },
     async execute(args: Record<string, unknown>): Promise<RecordFeedbackOutput> {
       const operation = args.operation
-      if (operation === 'like' || operation === 'dislike') {
-        return {
-          ok: false,
-          code: 'rating_requires_clean_feedback',
-          message: 'like/dislike 必须经过 Telegram clean feedback 与 TrustedFact 链，不能写入旧反馈账本',
-        }
-      }
       if (operation !== 'save' && operation !== 'unsave') {
         return { ok: false, code: 'invalid_operation', message: 'operation 必须是 save|unsave' }
       }
@@ -124,7 +117,7 @@ export function registerXFeedTools(
     },
     presentCall: (args: unknown) => ({
       card: 'generic',
-      title: 'X feed: record feedback',
+      title: 'Personal Feed: record feedback',
       kind: 'other',
       rawInput: (args as Record<string, unknown>).operation as string | undefined,
     }),
@@ -132,7 +125,7 @@ export function registerXFeedTools(
 
   try {
     disposers.push(toolCtx.tools.register(defineTool({
-    name: 'x_feed_list_saved',
+    name: 'personal_feed_list_saved',
     description:
       '查询 Harness 本地收藏（稍后阅读）列表：fold 全部 save/unsave，默认返回最近 20 条仍处于 saved 的项目。'
       + '只返回 URL、title、savedAt 和必要 note；不启动浏览器、不访问 X、不修改外部账户。',
@@ -169,7 +162,7 @@ export function registerXFeedTools(
         return { code: 'list_failed', message: error instanceof Error ? error.message : String(error) }
       }
     },
-    presentCall: () => ({ card: 'generic', title: 'X feed: list saved', kind: 'read' }),
+    presentCall: () => ({ card: 'generic', title: 'Personal Feed: list saved', kind: 'read' }),
     })))
   } catch (error) {
     const rollbackErrors: unknown[] = []

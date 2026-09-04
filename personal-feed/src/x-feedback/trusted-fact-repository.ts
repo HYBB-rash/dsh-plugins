@@ -88,12 +88,12 @@ export class FileTrustedFactRepository implements TrustedFactRepository, Located
       const parsed: unknown = JSON.parse(trimmed)
       const input = deserializeFact(parsed)
       if (input === undefined) {
-        warn?.(`x-feed: skipping invalid trusted-facts.jsonl line: ${trimmed.slice(0, 120)}`)
+        warn?.(`personal-feed: skipping invalid trusted-facts.jsonl line: ${trimmed.slice(0, 120)}`)
         return undefined
       }
       const result = createTrustedFact(input)
       if (!result.ok) {
-        warn?.(`x-feed: skipping rejected trusted-facts.jsonl line: ${result.message}`)
+        warn?.(`personal-feed: skipping rejected trusted-facts.jsonl line: ${result.message}`)
         return undefined
       }
       const canonicalDigest = sha256(JSON.stringify(serializeFact(result.fact)))
@@ -111,7 +111,7 @@ export class FileTrustedFactRepository implements TrustedFactRepository, Located
         fact: result.fact,
       }
     } catch {
-      warn?.(`x-feed: skipping corrupt trusted-facts.jsonl line: ${trimmed.slice(0, 120)}`)
+      warn?.(`personal-feed: skipping corrupt trusted-facts.jsonl line: ${trimmed.slice(0, 120)}`)
       return undefined
     }
   }
@@ -128,7 +128,7 @@ export class FileTrustedFactRepository implements TrustedFactRepository, Located
     try {
       const expected = Buffer.byteLength(line)
       const written = writeSync(descriptor, line, undefined, 'utf8')
-      if (written !== expected) throw new Error(`x-feed: incomplete trusted fact append (${written}/${expected} bytes)`)
+      if (written !== expected) throw new Error(`personal-feed: incomplete trusted fact append (${written}/${expected} bytes)`)
       fsyncSync(descriptor)
     } finally {
       closeSync(descriptor)

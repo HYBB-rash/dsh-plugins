@@ -25,34 +25,34 @@
 | **Telegram 随身入口 / Telegram On-the-Go** | [`telegram-gateway`](telegram-gateway) / `@deepseek-ai/dsh-telegram-gateway` | 出门后还想用 Telegram 发一句话继续和家里的 Harness 对话。 | Bot 把话送进固定会话，用 Telegram MarkdownV2 转换后的普通消息回复，保留局部引用和 reaction；不会把流式半句话反复改来改去。 | 仅文本；需要 Telegram 凭据和允许的 chat ID；不是多 bot 或媒体网关。 |
 | **私人助理责任台 / Assistant Responsibility Desk** | [`dsh-assistant`](dsh-assistant) / `@deepseek-ai/dsh-assistant` | 想让助手长期盯一件事，同时又不丢掉自己正在做或刚委派的事。 | 它能分别记住焦点、委派和监控；重启后仍知道该向谁回报，并在有结果时送回来。 | 不是完整待办清单或通用工作流平台。 |
 | **定时 Agent / Scheduled Agent** | [`dsh-cron`](dsh-cron) / `@deepseek-ai/dsh-cron` | 想让 Agent 每小时看一次信息、每天做一次整理，而不必一直开网页等着。 | 到点会唤醒独立会话完成工作，并可把结果送到 Telegram。 | 会启动无人值守 Agent；副作用、成本和重复执行边界要自行承担。 |
-| **X 洞察筛选器 / X Insight Filter** | [`x-feed`](x-feed) 私有业务运行时 + [`skills/x-feed`](skills/x-feed) Skill | 想从 X/Twitter 时间线挑几条值得看，而不是整条信息流搬进 Telegram。 | 本版本保留 selector，以及 x-feed 的 Telegram 反馈/收藏扩展；旧 V1 的 `dsh-cron` 自动 Feed 接线已退休，仓库仍保留未正式接线的 legacy direct/Python 路线。 | 它不是插件；依赖宿主的通用扩展口和 Python，不提供账号、cookie 或通用爬虫。 |
+| **个人 Feed / Personal Feed** | [`personal-feed`](personal-feed) / `@herman/personal-feed` + [`skills/personal-feed`](skills/personal-feed) Skill | 在 Telegram 明确要求从当前 X 页面挑一条真正值得看的内容，并继续反馈或查看收藏。 | 结合个人语境和当前页面严格返回 0 或 1 条；同时处理喜欢/不喜欢、收藏/取消收藏和查看收藏。 | 只有一个 Telegram 扩展入口；不定时运行，不提供账号、cookie 或通用爬虫。 |
 | **探索机会 / Exploration Opportunity** | [`skills/explore-opportunity`](skills/explore-opportunity) / Skill | 你丢来一句话或链接，想先听懂背后最有意思的机制；真的感兴趣时再留到以后。 | Agent 用宿主已有的搜索、网页、文件或 Shell 能力做初步查证，先给一个“还想再听一点”的钩子；只有你明确表态才更新 `EXPLORE.md`。 | 不自带浏览器、网络隔离或后台任务；普通追问次数不会自动入池。 |
 
 ```mermaid
 flowchart LR
   TG[Telegram Bridge] --> A[Responsibility Ledger]
   TG --> C[Agent Clock]
-  TG --> X[X Insight Feedback]
+  TG --> F[Personal Feed]
   TG --> E[Exploration Opportunity Skill]
   E --> DSH
   A --> DSH[DeepSeek Harness / Cordis host]
   C --> DSH
-  X --> DSH
+  F --> DSH
 ```
 
-图只表示代码中存在的协作关系，不表示必须一次安装全部组件。探索机会由宿主的 Skill 机制按语义发现，再协调这个 Agent 原本就有的搜索、网页、文件或 Shell 工具；它不依赖另一个探索插件，也不让其他插件因为发现它存在就偷偷改变行为。`x-feed` 不是 Cordis 插件：本版本由 `telegram-gateway` 通过通用 Telegram 扩展口加载反馈和收藏；旧 V1 的 `dsh-cron` 自动 Feed 接线已退休。
+图只表示代码中存在的协作关系，不表示必须一次安装全部组件。探索机会由宿主的 Skill 机制按语义发现，再协调这个 Agent 原本就有的搜索、网页、文件或 Shell 工具；它不依赖另一个探索插件，也不让其他插件因为发现它存在就偷偷改变行为。`personal-feed` 不是 Cordis 插件：它作为唯一 Feed 业务包，由 `telegram-gateway` 的通用扩展口加载一次；没有独立 selector 或 cron 入口。
 
 ## 公开范围与前置条件
 
-这个仓库是源码参考，不是已发布的安装包或 Skill 集合：没有根 `package.json`、统一安装脚本、发布的 npm tarball 或自动激活清单。插件目录自己的 `package.json` 都声明了 DSH/Cordis peer dependencies，且目前的版本是 `0.1.0-rc.*`；`x-feed` 是不发布的私有业务包。要构建或测试，需要：
+这个仓库是源码参考，不是已发布的安装包或 Skill 集合：没有根 `package.json`、统一安装脚本、发布的 npm tarball 或自动激活清单。插件目录自己的 `package.json` 都声明了 DSH/Cordis peer dependencies，且目前的版本是 `0.1.0-rc.*`；`personal-feed` 是不发布的私有业务包。要构建或测试，需要：
 
 - 一个与这些源码相容的 DeepSeek Harness 源码检出，其中能提供 `@deepseek-ai/*` 与 Cordis 依赖；兼容版本没有在本仓库冻结。
 - Node.js、pnpm、TypeScript/`tsc`、`tsdown`、Vitest；它们应由该兼容开发环境提供。
 - 使用 Telegram 相关插件时，一个凭据提供方中的 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_ALLOWED_CHAT_ID`。不要把真实值写进配置、`.env`、测试夹具或提交。
-- 使用 X Insight Loop 时，Python 3 和你自己依法、合规配置的浏览器/X 访问环境；本仓库不附带 cookie、登录态、账号或抓取结果。
+- 使用 Personal Feed 时，Python 3 和你自己依法、合规配置的浏览器/X 访问环境；本仓库不附带 cookie、登录态、账号或抓取结果。
 - 使用 Exploration Opportunity 时，宿主必须支持发现和加载 Skill，并允许 Agent 在当前工作区维护 `EXPLORE.md`；Skill 本身不会增加新的网页或浏览器工具。
 
-因此没有可靠的“一行安装命令”。Cordis 插件请先在隔离环境中接入；Skill 放入宿主可发现的目录。`x-feed` 要构建后由 `telegram-gateway.extensions` 加载，不能再按插件安装。旧 V1 的 `dsh-cron.environmentModules` 接线已从正式 Telegram profile 删除；仓库保留的 legacy direct/Python 路线未正式接线。这里没有声称 `dsh plugin add`、npm 安装或任意 DSH 版本可以直接工作。
+因此没有可靠的“一行安装命令”。Cordis 插件请先在隔离环境中接入；Skill 放入宿主可发现的目录。`personal-feed` 要构建后由 `telegram-gateway.extensions` 加载，不能按 Cordis 插件安装，也没有第二个 Feed 包或 Skill 需要加载。这里没有声称 `dsh plugin add`、npm 安装或任意 DSH 版本可以直接工作。
 
 ### 最小配置形状
 
@@ -72,15 +72,15 @@ flowchart LR
   mode: 'scheduler',
   pollIntervalMs: 10_000,
   maxConcurrent: 3,
-  // 本版本正式 Telegram profile 不再接入 x-feed environment module。
+  // Personal Feed 没有定时 environment module。
 }
 
-// Telegram Bridge 可加载同一业务包的反馈适配器；x-feed 本身没有 apply()。
-{ extensions: [{ modulePath: '<x-feed>/lib/index.js', configJson: '{}' }] }
+// Telegram Bridge 只加载这一个 Feed 业务入口；personal-feed 本身没有 apply()。
+{ extensions: [{ modulePath: '<personal-feed>/lib/index.js', configJson: '{}' }] }
 
 ```
 
-`Telegram Bridge`、`Responsibility Ledger` 和 `Agent Clock` 都会从 credential provider 查找 Telegram 凭据；不要把 token 或 chat ID 直接填到源码控制中的对象里。`Exploration Opportunity` 和 `X Feed` Skill 都没有 `apply()`；后者只指导现有 X 工具的使用。`x-feed` 的默认数据目录仍是宿主 `DSH_HOME/storages/dsh-x-feed`，因此重构不迁移或删除旧数据。
+`Telegram Bridge`、`Responsibility Ledger` 和 `Agent Clock` 都会从 credential provider 查找 Telegram 凭据；不要把 token 或 chat ID 直接填到源码控制中的对象里。`Exploration Opportunity` 和 `Personal Feed` Skill 都没有 `apply()`；后者只说明何时使用同一个 Feed 入口。X 来源数据仍沿用宿主 `DSH_HOME/storages/dsh-x-feed`，个人语境仍沿用 `DSH_HOME/storages/personal-feed`，因此重构不迁移或删除旧数据。
 
 ## 各组件的功能与限制
 
@@ -116,16 +116,16 @@ flowchart LR
 - 通用 `prepared-delivery/v1` 能让业务先冻结最终正文、交付后再提交状态；复杂业务可通过受信任务环境模块接入，同样获得持久回执与崩溃后补确认。
 - 每个 job 都可能启动模型、工具和外部副作用；不应当作无成本提醒器或 exactly-once 执行器。
 
-### X 洞察筛选器 / X Insight Filter
+### 个人 Feed / Personal Feed
 
-每小时从 X/Twitter 时间线里挑几条真正值得看的内容，比把整条信息流搬进 Telegram 更有用。这里不再提供 `dsh-x-feed` 插件：[`x-feed`](x-feed) 是业务运行时，[`skills/x-feed`](skills/x-feed) 是 Agent 行为说明。旧 V1 的正式 `dsh-cron` 自动 Feed 已退休；selector 和 x-feed Telegram 反馈/收藏仍保留，仓库中的 legacy direct/Python 路线明确保留但未正式接线。本版本不把 V2 写成已上线。
+当用户在 Telegram 明确提出 Feed 请求时，[`personal-feed`](personal-feed) 会观察当前 X 页面，结合个人语境和候选状态，只返回 0 或 1 条内容。没有独立 selector、`x-feed` 产品包或定时 Feed；[`skills/personal-feed`](skills/personal-feed) 只说明同一入口的使用方式。
 
-公开范围只包括 Python 收集/投递准备管线、`dsh-cron` receipt 接口和本地 feedback/store；**不包含作者个人的排序或选稿 prompt**。使用者需要按自己的目标、来源和边界编写 cron prompt。
+结果明确区分“选中一条”“当前没有合适内容”和“本次没有完成”。喜欢/不喜欢由 Telegram 的自然反馈链处理；收藏/取消收藏使用 `personal_feed_record_feedback`，查看收藏使用 `personal_feed_list_saved`。
 
-- `telegram-gateway` 的通用扩展口把 X URL、喜欢/不喜欢、收藏/取消收藏能力限制在指定 Telegram root。
-- `skills/x-feed` 只负责何时使用这些能力，不保存第二份状态，也不模拟定时器或交付事务。
+- `telegram-gateway` 的通用扩展口把 Feed 请求、X URL、反馈和收藏能力限制在指定 Telegram root。
+- `skills/personal-feed` 只负责何时使用这些能力，不保存第二份状态，也不模拟定时器或旧 selector。
 - 本地反馈、收藏和 shown 数据沿用原目录；重构不删除或自动迁移用户数据。
-- 依赖 `dsh-cron` 和 Python，不管理 X 账号、不提供 cookie/登录态，也不承诺抓取可用性。
+- 页面观察依赖 Python 和已有浏览器环境；不管理 X 账号、不提供 cookie/登录态，也不承诺抓取可用性。
 
 ### 探索机会 Skill / Exploration Opportunity
 
@@ -150,7 +150,7 @@ export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
 (cd telegram-gateway && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd dsh-assistant && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 (cd dsh-cron && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
-(cd x-feed && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
+(cd personal-feed && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
 ```
 
 测试同样逐包执行：
@@ -161,12 +161,12 @@ export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
 
 (cd dsh-assistant && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd dsh-cron && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
-(cd x-feed && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
+(cd personal-feed && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 (cd telegram-gateway && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
 
 # Skill 没有构建产物；可用兼容的 Skill Creator 校验目录结构和 frontmatter。
 python '<path-to-skill-creator>/scripts/quick_validate.py' skills/explore-opportunity
-python '<path-to-skill-creator>/scripts/quick_validate.py' skills/x-feed
+python '<path-to-skill-creator>/scripts/quick_validate.py' skills/personal-feed
 ```
 
 每个包的 `tsconfig.json` 和 `tsdown.config.ts` 也可用于显式检查：
@@ -182,7 +182,7 @@ python '<path-to-skill-creator>/scripts/quick_validate.py' skills/x-feed
 
 - `.gitignore` 排除常见凭据、`.env`、密钥文件、SQLite/WAL/SHM、运行日志、构建物和本地 session 状态。忽略规则不是权限控制：提交前仍应人工审查差异。
 - Telegram 凭据只应交给宿主的 credential provider。示例从不包含真实 token、chat ID、主机、账号、cookie 或个人档案。
-- `x-feed` 对外部内容与浏览器环境的行为由部署者负责；遵守服务条款、适用法律及账号安全要求。
+- `personal-feed` 对外部内容与浏览器环境的行为由部署者负责；遵守服务条款、适用法律及账号安全要求。
 - `explore-opportunity` 只是对现有工具的行为指导，不是安全沙箱；网页和外部文件仍应视为不可信数据，实际可访问范围与副作用由宿主提供的工具决定。
 - 探索状态只放在工作区 `EXPLORE.md`；它不等于任务系统、长期 MEMORY、X 收藏夹或 cron，也不会自行启动深度调查。
 - 本公开仓库不包含作者的部署脚本、远端主机资料、运行数据库、验收记录、研究笔记或个人长期认识；也不提供任何生产部署承诺。
@@ -194,8 +194,8 @@ python '<path-to-skill-creator>/scripts/quick_validate.py' skills/x-feed
 telegram-gateway/       Telegram bot/gateway 插件源码与测试
 dsh-assistant/          个人助理责任、提醒与 outbox
 dsh-cron/               定时 Agent manager/scheduler
-x-feed/                 X 洞察私有业务运行时与 Python 流水线（非插件）
-skills/x-feed/          X 反馈与收藏的 Agent 行为说明
+personal-feed/          单一 Personal Feed 业务运行时与页面观察器（非插件）
+skills/personal-feed/   Feed 请求、反馈与收藏的 Agent 行为说明
 skills/explore-opportunity/  用现有工具查证线索并维护显式兴趣的 Skill
 ```
 

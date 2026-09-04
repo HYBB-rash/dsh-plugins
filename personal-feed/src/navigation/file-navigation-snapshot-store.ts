@@ -43,7 +43,7 @@ export class FileNavigationSnapshotStore implements NavigationSnapshotWriter {
     let offset = 0
     while (offset < content.length) {
       const written = writeSync(descriptor, content, offset, content.length - offset, null)
-      if (written <= 0) throw new Error('x-feed: incomplete navigation snapshot write')
+      if (written <= 0) throw new Error('personal-feed: incomplete navigation snapshot write')
       offset += written
     }
   }

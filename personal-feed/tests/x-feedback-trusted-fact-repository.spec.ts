@@ -236,9 +236,9 @@ describe('FileTrustedFactRepository', () => {
     expect(snapshot.facts).toHaveLength(1)
     expect(snapshot.facts[0].locator.persistence.lineNumber).toBe(4)
     expect(warnings).toEqual([
-      `x-feed: skipping corrupt trusted-facts.jsonl line: ${invalid}`,
-      `x-feed: skipping invalid trusted-facts.jsonl line: ${unknown.slice(0, 120)}`,
-      `x-feed: skipping invalid trusted-facts.jsonl line: ${candidate.slice(0, 120)}`,
+      `personal-feed: skipping corrupt trusted-facts.jsonl line: ${invalid}`,
+      `personal-feed: skipping invalid trusted-facts.jsonl line: ${unknown.slice(0, 120)}`,
+      `personal-feed: skipping invalid trusted-facts.jsonl line: ${candidate.slice(0, 120)}`,
     ])
   })
 

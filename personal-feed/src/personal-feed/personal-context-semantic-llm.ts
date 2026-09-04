@@ -60,7 +60,7 @@ export function createPersonalContextSemanticLlmPort(options: {
         return decodeDecision(assembler, tool.name)
       } catch (cause) {
         if (signal.aborted) throw signal.reason ?? cause
-        options.ctx.logger?.warn(`x-feed: personal context semantic failed (${failureCategory(cause)})`)
+        options.ctx.logger?.warn(`personal-feed: personal context semantic failed (${failureCategory(cause)})`)
         throw new Error('personal context semantic response is invalid', { cause })
       }
     },
@@ -90,7 +90,7 @@ function semanticRequest(
     reasoningEffort: ReasoningEffortId('off'),
     messages: [createUserMessage({
       content: [{ type: 'text', text: JSON.stringify({ ...input, rawTextUtf16Length }) }],
-      source: { kind: 'plugin', plugin: 'x-feed' },
+      source: { kind: 'plugin', plugin: 'personal-feed' },
     })],
     system: SYSTEM,
     tools: [tool],

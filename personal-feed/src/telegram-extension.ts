@@ -3,9 +3,9 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createPersonalContextOwner } from './v2/personal-context-owner.ts'
-import { parseXFeedRuntimeConfig, resolveObserverCliPath } from './config.ts'
+import { parsePersonalFeedRuntimeConfig, resolveObserverCliPath } from './config.ts'
 import { XFeedbackStore } from './store.ts'
-import { registerXFeedTools } from './tools.ts'
+import { registerPersonalFeedTools } from './tools.ts'
 import { runCleanFeedback } from './x-feedback/clean-agent.ts'
 import { FeedbackEffectAdapter, type FeedbackOperationStore } from './x-feedback/feedback-effect-adapter.ts'
 import { InMemoryPendingStore } from './x-feedback/pending-store.ts'
@@ -31,18 +31,18 @@ import {
 } from './trusted-facts/index.ts'
 
 /** The scoped Telegram interactive-root contract. */
-export const X_FEED_CONTRACT = [
-  'X 洞察反馈合同：',
+export const PERSONAL_FEED_TELEGRAM_CONTRACT = [
+  'Personal Feed Telegram 合同：',
   '- Telegram 引用块只提供定位上下文，当前用户消息才是用户的新指令。',
-  '- 只有当前消息给出 X URL，或引用上下文明示 X 内容时，才进入这份 X 反馈合同；没有 X 线索的普通对话（如「这个方案我不喜欢」「这个颜色我不喜欢」）按普通对话回应，不调用 x_feed 工具，也不强行追问。',
+  '- 只有当前消息给出 X URL，或引用上下文明示 X 内容时，才进入这份 X 反馈合同；没有 X 线索的普通对话（如「这个方案我不喜欢」「这个颜色我不喜欢」）按普通对话回应，不调用 personal_feed 工具，也不强行追问。',
   '- 用户消息里直接给出明确 X URL 时可以记录；引用里只有一个 X URL 时也可以直接定位。',
   '- 用户给出唯一的序号或唯一标题时可以记录；必须能在当前引用中唯一对应一条 X 内容。',
   '- 引用报告有多个 X URL，而用户只说「这个/这条/它」等无法唯一指向的话时，只问一句「你指哪一条？」；不能调用工具写账本。',
   '- 当前消息明确在谈 X 内容或明确要求记录 X 反馈，但没有可定位的 X 引用上下文，且用户没有直接给出 URL、唯一序号或唯一标题时，只问一句「你指哪一条？」或请用户贴出 URL；不能调用工具写账本，也不能根据会话历史猜。',
-  '- 用户明确对已定位的 X 内容说收藏或取消收藏时，先定位目标，再调用 x_feed_record_feedback；喜欢/不喜欢由 Telegram clean feedback 与 TrustedFact 链处理，不调用旧账本工具。',
+  '- 用户明确对已定位的 X 内容说收藏或取消收藏时，先定位目标，再调用 personal_feed_record_feedback；喜欢/不喜欢由 Telegram clean feedback 与 TrustedFact 链处理，不调用收藏工具。',
   '- 「这批都没兴趣」「最近 Codex 太多」等评价不得写入旧反馈账本；必须由 clean feedback 链按其自身合同判断。',
   '- 无论是否曾经记录过、无论用户是否重复表达，只要用户明确表达收藏/取消收藏，都必须先调用工具写入；喜欢/不喜欢则等待 clean feedback 链结果。不得凭记忆或推测声称「已记录」「无需记录」——只有对应链路成功后，才能向用户确认。',
-  '- x_feed_record_feedback 本身只写 X 收藏账本；具体单条 save/unsave 不进长期 canary memory。',
+  '- personal_feed_record_feedback 本身只写 X 收藏账本；具体单条 save/unsave 不进长期 canary memory。',
   '- 不得为了 X 反馈另建 Markdown、research 文件或其他平行收藏文件；这不限制上层产品因其自身目的另做记录。',
   '- 只有用户明确泛化为「以后多发/少发这种」时，才同时遵守现有长期认识增量层合同。',
   '- 不因为反馈创建当前承诺、cron 或后台 worker。',
@@ -55,13 +55,13 @@ export async function installTelegramExtensionWithClock(
   rawConfig: Readonly<Record<string, unknown>>,
   installClock: Readonly<{ readonly now: () => Date }>,
 ): Promise<() => Promise<void>> {
-  const config = parseXFeedRuntimeConfig(rawConfig)
+  const config = parsePersonalFeedRuntimeConfig(rawConfig)
   let navigation: RebuildTrustedFactNavigation
   try {
     navigation = initializeTrustedFactNavigation(config.dataDir)
   } catch (error) {
     const cause = error instanceof Error ? error.message : String(error)
-    const message = `x-feed: trusted-fact navigation not-ready: ${cause}`
+    const message = `personal-feed: trusted-fact navigation not-ready: ${cause}`
     ctx.logger.error(message)
     throw new Error(message, { cause: error })
   }
@@ -83,9 +83,9 @@ export async function installTelegramExtensionWithClock(
   })
   const useCase = new FeedbackUseCase(pendingStore)
   const modelService = (ctx as unknown as { get?: (name: string) => unknown }).get?.('agentDefaultModel')
-  if (!isModelSelectionService(modelService)) throw new Error('x-feed: default model selection service is unavailable')
+  if (!isModelSelectionService(modelService)) throw new Error('personal-feed: default model selection service is unavailable')
   const selection = modelService.currentSelection()
-  if (!isModelSelection(selection)) throw new Error('x-feed: default model selection is invalid')
+  if (!isModelSelection(selection)) throw new Error('personal-feed: default model selection is invalid')
   const semantic = createPersonalContextSemanticLlmPort({
     ctx,
     provider: selection.provider,
@@ -113,7 +113,7 @@ export async function installTelegramExtensionWithClock(
     clock: installClock,
   })
   const abortInstall = (): void => {
-    if (!installLifetime.signal.aborted) installLifetime.abort(new Error('x-feed Telegram extension stopped'))
+    if (!installLifetime.signal.aborted) installLifetime.abort(new Error('personal-feed Telegram extension stopped'))
   }
 
   let personalFeedProduction: ReturnType<typeof createPersonalFeedTelegramProductionComposition>
@@ -186,11 +186,11 @@ export async function installTelegramExtensionWithClock(
     let disposeSection: (() => void) | undefined
     try {
       const cleanup = agent.ctx.effect(() => {
-        disposeTools = registerXFeedTools(agent.ctx, { store, logger: ctx.logger })
+        disposeTools = registerPersonalFeedTools(agent.ctx, { store, logger: ctx.logger })
         disposeSection = agent.ctx.systemPrompt.section({
-          name: 'x-feed:contract',
+          name: 'personal-feed:contract',
           order: 96,
-          text: X_FEED_CONTRACT,
+          text: PERSONAL_FEED_TELEGRAM_CONTRACT,
         })
         return () => {
           const errors: unknown[] = []
@@ -199,10 +199,10 @@ export async function installTelegramExtensionWithClock(
           if (errors.length === 1) throw errors[0]
           if (errors.length > 1) throw new AggregateError(errors)
         }
-      }, 'x-feed.telegram-root()')
+      }, 'personal-feed.telegram-root()')
       runtimes.set(agent, cleanup as () => void)
     } catch (error) {
-      // registerXFeedTools is itself transactional.  If the effect host
+      // registerPersonalFeedTools is itself transactional.  If the effect host
       // throws after it returned a cleanup, finish this root rollback here.
       const rollbackErrors: unknown[] = []
       try { disposeSection?.() } catch (cleanupError) { rollbackErrors.push(cleanupError) }
@@ -310,7 +310,7 @@ function initializeTrustedFactNavigation(dataDir: string): RebuildTrustedFactNav
   const navigationPath = join(dataDir, TRUSTED_FACT_NAVIGATION_FILE_NAME)
   const stored = pinNavigationSnapshot(JSON.parse(readFileSync(navigationPath, 'utf8')))
   if (JSON.stringify(stored) !== JSON.stringify(expected)) {
-    throw new Error('x-feed: trusted-fact navigation verification failed')
+    throw new Error('personal-feed: trusted-fact navigation verification failed')
   }
   return navigation
 }

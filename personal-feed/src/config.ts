@@ -3,8 +3,8 @@ import { join } from 'node:path'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { defaultStoreDir } from './store.ts'
 
-/** Shared operator configuration for the X business runtime. */
-export interface XFeedRuntimeConfig {
+/** Shared operator configuration for the Personal Feed runtime. */
+export interface PersonalFeedRuntimeConfig {
   readonly dataDir?: string
   readonly telegramSessionId?: string
   readonly feedbackPendingTtlMs?: number
@@ -12,7 +12,7 @@ export interface XFeedRuntimeConfig {
   readonly personalFeedDataDir?: string
 }
 
-export interface ResolvedXFeedRuntimeConfig {
+export interface ResolvedPersonalFeedRuntimeConfig {
   readonly dataDir: string
   readonly telegramSessionId: string
   readonly feedbackPendingTtlMs: number
@@ -24,9 +24,9 @@ const DEFAULT_FEEDBACK_PENDING_TTL_MS = 600_000
 const DEFAULT_FEEDBACK_TURN_TIMEOUT_MS = 30_000
 
 /** Parse the bounded JSON object supplied by a trusted host extension loader. */
-export function parseXFeedRuntimeConfig(
+export function parsePersonalFeedRuntimeConfig(
   input: Readonly<Record<string, unknown>>,
-): ResolvedXFeedRuntimeConfig {
+): ResolvedPersonalFeedRuntimeConfig {
   const dataDir = optionalString(input, 'dataDir')
   const telegramSessionId = optionalString(input, 'telegramSessionId')
   const feedbackPendingTtlMs = optionalInteger(input, 'feedbackPendingTtlMs', 1, 86_400_000)
@@ -58,7 +58,7 @@ export function resolveObserverCliPath(config: { readonly observerCliPath?: stri
 function optionalString(input: Readonly<Record<string, unknown>>, key: string): string | undefined {
   const value = input[key]
   if (value === undefined) return undefined
-  if (typeof value !== 'string') throw new Error(`x-feed config ${key} must be a string`)
+  if (typeof value !== 'string') throw new Error(`personal-feed config ${key} must be a string`)
   return value
 }
 
@@ -71,7 +71,7 @@ function optionalInteger(
   const value = input[key]
   if (value === undefined) return undefined
   if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) {
-    throw new Error(`x-feed config ${key} must be an integer between ${min} and ${max}`)
+    throw new Error(`personal-feed config ${key} must be an integer between ${min} and ${max}`)
   }
   return value as number
 }

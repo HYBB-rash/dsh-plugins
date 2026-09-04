@@ -84,11 +84,11 @@ export function createPersonalFeedJudgmentLlmPort(options: {
       if (signal.aborted) return INCOMPLETE
       const result = decodeJudgment(assembler, tool.name)
       if (result.kind === 'incomplete') {
-        options.ctx.logger?.warn(`x-feed: personal Feed judgment incomplete (${incompleteCategory(assembler, tool.name)})`)
+        options.ctx.logger?.warn(`personal-feed: personal Feed judgment incomplete (${incompleteCategory(assembler, tool.name)})`)
       }
       return result
     } catch (cause) {
-      options.ctx.logger?.warn(`x-feed: personal Feed judgment incomplete (${failureCategory(cause)})`)
+      options.ctx.logger?.warn(`personal-feed: personal Feed judgment incomplete (${failureCategory(cause)})`)
       return INCOMPLETE
     }
   }
@@ -272,7 +272,7 @@ function judgmentRequest(
     reasoningEffort: ReasoningEffortId('off'),
     messages: [createUserMessage({
       content: [{ type: 'text', text: JSON.stringify(payload) }],
-      source: { kind: 'plugin', plugin: 'x-feed' },
+      source: { kind: 'plugin', plugin: 'personal-feed' },
     })],
     system: SYSTEM,
     tools: [tool],

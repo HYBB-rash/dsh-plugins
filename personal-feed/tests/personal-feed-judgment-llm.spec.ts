@@ -309,7 +309,7 @@ describe('single Personal Feed candidate judgment LLM boundary', () => {
 
     await expect(port.judgeOne(input({ candidate: Object.freeze({ ...candidate, body: 'PRIVATE_BODY_CANARY' }) })))
       .resolves.toStrictEqual({ kind: 'incomplete' })
-    expect(warn).toHaveBeenCalledWith('x-feed: personal Feed judgment incomplete (information-unknown)')
+    expect(warn).toHaveBeenCalledWith('personal-feed: personal Feed judgment incomplete (information-unknown)')
     expect(JSON.stringify(warn.mock.calls)).not.toContain('PRIVATE_BODY_CANARY')
   })
 })
