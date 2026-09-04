@@ -114,3 +114,4 @@
 - 2026-09-05：源码模式的本地 Web Profile 使用 hoisted `file:` 依赖时，同版本同路径下 `plugin add --force` 与 `plugin update --force` 都可能退出 0、显示 `Already up to date`，却保留旧插件字节；刷新必须经 Harness 先移除实际已安装的本地插件再重新添加，并以源码/Profile 哈希和重复安装测试验证，不能用临时新路径 Profile 的成功替代真实既有 Profile 证据。
 - 2026-09-05：源码 Web 运行入口的默认应用参数不能注入 `--dump-config` 或 `--dump-default-config`，Harness 明确要求配置导出不携带应用参数。开发默认端口应只在正常启动且调用者未显式传 `--port` 时补入；本机正式部署继续由 `dsh-web-start` 显式固定 3080。
 - 2026-09-05：`pnpm install --ignore-scripts` 后，`pnpm rebuild fs-ext` 可能退出 0 却不生成 `fs_ext.node`；native 验收不能只看命令回执或由 fake rebuild 制造标记，必须执行已定位包自己的 install 脚本，并用当前 Node 实际 `require()` 生成物。
+- 2026-09-05：统一 Web Profile 中 `dsh-cron` 的 scheduler 和 manager 是两个互斥运行角色；只装 scheduler 会让既有任务继续跑，却没有 control socket，导致 `dsh-assistant` 的 cron 管理能力不可用。生产 patch 必须用同一模块的两个实例分别承载执行面和控制面，并让 manager 与 assistant 共享同一个 DSH_HOME socket；配置回归要经过真实 `plugin exec` 与 `--dump-config`，不能只查 YAML 字面。

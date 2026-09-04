@@ -12,6 +12,13 @@
     maxConcurrent: 3
     deliverOnError: true
 
+- insert:
+    - id: dsh-cron-manager
+      name: '@deepseek-ai/dsh-cron'
+      config:
+        mode: manager
+        controlSocketPath: !!js dshHomePath('storages/dsh-cron/control.sock')
+
 - id: dsh-assistant
   config:
     mode: telegram

@@ -359,11 +359,14 @@ URL 不通过 argv 传递，避免出现在 `ps` 或 `/proc/<pid>/cmdline`。Har
 
 ## 9. `portable.patch.yml` 的责任
 
-`config/web/portable.patch.yml` 只覆盖三个插件的运行参数：
+`config/web/portable.patch.yml` 只覆盖三个插件的运行参数，其中 cron 按职责装载两个实例：
 
 - telegram gateway 的 Session、preset 和工作目录；
-- cron 的 scheduler、轮询、并发和错误投递；
-- assistant 的 Telegram 模式、轮询和 cron socket。
+- cron scheduler 的轮询、并发和错误投递；
+- cron manager 的控制 socket；
+- assistant 的 Telegram 模式、轮询，并指向 manager 的同一个 cron socket。
+
+同一个 cron 实例不能同时承担 scheduler 和 manager。scheduler 负责定时执行既有任务，manager 负责创建控制 RPC socket 和注册管理工具；统一 Web Profile 必须同时装载二者，否则 assistant 虽然能启动，但无法管理 cron。
 
 生产凭据、LAN 地址、源 IP 白名单、公网域名、代理和启动通知都留在部署层，不塞进业务 patch。这样源码开发和生产包使用同一 Harness、插件构建产物、patch 和 runtime，生产唯一特殊数据是打包时附加的凭据。
 

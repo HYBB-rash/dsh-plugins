@@ -70,10 +70,46 @@ import re
 import sys
 
 config = Path(sys.argv[1]).read_text(encoding="utf-8")
-for plugin_id in ["telegram-gateway", "dsh-cron", "dsh-assistant"]:
-    count = len(re.findall(rf"(?m)^\s*- id: {re.escape(plugin_id)}$", config))
+blocks = re.split(r"(?m)(?=^[ \t]*- id:)", config)
+for plugin_id in ["telegram-gateway", "dsh-cron", "dsh-cron-manager", "dsh-assistant"]:
+    matching = [
+        block for block in blocks
+        if re.search(rf"(?m)^[ \t]*- id: {re.escape(plugin_id)}$", block)
+    ]
+    count = len(matching)
     if count != 1:
         raise SystemExit(f"effective profile must contain exactly one {plugin_id} row, got {count}")
+
+expected_modes = {
+    "dsh-cron": "scheduler",
+    "dsh-cron-manager": "manager",
+}
+for plugin_id, mode in expected_modes.items():
+    block = next(
+        block for block in blocks
+        if re.search(rf"(?m)^[ \t]*- id: {re.escape(plugin_id)}$", block)
+    )
+    if re.search(rf"(?m)^[ \t]+mode: {mode}$", block) is None:
+        raise SystemExit(f"effective profile must configure {plugin_id} in {mode} mode")
+
+def value_for(plugin_id, key):
+    block = next(
+        block for block in blocks
+        if re.search(rf"(?m)^[ \t]*- id: {re.escape(plugin_id)}$", block)
+    )
+    match = re.search(rf"(?m)^[ \t]+{re.escape(key)}: (.+)$", block)
+    if match is None:
+        raise SystemExit(f"effective profile must configure {key} for {plugin_id}")
+    return match.group(1)
+
+manager_socket = value_for("dsh-cron-manager", "controlSocketPath")
+assistant_socket = value_for("dsh-assistant", "cronControlSocketPath")
+expected_socket = "!!js dshHomePath('storages/dsh-cron/control.sock')"
+if manager_socket != expected_socket or assistant_socket != expected_socket:
+    raise SystemExit(
+        "cron manager and assistant must share the one DSH_HOME control socket; "
+        f"got manager={manager_socket!r}, assistant={assistant_socket!r}"
+    )
 PY
 
 echo 'self-describing plugin import passed'
