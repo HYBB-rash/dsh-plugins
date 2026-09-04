@@ -8,15 +8,15 @@
 
 > 这里的“展示名”仅用于本 README 的识别和检索；紧邻的目录名以及组件类型才是代码中的真实标识。它们没有修改 API、包名或 Skill 名。
 
-## 发版入口
+## 部署入口
 
-这个仓库部署到 `herman.hermes` 时，唯一入口是：
+这个仓库部署到 `herman.hermes` 时，唯一入口是普通 `tar.gz` Web 部署：
 
 ```bash
-./release/dsh
+nix develop -c ./scripts/dsh-web-deploy
 ```
 
-开发、上线前测试和生产运行使用同一个不可变 Docker/OCI 镜像；镜像只能从明确的 Harness commit 和插件 commit 构建。禁止直接同步源码、修改线上 selector、在线安装依赖，也禁止恢复或扩展已退役的源码发版系统。停机、快照、上线、真实验收、正式接受和回退的完整边界见 [`release/README.md`](release/README.md)。
+该命令构建并上传完整 Harness、三个插件包、固定 Node runtime 和生产凭据，但不会隐式停止或启动远端服务。远端启动、重启、健康检查和 Telegram 登录 URL 遵循项目 `$dsh-web-deploy` Skill；完整结构与现场经验见 [`docs/dsh-web-portable-deployment.md`](docs/dsh-web-portable-deployment.md)。旧 Docker/OCI `release/dsh` 发版系统已经退役，不得恢复或与普通归档流程混用。
 
 ## 仓库总览
 
@@ -41,7 +41,7 @@ flowchart LR
 
 ## 公开范围与前置条件
 
-这个仓库是源码参考，不是已发布的安装包或 Skill 集合：没有根 `package.json`、统一安装脚本、发布的 npm tarball 或自动激活清单。插件目录自己的 `package.json` 都声明了 DSH/Cordis peer dependencies，且目前的版本是 `0.1.0-rc.*`。要构建或测试，需要：
+这个仓库主要是源码参考，不是公开发布的安装包或 Skill 集合：没有根 `package.json`、公开 npm tarball 或自动激活清单；仓库内普通归档脚本只服务作者自己的 `herman.hermes`。插件目录自己的 `package.json` 都声明了 DSH/Cordis peer dependencies，且目前的版本是 `0.1.0-rc.*`。要构建或测试，需要：
 
 - 一个与这些源码相容的 DeepSeek Harness 源码检出，其中能提供 `@deepseek-ai/*` 与 Cordis 依赖；兼容版本没有在本仓库冻结。
 - Node.js、pnpm、TypeScript/`tsc`、`tsdown`、Vitest；它们应由该兼容开发环境提供。

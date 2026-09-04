@@ -24,12 +24,11 @@
 
 ## 发布与数据边界
 
-- 本机到 `herman.hermes` 的发布唯一入口是 `./release/dsh`。Harness、插件、Profiles、Skills 和运行依赖应从明确 Git commit 构建为不可变 Docker/OCI 镜像；开发、上线前测试和生产运行使用同一候选。不要直接同步源码、修改线上 selector、远程安装依赖或恢复已退役的源码发布方式。
-- 镜像只保存不可变代码；`~/.dsh`、工作区、Session、SQLite、cron 状态、凭据、Telegram offset、附件与日志在镜像外持久化。日常开发使用停机快照的独立副本、测试凭据、假 Telegram 和无真实任务 cron 台账，不能访问真实 Telegram、领取生产任务或写生产目录。
-- 生产候选先在镜像中完成测试；获准停机后停止 DSH 写入者、确认 writer=0 并生成一致快照，再用快照副本做上线前验证。只有候选镜像与 archive 摘要一致、必要的 Web/LAN、Telegram、cron、SQLite、offset 与宿主能力门通过，才能启动生产候选。
-- 上线后保持 `awaiting-user-acceptance`，由用户完成真实 Telegram/Web 验收并执行 `./release/dsh accept` 后才固定为 `last-good`。`rollback` 默认只说明恢复方案；只有用户明确批准 `--approved` 才能恢复上一镜像及该次停机前数据。工具不得静默恢复、覆盖或删除回退边界。
-- 现场故障只有在明确属于挂载、权限、Compose、路径或启动参数，且仍处于限定现场窗口时，才可现场修复后重验；原因不明、需改 Harness/插件、改变数据语义或无法在窗口内解决时，先报告。产品代码回本地修复、提交、重建唯一候选，禁止在线改源码。
-- `herman.hermes` 替代试运行使用独立 Telegram bot 和独立 `~/.dsh` 写入状态，只按需读取 OpenClaw 的 workspace、记忆、技能和任务事实。在真实替代验收前，OpenClaw 保持其进程、cron、Session、记忆索引与 Telegram token 的唯一写入权。
+- 本机到 `herman.hermes` 的唯一现役发布入口是 `$dsh-web-deploy` 约束的普通 `tar.gz` 流程：`scripts/dsh-web-deploy` 只打包和上传，远端 `dsh-web-start` 在另行授权后校验、安装、切换和启动。旧 Docker/OCI `release/dsh` 系统已于 2026-09-04 退役，不恢复第二套入口。
+- 归档保存完整 Harness、三个插件包、固定 Node runtime、同一 Web patch/runtime 和打包阶段加入的生产凭据；`~/.dsh`、Workspace、Session、SQLite、cron、Telegram offset、附件与日志都留在归档外。
+- 普通归档是秘密载体且不是完全离线包。开发和自动测试不得使用真实凭据、Telegram 或 cron 写入；目标机只安装已构建插件并使用 `--ignore-scripts`，不在线修改 release 内容。
+- 上传不等于启动，也不产生新 token。停机或重启必须另获许可，精确停止当前监督进程树后验证两个 `3080` 入口、认证、数据和真实业务；该流程没有自动快照、accept 或 rollback，不能把旧 Docker 回执当作当前恢复保证。
+- OpenClaw 永远在流程外且可以完全不存在；不得读取、停止、配置或依赖它。
 
 ## Telegram gateway
 

@@ -1,13 +1,13 @@
 ---
 name: dsh-web-deploy
-description: 在 dsh-plugins 仓库中打包、上传、启动、重启或排查 herman.hermes 的普通 tar.gz DSH Web 部署。涉及 scripts/package-dsh-web、dsh-web-deploy、dsh-web-start、Node native ABI、Corepack/pnpm、LAN 白名单、trusted-host、listProviders 401/403、dsh.man-her.icu 或 Telegram 启动 URL 时使用。该流程不是 Docker release/dsh，也不是本地 Web 开发。
+description: 在 dsh-plugins 仓库中打包、上传、启动、重启或排查 herman.hermes 的普通 tar.gz DSH Web 部署。涉及 scripts/package-dsh-web、dsh-web-deploy、dsh-web-start、Node native ABI、Corepack/pnpm、LAN 白名单、trusted-host、listProviders 401/403、dsh.man-her.icu 或 Telegram 启动 URL 时使用。该流程是唯一现役发布入口，不用于本地 Web 开发。
 ---
 
 # DSH Web 普通归档部署
 
 先完整阅读 [`../../../docs/dsh-web-portable-deployment.md`](../../../docs/dsh-web-portable-deployment.md)，再操作。该文档解释每个现场兼容层和安全边界；不得只根据本 Skill 猜测当前运行状态。
 
-本 Skill 只覆盖普通 `tar.gz` 到 `herman.hermes` 的 Web 部署。本地源码安装、刷新和启动使用相邻的 `$dsh-web-dev`；任务同时触及本地开发行为时，还要读取 `../dsh-web-dev/SKILL.md`。Docker/OCI、`release/dsh`、快照、accept 或 rollback 使用对应发布流程。不得混用三者。
+本 Skill 只覆盖普通 `tar.gz` 到 `herman.hermes` 的 Web 部署，也是仓库唯一现役发布流程。本地源码安装、刷新和启动使用相邻的 `$dsh-web-dev`；任务同时触及本地开发行为时，还要读取 `../dsh-web-dev/SKILL.md`。旧 Docker/OCI、快照、accept 和 rollback 系统已经退役，不得恢复或混用。
 
 ## 固定边界
 
@@ -18,7 +18,7 @@ description: 在 dsh-plugins 仓库中打包、上传、启动、重启或排查
 - Harness trusted hosts 包含 `192.168.6.240` 和 `dsh.man-her.icu`。源 IP 白名单与 HTTP Host 信任不是同一机制。
 - HTTPS、DNS 和证书由外部网络反代负责；不要在 hermes 安装或配置 Caddy/nginx。
 - `$DSH_HOME`、Workspace 和业务数据在归档外；生产凭据只由打包器从 Git 忽略目录加入秘密归档。
-- 不读取、停止、配置或依赖 OpenClaw；不修改 `release/`。
+- 不读取、停止、配置或依赖 OpenClaw；不得恢复已删除的 `release/`。
 - 不在命令输出、日志摘录、提交信息或回复中打印 token、Cookie、bot token、API key 或 Notion token。
 
 ## 开始前
@@ -76,7 +76,7 @@ dsh-web-notify-start-url.mjs
    - `127.0.0.1:3080`
    - `192.168.6.240:3080`
 
-两个端口未释放时禁止启动第二份。不得触碰 Docker DSH 或 OpenClaw。
+两个端口未释放时禁止启动第二份。不得触碰任何遗留 Docker 状态或 OpenClaw。
 
 ## 启动远端实例
 

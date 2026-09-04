@@ -8,6 +8,16 @@ The repository evolves around the author's own needs. It makes **no promise of c
 
 > The display names below are only for recognition and search in this README. The adjacent directory and component type are the real code identifiers. No API, package name, or Skill name has been changed.
 
+## Deployment entry point
+
+The only supported deployment path from this repository to `herman.hermes` is the ordinary Web `tar.gz` flow:
+
+```bash
+nix develop -c ./scripts/dsh-web-deploy
+```
+
+This command packages and uploads the complete Harness, three plugin archives, a pinned Node runtime, and production credentials. It deliberately does not stop or start the remote service. Use the project `$dsh-web-deploy` Skill for remote start, restart, health checks, and the Telegram login URL; see [`docs/dsh-web-portable-deployment.md`](docs/dsh-web-portable-deployment.md) for the complete design and incident history. The former Docker/OCI `release/dsh` system is retired and must not be restored or mixed with this flow.
+
 ## Overview
 
 | Display name | Actual directory / type | When it helps | What changes after installation | Main boundary |
@@ -31,7 +41,7 @@ The diagram shows code-level collaboration, not a requirement to install everyth
 
 ## Public scope and prerequisites
 
-This repository is source reference, not a collection of published installable packages or Skills: it has no root `package.json`, unified install script, published npm tarball, or automatic activation manifest. Each plugin directory has its own `package.json`, declares DSH/Cordis peer dependencies, and is currently versioned `0.1.0-rc.*`. Building or testing requires:
+This repository is primarily source reference, not a collection of publicly installable packages or Skills: it has no root `package.json`, published npm tarball, or automatic activation manifest. Its portable deployment scripts exist only for the author's own `herman.hermes`. Each plugin directory has its own `package.json`, declares DSH/Cordis peer dependencies, and is currently versioned `0.1.0-rc.*`. Building or testing requires:
 
 - A compatible DeepSeek Harness source checkout that can provide `@deepseek-ai/*` and Cordis dependencies. This repository does not pin a compatible Harness version.
 - Node.js, pnpm, TypeScript/`tsc`, `tsdown`, and Vitest supplied by that compatible development environment.

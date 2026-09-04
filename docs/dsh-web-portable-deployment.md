@@ -2,7 +2,7 @@
 
 本文记录 `dsh-plugins` 当前普通 `tar.gz` Web 部署的结构、边界、现场故障和验证方式。它解释“为什么脚本里会有这些看似突然出现的细节”，供后续维护和排障使用。
 
-操作任务使用项目 Skill：`$dsh-web-deploy`。本地源码开发使用 `$dsh-web-dev`。本文不是 Docker `release/dsh` 的说明，也不授权读取或操作 OpenClaw。
+操作任务使用项目 Skill：`$dsh-web-deploy`。本地源码开发使用 `$dsh-web-dev`。旧 Docker/OCI 发布系统已经退役；本文记录的是仓库唯一现役发布流程，也不授权读取或操作 OpenClaw。
 
 ## 1. 总览
 

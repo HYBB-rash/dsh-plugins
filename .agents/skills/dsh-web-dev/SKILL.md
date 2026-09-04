@@ -17,7 +17,7 @@ description: 在 dsh-plugins 仓库中安装、刷新和启动本地 DSH Web 开
 - 修改 `config/web/portable.patch.yml` 或本地 Web 启动任务；
 - 排查本地 Web Profile 的插件安装、登记或配置合成问题。
 
-本文只覆盖本地源码开发入口。生产发布、Docker、快照、验收和回退遵循仓库其他专门规则。
+本文只覆盖本地源码开发入口。打包、上传、远端启动和生产验收使用项目 `$dsh-web-deploy`；旧 Docker 发布系统已退役，不得恢复第二套入口。
 
 ## 开始前
 
