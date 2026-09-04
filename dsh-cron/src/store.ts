@@ -734,6 +734,11 @@ export function foldRunLines(lines: readonly string[], jobId: string): FoldedJob
   return foldParsedRunLines(lines.map(parseRunLine), jobId)
 }
 
+export interface InspectedTerminalFinishes {
+  readonly unique: readonly RunFinishRecord[]
+  readonly conflicts: ReadonlyMap<string, readonly RunFinishRecord[]>
+}
+
 /**
  * V2 run ledger: the scheduler's single-writer event book over runs.jsonl.
  * Claim-before-side-effect is enforced by the caller; this class only makes
@@ -749,24 +754,46 @@ export class RunLedger {
     this.store = new JsonlStore(join(storeDir, 'runs.jsonl'))
   }
 
+  private refreshSnapshot(): void {
+    const revision = this.store.revision()
+    if (revision === this.cachedRevision) return
+    const rawLines = this.store.readLines()
+    const stableRevision = this.store.revision()
+    if (stableRevision !== revision) {
+      throw new Error('run ledger changed while reading one snapshot')
+    }
+    this.cachedLines = rawLines.map(parseRunLine)
+    this.cachedRevision = revision
+    this.cachedFolds.clear()
+  }
+
   /** Fold one job's projection from the current file contents. */
   foldJob(jobId: string): FoldedJobRuns {
-    const revision = this.store.revision()
-    if (revision !== this.cachedRevision) {
-      const rawLines = this.store.readLines()
-      const stableRevision = this.store.revision()
-      if (stableRevision !== revision) {
-        throw new Error('run ledger changed while reading one snapshot')
-      }
-      this.cachedLines = rawLines.map(parseRunLine)
-      this.cachedRevision = revision
-      this.cachedFolds.clear()
-    }
+    this.refreshSnapshot()
     const cached = this.cachedFolds.get(jobId)
     if (cached !== undefined) return cached
     const folded = foldParsedRunLines(this.cachedLines, jobId)
     this.cachedFolds.set(jobId, folded)
     return folded
+  }
+
+  /** Inspect durable terminal facts across every job, including deleted jobs. */
+  inspectTerminalFinishes(): InspectedTerminalFinishes {
+    this.refreshSnapshot()
+    const byRunId = new Map<string, RunFinishRecord[]>()
+    for (const parsed of this.cachedLines) {
+      if (parsed.kind !== 'finish') continue
+      const records = byRunId.get(parsed.record.runId) ?? []
+      records.push(parsed.record)
+      byRunId.set(parsed.record.runId, records)
+    }
+    const unique: RunFinishRecord[] = []
+    const conflicts = new Map<string, readonly RunFinishRecord[]>()
+    for (const [runId, records] of byRunId) {
+      if (records.length === 1) unique.push(records[0]!)
+      else conflicts.set(runId, records)
+    }
+    return { unique, conflicts }
   }
 
   /**

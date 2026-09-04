@@ -31,6 +31,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
+import type {} from '@deepseek-ai/dsh-workspace'
 import {
   chunkText,
   createTelegramHttp,
@@ -87,6 +88,10 @@ import type {
 
 /** Largest delay that Node timers represent without clamping. */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+function perRunSessionId(runId: string): string {
+  return `session-cron-run-${createHash('sha256').update(runId).digest('hex').slice(0, 32)}`
+}
 
 /** One-shot grace window, mirroring Hermes ONESHOT_GRACE_SECONDS. */
 const ONESHOT_GRACE_MS = 120_000
@@ -958,6 +963,92 @@ export class SchedulerRuntime implements RunNowPort {
         void handle.dispose()
       }
     }
+    await this.reconcilePerRunSessionArchives()
+  }
+
+  /** Converge durable, uniquely-finished per-run Sessions into the global archive. */
+  private async reconcilePerRunSessionArchives(): Promise<void> {
+    let inspected: ReturnType<RunLedger['inspectTerminalFinishes']>
+    try {
+      inspected = this.ledger.inspectTerminalFinishes()
+    } catch (error) {
+      this.ctx.logger.error(
+        `dsh-cron: per_run archive failed stage=ledger runId=- sessionId=- error=${errorMessage(error)}`,
+      )
+      return
+    }
+
+    for (const [runId, records] of inspected.conflicts) {
+      const expected = perRunSessionId(runId)
+      for (const record of records) {
+        if (record.sessionId !== expected && !record.sessionId.startsWith('session-cron-run-')) continue
+        this.ctx.logger.error(
+          `dsh-cron: per_run archive rejected stage=identity runId=${runId} sessionId=${record.sessionId} error=multiple_valid_finishes`,
+        )
+      }
+    }
+
+    const candidates = inspected.unique.filter(record => {
+      const expected = perRunSessionId(record.runId)
+      if (record.sessionId === expected) return true
+      if (record.sessionId.startsWith('session-cron-run-')) {
+        this.ctx.logger.error(
+          `dsh-cron: per_run archive rejected stage=identity runId=${record.runId} sessionId=${record.sessionId} error=session_id_hash_mismatch`,
+        )
+      }
+      return false
+    })
+    if (candidates.length === 0) return
+
+    let persistence: Context['sessionPersistence'] | undefined
+    let workspaceRegistry: Context['workspaceRegistry'] | undefined
+    try {
+      persistence = this.ctx.get('sessionPersistence')
+      workspaceRegistry = this.ctx.get('workspaceRegistry')
+      if (persistence === undefined || workspaceRegistry === undefined) {
+        throw new Error('required session persistence or workspace service unavailable')
+      }
+    } catch (error) {
+      this.ctx.logger.error(
+        `dsh-cron: per_run archive failed stage=services runId=- sessionId=- error=${errorMessage(error)}`,
+      )
+      return
+    }
+    if (persistence === undefined || workspaceRegistry === undefined) return
+
+    let archived: ReadonlySet<string>
+    try {
+      archived = new Set(workspaceRegistry.archivedSessionIds)
+    } catch (error) {
+      this.ctx.logger.error(
+        `dsh-cron: per_run archive failed stage=archive_state runId=- sessionId=- error=${errorMessage(error)}`,
+      )
+      return
+    }
+    const pending = candidates.filter(record => !archived.has(record.sessionId))
+    if (pending.length === 0) return
+
+    let persistedSessionIds: ReadonlySet<string>
+    try {
+      const snapshots = await persistence.list({ signal: this.signal })
+      persistedSessionIds = new Set(snapshots.map(snapshot => snapshot.header.id))
+    } catch (error) {
+      this.ctx.logger.error(
+        `dsh-cron: per_run archive failed stage=session_list runId=- sessionId=- error=${errorMessage(error)}`,
+      )
+      return
+    }
+
+    for (const record of pending) {
+      if (!persistedSessionIds.has(record.sessionId)) continue
+      try {
+        await workspaceRegistry.archiveSession(SessionId(record.sessionId))
+      } catch (error) {
+        this.ctx.logger.error(
+          `dsh-cron: per_run archive failed stage=archive runId=${record.runId} sessionId=${record.sessionId} error=${errorMessage(error)}`,
+        )
+      }
+    }
   }
 
   private async recoverPreparedDelivery(
@@ -1264,7 +1355,7 @@ export class SchedulerRuntime implements RunNowPort {
     }
     const sessionMode = (job as Job & { readonly sessionMode?: 'persistent' | 'per_run' }).sessionMode ?? 'persistent'
     if (sessionMode === 'per_run') {
-      return `session-cron-run-${createHash('sha256').update(runId).digest('hex').slice(0, 32)}`
+      return perRunSessionId(runId)
     }
     return `session-cron-${job.id}`
   }

@@ -154,6 +154,13 @@ interface AgentCall {
   readonly options?: Record<string, unknown>
 }
 
+function persistenceSnapshot(id: string) {
+  return {
+    header: { version: 2 as const, id, createdAt: 0, isSeeded: false },
+    revision: 'test',
+  }
+}
+
 /** A test-only agent registry that exposes session lifecycle decisions. */
 function lifecycleCtx(
   calls: AgentCall[],
@@ -193,7 +200,7 @@ function lifecycleCtx(
       if (name === 'agents') return registry
       if (name === 'sessions') return { flush: async () => undefined }
       if (name === 'sessionPersistence') {
-        return { list: async () => persistedSessionIds.map(id => ({ id })) }
+        return { list: async () => persistedSessionIds.map(persistenceSnapshot) }
       }
       if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'test', model: 'test' }) }
       return undefined
@@ -245,7 +252,7 @@ function orderedEnvironmentCtx(
       if (name === 'agents') return agents
       if (name === 'sessions') return { flush: async () => { order.push('flush') } }
       if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'test', model: 'test' }) }
-      if (name === 'sessionPersistence') throw new Error('marked per_run must not inspect persistence')
+      if (name === 'sessionPersistence') return { list: async () => [] }
       return undefined
     },
     logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
@@ -286,6 +293,520 @@ function newRuntime(dir: string, deps: object) {
   runtime.start()
   return { runtime, controller, errors, events }
 }
+
+describe('per_run session archival reconciliation', () => {
+  it('archives a real uniquely-finished per_run session even after its job was deleted', async () => {
+    const dir = tempDir()
+    const runId = 'deleted-per-run@2026-08-14T11:00:00.000Z'
+    const sessionId = 'session-cron-run-169cf3d94c5d0f34a55d572d5ff49ff9'
+    const deletedJob: Job = {
+      id: 'deleted-per-run',
+      schedule: { kind: 'interval', minutes: 60 },
+      prompt: 'deleted historical job',
+      deliver: 'silent',
+      sessionMode: 'per_run',
+      createdAt: '2026-08-14T10:00:00.000Z',
+    }
+    const jobs = new JobStore(dir)
+    jobs.append({ op: 'create', ...deletedJob })
+    jobs.append({ op: 'delete', id: deletedJob.id, deletedAt: '2026-08-14T12:00:00.000Z' })
+    new RunLedger(dir).finish({
+      schemaVersion: 2,
+      event: 'finish',
+      runId,
+      jobId: 'deleted-per-run',
+      sessionId,
+      scheduledFor: '2026-08-14T11:00:00.000Z',
+      startedAt: '2026-08-14T11:00:01.000Z',
+      finishedAt: '2026-08-14T11:00:02.000Z',
+      status: 'success',
+    })
+    expect(jobs.fold().active).toEqual([])
+    const ledgerBefore = readLines(dir)
+    const archived: string[] = []
+    const events: Array<{ name: string; payload: unknown }> = []
+    const ctx = {
+      get: (name: string) => {
+        if (name === 'sessionPersistence') {
+          return { list: async () => [persistenceSnapshot(sessionId)] }
+        }
+        if (name === 'workspaceRegistry') {
+          return {
+            archivedSessionIds: [],
+            archiveSession: async (id: string) => { archived.push(id) },
+          }
+        }
+        return undefined
+      },
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      parallel: async (name: string, payload: unknown) => { events.push({ name, payload }) },
+    }
+    const runtime = new SchedulerRuntime(
+      ctx as never,
+      makeConfig(dir),
+      {} as never,
+      0,
+      new AbortController().signal,
+    )
+
+    runtime.start()
+    await waitFor(() => archived.includes(sessionId))
+    await runtime.dispose()
+
+    expect(archived).toEqual([sessionId])
+    expect(events).toEqual([])
+    expect(readLines(dir)).toEqual(ledgerBefore)
+  })
+
+  it.each(['error', 'interrupted'] as const)('archives a real %s terminal Session', async status => {
+    const dir = tempDir()
+    const runId = `terminal-${status}@2026-08-14T11:00:00.000Z`
+    const sessionId = `session-cron-run-${createHash('sha256').update(runId).digest('hex').slice(0, 32)}`
+    new RunLedger(dir).finish({
+      schemaVersion: 2,
+      event: 'finish',
+      runId,
+      jobId: `terminal-${status}`,
+      sessionId,
+      scheduledFor: '2026-08-14T11:00:00.000Z',
+      startedAt: '2026-08-14T11:00:01.000Z',
+      finishedAt: '2026-08-14T11:00:02.000Z',
+      status,
+    })
+    const archived: string[] = []
+    const runtime = new SchedulerRuntime(
+      {
+        get: (name: string) => {
+          if (name === 'sessionPersistence') {
+            return { list: async () => [persistenceSnapshot(sessionId)] }
+          }
+          if (name === 'workspaceRegistry') {
+            return {
+              archivedSessionIds: [],
+              archiveSession: async (id: string) => { archived.push(id) },
+            }
+          }
+          return undefined
+        },
+        logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      makeConfig(dir),
+      {} as never,
+      0,
+      new AbortController().signal,
+    )
+
+    runtime.start()
+    await waitFor(() => archived.includes(sessionId))
+    await runtime.dispose()
+
+    expect(archived).toEqual([sessionId])
+  })
+
+  it('does not archive before finish, then archives on the next reload', async () => {
+    const dir = tempDir()
+    const runId = 'next-poll@2026-08-14T11:00:00.000Z'
+    const sessionId = `session-cron-run-${createHash('sha256').update(runId).digest('hex').slice(0, 32)}`
+    const ledger = new RunLedger(dir)
+    ledger.claim({
+      schemaVersion: 2,
+      event: 'claim',
+      runId,
+      jobId: 'next-poll',
+      sessionId,
+      scheduledFor: '2026-08-14T11:00:00.000Z',
+      claimedAt: '2026-08-14T11:00:01.000Z',
+    })
+    const archived: string[] = []
+    const runtime = new SchedulerRuntime(
+      {
+        get: (name: string) => {
+          if (name === 'sessionPersistence') {
+            return { list: async () => [persistenceSnapshot(sessionId)] }
+          }
+          if (name === 'workspaceRegistry') {
+            return {
+              archivedSessionIds: archived,
+              archiveSession: async (id: string) => { if (!archived.includes(id)) archived.push(id) },
+            }
+          }
+          return undefined
+        },
+        logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      makeConfig(dir),
+      {} as never,
+      0,
+      new AbortController().signal,
+    )
+
+    await (runtime as unknown as { reload(): Promise<void> }).reload()
+    expect(archived).toEqual([])
+
+    ledger.finish({
+      schemaVersion: 2,
+      event: 'finish',
+      runId,
+      jobId: 'next-poll',
+      sessionId,
+      scheduledFor: '2026-08-14T11:00:00.000Z',
+      startedAt: '2026-08-14T11:00:01.000Z',
+      finishedAt: '2026-08-14T11:00:02.000Z',
+      status: 'success',
+    })
+    await (runtime as unknown as { reload(): Promise<void> }).reload()
+
+    expect(archived).toEqual([sessionId])
+    await runtime.dispose()
+  })
+
+  it('retries a failed archive without changing the finish, delivery, event, or business execution', async () => {
+    const dir = tempDir()
+    const job: Job = {
+      ...dueIntervalJob(60, 60 * 60_000 + 1_000),
+      id: 'archive-retry',
+      sessionMode: 'per_run',
+    }
+    seedJob(dir, job)
+    let persistedSessionId: string | undefined
+    let archiveAttempts = 0
+    let driveCalls = 0
+    let deliveryCalls = 0
+    const errors: string[] = []
+    const events: Array<{ name: string; payload: unknown }> = []
+    const order: string[] = []
+    const controller = new AbortController()
+    const agent = {
+      session: { seq: 0, events: [] as SessionEvent[] },
+      followup: () => undefined,
+      whenIdle: async () => undefined,
+    }
+    const runtime = new SchedulerRuntime(
+      {
+        get: (name: string) => {
+          if (name === 'agents') return {
+            get: () => undefined,
+            create: async (options: { sessionId: string }) => {
+              persistedSessionId = options.sessionId
+              return { agent, dispose: async () => undefined }
+            },
+          }
+          if (name === 'sessions') return { flush: async () => undefined }
+          if (name === 'agentDefaultModel') {
+            return { currentSelection: () => ({ provider: 'test', model: 'test' }) }
+          }
+          if (name === 'sessionPersistence') return {
+            list: async () => persistedSessionId === undefined
+              ? []
+              : [persistenceSnapshot(persistedSessionId)],
+          }
+          if (name === 'workspaceRegistry') return {
+            archivedSessionIds: [],
+            archiveSession: async () => {
+              order.push('archive')
+              archiveAttempts += 1
+              if (archiveAttempts === 1) throw new Error('temporary archive fault')
+            },
+          }
+          return undefined
+        },
+        logger: {
+          info: () => undefined,
+          warn: () => undefined,
+          error: (message: string) => { errors.push(message) },
+        },
+        parallel: async (name: string, payload: unknown) => {
+          events.push({ name, payload })
+          if (name === 'dsh-cron/run-finished') order.push('run-finished')
+        },
+      } as never,
+      makeConfig(dir),
+      {} as never,
+      0,
+      controller.signal,
+      {
+        driveTurn: async () => { driveCalls += 1; return { text: 'delivered once' } },
+        deliverText: async () => { deliveryCalls += 1 },
+      },
+    )
+    runtime.start()
+    await waitFor(() => archiveAttempts === 1)
+    const ledgerBeforeRetry = readLines(dir)
+
+    runtime.requestDrive()
+    await waitFor(() => archiveAttempts === 2)
+
+    expect(driveCalls).toBe(1)
+    expect(deliveryCalls).toBe(1)
+    expect(events.filter(event => event.name === 'dsh-cron/run-finished')).toHaveLength(1)
+    expect(readLines(dir)).toEqual(ledgerBeforeRetry)
+    expect(order.slice(0, 2)).toEqual(['run-finished', 'archive'])
+    expect(errors).toEqual([
+      expect.stringContaining(`stage=archive runId=${job.id}@`),
+    ])
+    controller.abort()
+    await runtime.dispose()
+  })
+
+  it('ignores non-per_run, claim-only, missing, wrong-hash, and duplicate-finish evidence', async () => {
+    const dir = tempDir()
+    const ledger = new RunLedger(dir)
+    const scheduledFor = '2026-08-14T11:00:00.000Z'
+    const appendFinish = (runId: string, sessionId: string, finishedAt = '2026-08-14T11:00:02.000Z') => {
+      ledger.finish({
+        schemaVersion: 2,
+        event: 'finish',
+        runId,
+        jobId: runId.split('@')[0]!,
+        sessionId,
+        scheduledFor,
+        startedAt: '2026-08-14T11:00:01.000Z',
+        finishedAt,
+        status: 'success',
+      })
+    }
+    const persistentRun = 'persistent@2026-08-14T11:00:00.000Z'
+    const commandRun = 'command@2026-08-14T11:00:00.000Z'
+    const wrongHashRun = 'wrong-hash@2026-08-14T11:00:00.000Z'
+    const similarPrefixRun = 'similar-prefix@2026-08-14T11:00:00.000Z'
+    const duplicateRun = 'duplicate@2026-08-14T11:00:00.000Z'
+    const claimOnlyRun = 'claim-only@2026-08-14T11:00:00.000Z'
+    const missingRun = 'missing@2026-08-14T11:00:00.000Z'
+    const duplicateSessionId = `session-cron-run-${createHash('sha256').update(duplicateRun).digest('hex').slice(0, 32)}`
+    const claimOnlySessionId = `session-cron-run-${createHash('sha256').update(claimOnlyRun).digest('hex').slice(0, 32)}`
+    const missingSessionId = `session-cron-run-${createHash('sha256').update(missingRun).digest('hex').slice(0, 32)}`
+    appendFinish(persistentRun, 'session-cron-persistent')
+    appendFinish(commandRun, `session-command-cron-run-${'a'.repeat(32)}`)
+    appendFinish(wrongHashRun, `session-cron-run-${'0'.repeat(32)}`)
+    appendFinish(similarPrefixRun, `session-cron-runx-${'b'.repeat(32)}`)
+    appendFinish(duplicateRun, duplicateSessionId)
+    appendFinish(duplicateRun, duplicateSessionId, '2026-08-14T11:00:03.000Z')
+    appendFinish(missingRun, missingSessionId)
+    ledger.claim({
+      schemaVersion: 2,
+      event: 'claim',
+      runId: claimOnlyRun,
+      jobId: 'claim-only',
+      sessionId: claimOnlySessionId,
+      scheduledFor,
+      claimedAt: '2026-08-14T11:00:01.000Z',
+    })
+    const archived: string[] = []
+    const errors: string[] = []
+    const persisted = [
+      'session-cron-persistent',
+      `session-command-cron-run-${'a'.repeat(32)}`,
+      `session-cron-run-${'0'.repeat(32)}`,
+      `session-cron-runx-${'b'.repeat(32)}`,
+      duplicateSessionId,
+      claimOnlySessionId,
+    ]
+    const runtime = new SchedulerRuntime(
+      {
+        get: (name: string) => {
+          if (name === 'sessionPersistence') {
+            return { list: async () => persisted.map(persistenceSnapshot) }
+          }
+          if (name === 'workspaceRegistry') return {
+            archivedSessionIds: [],
+            archiveSession: async (id: string) => { archived.push(id) },
+          }
+          return undefined
+        },
+        logger: {
+          info: () => undefined,
+          warn: () => undefined,
+          error: (message: string) => { errors.push(message) },
+        },
+      } as never,
+      makeConfig(dir),
+      {} as never,
+      0,
+      new AbortController().signal,
+    )
+
+    await expect((runtime as unknown as { reload(): Promise<void> }).reload()).resolves.toBeUndefined()
+
+    expect(archived).toEqual([])
+    expect(errors).toEqual(expect.arrayContaining([
+      expect.stringContaining(`runId=${wrongHashRun}`),
+      expect.stringContaining(`runId=${duplicateRun}`),
+    ]))
+    await runtime.dispose()
+  })
+
+  it('does not repeat an archive write after the registry reports the Session archived', async () => {
+    const dir = tempDir()
+    const runId = 'idempotent@2026-08-14T11:00:00.000Z'
+    const sessionId = `session-cron-run-${createHash('sha256').update(runId).digest('hex').slice(0, 32)}`
+    new RunLedger(dir).finish({
+      schemaVersion: 2,
+      event: 'finish',
+      runId,
+      jobId: 'idempotent',
+      sessionId,
+      scheduledFor: '2026-08-14T11:00:00.000Z',
+      startedAt: '2026-08-14T11:00:01.000Z',
+      finishedAt: '2026-08-14T11:00:02.000Z',
+      status: 'success',
+    })
+    const archived: string[] = []
+    let archiveCalls = 0
+    const runtime = new SchedulerRuntime(
+      {
+        get: (name: string) => {
+          if (name === 'sessionPersistence') {
+            return { list: async () => [persistenceSnapshot(sessionId)] }
+          }
+          if (name === 'workspaceRegistry') return {
+            archivedSessionIds: archived,
+            archiveSession: async (id: string) => {
+              archiveCalls += 1
+              if (!archived.includes(id)) archived.push(id)
+            },
+          }
+          return undefined
+        },
+        logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      makeConfig(dir),
+      {} as never,
+      0,
+      new AbortController().signal,
+    )
+
+    await (runtime as unknown as { reload(): Promise<void> }).reload()
+    await (runtime as unknown as { reload(): Promise<void> }).reload()
+
+    expect(archived).toEqual([sessionId])
+    expect(archiveCalls).toBe(1)
+    await runtime.dispose()
+  })
+
+  it('keeps a finished once+persistent Session visible', async () => {
+    const dir = tempDir()
+    const job: Job = {
+      id: 'once-persistent',
+      schedule: { kind: 'once', runAt: '2026-08-14T11:00:00.000Z' },
+      prompt: 'persistent once',
+      deliver: 'silent',
+      sessionMode: 'persistent',
+      createdAt: '2026-08-14T10:00:00.000Z',
+    }
+    seedJob(dir, job)
+    new RunLedger(dir).finish({
+      schemaVersion: 2,
+      event: 'finish',
+      runId: 'once-persistent@2026-08-14T11:00:00.000Z',
+      jobId: job.id,
+      sessionId: 'session-cron-once-persistent',
+      scheduledFor: '2026-08-14T11:00:00.000Z',
+      startedAt: '2026-08-14T11:00:01.000Z',
+      finishedAt: '2026-08-14T11:00:02.000Z',
+      status: 'success',
+    })
+    const archiveCalls: string[] = []
+    const runtime = new SchedulerRuntime(
+      {
+        get: (name: string) => {
+          if (name === 'sessionPersistence') {
+            return { list: async () => [persistenceSnapshot('session-cron-once-persistent')] }
+          }
+          if (name === 'workspaceRegistry') return {
+            archivedSessionIds: [],
+            archiveSession: async (id: string) => { archiveCalls.push(id) },
+          }
+          return undefined
+        },
+        logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      makeConfig(dir),
+      {} as never,
+      0,
+      new AbortController().signal,
+    )
+
+    runtime.start()
+    await runtime.dispose()
+
+    expect(archiveCalls).toEqual([])
+  })
+
+  it('contains ledger, listing, and per-item archive failures without blocking later candidates', async () => {
+    const dir = tempDir()
+    const firstRunId = 'archive-first@2026-08-14T11:00:00.000Z'
+    const secondRunId = 'archive-second@2026-08-14T11:00:00.000Z'
+    const firstSessionId = `session-cron-run-${createHash('sha256').update(firstRunId).digest('hex').slice(0, 32)}`
+    const secondSessionId = `session-cron-run-${createHash('sha256').update(secondRunId).digest('hex').slice(0, 32)}`
+    const ledger = new RunLedger(dir)
+    for (const [runId, sessionId] of [[firstRunId, firstSessionId], [secondRunId, secondSessionId]]) {
+      ledger.finish({
+        schemaVersion: 2,
+        event: 'finish',
+        runId: runId!,
+        jobId: runId!.split('@')[0]!,
+        sessionId: sessionId!,
+        scheduledFor: '2026-08-14T11:00:00.000Z',
+        startedAt: '2026-08-14T11:00:01.000Z',
+        finishedAt: '2026-08-14T11:00:02.000Z',
+        status: 'success',
+      })
+    }
+    const archived: string[] = []
+    const errors: string[] = []
+    let listFails = true
+    const runtime = new SchedulerRuntime(
+      {
+        get: (name: string) => {
+          if (name === 'sessionPersistence') return {
+            list: async () => {
+              if (listFails) throw new Error('temporary list fault')
+              return [persistenceSnapshot(firstSessionId), persistenceSnapshot(secondSessionId)]
+            },
+          }
+          if (name === 'workspaceRegistry') return {
+            archivedSessionIds: archived,
+            archiveSession: async (id: string) => {
+              if (id === firstSessionId) throw new Error('first item fault')
+              if (!archived.includes(id)) archived.push(id)
+            },
+          }
+          return undefined
+        },
+        logger: {
+          info: () => undefined,
+          warn: () => undefined,
+          error: (message: string) => { errors.push(message) },
+        },
+      } as never,
+      makeConfig(dir),
+      {} as never,
+      0,
+      new AbortController().signal,
+    )
+
+    await expect((runtime as unknown as { reload(): Promise<void> }).reload()).resolves.toBeUndefined()
+    expect(archived).toEqual([])
+    listFails = false
+    await expect((runtime as unknown as { reload(): Promise<void> }).reload()).resolves.toBeUndefined()
+
+    expect(archived).toEqual([secondSessionId])
+    expect(errors).toEqual(expect.arrayContaining([
+      expect.stringContaining('stage=session_list runId=- sessionId=- error=temporary list fault'),
+      expect.stringContaining(`stage=archive runId=${firstRunId} sessionId=${firstSessionId} error=first item fault`),
+    ]))
+
+    const inspect = vi.spyOn(RunLedger.prototype, 'inspectTerminalFinishes')
+      .mockImplementationOnce(() => { throw new Error('temporary ledger fault') })
+    runtime.start()
+    await waitFor(() => errors.includes(
+      'dsh-cron: per_run archive failed stage=ledger runId=- sessionId=- error=temporary ledger fault',
+    ))
+    inspect.mockRestore()
+    expect(errors).toContain('dsh-cron: per_run archive failed stage=ledger runId=- sessionId=- error=temporary ledger fault')
+    await runtime.dispose()
+  })
+})
 
 /** Make a recurring job that is due within its grace window right now. */
 function dueIntervalJob(intervalMinutes: number, createdAtAgoMs: number): Job {

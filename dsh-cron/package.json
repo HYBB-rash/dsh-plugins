@@ -39,6 +39,7 @@
     "@deepseek-ai/dsh-session-persistence": "*",
     "@deepseek-ai/dsh-telegram-gateway": "*",
     "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-workspace": "*",
     "@deepseek-ai/cordis": "workspace:*"
   },
   "dependencies": {
@@ -54,6 +55,7 @@
     "@deepseek-ai/dsh-session-persistence": "*",
     "@deepseek-ai/dsh-telegram-gateway": "*",
     "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-workspace": "*",
     "@deepseek-ai/cordis": "workspace:*"
   }
 }

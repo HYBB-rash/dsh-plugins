@@ -355,6 +355,43 @@ describe('RunLedger.foldJob', () => {
   })
 })
 
+describe('RunLedger.inspectTerminalFinishes', () => {
+  it('projects unique finishes across deleted jobs and rejects duplicate runIds', () => {
+    const dir = tempDir()
+    const deletedRunId = 'deleted-job@2026-08-14T11:00:00.000Z'
+    const duplicateRunId = 'duplicate-job@2026-08-14T12:00:00.000Z'
+    seed(dir, [
+      finish({
+        jobId: 'deleted-job',
+        runId: deletedRunId,
+        sessionId: 'session-deleted',
+        scheduledFor: '2026-08-14T11:00:00.000Z',
+      }),
+      finish({
+        jobId: 'duplicate-job',
+        runId: duplicateRunId,
+        sessionId: 'session-duplicate',
+        scheduledFor: '2026-08-14T12:00:00.000Z',
+      }),
+      finish({
+        jobId: 'duplicate-job',
+        runId: duplicateRunId,
+        sessionId: 'session-duplicate',
+        scheduledFor: '2026-08-14T12:00:00.000Z',
+        finishedAt: '2026-08-14T12:00:30.000Z',
+      }),
+      { schemaVersion: 99, event: 'finish', jobId: 'ignored', runId: 'ignored', sessionId: 'ignored' },
+    ])
+
+    const inspected = new RunLedger(dir).inspectTerminalFinishes()
+
+    expect(inspected.unique).toEqual([
+      expect.objectContaining({ jobId: 'deleted-job', runId: deletedRunId, sessionId: 'session-deleted' }),
+    ])
+    expect([...inspected.conflicts.keys()]).toEqual([duplicateRunId])
+  })
+})
+
 describe('RunLedger V2 strict validation', () => {
   it('skips a finish with an unknown status', () => {
     const dir = tempDir()
