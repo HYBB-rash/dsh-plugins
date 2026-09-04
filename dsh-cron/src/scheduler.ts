@@ -1832,7 +1832,9 @@ export class SchedulerRuntime implements RunNowPort {
       const selected: ModelSelectionRef = { current: selection, assembled: undefined }
       installModelSelection(agentCtx, selected)
     }
-    const persisted = (await persistence.list(this.signal)).some(header => header.id === sessionId)
+    const persisted = (await persistence.list({ signal: this.signal })).some(
+      (snapshot) => snapshot.header.id === sessionId,
+    )
     const handle = persisted
       ? await agents.resume({
           resumeSessionId: sessionId,
