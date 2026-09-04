@@ -28,7 +28,7 @@ done
 
 grep -Fq './scripts/dsh-web-deploy' README.md
 grep -Fq './scripts/dsh-web-deploy' README.en.md
-grep -Fq '\$dsh-web-deploy' AGENTS.md
+grep -Fq '$dsh-web-deploy' AGENTS.md
 
 if grep -Eq '\b(podman|docker|compose)\b' flake.nix; then
   echo 'retired container tooling remains in the development shell' >&2
