@@ -8,7 +8,12 @@ cleanup() { rm -rf -- "$fixture_root"; }
 trap cleanup EXIT
 
 profile_dir="$fixture_root/profiles/quick-import"
-mkdir -p "$profile_dir/node_modules/@deepseek-ai"
+mkdir -p "$profile_dir/node_modules/@deepseek-ai" "$fixture_root/bin"
+cat >"$fixture_root/bin/pnpm" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$fixture_root/bin/pnpm"
 ln -s "$repository_root/telegram-gateway" "$profile_dir/node_modules/@deepseek-ai/dsh-telegram-gateway"
 ln -s "$repository_root/dsh-cron" "$profile_dir/node_modules/@deepseek-ai/dsh-cron"
 ln -s "$repository_root/dsh-assistant" "$profile_dir/node_modules/@deepseek-ai/dsh-assistant"
@@ -33,7 +38,7 @@ cp "$repository_root/config/web/cordis.patch.yml" "$profile_dir/cordis.patch.yml
 
 (
   cd "$harness_root"
-  DSH_HOME="$fixture_root" pnpm exec tsx apps/cli/src/bin.ts \
+  PATH="$fixture_root/bin:$PATH" DSH_HOME="$fixture_root" node --import tsx apps/cli/src/bin.ts \
     plugin --profile quick-import exec true
 )
 
@@ -55,7 +60,7 @@ PY
 
 (
   cd "$harness_root"
-  DSH_HOME="$fixture_root" pnpm exec tsx apps/cli/src/bin.ts \
+  DSH_HOME="$fixture_root" node --import tsx apps/cli/src/bin.ts \
     --profile quick-import --dump-config >"$fixture_root/effective.yml"
 )
 
