@@ -8,7 +8,10 @@ import type {
 import { describe, expect, it, vi } from 'vitest'
 
 type JudgmentFactory = (options: {
-  readonly ctx: { readonly llm: { readonly stream: (request: GenerateOptions) => AsyncIterable<StreamChunk> } }
+  readonly ctx: {
+    readonly llm: { readonly stream: (request: GenerateOptions) => AsyncIterable<StreamChunk> }
+    readonly logger?: { readonly warn: (message: string) => void }
+  }
   readonly provider: string
   readonly model: string
   readonly timeoutMs?: number
@@ -288,5 +291,23 @@ describe('single Personal Feed candidate judgment LLM boundary', () => {
     await expect(fixture.port.judgeOne(input())).resolves.toStrictEqual({ kind: 'incomplete' })
     expect(fixture.ctx.llm.stream).toHaveBeenCalledOnce()
     expect(fixture.signal()?.aborted).toBe(true)
+  })
+
+  it('logs only a body-free category when a live judgment is incomplete', async () => {
+    const fixture = harness(requestValue => toolCall(requestValue, {
+      kind: 'judgment', longTermValue: 'pass', longTermInterestMatch: 'pass', informationIncrement: 'unknown',
+    }))
+    const warn = vi.fn()
+    const create = await loadFactory()
+    const port = create({
+      ctx: { ...fixture.ctx, logger: { warn } },
+      provider: 'test-provider',
+      model: 'test-model',
+    })
+
+    await expect(port.judgeOne(input({ candidate: Object.freeze({ ...candidate, body: 'PRIVATE_BODY_CANARY' }) })))
+      .resolves.toStrictEqual({ kind: 'incomplete' })
+    expect(warn).toHaveBeenCalledWith('x-feed: personal Feed judgment incomplete (information-unknown)')
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('PRIVATE_BODY_CANARY')
   })
 })

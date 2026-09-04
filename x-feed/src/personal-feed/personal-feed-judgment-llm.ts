@@ -34,6 +34,9 @@ type JudgmentContext = {
   readonly llm: {
     readonly stream: (request: GenerateOptions) => AsyncIterable<StreamChunk>
   }
+  readonly logger?: {
+    readonly warn: (message: string) => void
+  }
 }
 
 type PlainRecord = Record<string, unknown>
@@ -77,13 +80,42 @@ export function createPersonalFeedJudgmentLlmPort(options: {
       const assembler = new BlockAssembler()
       for await (const chunk of options.ctx.llm.stream(request)) assembler.push(chunk)
       if (signal.aborted) return INCOMPLETE
-      return decodeJudgment(assembler, tool.name)
-    } catch {
+      const result = decodeJudgment(assembler, tool.name)
+      if (result.kind === 'incomplete') {
+        options.ctx.logger?.warn(`x-feed: personal Feed judgment incomplete (${incompleteCategory(assembler, tool.name)})`)
+      }
+      return result
+    } catch (cause) {
+      options.ctx.logger?.warn(`x-feed: personal Feed judgment incomplete (${failureCategory(cause)})`)
       return INCOMPLETE
     }
   }
 
   return Object.freeze({ judgeOne })
+}
+
+function failureCategory(cause: unknown): string {
+  if (!(cause instanceof Error)) return 'stream-error'
+  if (cause instanceof SyntaxError) return 'invalid-json'
+  if (cause.message === 'unexpected finish') return 'unexpected-finish'
+  if (cause.message === 'unexpected blocks') return 'unexpected-blocks'
+  if (cause.message === 'unexpected tool') return 'unexpected-tool'
+  return 'stream-error'
+}
+
+function incompleteCategory(assembler: BlockAssembler, toolName: string): string {
+  try {
+    const call = assembler.blocks().find(block => block.type === 'tool-call')
+    if (call?.type !== 'tool-call' || call.name !== toolName || typeof call.arguments !== 'string') return 'invalid-output'
+    const value: unknown = JSON.parse(call.arguments)
+    if (!isRecord(value)) return 'invalid-output'
+    if (value.longTermValue === 'unknown') return 'long-term-value-unknown'
+    if (value.longTermInterestMatch === 'unknown') return 'interest-unknown'
+    if (value.informationIncrement === 'unknown') return 'information-unknown'
+    return 'invalid-gate-prefix'
+  } catch {
+    return 'invalid-output'
+  }
 }
 
 function isRecord(value: unknown): value is PlainRecord {

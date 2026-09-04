@@ -177,7 +177,7 @@ function parseOccurrence(
   if (canonicalUrl === undefined || canonicalUrl !== value.sourceUrl
     || canonicalUrl.split('/')[3] !== value.authorHandle || capturedAtEpochMs === undefined || publishedAtEpochMs === undefined
     || publishedAtEpochMs > capturedAtEpochMs || capturedAtEpochMs < cutoffEpochMs
-    || capturedAtEpochMs < faceStartedEpochMs || capturedAtEpochMs >= faceCompletedEpochMs || !isRecord(value.body)) return undefined
+    || capturedAtEpochMs < faceStartedEpochMs || capturedAtEpochMs > faceCompletedEpochMs || !isRecord(value.body)) return undefined
   const statusId = canonicalUrl.split('/')[5]
   if (statusId === undefined) return undefined
   let take: TakeHandle | undefined

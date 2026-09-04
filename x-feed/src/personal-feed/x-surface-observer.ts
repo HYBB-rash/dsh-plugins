@@ -185,7 +185,7 @@ function parseOccurrence(
   const match = /^https:\/\/x\.com\/([a-z0-9_]{1,15})\/status\/([1-9]\d*)$/.exec(sourceUrl)
   const capturedEpochMs = parseStamp(capturedAt)
   if (match === null || authorHandle !== match[1] || capturedEpochMs === undefined
-    || capturedEpochMs < cutoffEpochMs || capturedEpochMs < faceStartedEpochMs || capturedEpochMs >= faceCompletedEpochMs
+    || capturedEpochMs < cutoffEpochMs || capturedEpochMs < faceStartedEpochMs || capturedEpochMs > faceCompletedEpochMs
     || parseStamp(publishedAt) === undefined) return undefined
   const body = parseBody(value.body, batch)
   if (body === undefined) return undefined

@@ -26,6 +26,9 @@ type SemanticContext = {
   readonly llm: {
     readonly stream: (request: GenerateOptions) => AsyncIterable<StreamChunk>
   }
+  readonly logger?: {
+    readonly warn: (message: string) => void
+  }
 }
 
 export function createPersonalContextSemanticLlmPort(options: {
@@ -57,10 +60,20 @@ export function createPersonalContextSemanticLlmPort(options: {
         return decodeDecision(assembler, tool.name)
       } catch (cause) {
         if (signal.aborted) throw signal.reason ?? cause
+        options.ctx.logger?.warn(`x-feed: personal context semantic failed (${failureCategory(cause)})`)
         throw new Error('personal context semantic response is invalid', { cause })
       }
     },
   })
+}
+
+function failureCategory(cause: unknown): string {
+  if (!(cause instanceof Error)) return 'stream-error'
+  if (cause instanceof SyntaxError) return 'invalid-json'
+  if (cause.message === 'unexpected finish') return 'unexpected-finish'
+  if (cause.message === 'unexpected blocks') return 'unexpected-blocks'
+  if (cause.message === 'unexpected tool') return 'unexpected-tool'
+  return 'stream-error'
 }
 
 function semanticRequest(

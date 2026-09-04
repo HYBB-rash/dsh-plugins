@@ -11,7 +11,10 @@ import {
 import { describe, expect, it, vi } from 'vitest'
 
 type Factory = (options: {
-  readonly ctx: { readonly llm: { readonly stream: (request: GenerateOptions) => AsyncIterable<StreamChunk> } }
+  readonly ctx: {
+    readonly llm: { readonly stream: (request: GenerateOptions) => AsyncIterable<StreamChunk> }
+    readonly logger?: { readonly warn: (message: string) => void }
+  }
   readonly provider: string
   readonly model: string
   readonly timeoutMs?: number
@@ -318,6 +321,21 @@ describe('single Personal Context semantic boundary', () => {
     const fixture = context(chunks)
     const semantic = (await loadFactory())({ ctx: fixture.ctx, provider: 'p', model: 'm' })
     await expect(semantic.revise(input)).rejects.toThrow('personal context semantic response is invalid')
+  })
+
+  it('logs only a body-free failure category when the live semantic protocol is invalid', async () => {
+    const fixture = context(() => [{ type: 'finish', reason: { kind: 'stop' } }])
+    const warn = vi.fn()
+    const semantic = (await loadFactory())({
+      ctx: { ...fixture.ctx, logger: { warn } },
+      provider: 'p',
+      model: 'm',
+    })
+
+    await expect(semantic.revise(Object.freeze({ ...input, rawText: 'PRIVATE_BODY_CANARY' })))
+      .rejects.toThrow('personal context semantic response is invalid')
+    expect(warn).toHaveBeenCalledWith('x-feed: personal context semantic failed (unexpected-finish)')
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('PRIVATE_BODY_CANARY')
   })
 
   it('passes a caller abort through the one model request and returns no fallback decision', async () => {

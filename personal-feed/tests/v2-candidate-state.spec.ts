@@ -172,6 +172,27 @@ describe('Personal Feed v2 candidate-state owner', () => {
     }
   })
 
+  it('accepts a candidate captured in the same millisecond as its surface completion', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'personal-feed-candidate-state-'))
+    const calls = { take: 0, close: 0 }
+    try {
+      const create = await factory()
+      const owner = create({ statePath: join(directory, 'state.jsonl'), clock: { now: () => new Date('2026-08-31T02:00:05.000Z') } })
+      const currentWindow = threeFaces([], [], [
+        occurrence(101, 'alpha', '2026-08-31T02:00:03.000Z', 0, body('candidate', calls)),
+      ])
+
+      await expect(owner.evaluate(input(currentWindow, signal(), () => ({ kind: 'qualified' })))).resolves.toEqual({
+        kind: 'selected',
+        stableId: 'x-status:101',
+        canonicalUrl: 'https://x.com/alpha/status/101',
+      })
+      expect(calls).toEqual({ take: 1, close: 1 })
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it('queries the single body-free log before taking body and skips an already processed stable identity', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'personal-feed-candidate-state-'))
     const statePath = join(directory, 'state.jsonl')

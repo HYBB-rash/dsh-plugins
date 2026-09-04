@@ -189,6 +189,24 @@ describe('Personal Feed X surface observer', () => {
     await result.close()
   })
 
+  it('accepts a capture stamped in the same millisecond as its surface completion', async () => {
+    const raw = completeRaw({
+      surfaces: Object.freeze([
+        surface('for_you', 0, '2026-08-31T02:00:00.200Z', '2026-08-31T02:00:01.000Z', []),
+        surface('following', 1, '2026-08-31T02:00:01.100Z', '2026-08-31T02:00:02.000Z', []),
+        surface('explore', 2, '2026-08-31T02:00:02.100Z', '2026-08-31T02:00:03.000Z', [
+          occurrence('https://x.com/alpha/status/101', 'alpha', Object.freeze({ kind: 'sufficient', text: RAW_BODY_A }), 0, '2026-08-31T02:00:03.000Z'),
+        ]),
+      ]),
+    })
+    const observer = createObserver(async () => ({ stdout: line(raw), stderr: '' }))
+
+    const result = await observer.observe(input()) as { readonly kind: string; readonly close?: () => Promise<void> }
+
+    expect(result.kind).toBe('complete')
+    await result.close?.()
+  })
+
   it('binds one-shot body access to the original signal and closes the whole batch on abort or explicit close', async () => {
     const controller = new AbortController()
     const other = new AbortController()
