@@ -20,6 +20,7 @@
               git
               iproute2
               nodejs_24
+              pnpm
               openssh
               podman
               procps
