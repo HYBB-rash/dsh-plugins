@@ -34,7 +34,6 @@ export function createLanProxy({
 
     const headers = {
       ...request.headers,
-      host: `${upstreamAddress}:${upstreamPort}`,
       'x-forwarded-for': clientAddress,
     }
     delete headers.forwarded
@@ -66,10 +65,9 @@ export function createLanProxy({
       const lines = [`${request.method} ${request.url} HTTP/${request.httpVersion}`]
       for (let index = 0; index < request.rawHeaders.length; index += 2) {
         const name = request.rawHeaders[index]
-        if (name.toLowerCase() === 'host' || name.toLowerCase() === 'forwarded' || name.toLowerCase() === 'x-forwarded-for') continue
+        if (name.toLowerCase() === 'forwarded' || name.toLowerCase() === 'x-forwarded-for') continue
         lines.push(`${name}: ${request.rawHeaders[index + 1]}`)
       }
-      lines.push(`Host: ${upstreamAddress}:${upstreamPort}`)
       lines.push(`X-Forwarded-For: ${clientAddress}`, '', '')
       upstream.write(lines.join('\r\n'))
       if (head.length > 0) upstream.write(head)

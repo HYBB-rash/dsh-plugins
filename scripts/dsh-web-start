@@ -12,6 +12,7 @@ export DSH_HOME=${DSH_HOME:-$HOME/.dsh}
 export DSH_CWD=${DSH_CWD:-$DSH_HOME/workspace}
 host=${DSH_WEB_HOST:-127.0.0.1}
 port=${DSH_WEB_PORT:-3080}
+lan_address=${DSH_LAN_ADDRESS:-192.168.6.240}
 
 for command_name in tar sha256sum awk mktemp install mv ln; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -112,7 +113,7 @@ export PATH="$runtime_bin:$PATH"
 ln -sfn "releases/$archive_sha" "$package_root/current.next"
 mv -Tf "$package_root/current.next" "$package_root/current"
 cd "$DSH_CWD"
-"$package_root/current/bin/web" --host "$host" --port "$port" --no-open "$@" &
+"$package_root/current/bin/web" --host "$host" --port "$port" --no-open --trusted-host "$lan_address" "$@" &
 web_pid=$!
 "$runtime_node" "$proxy_script" &
 proxy_pid=$!
