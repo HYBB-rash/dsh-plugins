@@ -24,7 +24,7 @@
 
 ## 本地 Web 开发
 
-涉及 Harness、`telegram-gateway`、`dsh-cron`、`dsh-assistant`、Web Profile、插件注册或本地 Web 开发服时，先读取并遵循 `$dsh-web-dev`。本地开发固定使用两段式入口：`./scripts/dsh-web-install-plugins` 负责构建和安装，`./scripts/dsh-web-runtime` 只负责启动；不得恢复已清退的 `scripts/dsh-web`，不得直接维护 Profile 的 `node_modules` 或手工登记 bundle。
+涉及 Harness、`telegram-gateway`、`dsh-cron`、`dsh-assistant`、Web Profile、插件注册或本地 Web 开发服时，先读取并遵循 `$dsh-web-dev`。本地开发固定使用两段式入口：`./scripts/dsh-web-install-plugins` 负责构建和安装，`./scripts/dsh-web-runtime` 只负责启动；不得恢复已清退的 `scripts/dsh-web`，不得直接维护 Profile 的 `node_modules` 或手工登记 bundle。开发与传输包必须使用同一份 Harness、插件构建产物、Web patch 和 runtime 脚本；生产包唯一允许的环境差异是打包阶段附加 Git 忽略的线上凭据数据。
 
 ## 发布入口与隔离
 
