@@ -83,14 +83,9 @@ scan_roots = [
     root / "dsh-assistant",
     root / "dsh-cron",
     root / "scripts",
+    root / "skills",
     root / "telegram-gateway",
-    root / "release" / "Containerfile",
-    root / "release" / "README.md",
-    root / "release" / "cli.mjs",
-    root / "release" / "compose.production.yml",
-    root / "release" / "profiles",
-    root / "release" / "scripts",
-    root / "release" / "tests",
+    root / "release",
 ]
 
 tracked_paths = subprocess.run(
