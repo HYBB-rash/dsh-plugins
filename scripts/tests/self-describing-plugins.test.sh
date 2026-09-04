@@ -34,7 +34,7 @@ cat >"$profile_dir/package.json" <<EOF
   }
 }
 EOF
-cp "$repository_root/config/web/cordis.patch.yml" "$profile_dir/cordis.patch.yml"
+cp "$repository_root/config/web/portable.patch.yml" "$profile_dir/cordis.patch.yml"
 
 (
   cd "$harness_root"

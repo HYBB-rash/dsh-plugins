@@ -2,8 +2,70 @@
 set -euo pipefail
 
 package_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-: "${DSH_HOME:?set DSH_HOME to an external writable directory}"
 
+if [[ -d "$package_root/upstream/deepseek-harness" ]]; then
+  export DSH_HOME="${DSH_WEB_HOME:-$package_root/.dsh-web}"
+  harness_root="$package_root/upstream/deepseek-harness"
+  harness_node_modules="$harness_root/node_modules/.pnpm/node_modules"
+  harness_tsc="$harness_root/node_modules/.bin/tsc"
+  harness_tsdown="$harness_root/node_modules/.bin/tsdown"
+  harness_scope="$harness_node_modules/@deepseek-ai"
+
+  ensure_local_plugin_link() {
+    local plugin=$1
+    local link="$harness_scope/$plugin"
+    local target="$package_root/$plugin"
+    mkdir -p "$harness_scope"
+    if [[ -e "$link" || -L "$link" ]]; then
+      if [[ ! -L "$link" ]]; then
+        echo "$link is not a symlink; refusing to overwrite" >&2
+        return 1
+      fi
+      ln -sfn "$target" "$link"
+    else
+      ln -s "$target" "$link"
+    fi
+  }
+
+  build_plugin() {
+    local plugin_directory=$1
+    local existing
+    existing=$(readlink "$plugin_directory/node_modules" 2>/dev/null || true)
+    if [[ "$existing" != "$harness_node_modules" ]]; then
+      if [[ -e "$plugin_directory/node_modules" || -L "$plugin_directory/node_modules" ]]; then
+        if [[ ! -L "$plugin_directory/node_modules" ]]; then
+          echo "$plugin_directory/node_modules is not a symlink; refusing to overwrite" >&2
+          return 1
+        fi
+        rm -f "$plugin_directory/node_modules"
+      fi
+      ln -s "$harness_node_modules" "$plugin_directory/node_modules"
+    fi
+
+    rm -rf "$plugin_directory/lib" "$plugin_directory/tsconfig.tsbuildinfo"
+    (cd "$plugin_directory" && "$harness_tsc" -b)
+    (cd "$plugin_directory" && "$harness_tsdown")
+    (cd "$plugin_directory" && "$harness_tsc" -b)
+    if [[ ! -f "$plugin_directory/lib/index.js" ]]; then
+      echo "missing $plugin_directory/lib/index.js after build" >&2
+      return 1
+    fi
+  }
+
+  (cd "$harness_root" && pnpm install --ignore-scripts && pnpm run build)
+  for plugin in telegram-gateway dsh-cron dsh-assistant; do
+    ensure_local_plugin_link "$plugin"
+    build_plugin "$package_root/$plugin"
+  done
+
+  exec node "$harness_root/apps/cli/lib/bin.js" \
+    plugin --profile web add --ignore-scripts --force \
+    "file:$package_root/telegram-gateway" \
+    "file:$package_root/dsh-cron" \
+    "file:$package_root/dsh-assistant"
+fi
+
+: "${DSH_HOME:?set DSH_HOME to an external writable directory}"
 if ! command -v node >/dev/null 2>&1; then
   echo 'node is required to install DSH plugins' >&2
   exit 127

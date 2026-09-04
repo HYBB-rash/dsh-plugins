@@ -2,9 +2,23 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "DSH: Install Web Plugins (source)",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/dsh-web-install-plugins",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
       "label": "DSH: Start Web (source)",
       "type": "shell",
-      "command": "${workspaceFolder}/scripts/dsh-web",
+      "command": "${workspaceFolder}/scripts/dsh-web-runtime",
       "options": {
         "cwd": "${workspaceFolder}"
       },
