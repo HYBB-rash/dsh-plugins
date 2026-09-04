@@ -64,6 +64,14 @@ function gatewayContext() {
   const dispose = vi.fn(async () => {})
   const agent = {
     session: {
+      id: 'session-telegram',
+      header: {
+        version: 1,
+        id: 'session-telegram',
+        createdAt: 1,
+        isSeeded: false,
+        cwd: '/telegram-workspace',
+      },
       seq: 0,
       events: [] as SessionEvent[],
       snapshotEvents() { return this.events },
@@ -85,6 +93,14 @@ function gatewayContext() {
     },
     sessions: { flush: vi.fn(async () => {}) },
     sessionPersistence: { list: vi.fn(async () => []) },
+    workspaceRegistry: {
+      resolveByPath: vi.fn(async () => ({
+        id: 'workspace-telegram',
+        path: '/telegram-workspace',
+        attachSession: vi.fn(async () => {}),
+      })),
+      create: vi.fn(),
+    },
     credentials: { resolve: vi.fn(async () => undefined) },
     appExit: vi.fn(),
   }

@@ -48,6 +48,7 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
+import type {} from '@deepseek-ai/dsh-workspace'
 import { ignoreFeedbackFailure, TurnFeedback } from './turn-feedback.ts'
 import { dispatchInbound } from './inbound-dispatch.ts'
 import type {
@@ -105,6 +106,7 @@ export const inject = [
   'agentDefaultModel',
   'agents',
   'sessions',
+  'workspaceRegistry',
   'credentials',
   'loader',
   'llm',
@@ -432,7 +434,8 @@ export async function runGateway(
   const defaultModel = ctx.get('agentDefaultModel')
   const sessions = ctx.get('sessions')
   const persistence = ctx.get('sessionPersistence')
-  if (agents === undefined || defaultModel === undefined || sessions === undefined || persistence === undefined) {
+  const workspaceRegistry = ctx.get('workspaceRegistry')
+  if (agents === undefined || defaultModel === undefined || sessions === undefined || persistence === undefined || workspaceRegistry === undefined) {
     throw new Error('telegram-gateway: core services unavailable')
   }
   signal.throwIfAborted()
@@ -484,17 +487,31 @@ export async function runGateway(
         })
   }
   const agent = live ?? handle!.agent
-
-  const offsetDir = config.offsetDir !== ''
-    ? config.offsetDir
-    : join(resolveDshHome(), 'storages', 'telegram')
-  const offsetStore = createOffsetStore(join(offsetDir, 'offset.txt'))
-  let offset = offsetStore.read()
-
   // 未收尾的 👀（正常 dispose 时用独立短超时信号尽力清理）。
   let armedReaction: { chatId: number; messageId: number } | undefined
 
   try {
+    const sessionCwd = agent.session.header.cwd
+    if (sessionCwd === undefined) {
+      throw new Error(`telegram-gateway: session "${agent.session.id}" has no cwd for Workspace ownership`)
+    }
+    try {
+      const workspace = await workspaceRegistry.resolveByPath(sessionCwd)
+        ?? await workspaceRegistry.create(sessionCwd)
+      await workspace.attachSession(agent.session.id)
+    } catch (error) {
+      throw new Error(
+        `telegram-gateway: failed to attach session "${agent.session.id}" to its Workspace: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      )
+    }
+
+    const offsetDir = config.offsetDir !== ''
+      ? config.offsetDir
+      : join(resolveDshHome(), 'storages', 'telegram')
+    const offsetStore = createOffsetStore(join(offsetDir, 'offset.txt'))
+    let offset = offsetStore.read()
+
     if (Number.isFinite(chatId)) {
       await sendStartupNotification(ctx, http, chatId, signal)
     }

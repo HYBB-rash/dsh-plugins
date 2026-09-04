@@ -75,15 +75,27 @@ function gatewayContext(options: {
   credentialValues?: Array<string | undefined>
   live?: boolean
   persisted?: boolean
+  persistedSessionIds?: string[]
+  sessionCwd?: string
   token?: string
+  workspaceExists?: boolean
   inbound?: {
     ready?: true
     waterfall?: (envelope: TelegramInboundEnvelope, next: () => TelegramInboundResult | Promise<TelegramInboundResult>) => TelegramInboundResult | Promise<TelegramInboundResult>
   }
 } = {}) {
   const dispose = vi.fn(async () => {})
+  const sessionCwd = options.sessionCwd ?? '/telegram-workspace'
   const agent = {
     session: {
+      id: 'session-telegram',
+      header: {
+        version: 1,
+        id: 'session-telegram',
+        createdAt: 1,
+        isSeeded: false,
+        cwd: sessionCwd,
+      },
       seq: 0,
       events: [] as SessionEvent[],
       snapshotEvents() { return this.events },
@@ -107,15 +119,25 @@ function gatewayContext(options: {
     return value === undefined ? undefined : { value }
   })
   const mountAgentPreset = vi.fn(async () => ({ id: 'standard' }))
+  const workspace = {
+    id: 'workspace-telegram',
+    path: sessionCwd,
+    attachSession: vi.fn(async (_sessionId: string) => {}),
+  }
+  const workspaceRegistry = {
+    resolveByPath: vi.fn(async (_cwd: string) => options.workspaceExists === false ? undefined : workspace),
+    create: vi.fn(async (_cwd: string) => workspace),
+  }
   const services: Record<string, unknown> = {
     agentDefaultModel: { currentSelection: () => ({ provider: 'test-provider', model: 'test-model' }) },
     agents,
     sessions: { flush: vi.fn(async () => {}) },
     sessionPersistence: {
       list: vi.fn(async () => options.persisted === true
-        ? [{ header: { id: 'session-telegram' } }]
+        ? (options.persistedSessionIds ?? ['session-telegram']).map(id => ({ header: { id, cwd: sessionCwd } }))
         : []),
     },
+    workspaceRegistry,
     credentials: {
       resolve: resolveCredential,
     },
@@ -154,11 +176,17 @@ function gatewayContext(options: {
     services,
     setupContext,
     mountAgentPreset,
+    workspace,
+    workspaceRegistry,
   }
 }
 
 it('declares the llm service required by trusted Telegram extensions', () => {
   expect(gatewayInject).toContain('llm')
+})
+
+it('declares Workspace ownership as a required gateway service', () => {
+  expect(gatewayInject).toContain('workspaceRegistry')
 })
 
 describe('summarizeTurn', () => {
@@ -1110,6 +1138,110 @@ describe('gateway lifecycle', () => {
     ])
     expect((harness.services.sessions as { flush: ReturnType<typeof vi.fn> }).flush).toHaveBeenCalledOnce()
     expect(harness.setupContext.on).toHaveBeenCalledTimes(2)
+  })
+
+  it('attaches a persisted Telegram session to its recorded Workspace before readiness', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+    const harness = gatewayContext({
+      persisted: true,
+      persistedSessionIds: ['unrelated-web', 'session-telegram', 'session-cron'],
+      sessionCwd: '/historical-telegram-workspace',
+    })
+    const lifetime = new AbortController()
+    const order: string[] = []
+    harness.workspace.attachSession.mockImplementation(async (sessionId: string) => {
+      order.push(`attach:${sessionId}`)
+    })
+    const ready = vi.fn(() => { order.push('ready') })
+    const getUpdates = vi.fn(async () => {
+      order.push('poll')
+      lifetime.abort()
+      return []
+    })
+    const http: TelegramHttp = {
+      getMe: async () => ({ id: 9 }),
+      getUpdates,
+      sendMessage: async () => ({ messageId: 1 }),
+    }
+
+    await runGateway(
+      harness.ctx,
+      gatewayConfig({ cwd: '/new-configured-workspace' }),
+      http,
+      lifetime.signal,
+      ready,
+    )
+
+    expect(harness.workspaceRegistry.resolveByPath).toHaveBeenCalledWith('/historical-telegram-workspace')
+    expect(harness.workspaceRegistry.create).not.toHaveBeenCalled()
+    expect(harness.workspace.attachSession).toHaveBeenCalledOnce()
+    expect(harness.workspace.attachSession).toHaveBeenCalledWith('session-telegram')
+    expect(order).toEqual(['attach:session-telegram', 'ready', 'poll'])
+  })
+
+  it('creates a Workspace when the Telegram session directory is unregistered', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+    const harness = gatewayContext({ sessionCwd: '/new-telegram-workspace', workspaceExists: false })
+    const lifetime = new AbortController()
+    const http: TelegramHttp = {
+      getMe: async () => ({ id: 9 }),
+      getUpdates: async () => {
+        lifetime.abort()
+        return []
+      },
+      sendMessage: async () => ({ messageId: 1 }),
+    }
+
+    await runGateway(harness.ctx, gatewayConfig(), http, lifetime.signal)
+
+    expect(harness.workspaceRegistry.create).toHaveBeenCalledOnce()
+    expect(harness.workspaceRegistry.create).toHaveBeenCalledWith('/new-telegram-workspace')
+    expect(harness.workspace.attachSession).toHaveBeenCalledWith('session-telegram')
+  })
+
+  it('does not become ready or poll when Workspace attachment fails', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+    const harness = gatewayContext()
+    const lifetime = new AbortController()
+    harness.workspace.attachSession.mockRejectedValueOnce(new Error('workspace write failed'))
+    const ready = vi.fn()
+    const getUpdates = vi.fn(async () => {
+      lifetime.abort()
+      return []
+    })
+    const http: TelegramHttp = {
+      getMe: async () => ({ id: 9 }),
+      getUpdates,
+      sendMessage: async () => ({ messageId: 1 }),
+    }
+
+    await expect(runGateway(harness.ctx, gatewayConfig(), http, lifetime.signal, ready))
+      .rejects.toThrow('workspace write failed')
+    expect(ready).not.toHaveBeenCalled()
+    expect(getUpdates).not.toHaveBeenCalled()
+    expect(harness.dispose).toHaveBeenCalledOnce()
+  })
+
+  it('reconciles Workspace membership again when a live Telegram session is reused', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+    const harness = gatewayContext({ live: true })
+    const runOnce = async (): Promise<void> => {
+      const lifetime = new AbortController()
+      await runGateway(harness.ctx, gatewayConfig(), {
+        getMe: async () => ({ id: 9 }),
+        getUpdates: async () => {
+          lifetime.abort()
+          return []
+        },
+        sendMessage: async () => ({ messageId: 1 }),
+      }, lifetime.signal)
+    }
+
+    await runOnce()
+    await runOnce()
+
+    expect(harness.workspace.attachSession).toHaveBeenCalledTimes(2)
+    expect(harness.workspaceRegistry.create).not.toHaveBeenCalled()
   })
 
   it('resumes a persisted session and reports an Agent turn error to the configured chat', async () => {

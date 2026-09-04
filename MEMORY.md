@@ -32,6 +32,7 @@
 
 ## Telegram gateway
 
+- 2026-09-05：`cwd` 只决定 Telegram Agent 的工作目录，不会让 Session 自动成为 Workspace 成员。Gateway 自建或恢复固定根会话后，应在 ready/轮询前按 `agent.session.header.cwd` 复用或创建 Workspace，并只对 `agent.session.id` 做幂等 attach；归属失败不得继续启动，且新取得的 Agent 必须在同一清理区间释放。不要按 cwd 扫描和收编其他会话。
 - Telegram 正文采用消息级投递：保留 👀、typing、引用、reaction 与最终交付，忽略 `assistant/chunk`；把完整 text + tool-call `assistant/message` 串行投递为不可编辑中途消息，再由 `summarizeTurn()` 权威收口最终文本。相同完整正文只能成功交付一次，是否自然且不重放需真实客户端验收。
 - Gateway 只保证完整事件、不可编辑、串行投递与完整可见文本精确去重；Telegram 专属 `dsh-assistant` persona 决定是否表达中途消息与如何避免语义重放。不要在 gateway 依据句号、空行、字数、前后缀 diff 或相似度切分消息。
 - 普通 Telegram reaction 不能假设支持 ✅/❌；终态 reaction 使用官方允许列表，并在真实客户端验证，不能只测请求 payload。
