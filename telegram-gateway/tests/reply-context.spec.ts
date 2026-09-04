@@ -106,6 +106,10 @@ function gatewayContext() {
   }
   const ctx = {
     get: (key: string) => services[key],
+    provide: vi.fn((key: string, value: unknown) => {
+      services[key] = value
+      return () => { delete services[key] }
+    }),
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     on: vi.fn(() => vi.fn()),
     effect: async (setup: () => Promise<() => Promise<void>>) => setup(),

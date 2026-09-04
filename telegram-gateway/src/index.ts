@@ -64,9 +64,9 @@ import {
   type TelegramUpdate,
 } from './telegram-contract.ts'
 import { loadTelegramExtensions, type TelegramExtensionConfig } from './extensions.ts'
+import { createDshTextDeliveryV1, DSH_TEXT_DELIVERY_V1 } from './text-delivery.ts'
 
-// Shared transport contract re-exported so existing consumers (dsh-assistant,
-// tests) keep importing these names from the package entry.
+// Keep the gateway's Telegram transport helpers on its public package surface.
 export {
   buildIncomingUserText,
   chunkText,
@@ -97,6 +97,7 @@ export {
 } from './inbound-contract.ts'
 
 export * from './extensions.ts'
+export * from './text-delivery.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'telegram-gateway'
@@ -487,6 +488,14 @@ export async function runGateway(
         })
   }
   const agent = live ?? handle!.agent
+  const disposeTextDelivery = ctx.provide(
+    DSH_TEXT_DELIVERY_V1,
+    createDshTextDeliveryV1(
+      http,
+      () => Number.isFinite(chatId) ? chatId : undefined,
+      config.maxMessageChars,
+    ),
+  )
   // 未收尾的 👀（正常 dispose 时用独立短超时信号尽力清理）。
   let armedReaction: { chatId: number; messageId: number } | undefined
 
@@ -638,6 +647,7 @@ export async function runGateway(
       }
     }
   } finally {
+    await disposeTextDelivery()
     // 正常 dispose：主 signal 已 abort，用独立短超时信号尽力清理未完成的 👀。
     if (armedReaction !== undefined) {
       const pending = armedReaction

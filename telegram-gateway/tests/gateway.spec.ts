@@ -8,8 +8,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import {
-  apply, chunkText, createOffsetStore, createTelegramHttp, formatMarkdownV2, runGateway, summarizeTurn,
-  inject as gatewayInject, isTelegramInboundEnvelope, TelegramApiError, type Config, type SendMessageOptions, type TelegramHttp, type TelegramUpdate,
+  apply, chunkText, createOffsetStore, createTelegramHttp, DSH_TEXT_DELIVERY_V1, formatMarkdownV2, runGateway, summarizeTurn,
+  inject as gatewayInject, isTelegramInboundEnvelope, TelegramApiError, type Config, type DshTextDeliveryV1, type SendMessageOptions, type TelegramHttp, type TelegramUpdate,
 } from '../src/index.ts'
 import type { TelegramInboundEnvelope, TelegramInboundResult } from '../src/inbound-contract.ts'
 import {
@@ -150,6 +150,10 @@ function gatewayContext(options: {
   const sessionEventHandlers = new Map<string, (session: unknown, event: SessionEvent) => void>()
   const ctx = {
     get: (key: string) => services[key],
+    provide: vi.fn((key: string, value: unknown) => {
+      services[key] = value
+      return () => { delete services[key] }
+    }),
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     on: vi.fn((event: string, handler: (session: unknown, event: SessionEvent) => void) => {
       sessionEventHandlers.set(event, handler)
@@ -180,6 +184,40 @@ function gatewayContext(options: {
     workspaceRegistry,
   }
 }
+
+it('provides delivery only while the gateway runs and adopts the first private chat for it', async () => {
+  scratch = mkdtempSync(join(tmpdir(), 'tg-gateway-'))
+  const harness = gatewayContext()
+  const lifetime = new AbortController()
+  const sendMessage = vi.fn(async () => ({ messageId: 1 }))
+  let polls = 0
+  const http: TelegramHttp = {
+    getMe: async () => ({ id: 1 }),
+    getUpdates: async () => {
+      if (polls++ === 0) {
+        return [{ update_id: 1, message: { message_id: 1, chat: { id: 77, type: 'private' }, text: 'authorize' } }]
+      }
+      return await new Promise((resolve) => {
+        lifetime.signal.addEventListener('abort', () => resolve([]), { once: true })
+      })
+    },
+    sendMessage,
+  }
+  const ready = Promise.withResolvers<void>()
+  const running = runGateway(harness.ctx, gatewayConfig(), http, lifetime.signal, () => ready.resolve())
+  await ready.promise
+  const service = harness.services[DSH_TEXT_DELIVERY_V1] as DshTextDeliveryV1
+  expect(service.protocolVersion).toBe(1)
+
+  while (sendMessage.mock.calls.length < 2) await new Promise(resolve => setTimeout(resolve, 0))
+  await expect(service.deliver({ text: 'from-service', signal: new AbortController().signal }))
+    .resolves.toMatchObject({ state: 'delivered' })
+  expect(sendMessage).toHaveBeenLastCalledWith(77, 'from-service', undefined, expect.any(AbortSignal))
+
+  lifetime.abort()
+  await running
+  expect(harness.services[DSH_TEXT_DELIVERY_V1]).toBeUndefined()
+})
 
 it('declares the llm service required by trusted Telegram extensions', () => {
   expect(gatewayInject).toContain('llm')
