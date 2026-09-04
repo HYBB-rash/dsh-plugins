@@ -12,7 +12,7 @@ export DSH_CWD=${DSH_CWD:-$DSH_HOME/workspace}
 host=${DSH_WEB_HOST:-127.0.0.1}
 port=${DSH_WEB_PORT:-3080}
 
-for command_name in node tar sha256sum awk mktemp install mv ln; do
+for command_name in tar sha256sum awk mktemp install mv ln; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "$command_name is required to start DSH Web" >&2
     exit 127
@@ -51,12 +51,23 @@ if [[ ! -d "$release" ]]; then
   trap - EXIT
 fi
 
+runtime_node="$release/runtime-node/bin/node"
+if [[ ! -f "$runtime_node" || -L "$runtime_node" || ! -x "$runtime_node" ]]; then
+  echo 'package is missing its regular bundled Node executable' >&2
+  exit 1
+fi
+if [[ $("$runtime_node" --version) != v24.19.0 ]]; then
+  echo 'bundled Node must be v24.19.0 to match packaged native addons' >&2
+  exit 1
+fi
+export PATH="$release/runtime-node/bin:$PATH"
+
 pnpm_command=${DSH_WEB_PNPM:-pnpm}
 corepack_command=${DSH_WEB_COREPACK:-corepack}
 if pnpm_path=$(command -v "$pnpm_command" 2>/dev/null); then
   pnpm_argv=("$pnpm_path")
 elif corepack_path=$(command -v "$corepack_command" 2>/dev/null); then
-  package_manager=$(node -e '
+  package_manager=$("$runtime_node" -e '
     const fs = require("node:fs")
     const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).packageManager
     if (typeof value !== "string" || !/^pnpm@[0-9]+\.[0-9]+\.[0-9]+$/.test(value)) process.exit(1)
@@ -84,7 +95,7 @@ elif corepack_path=$(command -v "$corepack_command" 2>/dev/null); then
     rm -rf -- "$temporary_manager"
     trap - EXIT
   fi
-  pnpm_argv=("$(command -v node)" "$pnpm_entry")
+  pnpm_argv=("$runtime_node" "$pnpm_entry")
 else
   echo 'pnpm is required to install DSH plugins; install pnpm or provide corepack' >&2
   exit 127
