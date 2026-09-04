@@ -40,6 +40,8 @@
 - 测试 `session/event` 时，Harness ctx 需 mock `on` 并捕获 handler 的 `emit(session, event)`；监听器按 `session === agent.session && event.seq >= firstSeq` 过滤，TurnFeedback 再按 turn/step 边界过滤。
 - session-telegram 日志发生 seq 冲突时，先快照到 `~/.dsh/recovery/`；删冲突行后用 node:zlib `zstdCompressSync` 且 `ZSTD_c_checksumFlag=1` 逐行一帧重建。zstd CLI 单帧不满足“每个 header line 一帧”的读取约束。
 
+- 2026-09-04：LAN 代理的拒绝路径也必须处理 socket `error`；即使只是对非白名单 WebSocket upgrade 写 `403`，客户端提前 reset 也会在 `socket.end()` 上触发 `ECONNRESET`。未处理会杀死代理，并因 `dsh-web-start` 的 `wait -n` 监督模型连带停掉 Web；回归测试应用伪 socket 覆盖拒绝写入失败。
+
 ## 已停止或需复审的历史路线
 
 - `dsh-explore` 与 `dsh-browser-readonly` 已从源码树移除；不要把旧名称当作可编辑的现役模块。探索若再启用，应以当前 `skills/explore-opportunity` 和现场目录为准。
