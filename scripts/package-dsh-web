@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: $0 <output.tar.gz>" >&2
+  exit 2
+fi
+
+repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+harness_root="$repository_root/upstream/deepseek-harness"
+profile_root="${DSH_WEB_HOME:-$repository_root/.dsh-web}/profiles/web"
+output=$(realpath -m -- "$1")
+
+required_files=(
+  "$harness_root/apps/cli/lib/bin.js"
+  "$harness_root/apps/web/dist/index.html"
+  "$harness_root/.dsh-build/client-build-environment.json"
+  "$profile_root/cordis.patch.yml"
+  "$profile_root/node_modules/@deepseek-ai/dsh-telegram-gateway/lib/index.js"
+  "$profile_root/node_modules/@deepseek-ai/dsh-cron/lib/index.js"
+  "$profile_root/node_modules/@deepseek-ai/dsh-assistant/lib/index.js"
+  "$profile_root/node_modules/@herman/personal-feed-selector/lib/index.js"
+  "$profile_root/node_modules/@herman/personal-feed/lib/index.js"
+  "$profile_root/node_modules/@herman/x-feed/lib/index.js"
+)
+for required_file in "${required_files[@]}"; do
+  if [[ ! -f "$required_file" ]]; then
+    echo "missing built artifact: $required_file" >&2
+    exit 1
+  fi
+done
+
+mkdir -p -- "$(dirname -- "$output")"
+temporary_output=$(mktemp "$(dirname -- "$output")/.dsh-web-package.XXXXXX.tar.gz")
+cleanup() { rm -f -- "$temporary_output"; }
+trap cleanup EXIT
+
+tar -czf "$temporary_output" \
+  --exclude='.git' \
+  --exclude='.env' \
+  --exclude='.env.*' \
+  --transform='s|^deepseek-harness|dsh-web/harness|' \
+  --transform='s|^web|dsh-web/profile/web|' \
+  -C "$repository_root/upstream" deepseek-harness \
+  -C "$(dirname -- "$profile_root")" web
+mv -f -- "$temporary_output" "$output"
+trap - EXIT
+
+printf 'archive: %s\n' "$output"
+printf 'sha256: %s\n' "$(sha256sum "$output" | awk '{print $1}')"
