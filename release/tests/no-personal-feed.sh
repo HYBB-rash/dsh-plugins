@@ -25,6 +25,7 @@ python3 - "$repo_root" <<'PY'
 import json
 import pathlib
 import re
+import subprocess
 import sys
 
 root = pathlib.Path(sys.argv[1])
@@ -92,20 +93,35 @@ scan_roots = [
     root / "release" / "tests",
 ]
 
+tracked_paths = subprocess.run(
+    [
+        "git",
+        "-C",
+        str(root),
+        "ls-files",
+        "-z",
+        "--",
+        *(str(path.relative_to(root)) for path in scan_roots),
+    ],
+    check=True,
+    capture_output=True,
+).stdout.split(b"\0")
+
 violations = []
-for scan_root in scan_roots:
-    paths = [scan_root] if scan_root.is_file() else scan_root.rglob("*")
-    for path in paths:
-        if not path.is_file() or path == root / "release" / "tests" / "no-personal-feed.sh":
-            continue
-        try:
-            text = path.read_text()
-        except UnicodeDecodeError:
-            continue
-        text = text.replace("no-personal-feed.sh", "retired-component-boundary.sh")
-        for line_number, line in enumerate(text.splitlines(), start=1):
-            if forbidden.search(line):
-                violations.append(f"{path.relative_to(root)}:{line_number}:{line.strip()}")
+for encoded_path in tracked_paths:
+    if not encoded_path:
+        continue
+    path = root / encoded_path.decode()
+    if path == root / "release" / "tests" / "no-personal-feed.sh":
+        continue
+    try:
+        text = path.read_text()
+    except UnicodeDecodeError:
+        continue
+    text = text.replace("no-personal-feed.sh", "retired-component-boundary.sh")
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if forbidden.search(line):
+            violations.append(f"{path.relative_to(root)}:{line_number}:{line.strip()}")
 
 if violations:
     raise SystemExit("retired Personal Feed responsibility remains:\n" + "\n".join(violations))
