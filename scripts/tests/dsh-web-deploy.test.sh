@@ -127,7 +127,7 @@ PATH="$fixture_root/start-bin:$PATH" \
 
 grep -Fq 'node-pnpm --version' "$DSH_START_LOG"
 grep -Fxq "install DSH_HOME=$home" "$DSH_START_LOG"
-grep -Fq 'web --host 0.0.0.0 --port 3080 --no-open' "$DSH_START_LOG"
+grep -Fq 'web --host 127.0.0.1 --port 3080 --no-open' "$DSH_START_LOG"
 test -L "$start_root/current"
 test -x "$start_root/current/bin/web"
 if grep -Fq 'package-dsh-web' "$DSH_START_LOG"; then

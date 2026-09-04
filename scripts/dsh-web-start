@@ -9,7 +9,7 @@ releases="$package_root/releases"
 runtime_bin="$package_root/runtime-bin"
 export DSH_HOME=${DSH_HOME:-$HOME/.dsh}
 export DSH_CWD=${DSH_CWD:-$DSH_HOME/workspace}
-host=${DSH_WEB_HOST:-0.0.0.0}
+host=${DSH_WEB_HOST:-127.0.0.1}
 port=${DSH_WEB_PORT:-3080}
 
 for command_name in node tar sha256sum awk mktemp install mv ln; do
