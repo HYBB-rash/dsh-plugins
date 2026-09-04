@@ -34,8 +34,9 @@ declare -A package_names=(
   [telegram-gateway]=@deepseek-ai/dsh-telegram-gateway
   [dsh-cron]=@deepseek-ai/dsh-cron
   [dsh-assistant]=@deepseek-ai/dsh-assistant
+  [liangshen]=@deepseek-ai/dsh-liangshen
 )
-for package in telegram-gateway dsh-cron dsh-assistant; do
+for package in telegram-gateway dsh-cron dsh-assistant liangshen; do
   mkdir -p "$fixture_root/$package"
   printf '{"name":"%s"}\n' "${package_names[$package]}" >"$fixture_root/$package/package.json"
 done
@@ -102,7 +103,7 @@ chmod +x \
 export DSH_WEB_TEST_LOG="$fixture_root/commands.log"
 export DSH_WEB_TEST_REAL_NODE
 DSH_WEB_TEST_REAL_NODE=$(command -v node)
-for package in telegram-gateway dsh-cron dsh-assistant; do
+for package in telegram-gateway dsh-cron dsh-assistant liangshen; do
   ln -s "$fixture_root/$package" \
     "$fixture_root/upstream/deepseek-harness/node_modules/.pnpm/node_modules/@deepseek-ai/${package_names[$package]#@deepseek-ai/}"
 done
@@ -117,7 +118,7 @@ if [[ $install_status -ne 0 ]]; then
   exit "$install_status"
 fi
 
-for package in telegram-gateway dsh-cron dsh-assistant; do
+for package in telegram-gateway dsh-cron dsh-assistant liangshen; do
   test -f "$fixture_root/$package/lib/index.js" || {
     echo "installer did not build $package" >&2
     exit 1
@@ -163,6 +164,7 @@ if grep -Fq -- '--patch' "$DSH_WEB_TEST_LOG"; then
 fi
 
 : >"$DSH_WEB_TEST_LOG"
+mkdir -p "$fixture_root/home/profiles/web/node_modules/@linxin666/dsh-liangshen"
 for package in dsh-telegram-gateway dsh-cron dsh-assistant; do
   mkdir -p "$fixture_root/home/profiles/web/node_modules/@deepseek-ai/$package"
 done
@@ -175,6 +177,7 @@ if ! grep -Fq 'plugin --profile web remove @deepseek-ai/dsh-telegram-gateway @de
   exit 1
 fi
 grep -Fq 'plugin --profile web add --ignore-scripts --force' "$DSH_WEB_TEST_LOG"
+grep -F 'plugin --profile web remove' "$DSH_WEB_TEST_LOG" | grep -Fq '@linxin666/dsh-liangshen'
 remove_line=$(grep -Fn 'plugin --profile web remove' "$DSH_WEB_TEST_LOG" | cut -d: -f1)
 add_line=$(grep -Fn 'plugin --profile web add' "$DSH_WEB_TEST_LOG" | cut -d: -f1)
 if [[ "$remove_line" -ge "$add_line" ]]; then

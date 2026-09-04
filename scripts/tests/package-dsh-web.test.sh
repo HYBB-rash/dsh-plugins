@@ -54,7 +54,8 @@ EOF
 for specification in \
   'telegram-gateway|@deepseek-ai/dsh-telegram-gateway|0.1.0' \
   'dsh-cron|@deepseek-ai/dsh-cron|0.2.0' \
-  'dsh-assistant|@deepseek-ai/dsh-assistant|0.3.0'; do
+  'dsh-assistant|@deepseek-ai/dsh-assistant|0.3.0' \
+  'liangshen|@deepseek-ai/dsh-liangshen|0.3.14-herman.1'; do
   IFS='|' read -r directory package_name version <<<"$specification"
   mkdir -p "$source_root/$directory/lib"
   printf '%s\n' "$directory" >"$source_root/$directory/lib/index.js"
@@ -141,6 +142,7 @@ for expected in \
   dsh-web/plugins/deepseek-ai-dsh-telegram-gateway-0.1.0.tgz \
   dsh-web/plugins/deepseek-ai-dsh-cron-0.2.0.tgz \
   dsh-web/plugins/deepseek-ai-dsh-assistant-0.3.0.tgz \
+  dsh-web/plugins/deepseek-ai-dsh-liangshen-0.3.14-herman.1.tgz \
   dsh-web/config/web.patch.yml \
   dsh-web/production-credentials/.credentials.yaml \
   dsh-web/production-credentials/secrets/notion.token \
@@ -180,6 +182,7 @@ for plugin_archive in "$unpacked/dsh-web/plugins"/*.tgz; do
     deepseek-ai-dsh-telegram-gateway-*) source_plugin=telegram-gateway ;;
     deepseek-ai-dsh-cron-*) source_plugin=dsh-cron ;;
     deepseek-ai-dsh-assistant-*) source_plugin=dsh-assistant ;;
+    deepseek-ai-dsh-liangshen-*) source_plugin=liangshen ;;
     *) echo "unexpected plugin archive: $plugin_archive" >&2; exit 1 ;;
   esac
   tar -xOzf "$plugin_archive" package/lib/index.js >"$fixture_root/packed-plugin.js"

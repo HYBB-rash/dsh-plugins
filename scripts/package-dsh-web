@@ -63,7 +63,7 @@ required_files=(
   "$repository_root/scripts/dsh-web-install-plugins"
   "$repository_root/scripts/dsh-web-runtime"
 )
-for plugin in telegram-gateway dsh-cron dsh-assistant; do
+for plugin in telegram-gateway dsh-cron dsh-assistant liangshen; do
   required_files+=(
     "$repository_root/$plugin/package.json"
     "$repository_root/$plugin/cordis.patch.yml"
@@ -93,7 +93,7 @@ install -m 0755 "$repository_root/scripts/dsh-web-install-plugins" "$temporary_r
 install -m 0755 "$repository_root/scripts/dsh-web-runtime" "$temporary_root/dsh-web/bin/web"
 install -m 0755 "$repository_root/bin/dsh" "$temporary_root/dsh-web/bin/dsh"
 
-for plugin in telegram-gateway dsh-cron dsh-assistant; do
+for plugin in telegram-gateway dsh-cron dsh-assistant liangshen; do
   (cd "$repository_root/$plugin" && pnpm pack --pack-destination "$temporary_root/dsh-web/plugins" >/dev/null)
 done
 

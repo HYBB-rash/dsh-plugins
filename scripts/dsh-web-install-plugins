@@ -73,10 +73,10 @@ if [[ -d "$package_root/upstream/deepseek-harness" ]]; then
   for dependency in @types/node tsdown; do
     ensure_build_dependency_link "$dependency"
   done
-  for package_name in dsh-telegram-gateway dsh-cron dsh-assistant; do
+  for package_name in dsh-telegram-gateway dsh-cron dsh-assistant dsh-liangshen; do
     remove_legacy_local_plugin_link "$package_name"
   done
-  for plugin in telegram-gateway dsh-cron dsh-assistant; do
+  for plugin in telegram-gateway dsh-cron dsh-assistant liangshen; do
     build_plugin "$package_root/$plugin"
   done
 
@@ -84,7 +84,9 @@ if [[ -d "$package_root/upstream/deepseek-harness" ]]; then
   for package in \
     @deepseek-ai/dsh-telegram-gateway \
     @deepseek-ai/dsh-cron \
-    @deepseek-ai/dsh-assistant; do
+    @deepseek-ai/dsh-assistant \
+    @deepseek-ai/dsh-liangshen \
+    @linxin666/dsh-liangshen; do
     installed="$DSH_HOME/profiles/web/node_modules/$package"
     if [[ -e "$installed" || -L "$installed" ]]; then
       installed_packages+=("$package")
@@ -99,7 +101,8 @@ if [[ -d "$package_root/upstream/deepseek-harness" ]]; then
     plugin --profile web add --ignore-scripts --force \
     "file:$package_root/telegram-gateway" \
     "file:$package_root/dsh-cron" \
-    "file:$package_root/dsh-assistant"
+    "file:$package_root/dsh-assistant" \
+    "file:$package_root/liangshen"
 fi
 
 : "${DSH_HOME:?set DSH_HOME to an external writable directory}"
@@ -126,7 +129,8 @@ plugin_archives=()
 for pattern in \
   'deepseek-ai-dsh-telegram-gateway-*.tgz' \
   'deepseek-ai-dsh-cron-*.tgz' \
-  'deepseek-ai-dsh-assistant-*.tgz'; do
+  'deepseek-ai-dsh-assistant-*.tgz' \
+  'deepseek-ai-dsh-liangshen-*.tgz'; do
   matches=("$package_root"/plugins/$pattern)
   if [[ ${#matches[@]} -ne 1 || ! -f "${matches[0]}" ]]; then
     echo "expected exactly one $pattern under $package_root/plugins" >&2
@@ -139,7 +143,9 @@ installed_packages=()
 for package in \
   @deepseek-ai/dsh-telegram-gateway \
   @deepseek-ai/dsh-cron \
-  @deepseek-ai/dsh-assistant; do
+  @deepseek-ai/dsh-assistant \
+    @deepseek-ai/dsh-liangshen \
+    @linxin666/dsh-liangshen; do
   installed="$DSH_HOME/profiles/web/node_modules/$package"
   if [[ -e "$installed" || -L "$installed" ]]; then
     installed_packages+=("$package")

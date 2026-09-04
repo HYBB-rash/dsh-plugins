@@ -25,7 +25,8 @@ cat >"$profile_dir/package.json" <<EOF
   "dependencies": {
     "@deepseek-ai/dsh-telegram-gateway": "file:$repository_root/telegram-gateway",
     "@deepseek-ai/dsh-cron": "file:$repository_root/dsh-cron",
-    "@deepseek-ai/dsh-assistant": "file:$repository_root/dsh-assistant"
+    "@deepseek-ai/dsh-assistant": "file:$repository_root/dsh-assistant",
+    "@deepseek-ai/dsh-liangshen": "file:$repository_root/liangshen"
   },
   "dsh": {
     "profile": {
@@ -34,6 +35,7 @@ cat >"$profile_dir/package.json" <<EOF
   }
 }
 EOF
+ln -s "$repository_root/liangshen" "$profile_dir/node_modules/@deepseek-ai/dsh-liangshen"
 cp "$repository_root/config/web/portable.patch.yml" "$profile_dir/cordis.patch.yml"
 
 (
@@ -53,6 +55,7 @@ expected = [
     "@deepseek-ai/dsh-telegram-gateway",
     "@deepseek-ai/dsh-cron",
     "@deepseek-ai/dsh-assistant",
+    "@deepseek-ai/dsh-liangshen",
 ]
 if actual != expected:
     raise SystemExit(f"installed plugins were not auto-registered: expected {expected!r}, got {actual!r}")
@@ -71,7 +74,7 @@ import sys
 
 config = Path(sys.argv[1]).read_text(encoding="utf-8")
 blocks = re.split(r"(?m)(?=^[ \t]*- id:)", config)
-for plugin_id in ["telegram-gateway", "dsh-cron", "dsh-cron-manager", "dsh-assistant"]:
+for plugin_id in ["telegram-gateway", "dsh-cron", "dsh-cron-manager", "dsh-assistant", "liangshen"]:
     matching = [
         block for block in blocks
         if re.search(rf"(?m)^[ \t]*- id: {re.escape(plugin_id)}$", block)
