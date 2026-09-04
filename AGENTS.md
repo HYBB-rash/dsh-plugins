@@ -22,6 +22,10 @@
 
 `release/dsh dev shell` 是运行时开发的例外：它在 `dev prepare` 成功后提供锁定 Harness 及其私有 npm 依赖；仍先在 `nix develop` 中执行宿主侧的 Git、Nix 和发布工具命令。
 
+## 本地 Web 开发
+
+涉及 Harness、`telegram-gateway`、`dsh-cron`、`dsh-assistant`、Web Profile、插件注册或本地 Web 开发服时，先读取并遵循 `$dsh-web-dev`。本地开发固定使用两段式入口：`./scripts/dsh-web-install-plugins` 负责构建和安装，`./scripts/dsh-web-runtime` 只负责启动；不得恢复已清退的 `scripts/dsh-web`，不得直接维护 Profile 的 `node_modules` 或手工登记 bundle。
+
 ## 发布入口与隔离
 
 生产发布唯一入口是 `./release/dsh`：从明确 Git commit 构建同一不可变镜像，并遵守其停机、快照、验证、用户验收和显式回滚边界。不得直接同步源码、修改线上 selector、远程安装依赖，也不得恢复或扩展已退役的 `deploy.sh` 流程。
