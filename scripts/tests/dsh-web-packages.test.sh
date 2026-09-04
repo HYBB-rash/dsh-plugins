@@ -74,12 +74,36 @@ done
 grep -Fq 'pnpm install --ignore-scripts' "$DSH_WEB_TEST_LOG"
 grep -Fq 'pnpm run build' "$DSH_WEB_TEST_LOG"
 grep -Fq 'plugin --profile web add --ignore-scripts --force' "$DSH_WEB_TEST_LOG"
+if grep -Fq 'plugin --profile web remove' "$DSH_WEB_TEST_LOG"; then
+  echo 'source installer tried to remove plugins from a fresh profile' >&2
+  exit 1
+fi
 if [[ -e "$fixture_root/home/.credentials.yaml" || -e "$fixture_root/home/secrets/notion.token" ]]; then
   echo 'source installer copied production credentials into the development profile' >&2
   exit 1
 fi
 if grep -Fq -- '--patch' "$DSH_WEB_TEST_LOG"; then
   echo 'plugin installer also started the Web runtime' >&2
+  exit 1
+fi
+
+: >"$DSH_WEB_TEST_LOG"
+for package in dsh-telegram-gateway dsh-cron dsh-assistant; do
+  mkdir -p "$fixture_root/home/profiles/web/node_modules/@deepseek-ai/$package"
+done
+PATH="$fixture_root/test-bin:$PATH" \
+  DSH_WEB_HOME="$fixture_root/home" \
+  "$fixture_root/scripts/dsh-web-install-plugins"
+
+if ! grep -Fq 'plugin --profile web remove @deepseek-ai/dsh-telegram-gateway @deepseek-ai/dsh-cron @deepseek-ai/dsh-assistant' "$DSH_WEB_TEST_LOG"; then
+  echo 'source installer did not remove stale local plugin copies before adding them' >&2
+  exit 1
+fi
+grep -Fq 'plugin --profile web add --ignore-scripts --force' "$DSH_WEB_TEST_LOG"
+remove_line=$(grep -Fn 'plugin --profile web remove' "$DSH_WEB_TEST_LOG" | cut -d: -f1)
+add_line=$(grep -Fn 'plugin --profile web add' "$DSH_WEB_TEST_LOG" | cut -d: -f1)
+if [[ "$remove_line" -ge "$add_line" ]]; then
+  echo 'source installer did not remove stale local plugin copies before adding them' >&2
   exit 1
 fi
 

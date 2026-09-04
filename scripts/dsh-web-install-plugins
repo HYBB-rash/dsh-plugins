@@ -58,6 +58,21 @@ if [[ -d "$package_root/upstream/deepseek-harness" ]]; then
     build_plugin "$package_root/$plugin"
   done
 
+  installed_packages=()
+  for package in \
+    @deepseek-ai/dsh-telegram-gateway \
+    @deepseek-ai/dsh-cron \
+    @deepseek-ai/dsh-assistant; do
+    installed="$DSH_HOME/profiles/web/node_modules/$package"
+    if [[ -e "$installed" || -L "$installed" ]]; then
+      installed_packages+=("$package")
+    fi
+  done
+  if [[ ${#installed_packages[@]} -gt 0 ]]; then
+    node "$harness_root/apps/cli/lib/bin.js" \
+      plugin --profile web remove "${installed_packages[@]}"
+  fi
+
   exec node "$harness_root/apps/cli/lib/bin.js" \
     plugin --profile web add --ignore-scripts --force \
     "file:$package_root/telegram-gateway" \
