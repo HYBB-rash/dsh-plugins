@@ -1,9 +1,4 @@
 - insert:
-    - id: personal-feed-selector
-      name: './node_modules/@herman/personal-feed-selector/lib/index.js'
-      config:
-        mode: telegram
-        telegramParentSessionId: session-telegram
     - id: telegram-gateway
       name: './node_modules/@deepseek-ai/dsh-telegram-gateway/lib/index.js'
       config:

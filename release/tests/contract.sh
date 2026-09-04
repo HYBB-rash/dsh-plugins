@@ -653,6 +653,12 @@ grep -Fq '"@herman/personal-feed"' "$repo_root/release/profiles/telegram-test/pa
 grep -Fq 'personal-feed' "$repo_root/release/scripts/self-test.sh"
 grep -Eq '(^|[^[:alnum:]_-])personal-feed([^[:alnum:]_-]|$)' "$repo_root/release/scripts/check-runtime-module-identity.sh"
 test ! -d "$repo_root/x-feed"
+test ! -d "$repo_root/personal-feed-selector"
+test ! -d "$repo_root/skills/personal-feed-selector"
+! rg -n '@herman/personal-feed-selector|personal_feed_select_attention|id: personal-feed-selector' \
+  "$repo_root/config" "$repo_root/release/profiles" "$repo_root/release/Containerfile" \
+  "$repo_root/release/cli.mjs" "$repo_root/release/scripts" "$repo_root/scripts" \
+  "$repo_root/runtime-package-topology.json"
 ! grep -Eq '(^|[^[:alnum:]_-])personal-feed([^[:alnum:]_-]|$)' "$repo_root/dsh-cron/src/environment-modules.ts"
 python3 - "$repo_root/release/profiles/telegram/cordis.patch.yml" "$repo_root/release/profiles/telegram-test/cordis.patch.yml" <<'PY'
 import pathlib, sys

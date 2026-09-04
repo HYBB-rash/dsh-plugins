@@ -40,7 +40,7 @@ for package in dsh-telegram-gateway dsh-cron dsh-assistant; do
   mkdir -p "$fixture_root/web-home/profiles/web/node_modules/@deepseek-ai/$package/lib"
   printf '%s\n' "$package" >"$fixture_root/web-home/profiles/web/node_modules/@deepseek-ai/$package/lib/index.js"
 done
-for package in personal-feed-selector personal-feed; do
+for package in personal-feed; do
   mkdir -p "$fixture_root/web-home/profiles/web/node_modules/@herman/$package/lib"
   printf '%s\n' "$package" >"$fixture_root/web-home/profiles/web/node_modules/@herman/$package/lib/index.js"
 done
@@ -74,7 +74,6 @@ for expected in \
   dsh-web/profile/web/node_modules/@deepseek-ai/dsh-telegram-gateway/lib/index.js \
   dsh-web/profile/web/node_modules/@deepseek-ai/dsh-cron/lib/index.js \
   dsh-web/profile/web/node_modules/@deepseek-ai/dsh-assistant/lib/index.js \
-  dsh-web/profile/web/node_modules/@herman/personal-feed-selector/lib/index.js \
   dsh-web/profile/web/node_modules/@herman/personal-feed/lib/index.js \
   dsh-web/profile/web/node_modules/@herman/personal-feed/python/x_personal_feed_observer_cli.py; do
   grep -Fxq "$expected" "$fixture_root/files.txt" || {

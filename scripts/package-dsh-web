@@ -19,7 +19,6 @@ required_files=(
   "$profile_root/node_modules/@deepseek-ai/dsh-telegram-gateway/lib/index.js"
   "$profile_root/node_modules/@deepseek-ai/dsh-cron/lib/index.js"
   "$profile_root/node_modules/@deepseek-ai/dsh-assistant/lib/index.js"
-  "$profile_root/node_modules/@herman/personal-feed-selector/lib/index.js"
   "$profile_root/node_modules/@herman/personal-feed/lib/index.js"
   "$profile_root/node_modules/@herman/personal-feed/python/x_personal_feed_observer_cli.py"
 )

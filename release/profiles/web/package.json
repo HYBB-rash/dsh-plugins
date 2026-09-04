@@ -5,8 +5,7 @@
     "@deepseek-ai/dsh-assistant": "workspace:*",
     "@deepseek-ai/dsh-cron": "workspace:*",
     "@deepseek-ai/dsh-session-persistence-sqlite": "workspace:*",
-    "@deepseek-ai/dsh-tool-session-query": "workspace:*",
-    "@herman/personal-feed-selector": "workspace:*"
+    "@deepseek-ai/dsh-tool-session-query": "workspace:*"
   },
   "dsh": {
     "profile": {

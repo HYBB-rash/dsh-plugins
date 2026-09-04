@@ -41,7 +41,6 @@ RUN mkdir -p \
       /opt/dsh/harness/local-plugins/telegram-gateway \
       /opt/dsh/harness/local-plugins/dsh-cron \
       /opt/dsh/harness/local-plugins/dsh-assistant \
-      /opt/dsh/harness/local-plugins/personal-feed-selector \
       /opt/dsh/harness/local-plugins/personal-feed \
       /opt/dsh/harness/local-profiles/web \
       /opt/dsh/harness/local-profiles/telegram \
@@ -49,7 +48,6 @@ RUN mkdir -p \
 COPY plugins/telegram-gateway/package.json /opt/dsh/harness/local-plugins/telegram-gateway/package.json
 COPY plugins/dsh-cron/package.json /opt/dsh/harness/local-plugins/dsh-cron/package.json
 COPY plugins/dsh-assistant/package.json /opt/dsh/harness/local-plugins/dsh-assistant/package.json
-COPY plugins/personal-feed-selector/package.json /opt/dsh/harness/local-plugins/personal-feed-selector/package.json
 COPY plugins/personal-feed/package.json /opt/dsh/harness/local-plugins/personal-feed/package.json
 COPY release-system/release/profiles/web/package.json /opt/dsh/harness/local-profiles/web/package.json
 COPY release-system/release/profiles/telegram/package.json /opt/dsh/harness/local-profiles/telegram/package.json
@@ -64,7 +62,7 @@ RUN pnpm install --no-frozen-lockfile \
 COPY plugins/ /opt/dsh/plugins-src/
 COPY release-system/release/ /opt/dsh/release-system/
 RUN set -eu; \
-    for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed; do \
+    for package in telegram-gateway dsh-cron dsh-assistant personal-feed; do \
       cp -a "/opt/dsh/plugins-src/$package/." "/opt/dsh/harness/local-plugins/$package/"; \
     done; \
     cp -a /opt/dsh/release-system/profiles/. /opt/dsh/harness/local-profiles/; \
@@ -74,7 +72,7 @@ RUN set -eu; \
     cp /opt/dsh/plugins-src/scripts/materialize-runtime-topology.mjs \
       /opt/dsh/harness/local-plugins/scripts/materialize-runtime-topology.mjs; \
     bash /opt/dsh/release-system/scripts/check-runtime-module-identity.sh /opt/dsh/harness; \
-    for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed; do \
+    for package in telegram-gateway dsh-cron dsh-assistant personal-feed; do \
       (cd "local-plugins/$package" \
        && pnpm exec tsc -b \
        && pnpm exec tsdown \
@@ -90,7 +88,7 @@ RUN mkdir -p /home/herman/.dsh /home/herman/.dsh/workspace \
 USER 1000:1000
 
 RUN set -eu; \
-    for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed; do \
+    for package in telegram-gateway dsh-cron dsh-assistant personal-feed; do \
       if [ -d "local-plugins/$package/tests" ]; then \
         (cd "local-plugins/$package"; \
          config=vitest.config.ts; \

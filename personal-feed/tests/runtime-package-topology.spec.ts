@@ -21,7 +21,6 @@ const pluginDirectories = [
   'dsh-assistant',
   'dsh-cron',
   'personal-feed',
-  'personal-feed-selector',
   'telegram-gateway',
 ] as const
 const harnessPackages = [

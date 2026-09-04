@@ -197,7 +197,7 @@ source_a="$test_root/worktree-a"
 source_b="$test_root/worktree-b"
 prepare_source() {
   local source="$1" package profile
-  for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed; do
+  for package in telegram-gateway dsh-cron dsh-assistant personal-feed; do
     mkdir -p "$source/$package"
     printf '%s\n' '{}' >"$source/$package/package.json"
   done

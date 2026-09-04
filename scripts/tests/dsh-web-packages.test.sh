@@ -17,7 +17,7 @@ mkdir -p \
 cp "$repository_root/scripts/dsh-web" "$fixture_root/scripts/dsh-web"
 cp "$repository_root/config/web/cordis.patch.yml" "$fixture_root/config/web/cordis.patch.yml"
 
-for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed; do
+for package in telegram-gateway dsh-cron dsh-assistant personal-feed; do
   mkdir -p "$fixture_root/$package"
 done
 
@@ -52,13 +52,13 @@ PATH="$fixture_root/test-bin:$PATH" \
   DSH_WEB_HOME="$fixture_root/home" \
   "$fixture_root/scripts/dsh-web" --host 127.0.0.1 --port 3080 --no-open
 
-for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector personal-feed; do
+for package in telegram-gateway dsh-cron dsh-assistant personal-feed; do
   test -f "$fixture_root/$package/lib/index.js" || {
     echo "launcher did not build $package" >&2
     exit 1
   }
   case "$package" in
-    personal-feed-selector|personal-feed) scope=@herman ;;
+    personal-feed) scope=@herman ;;
     *) scope=@deepseek-ai ;;
   esac
   test "$(readlink "$fixture_root/upstream/deepseek-harness/node_modules/.pnpm/node_modules/$scope/$package")" = "$fixture_root/$package" || {
@@ -80,13 +80,14 @@ config = Path(sys.argv[1]).read_text(encoding="utf-8")
 contracts = {
     "Telegram standard Agent preset": r"id: telegram-gateway[\s\S]*?agentPreset: standard",
     "Personal Feed Telegram extension": r"id: telegram-gateway[\s\S]*?modulePath: '@herman/personal-feed'",
-    "Telegram selector mode": r"id: personal-feed-selector[\s\S]*?mode: telegram",
     "Telegram cron scheduler": r"id: dsh-cron[\s\S]*?mode: scheduler",
     "Telegram assistant delivery": r"id: dsh-assistant[\s\S]*?mode: telegram",
 }
 for name, pattern in contracts.items():
     if re.search(pattern, config) is None:
         raise SystemExit(f"launcher runtime config is missing {name}")
+if "personal-feed-selector" in config:
+    raise SystemExit("launcher runtime config still exposes personal-feed-selector")
 PY
 
 echo 'dsh-web package composition passed'

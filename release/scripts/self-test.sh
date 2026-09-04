@@ -13,11 +13,12 @@ ssh_known_hosts="$(ssh -G git@github.com 2>/dev/null \
 test "$ssh_known_hosts" = /home/herman/.ssh/known_hosts
 
 test -f /opt/dsh/harness/apps/cli/lib/bin.js
-for package in dsh-assistant dsh-cron telegram-gateway personal-feed-selector personal-feed; do
+for package in dsh-assistant dsh-cron telegram-gateway personal-feed; do
   test -d "/opt/dsh/harness/local-plugins/$package/lib"
 done
 test -f /opt/dsh/harness/local-plugins/personal-feed/lib/index.js
 test ! -e /opt/dsh/harness/local-plugins/x-feed
+test ! -e /opt/dsh/harness/local-plugins/personal-feed-selector
 bash /opt/dsh/release-system/scripts/check-runtime-module-identity.sh /opt/dsh/harness
 test ! -e /opt/dsh/harness/local-plugins/dsh-assistant/lib/migrate-cli.js
 test ! -e /opt/dsh/harness/local-plugins/dsh-assistant/lib/historical-recovery.js
@@ -139,7 +140,7 @@ if rg --fixed-strings '/opt/dsh/automations' "$tmp_home/.dsh/AGENTS.md"; then
   printf '%s\n' 'workspace instructions still advertise repository-owned automations' >&2
   exit 1
 fi
-for skill in explore-opportunity personal-feed-selector personal-task-list x-feed; do
+for skill in explore-opportunity personal-task-list x-feed; do
   test -L "$tmp_home/.dsh/skills/$skill"
   test "$(readlink "$tmp_home/.dsh/skills/$skill")" = "/opt/dsh/plugins-src/skills/$skill"
 done

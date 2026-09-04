@@ -7,7 +7,6 @@
       "requiredBy": [
         "@deepseek-ai/dsh-cron",
         "@deepseek-ai/dsh-telegram-gateway",
-        "@herman/personal-feed-selector",
         "@herman/personal-feed"
       ]
     },
@@ -36,7 +35,6 @@
       "requiredBy": [
         "@deepseek-ai/dsh-cron",
         "@deepseek-ai/dsh-telegram-gateway",
-        "@herman/personal-feed-selector",
         "@herman/personal-feed"
       ]
     },
@@ -47,7 +45,6 @@
         "@deepseek-ai/dsh-assistant",
         "@deepseek-ai/dsh-cron",
         "@deepseek-ai/dsh-telegram-gateway",
-        "@herman/personal-feed-selector",
         "@herman/personal-feed"
       ]
     },
@@ -57,7 +54,6 @@
       "requiredBy": [
         "@deepseek-ai/dsh-assistant",
         "@deepseek-ai/dsh-cron",
-        "@herman/personal-feed-selector",
         "@herman/personal-feed"
       ]
     },
@@ -65,7 +61,6 @@
       "name": "@deepseek-ai/dsh-util-values",
       "kind": "harness",
       "requiredBy": [
-        "@herman/personal-feed-selector",
         "@herman/personal-feed"
       ]
     },
@@ -75,7 +70,6 @@
       "requiredBy": [
         "@deepseek-ai/dsh-assistant",
         "@deepseek-ai/dsh-cron",
-        "@herman/personal-feed-selector",
         "@deepseek-ai/dsh-telegram-gateway"
       ]
     },

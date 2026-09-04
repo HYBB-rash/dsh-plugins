@@ -7,8 +7,7 @@
     "@deepseek-ai/dsh-session-persistence-sqlite": "workspace:*",
     "@deepseek-ai/dsh-telegram-gateway": "workspace:*",
     "@deepseek-ai/dsh-tool-session-query": "workspace:*",
-    "@herman/personal-feed": "workspace:*",
-    "@herman/personal-feed-selector": "workspace:*"
+    "@herman/personal-feed": "workspace:*"
   },
   "dsh": {
     "profile": {

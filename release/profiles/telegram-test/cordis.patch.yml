@@ -8,11 +8,6 @@
       name: '@deepseek-ai/dsh-session-persistence-sqlite'
       config:
         path: !!js dshHomePath('storages/session-persistence.sqlite')
-    - id: personal-feed-selector
-      name: '@herman/personal-feed-selector'
-      config:
-        mode: telegram
-        telegramParentSessionId: session-telegram-test
     - id: telegram-gateway
       name: '@deepseek-ai/dsh-telegram-gateway'
       config:
