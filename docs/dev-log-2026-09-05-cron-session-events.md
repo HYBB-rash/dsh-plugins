@@ -16,6 +16,7 @@
 5. 运行 dsh-cron 全量测试，24 个测试文件、637 项测试全部通过。
 6. 首次直接执行 `pnpm --dir dsh-cron run bundle` 失败，因为该调用把插件目录误当成独立 workspace，无法解析 Harness 内的 `@deepseek-ai/cordis@workspace:*`；这不是代码失败。改用 `dsh-web-install-plugins` 的正式构建入口后，Harness、三个插件和隔离 Web Profile 均构建安装成功。
 7. Web 分离开发流、插件自描述、便携打包、Shell 语法和 `git diff --check` 全部通过。
+8. 03:51 使用 `scripts/dsh-web-local-deploy` 将修复快进到本地 `main`，精确重启 `dsh-web-local.service` 并刷新共享 Web Profile。服务恢复为 active/running，且只监听 `127.0.0.1:3080`。
 
 ## 逻辑链条
 
@@ -39,7 +40,8 @@
 - `scripts/tests/package-dsh-web.test.sh`：通过。
 - 三个入口脚本 `bash -n`：通过。
 - `git diff --check`：通过。
+- 本地正式开发实例：Profile 中安装产物实际包含 `session.snapshotEvents()`；`dsh-web-local.service` 为 active/running；`127.0.0.1:3080` 正常监听；未登录 API 返回预期的 401；重启后的 journal 未再出现该错误。
 
 ## 遗留
 
-代码尚需合并到 `main`，并刷新、重启当前本地 Web 实例后做真实任务级验证。历史三次失败记录保持原样，不手工篡改运行账本。
+代码已进入本地 `main`，本地 Web 已刷新并重启。该小时任务下一次自然执行约在 04:36；为避免重复抓取和 Telegram 投递，本次没有手动提前触发。历史四次失败记录保持原样，不手工篡改运行账本；下一次自然运行是最终业务现场确认。
