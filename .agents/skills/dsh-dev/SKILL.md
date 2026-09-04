@@ -11,7 +11,7 @@ Prepare one isolated, editable-source Docker environment before changing anythin
 
 Use it when the task may change any of these runtime inputs:
 
-- `telegram-gateway`, `dsh-cron`, `dsh-assistant`, `personal-feed-selector`, or `x-feed`;
+- `telegram-gateway`, `dsh-cron`, or `dsh-assistant`;
 - product Skills, Profiles, runtime package topology, or code under `release/scripts` that is present in the image;
 - tests or configuration needed to prove those runtime changes.
 
@@ -49,7 +49,7 @@ Skip it for prose-only documentation, read-only review or diagnosis, Git-only ho
 ## Develop inside the boundary
 
 - Use `./release/dsh dev shell` for commands that must run with the fixed Harness and image dependencies. It only execs Bash inside this worktree's already-running fixed toolbox; it does not create a shell container or maintain shell-specific state. Multiple terminals may enter the same toolbox. Do not replace it with a direct container-engine command.
-- To formally validate mounted, including dirty, source, use `./release/dsh dev verify --source <task-worktree>`. It only execs the same fixed toolbox, repeats type/build/bundle and the full mounted TypeScript/Python gate, and prints a separate editable-source receipt beside the shared-main image receipt. It does not turn `dev prepare` back into a full test gate or create verification lifecycle state. Use `--package <one-mounted-package>` only for a focused inner loop; `x-feed` includes its Python tests.
+- To formally validate mounted, including dirty, source, use `./release/dsh dev verify --source <task-worktree>`. It only execs the same fixed toolbox, repeats type/build/bundle and the mounted package tests, and prints a separate editable-source receipt beside the shared-main image receipt. It does not turn `dev prepare` back into a full test gate or create verification lifecycle state. Use `--package <one-mounted-package>` only for a focused inner loop.
 - Do not hand-assemble `setpriv`, `HOME`, `NODE_PATH`, cache directories, dependency symlinks, or a direct engine command for this verification. The command keeps type/build/bundle in the local rootless toolbox identity, then runs TypeScript/Python tests as the Containerfile's 1000:1000 with per-run tmpfs HOME/npm/XDG/data directories; its default Node resolution intentionally matches the Containerfile gate.
 - Keep editable source in the task worktree. Generated `lib`, caches, and test output remain ignored and outside the image identity.
 - Use focused tests during the inner loop when the affected boundary is known. Before declaring development complete, rerun the affected integration tests and any wider tests required by the change.

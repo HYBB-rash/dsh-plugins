@@ -41,16 +41,12 @@ RUN mkdir -p \
       /opt/dsh/harness/local-plugins/telegram-gateway \
       /opt/dsh/harness/local-plugins/dsh-cron \
       /opt/dsh/harness/local-plugins/dsh-assistant \
-      /opt/dsh/harness/local-plugins/personal-feed-selector \
-      /opt/dsh/harness/local-plugins/x-feed \
       /opt/dsh/harness/local-profiles/web \
       /opt/dsh/harness/local-profiles/telegram \
       /opt/dsh/harness/local-profiles/telegram-test
 COPY plugins/telegram-gateway/package.json /opt/dsh/harness/local-plugins/telegram-gateway/package.json
 COPY plugins/dsh-cron/package.json /opt/dsh/harness/local-plugins/dsh-cron/package.json
 COPY plugins/dsh-assistant/package.json /opt/dsh/harness/local-plugins/dsh-assistant/package.json
-COPY plugins/personal-feed-selector/package.json /opt/dsh/harness/local-plugins/personal-feed-selector/package.json
-COPY plugins/x-feed/package.json /opt/dsh/harness/local-plugins/x-feed/package.json
 COPY release-system/release/profiles/web/package.json /opt/dsh/harness/local-profiles/web/package.json
 COPY release-system/release/profiles/telegram/package.json /opt/dsh/harness/local-profiles/telegram/package.json
 COPY release-system/release/profiles/telegram-test/package.json /opt/dsh/harness/local-profiles/telegram-test/package.json
@@ -64,7 +60,7 @@ RUN pnpm install --no-frozen-lockfile \
 COPY plugins/ /opt/dsh/plugins-src/
 COPY release-system/release/ /opt/dsh/release-system/
 RUN set -eu; \
-    for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector x-feed; do \
+    for package in telegram-gateway dsh-cron dsh-assistant; do \
       cp -a "/opt/dsh/plugins-src/$package/." "/opt/dsh/harness/local-plugins/$package/"; \
     done; \
     cp -a /opt/dsh/release-system/profiles/. /opt/dsh/harness/local-profiles/; \
@@ -74,7 +70,7 @@ RUN set -eu; \
     cp /opt/dsh/plugins-src/scripts/materialize-runtime-topology.mjs \
       /opt/dsh/harness/local-plugins/scripts/materialize-runtime-topology.mjs; \
     bash /opt/dsh/release-system/scripts/check-runtime-module-identity.sh /opt/dsh/harness; \
-    for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector x-feed; do \
+    for package in telegram-gateway dsh-cron dsh-assistant; do \
       (cd "local-plugins/$package" \
        && pnpm exec tsc -b \
        && pnpm exec tsdown \
@@ -90,7 +86,7 @@ RUN mkdir -p /home/herman/.dsh /home/herman/.dsh/workspace \
 USER 1000:1000
 
 RUN set -eu; \
-    for package in telegram-gateway dsh-cron dsh-assistant personal-feed-selector x-feed; do \
+    for package in telegram-gateway dsh-cron dsh-assistant; do \
       if [ -d "local-plugins/$package/tests" ]; then \
         (cd "local-plugins/$package"; \
          config=vitest.config.ts; \
@@ -101,13 +97,6 @@ RUN set -eu; \
               --maxWorkers=1 --no-file-parallelism); \
       fi; \
     done; \
-    python_data="$(mktemp -d)"; \
-    trap 'rm -rf "$python_data"' EXIT; \
-    (cd local-plugins/x-feed/python \
-     && DSH_X_FEED_DATA_DIR="$python_data" PYTHONWARNINGS=ignore \
-        python3 -m unittest discover -p 'test_x_*.py' \
-     && DSH_X_FEED_DATA_DIR="$python_data" PYTHONWARNINGS=ignore \
-        python3 -m unittest test_insight_engine.py); \
     PYTHONDONTWRITEBYTECODE=1 \
       python3 /opt/dsh/release-system/tests/test_workspace_migration.py; \
     PYTHONDONTWRITEBYTECODE=1 \

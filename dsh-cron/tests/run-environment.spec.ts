@@ -33,9 +33,9 @@ function provider(marker: string): CronAgentEnvironmentProvider {
 
 describe('dsh-cron run environment registry', () => {
   it('resolves one provider and rejects missing markers without fallback', () => {
-    const registry = createCronAgentEnvironmentRegistry([provider('x-feed/v1')])
+    const registry = createCronAgentEnvironmentRegistry([provider('business/v1')])
 
-    expect(registry.resolve('x-feed/v1')).toMatchObject({ ok: true })
+    expect(registry.resolve('business/v1')).toMatchObject({ ok: true })
     expect(registry.resolve('unknown')).toMatchObject({
       ok: false,
       error: {
@@ -43,9 +43,9 @@ describe('dsh-cron run environment registry', () => {
         marker: 'unknown',
       },
     })
-    expect(registry.resolve(' x-feed/v1 ')).toMatchObject({
+    expect(registry.resolve(' business/v1 ')).toMatchObject({
       ok: false,
-      error: { code: 'missing_provider', marker: ' x-feed/v1 ' },
+      error: { code: 'missing_provider', marker: ' business/v1 ' },
     })
     expect(registry.resolve('   ')).toMatchObject({
       ok: false,
@@ -54,32 +54,32 @@ describe('dsh-cron run environment registry', () => {
   })
 
   it('fails closed for duplicate markers', () => {
-    const registry = createCronAgentEnvironmentRegistry([provider('x-feed/v1'), provider('x-feed/v1')])
+    const registry = createCronAgentEnvironmentRegistry([provider('business/v1'), provider('business/v1')])
 
-    expect(registry.resolve('x-feed/v1')).toMatchObject({
+    expect(registry.resolve('business/v1')).toMatchObject({
       ok: false,
       error: {
         code: 'duplicate_provider',
-        marker: 'x-feed/v1',
+        marker: 'business/v1',
       },
     })
   })
 
   it('returns an idempotent disposer that removes only this registration', () => {
     const registry = createCronAgentEnvironmentRegistry()
-    const first = registry.register(provider('x-feed/v1'))
-    const second = registry.register(provider('x-feed/v1'))
+    const first = registry.register(provider('business/v1'))
+    const second = registry.register(provider('business/v1'))
 
-    expect(registry.resolve('x-feed/v1')).toMatchObject({
+    expect(registry.resolve('business/v1')).toMatchObject({
       ok: false,
       error: { code: 'duplicate_provider' },
     })
     first()
-    expect(registry.resolve('x-feed/v1')).toMatchObject({ ok: true })
+    expect(registry.resolve('business/v1')).toMatchObject({ ok: true })
     first()
-    expect(registry.resolve('x-feed/v1')).toMatchObject({ ok: true })
+    expect(registry.resolve('business/v1')).toMatchObject({ ok: true })
     second()
-    expect(registry.resolve('x-feed/v1')).toMatchObject({
+    expect(registry.resolve('business/v1')).toMatchObject({
       ok: false,
       error: { code: 'missing_provider' },
     })
@@ -87,14 +87,14 @@ describe('dsh-cron run environment registry', () => {
   })
 
   it('validates generic job requirements before preparing an environment', async () => {
-    const prepare = vi.fn(provider('x-feed/v1').prepare)
+    const prepare = vi.fn(provider('business/v1').prepare)
     const registry = createCronAgentEnvironmentRegistry([{
-      ...provider('x-feed/v1'),
+      ...provider('business/v1'),
       prepare,
     }])
 
-    await expect(registry.prepare('x-feed/v1', {
-      jobId: 'cron-x-feed',
+    await expect(registry.prepare('business/v1', {
+      jobId: 'cron-business',
       jobKind: 'agent',
       sessionMode: 'persistent',
       gate: 'forbidden',
@@ -103,7 +103,7 @@ describe('dsh-cron run environment registry', () => {
       ok: false,
       error: {
         code: 'requirements_mismatch',
-        marker: 'x-feed/v1',
+        marker: 'business/v1',
       },
     })
     expect(prepare).not.toHaveBeenCalled()
@@ -112,34 +112,34 @@ describe('dsh-cron run environment registry', () => {
   it('passes the exact generic job id to a provider after requirements pass', async () => {
     const received: CronAgentEnvironmentPrepareContext[] = []
     const registry = createCronAgentEnvironmentRegistry([{
-      ...provider('x-feed/v1'),
+      ...provider('business/v1'),
       prepare: async context => {
         received.push(context)
-        return provider('x-feed/v1').prepare(context)
+        return provider('business/v1').prepare(context)
       },
     }])
 
-    await expect(registry.prepare('x-feed/v1', {
-      jobId: 'cron-x-feed',
+    await expect(registry.prepare('business/v1', {
+      jobId: 'cron-business',
       jobKind: 'agent',
       sessionMode: 'per_run',
       gate: 'forbidden',
       runId: 'run-1',
     })).resolves.toMatchObject({ ok: true })
-    expect(received).toEqual([expect.objectContaining({ jobId: 'cron-x-feed' })])
+    expect(received).toEqual([expect.objectContaining({ jobId: 'cron-business' })])
   })
 
   it('passes a typed generic skip through prepare without treating it as a lease', async () => {
     const registry = createCronAgentEnvironmentRegistry([{
-      ...provider('x-feed/v1'),
+      ...provider('business/v1'),
       prepare: async () => ({
         kind: 'skip',
         outcome: { text: undefined, error: undefined },
       }) as never,
     }])
 
-    await expect(registry.prepare('x-feed/v1', {
-      jobId: 'cron-x-feed',
+    await expect(registry.prepare('business/v1', {
+      jobId: 'cron-business',
       jobKind: 'agent',
       sessionMode: 'per_run',
       gate: 'forbidden',
@@ -159,12 +159,12 @@ describe('dsh-cron run environment registry', () => {
     ['extra top-level field', { kind: 'skip', outcome: { text: undefined, error: undefined }, extra: true }],
   ])('fails closed for a malformed generic skip (%s)', async (_name, malformed) => {
     const registry = createCronAgentEnvironmentRegistry([{
-      ...provider('x-feed/v1'),
+      ...provider('business/v1'),
       prepare: async () => malformed as never,
     }])
 
-    await expect(registry.prepare('x-feed/v1', {
-      jobId: 'cron-x-feed',
+    await expect(registry.prepare('business/v1', {
+      jobId: 'cron-business',
       jobKind: 'agent',
       sessionMode: 'per_run',
       gate: 'forbidden',
@@ -183,11 +183,11 @@ describe('dsh-cron run environment registry', () => {
       dispose,
     }
     const registry = createCronAgentEnvironmentRegistry([{
-      ...provider('x-feed/v1'),
+      ...provider('business/v1'),
       prepare: async () => lease,
     }])
-    const prepared = await registry.prepare('x-feed/v1', {
-      jobId: 'cron-x-feed',
+    const prepared = await registry.prepare('business/v1', {
+      jobId: 'cron-business',
       jobKind: 'agent',
       sessionMode: 'per_run',
       gate: 'forbidden',
@@ -200,7 +200,7 @@ describe('dsh-cron run environment registry', () => {
       ok: false,
       error: {
         code: 'surface_verification_failed',
-        marker: 'x-feed/v1',
+        marker: 'business/v1',
       },
     })
     await prepared.lease.dispose()

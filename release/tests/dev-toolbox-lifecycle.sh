@@ -11,6 +11,7 @@ mock_state="$test_root/mock-state"
 mock_engine="$test_root/mock-engine"
 mkdir -p "$state_root/dev/leases" "$state_root/dev/runtimes" "$mock_state/running"
 touch "$test_root/engine.log"
+printf '%s\n' '/upstream/' >"$test_root/git-excludes"
 
 cat >"$mock_engine" <<'EOF'
 #!/usr/bin/env bash
@@ -81,6 +82,9 @@ cat >"$candidate" <<EOF
 EOF
 
 run_dev() {
+  GIT_CONFIG_COUNT=1 \
+  GIT_CONFIG_KEY_0=core.excludesFile \
+  GIT_CONFIG_VALUE_0="$test_root/git-excludes" \
   DSH_RELEASE_STATE_ROOT="$state_root" \
   DSH_CONTAINER_ENGINE="$mock_engine" \
   MOCK_ENGINE_STATE="$mock_state" \
@@ -127,8 +131,8 @@ fake_notion_b="dsh-dev-${key_b:0:12}-fake-notion"
 
 test "$(grep -Fc "exec --interactive --tty --workdir /workspace/dsh-plugins $toolbox_a bash" "$test_root/engine.log")" = 2
 run_dev dev verify --source "$source_a" --candidate "$candidate" >"$test_root/verify-all.json"
-run_dev dev verify --source "$source_a" --candidate "$candidate" --package x-feed >"$test_root/verify-x-feed.json"
-node - <<'NODE' "$test_root/verify-all.json" "$test_root/verify-x-feed.json" "$latest_main"
+run_dev dev verify --source "$source_a" --candidate "$candidate" --package telegram-gateway >"$test_root/verify-telegram-gateway.json"
+node - <<'NODE' "$test_root/verify-all.json" "$test_root/verify-telegram-gateway.json" "$latest_main"
 const fs = require('node:fs')
 const [allPath, focusedPath, latestMain] = process.argv.slice(2)
 const all = JSON.parse(fs.readFileSync(allPath, 'utf8'))
@@ -136,19 +140,15 @@ const focused = JSON.parse(fs.readFileSync(focusedPath, 'utf8'))
 if (all.result !== 'dev-source-verified') throw new Error('missing editable verification receipt')
 if (all.receipt.baseline.pluginsCommit !== latestMain) throw new Error('missing shared-main baseline receipt')
 if (all.receipt.editableSource.scope !== 'all') throw new Error('wrong full verification scope')
-if (focused.receipt.editableSource.scope !== 'x-feed') throw new Error('wrong focused verification scope')
-if (focused.tests.python !== 'x-feed unittest discover + test_insight_engine') throw new Error('focused x-feed must include both Python gates')
+if (focused.receipt.editableSource.scope !== 'telegram-gateway') throw new Error('wrong focused verification scope')
+if (all.tests.python !== 'release-system-suites') throw new Error('full verification must include release-system Python suites')
+if (focused.tests.python !== 'not-applicable') throw new Error('focused package verification must not claim Python suites')
 if (!all.receipt.editableSource.sourceFingerprint) throw new Error('missing stable source fingerprint')
 NODE
 grep -Fq "exec --workdir /workspace/dsh-plugins $toolbox_a bash /opt/dsh/release-system/scripts/dev-source-verify.sh all" "$test_root/engine.log"
-grep -Fq "exec --workdir /workspace/dsh-plugins $toolbox_a bash /opt/dsh/release-system/scripts/dev-source-verify.sh x-feed" "$test_root/engine.log"
+grep -Fq "exec --workdir /workspace/dsh-plugins $toolbox_a bash /opt/dsh/release-system/scripts/dev-source-verify.sh telegram-gateway" "$test_root/engine.log"
 set +e
-MOCK_VERIFY_EXIT=23 \
-  DSH_RELEASE_STATE_ROOT="$state_root" \
-  DSH_CONTAINER_ENGINE="$mock_engine" \
-  MOCK_ENGINE_STATE="$mock_state" \
-  MOCK_ENGINE_LOG="$test_root/engine.log" \
-    "$repo_root/release/dsh" dev verify --source "$source_a" --candidate "$candidate" >"$test_root/verify-fail.stdout" 2>"$test_root/verify-fail.stderr"
+MOCK_VERIFY_EXIT=23 run_dev dev verify --source "$source_a" --candidate "$candidate" >"$test_root/verify-fail.stdout" 2>"$test_root/verify-fail.stderr"
 verify_exit="$?"
 set -e
 test "$verify_exit" = 5

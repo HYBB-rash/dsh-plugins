@@ -38,10 +38,6 @@
 - insert:
     - id: tool-session-query
       name: '@deepseek-ai/dsh-tool-session-query'
-    - id: personal-feed-selector
-      name: '@herman/personal-feed-selector'
-      config:
-        mode: web
     - id: dsh-cron
       name: '@deepseek-ai/dsh-cron'
       config:

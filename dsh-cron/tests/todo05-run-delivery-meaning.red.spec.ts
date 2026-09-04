@@ -2,7 +2,7 @@
  * Bootstrap + A-lineage RED for dsh-cron's generic run-delivery meaning owner.
  *
  * This is deliberately source-neutral: it must consume only dsh-cron's
- * durable Cron claim identity. It does not import Personal Feed or name a
+ * durable Cron claim identity. It does not import a business package or name a
  * business result. The bootstrap, external-first lineage, primary object
  * binding, durable receipt acceptance, and C2 finalization lifecycle contracts
  * are tested here; later C2 hardening and source-specific adapters stay separate.

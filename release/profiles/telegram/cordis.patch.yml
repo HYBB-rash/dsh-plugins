@@ -27,19 +27,11 @@
 - insert:
     - id: tool-session-query
       name: '@deepseek-ai/dsh-tool-session-query'
-    - id: personal-feed-selector
-      name: '@herman/personal-feed-selector'
-      config:
-        mode: telegram
-        telegramParentSessionId: session-telegram
     - id: telegram-gateway
       name: '@deepseek-ai/dsh-telegram-gateway'
       config:
         sessionId: session-telegram
         cwd: !!js process.env.DSH_CWD ?? process.cwd()
-        extensions:
-          - modulePath: '@herman/x-feed'
-            configJson: '{"telegramSessionId":"session-telegram"}'
     - id: dsh-cron
       name: '@deepseek-ai/dsh-cron'
       config:

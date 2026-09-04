@@ -10,8 +10,8 @@ import {
 import { JobStore, JsonlStore } from '../src/store.ts'
 
 const dirs: string[] = []
-const PRIMARY = 'dsh-x-feed:primary'
-const MARKER = 'dsh-x-feed/v1'
+const PRIMARY = 'dsh-business:primary'
+const MARKER = 'dsh-business/v1'
 
 function tempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-cron-maintenance-'))

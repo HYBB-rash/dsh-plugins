@@ -35,8 +35,8 @@
 # 重新 type/build/bundle 后执行全部 TypeScript 与 Python 测试。
 ./release/dsh dev verify --source "$(git rev-parse --show-toplevel)"
 
-# 内循环只验证一个已挂载包；x-feed 同时包含其 Python 测试。
-./release/dsh dev verify --source "$(git rev-parse --show-toplevel)" --package x-feed
+# 内循环只验证一个已挂载包。
+./release/dsh dev verify --source "$(git rev-parse --show-toplevel)" --package telegram-gateway
 
 # 任务结束时只删除该 worktree 的容器和隔离数据；共享 main 镜像保留
 ./release/dsh dev down

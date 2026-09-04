@@ -2567,8 +2567,6 @@ const developmentPackages = Object.freeze([
   'telegram-gateway',
   'dsh-cron',
   'dsh-assistant',
-  'personal-feed-selector',
-  'x-feed',
 ])
 
 function editableSourceFingerprint(sourcePath) {
@@ -2656,12 +2654,6 @@ function developmentSourceArgs(sourcePath) {
       symlinkSync(imageNodeModules, localNodeModules, 'dir')
     }
     args.push('--volume', `${join(sourcePath, packageName)}:/opt/dsh/harness/local-plugins/${packageName}:rw`)
-  }
-  for (const profile of ['web', 'telegram', 'telegram-test']) {
-    args.push(
-      '--volume',
-      `${join(sourcePath, 'personal-feed-selector')}:/opt/dsh/harness/local-profiles/${profile}/node_modules/@herman/personal-feed-selector:rw`,
-    )
   }
   args.push(
     '--volume', `${join(sourcePath, 'release/cli.mjs')}:/opt/dsh/release-system/cli.mjs:ro`,
@@ -3419,7 +3411,7 @@ function commandDev(options) {
       tests: {
         typeBuildBundle: scope === 'all' ? [...developmentPackages] : [scope],
         typeScript: scope === 'all' ? 'all-mounted-package-suites' : scope,
-        python: scope === 'all' || scope === 'x-feed' ? 'x-feed unittest discover + test_insight_engine' : 'not-applicable',
+        python: scope === 'all' ? 'release-system-suites' : 'not-applicable',
       },
       runtime: verifyRuntime,
     }

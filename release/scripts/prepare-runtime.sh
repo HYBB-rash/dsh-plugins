@@ -39,7 +39,7 @@ done
 # old release tree across an image switch.
 rm -rf -- "$dsh_home/profiles/node_modules"
 
-for skill in explore-opportunity personal-feed-selector personal-task-list x-feed; do
+for skill in explore-opportunity personal-task-list; do
   source="$skills_root/$skill"
   target="$dsh_home/skills/$skill"
   if [[ -d "$source" ]]; then

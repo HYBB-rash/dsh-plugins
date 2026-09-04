@@ -6,9 +6,7 @@
       "kind": "harness",
       "requiredBy": [
         "@deepseek-ai/dsh-cron",
-        "@deepseek-ai/dsh-telegram-gateway",
-        "@herman/personal-feed-selector",
-        "@herman/x-feed"
+        "@deepseek-ai/dsh-telegram-gateway"
       ]
     },
     {
@@ -26,8 +24,7 @@
       "requiredBy": [
         "@deepseek-ai/dsh-assistant",
         "@deepseek-ai/dsh-cron",
-        "@deepseek-ai/dsh-telegram-gateway",
-        "@herman/x-feed"
+        "@deepseek-ai/dsh-telegram-gateway"
       ]
     },
     {
@@ -35,9 +32,7 @@
       "kind": "harness",
       "requiredBy": [
         "@deepseek-ai/dsh-cron",
-        "@deepseek-ai/dsh-telegram-gateway",
-        "@herman/personal-feed-selector",
-        "@herman/x-feed"
+        "@deepseek-ai/dsh-telegram-gateway"
       ]
     },
     {
@@ -46,9 +41,7 @@
       "requiredBy": [
         "@deepseek-ai/dsh-assistant",
         "@deepseek-ai/dsh-cron",
-        "@deepseek-ai/dsh-telegram-gateway",
-        "@herman/personal-feed-selector",
-        "@herman/x-feed"
+        "@deepseek-ai/dsh-telegram-gateway"
       ]
     },
     {
@@ -56,9 +49,7 @@
       "kind": "harness",
       "requiredBy": [
         "@deepseek-ai/dsh-assistant",
-        "@deepseek-ai/dsh-cron",
-        "@herman/personal-feed-selector",
-        "@herman/x-feed"
+        "@deepseek-ai/dsh-cron"
       ]
     },
     {
@@ -67,7 +58,6 @@
       "requiredBy": [
         "@deepseek-ai/dsh-assistant",
         "@deepseek-ai/dsh-cron",
-        "@herman/personal-feed-selector",
         "@deepseek-ai/dsh-telegram-gateway"
       ]
     },
@@ -76,8 +66,7 @@
       "kind": "release",
       "releaseDirectory": "dsh-cron",
       "requiredBy": [
-        "@deepseek-ai/dsh-assistant",
-        "@herman/x-feed"
+        "@deepseek-ai/dsh-assistant"
       ]
     },
     {
@@ -86,8 +75,7 @@
       "releaseDirectory": "telegram-gateway",
       "requiredBy": [
         "@deepseek-ai/dsh-assistant",
-        "@deepseek-ai/dsh-cron",
-        "@herman/x-feed"
+        "@deepseek-ai/dsh-cron"
       ]
     }
   ]

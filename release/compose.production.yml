@@ -11,7 +11,6 @@ x-dsh-common: &dsh-common
     DSH_CWD: /home/herman/.dsh/workspace
     TZ: Asia/Shanghai
     DSH_IMAGE_ID: ${DSH_IMAGE_ID:?DSH_IMAGE_ID is required}
-    DSH_X_FEED_DATA_DIR: /home/herman/.dsh/storages/dsh-x-feed
     NOTION_TOKEN_FILE: /home/herman/.dsh/secrets/notion.token
     NOTION_INBOX_FILE: /home/herman/.dsh/storages/task-inbox/inbox.md
     NOTION_API_BASE: https://api.notion.com/v1

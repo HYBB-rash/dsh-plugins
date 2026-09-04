@@ -1,4 +1,0 @@
-interface:
-  display_name: "X 信息流"
-  short_description: "处理 Telegram 引用里的 X 洞察反馈与本地收藏操作"
-  default_prompt: "使用 $x-feed 处理当前消息中可唯一定位的 X 内容反馈。"
