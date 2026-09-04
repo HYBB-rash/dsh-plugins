@@ -9,80 +9,41 @@ if [[ -d "$package_root/upstream/deepseek-harness" ]]; then
   harness_node_modules="$harness_root/node_modules/.pnpm/node_modules"
   harness_tsc="$harness_root/node_modules/.bin/tsc"
   harness_tsdown="$harness_root/node_modules/.bin/tsdown"
-  plugin_node_modules="$package_root/.dsh-plugin-node_modules"
-  pnpm_bin="$plugin_node_modules/.pnpm-bin"
 
-  prepare_pnpm_shim() {
-    local package_manager
-    package_manager=$(node -p 'require(process.argv[1]).packageManager' "$harness_root/package.json")
-    if [[ ! "$package_manager" =~ ^pnpm@[0-9][0-9A-Za-z.+-]*$ ]]; then
-      echo "unsupported Harness packageManager: $package_manager" >&2
+  ensure_build_dependency_link() {
+    local dependency=$1
+    local target="$harness_root/node_modules/$dependency"
+    local link="$harness_node_modules/$dependency"
+    if [[ ! -e "$target" ]]; then
+      echo "missing Harness build dependency: $dependency" >&2
       return 1
     fi
-    rm -rf "$pnpm_bin"
-    mkdir -p "$pnpm_bin"
-    printf '#!/usr/bin/env bash\nexec corepack %q "$@"\n' "$package_manager" >"$pnpm_bin/pnpm"
-    chmod +x "$pnpm_bin/pnpm"
-  }
-
-  build_fs_ext() {
-    local fs_ext_directories=(
-      "$harness_root"/node_modules/.pnpm/fs-ext@*/node_modules/fs-ext
-    )
-    if [[ ${#fs_ext_directories[@]} -ne 1 || ! -d "${fs_ext_directories[0]}" ]]; then
-      echo 'expected exactly one installed fs-ext package' >&2
-      return 1
+    if [[ -e "$link" ]]; then
+      return
     fi
-    (cd "${fs_ext_directories[0]}" && npm run install)
-  }
-
-  link_dependency_tree() {
-    local source=$1
-    local entry name scope_entry
-    while IFS= read -r -d '' entry; do
-      name=${entry##*/}
-      [[ "$name" == .* ]] && continue
-      if [[ "$name" == @* && -d "$entry" ]]; then
-        mkdir -p "$plugin_node_modules/$name"
-        while IFS= read -r -d '' scope_entry; do
-          rm -rf "$plugin_node_modules/$name/${scope_entry##*/}"
-          ln -s "$scope_entry" "$plugin_node_modules/$name/${scope_entry##*/}"
-        done < <(find "$entry" -mindepth 1 -maxdepth 1 -print0)
-      else
-        rm -rf "$plugin_node_modules/$name"
-        ln -s "$entry" "$plugin_node_modules/$name"
-      fi
-    done < <(find "$source" -mindepth 1 -maxdepth 1 -print0)
-  }
-
-  prepare_plugin_node_modules() {
-    rm -rf "$plugin_node_modules"
-    mkdir -p "$plugin_node_modules"
-    link_dependency_tree "$harness_root/node_modules"
-    link_dependency_tree "$harness_node_modules"
-  }
-
-  ensure_local_plugin_link() {
-    local plugin=$1
-    local target="$package_root/$plugin"
-    local package_name package_basename link
-    package_name=$(node -p 'require(process.argv[1]).name' "$target/package.json")
-    if [[ "$package_name" != @deepseek-ai/* || "${package_name#@deepseek-ai/}" == */* ]]; then
-      echo "unsupported local plugin package name: $package_name" >&2
-      return 1
-    fi
-    package_basename=${package_name#@deepseek-ai/}
-    link="$plugin_node_modules/@deepseek-ai/$package_basename"
-    mkdir -p "$plugin_node_modules/@deepseek-ai"
-    rm -rf "$link"
+    mkdir -p "${link%/*}"
+    rm -f "$link"
     ln -s "$target" "$link"
+  }
+
+  remove_legacy_local_plugin_link() {
+    local package_name=$1
+    local link="$harness_node_modules/@deepseek-ai/$package_name"
+    if [[ -L "$link" ]]; then
+      rm -f "$link"
+      return
+    fi
+    if [[ -e "$link" ]]; then
+      echo "$link is not a symlink; refusing to overwrite" >&2
+      return 1
+    fi
   }
 
   build_plugin() {
     local plugin_directory=$1
     local existing
     existing=$(readlink "$plugin_directory/node_modules" 2>/dev/null || true)
-    if [[ "$existing" != "$plugin_node_modules" ]]; then
+    if [[ "$existing" != "$harness_node_modules" ]]; then
       if [[ -e "$plugin_directory/node_modules" || -L "$plugin_directory/node_modules" ]]; then
         if [[ ! -L "$plugin_directory/node_modules" ]]; then
           echo "$plugin_directory/node_modules is not a symlink; refusing to overwrite" >&2
@@ -90,7 +51,7 @@ if [[ -d "$package_root/upstream/deepseek-harness" ]]; then
         fi
         rm -f "$plugin_directory/node_modules"
       fi
-      ln -s "$plugin_node_modules" "$plugin_directory/node_modules"
+      ln -s "$harness_node_modules" "$plugin_directory/node_modules"
     fi
 
     rm -rf "$plugin_directory/lib" "$plugin_directory/tsconfig.tsbuildinfo"
@@ -103,17 +64,19 @@ if [[ -d "$package_root/upstream/deepseek-harness" ]]; then
     fi
   }
 
-  prepare_pnpm_shim
   (
     cd "$harness_root"
-    export PATH="$pnpm_bin:$PATH"
-    pnpm install --ignore-scripts
-    build_fs_ext
+    export CI=true
+    pnpm install --frozen-lockfile
     pnpm run build
   )
-  prepare_plugin_node_modules
+  for dependency in @types/node tsdown; do
+    ensure_build_dependency_link "$dependency"
+  done
+  for package_name in dsh-telegram-gateway dsh-cron dsh-assistant; do
+    remove_legacy_local_plugin_link "$package_name"
+  done
   for plugin in telegram-gateway dsh-cron dsh-assistant; do
-    ensure_local_plugin_link "$plugin"
     build_plugin "$package_root/$plugin"
   done
 
