@@ -10,6 +10,8 @@ The repository evolves around the author's own needs. It makes **no promise of c
 
 ## Deployment entry point
 
+For the existing local systemd service, `scripts/dsh-web-local-deploy prepare` prepares a batch and requires an explicit local `DSH_WEB_PRODUCTION_CREDENTIALS` directory. After an authorized stop and backup, `scripts/dsh-web-local-deploy install <batch-directory>` installs it and updates the service's package-root `current` only on success. Start `dsh-web-local.service` separately. Neither step stops or starts the service automatically. See the [local deployment procedure](docs/dsh-web-portable-deployment.md#本机正式服准备安装启动).
+
 The only supported deployment path from this repository to `herman.hermes` is the ordinary Web `tar.gz` flow:
 
 ```bash

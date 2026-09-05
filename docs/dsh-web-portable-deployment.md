@@ -55,6 +55,41 @@ nix develop -c ./scripts/dsh-web-deploy
 
 deploy 只上传到 `incoming/<archive-sha>`，不覆盖运行中的 start 脚本，不安装、不停机、不启动。记录输出的目录和 SHA。本地 `dsh-web-local-deploy` 在 `incoming/batch.*` 新目录准备普通归档，不覆盖旧入口，不再停止 systemd、重置 checkout 或自动重启。
 
+## 本机正式服：准备、安装、启动
+
+现有 Home Manager unit 不需要修改，也不需要手动改软链接。以下命令在仓库根目录执行；准备期间旧服务继续运行。
+
+```bash
+nix develop
+DSH_WEB_PRODUCTION_CREDENTIALS=/绝对路径/本机专用凭据目录 \
+  ./scripts/dsh-web-local-deploy prepare
+```
+
+本机入口强制显式选择凭据目录，不回落到默认远端凭据。目录须被 Git 忽略，包含 `.credentials.yaml` 和 `secrets/notion.token`；先核对 bot 属于本机。不传 `prepare` 仍是准备操作。
+
+保存输出的完整 `prepared:` 批次目录。只有获得停机许可、核对当前进程树与数据目录后，才进入下面的阶段：
+
+1. 执行 `systemctl --user stop dsh-web-local.service`，确认该服务后代退出、3080 释放。
+2. 对正式 `DSH_HOME` 做停机一致性备份，保留当前 release，确认可以人工恢复。
+3. 执行下面的安装命令；成功后再单独启动。
+
+```bash
+# 替换为本次 prepared 输出的完整路径，不用通配符选择批次。
+DSH_HOME=/home/herman/.dsh \
+  ./scripts/dsh-web-local-deploy install /完整路径/incoming/batch.XXXXXX
+
+# 只在安装成功后执行；安装失败时保持停止并报告，不直接重启旧入口。
+systemctl --user start dsh-web-local.service
+```
+
+`install` 只消费已准备归档，不重新构建或选择最新版。它检查服务已停止、MainPID 为 0、ExecStart 指向同一包根目录，然后调用该批自带的安装器。安装器从批次目录读取归档，将 release 和 `current` 写到本机包根目录；只有安装成功才更新 `current`。本机服务因此仍通过原来的 `current/bin/web` 启动新版本，保持 loopback 的 3080，不调用远端 `dsh-web-start`。
+
+默认包根目录为 `~/.local/share/dsh-web-package-local`。自定义时准备和安装都传同一个绝对 `DSH_WEB_PACKAGE_ROOT`，且必须与 unit 的 ExecStart 匹配。安装使用的 `DSH_HOME` 必须与 unit 相同；本机入口将 `DSH_WEB_HOME` 同步到它，避免 shell 遗留的开发目录覆盖正式目标。脚本不改 Home Manager、不自动停服或启动、不自动备份整个业务状态，也不自动回滚。服务状态检查不能替代操作者确认旧版进程树已经退出。
+
+安装失败不切换 `current`，但依赖或 Profile 可能已部分修改，不能理解为完整事务回滚。启动后按本文验收要求核对本机入口、认证及业务。本轮脚本修复的隔离测试不替代真实上线验收。
+
+此安装子命令需要由新版准备入口生成的批次；旧批次自带的安装器没有 `--archive-dir` 能力，不要混搭，重新准备即可。
+
 ## 授权后安装，再单独启动
 
 开始前先核实当前 DSH 监督进程及其后代、DSH_HOME、Workspace 和端口。明确停机授权后，由当前服务管理器或精确识别的监督进程树停止旧实例；确认端口释放。禁止宽泛 pkill、并行第二份或触碰 OpenClaw。

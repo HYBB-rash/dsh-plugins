@@ -136,6 +136,10 @@ DSH_WEB_HOME=/absolute/isolated-home ./scripts/dsh-web-runtime --no-open
 
 构建产物、node_modules、凭据和业务数据库不入 Git。自有代码修改后重新安装才能进入运行时；不要手动改 Profile 的 bundle 或 node_modules。
 
+### 本机正式服更新
+
+`scripts/dsh-web-local-deploy prepare` 只准备本机批次，必须显式设置 `DSH_WEB_PRODUCTION_CREDENTIALS` 为本机专用凭据目录。授权停机并完成备份后，运行 `scripts/dsh-web-local-deploy install <批次完整目录>`；成功后再用 `systemctl --user start dsh-web-local.service` 启动。安装会更新现有 systemd 使用的 `current`，不用手动改软链接，也不会自动停服或启动。详细命令与失败处理见 [本机部署步骤](docs/dsh-web-portable-deployment.md#本机正式服准备安装启动)。
+
 ## 安全与部署边界
 
 - `.gitignore` 排除常见凭据、`.env`、密钥文件、SQLite/WAL/SHM、运行日志、构建物和本地 session 状态。忽略规则不是权限控制：提交前仍应人工审查差异。
