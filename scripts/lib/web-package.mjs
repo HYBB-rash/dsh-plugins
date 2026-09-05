@@ -78,9 +78,10 @@ export function preparePackage(root, destination, { run: execute = run } = {}) {
   mkdirSync(join(destination, 'scripts/lib'), { recursive: true })
   mkdirSync(join(destination, 'config'))
   cpSync(join(root, 'config/web/portable.patch.yml'), join(destination, 'config/web.patch.yml'))
+  cpSync(join(root, 'config/web/remote.patch.yml'), join(destination, 'config/remote.patch.yml'))
   cpSync(join(root, 'bin/dsh'), join(destination, 'bin/dsh'))
   for (const [from, to] of [['dsh-web-install-plugins', 'install'], ['dsh-web-runtime', 'web'], ['dsh-web-start', 'start']]) cpSync(join(root, 'scripts', from), join(destination, 'bin', to))
-  for (const file of ['lib/web-package.mjs', 'dsh-web-lan-proxy.mjs', 'dsh-web-notify-start-url.mjs']) cpSync(join(root, 'scripts', file), join(destination, 'scripts', file))
+  for (const file of ['lib/web-package.mjs', 'dsh-web-notify-start-url.mjs']) cpSync(join(root, 'scripts', file), join(destination, 'scripts', file))
   return destination
 }
 

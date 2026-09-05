@@ -1,6 +1,6 @@
 ---
 name: dsh-web-deploy
-description: 在 dsh-plugins 中准备和上传官方 npm 运行时的普通 tar.gz Web 包，或在明确授权后安装、启动及验收 herman.hermes。保留 LAN 白名单、trusted-host、认证和 Telegram 启动通知；不用于本地源码开发。
+description: 在 dsh-plugins 中准备和上传官方 npm 运行时的普通 tar.gz Web 包，或在明确授权后安装、启动及验收 herman.hermes。远端使用 webserver 配置直接监听，保留认证、设备配对和 Telegram 启动通知；不用于本地源码开发。
 ---
 
 # 官方 npm 普通归档部署
@@ -25,7 +25,9 @@ description: 在 dsh-plugins 中准备和上传官方 npm 运行时的普通 tar
 - 凭据只由打包器从 Git 忽略目录加入；不得打印 token、Cookie、bot/API/Notion 密钥。
 - 新版运行和安装互斥；旧版没有该锁，--migrate 不能替代人工停机确认。
 - 不清空 home 或业务数据；失败保持停止并报告，人工恢复，不声称自动 rollback。
-- 保留 loopback、LAN 白名单、Host/Origin 检查及一次性 Telegram URL 通知，不关闭认证。
+- 远端 start 加载 remote.patch.yml 直接监听 0.0.0.0:3080，配置用 DSH_WEB_HOST / DSH_WEB_PORT，不传 CLI --host 0.0.0.0。不再启动自有 LAN 代理或源 IP 白名单，也不自动改系统防火墙。
+- 保留 Harness 认证、Host/Origin 检查、插件 /remote 设备配对及一次性 Telegram URL 通知；不添加全局 trusted-host 来替代配对。本机正式服务仍只监听 loopback，不加载远端配置。
+- 配对域名由 DSH_REMOTE_PUBLIC_BASE_URL 指定，start 默认沿用 DSH_WEB_PUBLIC_ORIGIN。配对必须来自同一远端实例，本机另一份服务不能代为授权。
 - OpenClaw、旧 Docker/OCI release、另一套发布平台均在范围外。
 
 ## 验证与报告

@@ -1,0 +1,10 @@
+# Deliberate remote deployment bind, using the same webserver configuration
+# shape as dsh-remote-web-ui's LAN mode. No Profile or firewall mutation.
+- id: webserver
+  name: '@deepseek-ai/dsh-host-webserver'
+  config:
+    host: !!js process.env.DSH_WEB_HOST ?? '0.0.0.0'
+    port: !!js Number(process.env.DSH_WEB_PORT ?? 3080)
+    compression: gzip
+    compressionLevel: 1
+    compressionThresholdBytes: 1024

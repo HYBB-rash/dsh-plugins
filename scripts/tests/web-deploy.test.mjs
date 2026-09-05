@@ -18,7 +18,7 @@ const script = (path, text) => writeFileSync(path, '#!/usr/bin/env bash\nset -eu
 
 test('upload writes an incoming batch, not current, and never executes install/start/stop remotely', t => {
   const root = fixture(t)
-  for (const file of ['dsh-web-deploy', 'dsh-web-install', 'dsh-web-start', 'dsh-web-lan-proxy.mjs', 'dsh-web-notify-start-url.mjs']) cpSync(join(repository, 'scripts', file), join(root, 'scripts', file))
+  for (const file of ['dsh-web-deploy', 'dsh-web-install', 'dsh-web-start', 'dsh-web-notify-start-url.mjs']) cpSync(join(repository, 'scripts', file), join(root, 'scripts', file))
   script(join(root, 'scripts/package-dsh-web'), 'printf archive >"$1"\n')
   for (const command of ['ssh', 'scp']) script(join(root, 'fake-bin', command), 'printf "%s\\n" "$0 $*" >>"$TEST_COMMAND_LOG"\n')
   const log = join(root, 'commands')
@@ -70,42 +70,55 @@ for (const exitCode of [0, 42]) test(`archive installation keeps start separate 
   assert.equal(readlinkSync(join(root, 'current')), exitCode === 0 ? `releases/${sha}` : 'old')
 })
 
-test('start runs only the installed release and supervises Web/proxy without installing', t => {
+for (const override of [false, true]) test(`remote start loads config and public origin without installing (custom environment: ${override})`, t => {
   const root = fixture(t)
   const release = join(root, 'release')
-  for (const directory of ['bin', 'scripts']) mkdirSync(join(release, directory), { recursive: true })
+  for (const directory of ['bin', 'scripts', 'config']) mkdirSync(join(release, directory), { recursive: true })
+  writeFileSync(join(release, 'config/remote.patch.yml'), '')
   mkdirSync(join(root, 'home/runtime'), { recursive: true })
   writeFileSync(join(root, 'home/runtime/package-lock.json'), '{}')
   cpSync(join(repository, 'scripts/dsh-web-start'), join(root, 'dsh-web-start'))
   symlinkSync('release', join(root, 'current'))
   script(join(release, 'bin/dsh'), 'printf "cli %s\\n" "$*" >>"$TEST_COMMAND_LOG"\n')
-  script(join(release, 'bin/web'), 'printf "web %s\\n" "$*" >>"$TEST_COMMAND_LOG"\nexec sleep 20\n')
-  writeFileSync(join(release, 'scripts/dsh-web-lan-proxy.mjs'), 'setTimeout(()=>process.exit(7), 150)\n')
+  script(join(release, 'bin/web'), 'printf "web %s\\n" "$*" >>"$TEST_COMMAND_LOG"\nprintf "bind %s:%s public %s\\n" "$DSH_WEB_HOST" "$DSH_WEB_PORT" "$DSH_REMOTE_PUBLIC_BASE_URL" >>"$TEST_COMMAND_LOG"\nexit 7\n')
   writeFileSync(join(release, 'scripts/dsh-web-notify-start-url.mjs'), '')
   for (const command of ['npm', 'pnpm', 'tar', 'systemctl']) script(join(root, 'fake-bin', command), 'echo forbidden >&2; exit 98\n')
   const log = join(root, 'commands')
-  const result = spawnSync(join(root, 'dsh-web-start'), [], { encoding: 'utf8', timeout: 5000, env: { ...process.env, DSH_WEB_HOME: '', DSH_HOME: join(root, 'home'), PATH: `${root}/fake-bin:${process.env.PATH}`, TEST_COMMAND_LOG: log } })
+  const result = spawnSync(join(root, 'dsh-web-start'), [], { encoding: 'utf8', timeout: 5000, env: { ...process.env, DSH_WEB_HOME: '', DSH_HOME: join(root, 'home'), DSH_WEB_HOST: override ? '127.0.0.1' : '', DSH_WEB_PORT: override ? '5095' : '', DSH_WEB_PUBLIC_ORIGIN: 'https://dsh.man-her.icu', DSH_REMOTE_PUBLIC_BASE_URL: override ? 'https://dsh.example.test' : '', PATH: `${root}/fake-bin:${process.env.PATH}`, TEST_COMMAND_LOG: log } })
   assert.equal(result.status, 7, result.stderr)
   const commands = readFileSync(log, 'utf8')
   assert.match(commands, /cli --version/)
-  assert.match(commands, /web --host 127.0.0.1 --port 3080 --no-open --trusted-host 192.168.6.240 dsh.man-her.icu/)
+  assert.ok(commands.includes(`web --patch ${release}/config/remote.patch.yml --port ${override ? '5095' : '3080'} --no-open`))
+  assert.ok(commands.includes(override ? 'bind 127.0.0.1:5095 public https://dsh.example.test' : 'bind 0.0.0.0:3080 public https://dsh.man-her.icu'))
+  assert.doesNotMatch(commands, /--host|--trusted-host/)
   assert.doesNotMatch(commands, /install|latest/)
 })
 
-test('start through current launches the real LAN proxy entry point', async t => {
+test('remote start refuses conflicting CLI bind flags before touching an installation', t => {
+  const root = fixture(t)
+  cpSync(join(repository, 'scripts/dsh-web-start'), join(root, 'dsh-web-start'))
+  for (const args of [['--host', '0.0.0.0'], ['--port=5095']]) {
+    const result = spawnSync(join(root, 'dsh-web-start'), args, {encoding:'utf8',env:{...process.env,DSH_HOME:join(root,'missing-home')}})
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /set DSH_WEB_HOST \/ DSH_WEB_PORT/)
+    assert.ok(!existsSync(join(root,'missing-home')))
+  }
+})
+
+test('terminating the supervisor stops the complete Web process group without a LAN proxy', async t => {
   const root = fixture(t)
   const release = join(root, 'release')
-  for (const directory of ['bin', 'scripts']) mkdirSync(join(release, directory), { recursive: true })
+  for (const directory of ['bin', 'scripts', 'config']) mkdirSync(join(release, directory), { recursive: true })
+  writeFileSync(join(release, 'config/remote.patch.yml'), '')
   mkdirSync(join(root, 'home/runtime'), { recursive: true })
   writeFileSync(join(root, 'home/runtime/package-lock.json'), '{}')
   cpSync(join(repository, 'scripts/dsh-web-start'), join(root, 'dsh-web-start'))
-  cpSync(join(repository, 'scripts/dsh-web-lan-proxy.mjs'), join(release, 'scripts/dsh-web-lan-proxy.mjs'))
   writeFileSync(join(release, 'scripts/dsh-web-notify-start-url.mjs'), '')
   symlinkSync('release', join(root, 'current'))
   script(join(release, 'bin/dsh'), 'exit 0\n')
-  script(join(release, 'bin/web'), 'exec sleep 20\n')
+  script(join(release, 'bin/web'), 'sleep 20 &\nchild=$!\nprintf "ready %s %s\\n" "$$" "$child"\ntrap \'wait "$child" 2>/dev/null || true; exit 143\' TERM\nwait "$child"\n')
   const child = spawn(join(root, 'dsh-web-start'), [], {
-    env: { ...process.env, DSH_HOME: join(root, 'home'), DSH_LAN_ADDRESS: '127.0.0.1', DSH_LAN_PORT: '0' },
+    env: { ...process.env, DSH_HOME: join(root, 'home') },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let output = ''
@@ -114,11 +127,14 @@ test('start through current launches the real LAN proxy entry point', async t =>
     const timer = setTimeout(() => resolve(false), 3000)
     child.stdout.on('data', data => {
       output += data
-      if (output.includes('dsh lan proxy:')) { clearTimeout(timer); resolve(true) }
+      if (/ready \d+ \d+/.test(output)) { clearTimeout(timer); resolve(true) }
     })
     child.once('exit', () => { clearTimeout(timer); resolve(false) })
   })
   if (child.exitCode === null) child.kill('SIGTERM')
   await stopped
-  assert.equal(ready, true, 'real proxy must listen when the selected release is a symlink')
+  assert.equal(ready, true, 'Web must start without a proxy file in the release')
+  for (const pid of output.match(/ready (\d+) (\d+)/).slice(1)) {
+    assert.throws(() => process.kill(Number(pid), 0), {code:'ESRCH'}, `Web descendant ${pid} must be stopped`)
+  }
 })

@@ -9,32 +9,35 @@ export DSH_HOME=${DSH_HOME:-$HOME/.dsh}
 export DSH_CWD=${DSH_CWD:-$DSH_HOME/workspace}
 export DSH_WEB_HOME="$DSH_HOME"
 export DSH_WEB_PUBLIC_ORIGIN=${DSH_WEB_PUBLIC_ORIGIN:-https://dsh.man-her.icu}
-host=${DSH_WEB_HOST:-127.0.0.1}
-port=${DSH_WEB_PORT:-3080}
-lan_address=${DSH_LAN_ADDRESS:-192.168.6.240}
-public_authority=${DSH_WEB_PUBLIC_AUTHORITY:-dsh.man-her.icu}
-for file in "$release/bin/web" "$release/bin/dsh" "$release/scripts/dsh-web-lan-proxy.mjs" "$release/scripts/dsh-web-notify-start-url.mjs" "$DSH_HOME/runtime/package-lock.json"; do
+export DSH_REMOTE_PUBLIC_BASE_URL=${DSH_REMOTE_PUBLIC_BASE_URL:-$DSH_WEB_PUBLIC_ORIGIN}
+export DSH_WEB_HOST=${DSH_WEB_HOST:-0.0.0.0}
+export DSH_WEB_PORT=${DSH_WEB_PORT:-3080}
+for argument in "$@"; do
+  case "$argument" in
+    --host|--host=*|--port|--port=*) echo 'set DSH_WEB_HOST / DSH_WEB_PORT for this deployment entry' >&2; exit 1 ;;
+  esac
+done
+for file in "$release/bin/web" "$release/bin/dsh" "$release/config/remote.patch.yml" "$release/scripts/dsh-web-notify-start-url.mjs" "$DSH_HOME/runtime/package-lock.json"; do
   [[ -f "$file" ]] || { echo "missing installed input: $file; install separately first" >&2; exit 1; }
 done
-# Node resolves module URLs to real paths; the proxy's entry-point check must
-# receive that same path rather than the mutable current symlink.
+# Keep all launch inputs in the selected release, even if current later changes.
 release=$(cd -- "$release" && pwd -P)
 # A restart never unpacks, installs, rewrites Profile, or chooses a new version.
 "$release/bin/dsh" --version >/dev/null
 export DSH_WEB_NOTIFY_START_URL=1
-setsid "$release/bin/web" --host "$host" --port "$port" --no-open "$@" \
-  --trusted-host "$lan_address" "$public_authority" &
+# The published remote plugin's LAN path uses webserver config, not --host:
+# the official CLI deliberately refuses an explicit --host 0.0.0.0.
+# Remote devices use its paired /remote channel, not globally trusted /api.
+setsid "$release/bin/web" --patch "$release/config/remote.patch.yml" --port "$DSH_WEB_PORT" --no-open "$@" &
 web_pid=$!
-node "$release/scripts/dsh-web-lan-proxy.mjs" &
-proxy_pid=$!
 stop_children() {
   trap - INT TERM
-  kill -- "-$web_pid" "$proxy_pid" 2>/dev/null || true
-  wait "$web_pid" "$proxy_pid" 2>/dev/null || true
+  kill -- "-$web_pid" 2>/dev/null || true
+  wait "$web_pid" 2>/dev/null || true
 }
 trap 'stop_children; exit 143' INT TERM
 set +e
-wait -n "$web_pid" "$proxy_pid"
+wait "$web_pid"
 status=$?
 set -e
 stop_children

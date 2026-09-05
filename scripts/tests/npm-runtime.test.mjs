@@ -45,6 +45,18 @@ test('Web defaults to 5080, honors explicit port, and does not add a port to con
   }
 })
 
+for (const lanSuffix of ['', ' (LAN: http://192.168.6.240:3080/?token=first-secret)']) test(`startup relay notifies once for the official banner (LAN suffix: ${Boolean(lanSuffix)})`, t => {
+  const { root, cliRoot, env } = fixture(t)
+  const banner = `dsh web: http://127.0.0.1:3080/?token=first-secret${lanSuffix}`
+  writeFileSync(join(cliRoot, 'lib/bin.js'), `console.log(${JSON.stringify(banner)}); console.log('dsh web: http://127.0.0.1:3080/?token=second-secret')\n`)
+  writeFileSync(join(root, 'scripts/dsh-web-notify-start-url.mjs'), "import {appendFileSync} from 'node:fs';let input='';for await(const chunk of process.stdin)input+=chunk;appendFileSync(process.env.TEST_NOTIFY_LOG,input)\n")
+  const log = join(root,'notifications')
+  const result = spawnSync(join(root,'scripts/dsh-web-runtime'), ['--port','3080'], {env:{...env,DSH_WEB_NOTIFY_START_URL:'1',TEST_NOTIFY_LOG:log},encoding:'utf8',timeout:15000})
+  assert.equal(result.status,0,result.stderr)
+  assert.equal(readFileSync(log,'utf8'),'http://127.0.0.1:3080/?token=first-secret\n')
+  assert.doesNotMatch(result.stderr,/notification failed/)
+})
+
 test('missing or mismatched installed CLI fails instead of invoking another available dsh', t => {
   const { root, cliRoot, env } = fixture(t)
   writeFileSync(join(cliRoot, 'package.json'), '{"name":"@deepseek-ai/dsh","version":"9.9.9"}')

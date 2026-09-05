@@ -13,9 +13,9 @@ dsh-web/
   runtime/package.json + package-lock.json
   plugins/*.tgz
   config/web.patch.yml
+  config/remote.patch.yml
   bin/dsh, install, web, start
   scripts/lib/web-package.mjs
-  scripts/dsh-web-lan-proxy.mjs
   scripts/dsh-web-notify-start-url.mjs
   production-credentials/.credentials.yaml
   production-credentials/secrets/notion.token
@@ -74,19 +74,22 @@ DSH_HOME=/absolute/existing-home ./dsh-web-start
 
 Web 插件管理器的主动升级与普通重启是不同操作。若现有 package/lock 已升级，而 pnpm 的发布时间策略记录仍旧，精确 add 也可能被策略拒绝。先在状态副本复现；只有获得停机许可、完整备份并验证恢复路径后，才可人工用官方 `plugin --profile web clean --lockfile` 重建可安装的 Profile 依赖与 lock，再安装已选定批次。它不是安装器自动步骤；不要关闭策略、手改 bundle 或删除业务数据。
 
-普通 restart 只运行 current 与已安装 runtime；不读取新归档、不解压、不执行 npm install、不选择 latest。正常服务仍由现有 Bash 监督 Web 和 LAN 代理；任一退出时停止另一方，Web 子树使用独立进程组接受终止信号。
+普通 restart 只运行 current 与已安装 runtime；不读取新归档、不解压、不执行 npm install、不选择 latest。现有 Bash 只监督一棵 Web 进程树，使用独立进程组接受终止信号；不再启动自有 LAN 代理。
 
-start 先把 current 解析为真实 release 路径，再调用 Node 代理，避免软链接 argv 与 ESM 的真实模块 URL 不一致而跳过入口。现役本机由 `dsh-web-local.service` 调用 `/home/herman/.local/share/dsh-web-package-local/current/bin/web --host 127.0.0.1 --port 3080 --no-open`；服务定义在 Home Manager 的 `home/applications.nix`。本机不启用远端 LAN 代理。实际切换与备份记录见 [双端上线日志](dev-log-2026-09-05-local-hermes-npm-deploy.md)。
+start 先把 current 解析为真实 release 路径，固定本次启动输入。现役本机由 `dsh-web-local.service` 调用 `/home/herman/.local/share/dsh-web-package-local/current/bin/web --host 127.0.0.1 --port 3080 --no-open`；服务定义在 Home Manager 的 `home/applications.nix`。本机不加载 remote.patch.yml，继续只监听 loopback。原迁移切换与备份记录见 [双端上线日志](dev-log-2026-09-05-local-hermes-npm-deploy.md)。
 
 ## 入口、安全与通知
 
 - 本机正式端口 3080；开发默认 5080。临时端口必须显式指定。
-- 远端 Web 绑定 127.0.0.1:3080；LAN 代理默认 192.168.6.240:3080。
-- 默认源地址白名单为 127.0.0.1、192.168.6.1、192.168.6.189，不信任客户端转发头。
-- HTTP/WebSocket 保留浏览器 Host；trusted hosts 包含 LAN authority 和 dsh.man-her.icu。
+- 远端 start 通过普通 webserver 配置直接绑定 `0.0.0.0:3080`，同时接受 loopback 和 LAN 连接；自有 LAN 代理与其源 IP 白名单已退役。LAN 设备现在都能连接端口，但仍须通过认证和设备配对。不会自动修改系统防火墙。
+- 远端监听地址、端口用 `DSH_WEB_HOST` / `DSH_WEB_PORT` 设置，不向 start 传 `--host` / `--port`。本机 bin/web 与开发 runtime 仍支持原 CLI 参数。
+- 远端不再添加全局 trusted-host；远程设备通过插件的 `/remote` 通道读取数据，直接 `/api` 保留 Harness 的 Host/Origin 与浏览器认证边界。
+- 当前 Harness 会把实际绑定机器的 LAN IP 视作可用 authority，所以 LAN 直接 API 未认证为 401，而域名直接 API 为 403。插件的 posture 探测把前者标成 OPEN；这不等于匿名请求已能读数据，也不意味着配对撤销能撤销另行兑换的 Harness 浏览器凭据。两种凭据不要混为一谈。
 - 远程访问插件还可能要求浏览器设备配对。HTTP token 登录成功不等于设备已获授权；若页面提示未配对，须按插件的主电脑配对入口完成授权，不能通过关闭认证来凑验收。
+- 2026-09-05 实测：Harness `0.1.2-rc.1` 拒绝 CLI `--host 0.0.0.0`，但 `dsh-remote-web-ui` 0.3.16 明确通过 webserver 配置支持主动 LAN 开放。`remote.patch.yml` 使用同一配置形式，不修改上游、调用插件私有函数或自动写 Profile；压缩配置也保留。不要据 CLI 拒绝推断普通配置不可用。
+- start 将插件的 `DSH_REMOTE_PUBLIC_BASE_URL` 默认设为通知器的 `DSH_WEB_PUBLIC_ORIGIN`，本环境为 `https://dsh.man-her.icu`。两者原本是独立配置；插件已有的 publicBaseUrl 设置优先于环境默认值。配对控制台属于远端实例；本机另一份 3080 不能为它签发设备令牌。详见 [直连实验与切换日志](dev-log-2026-09-05-direct-listener-check.md)。
 - TLS、DNS 与域名反代继续由既有外部设施负责；不安装另一套反代。
-- 启动器从 stdout 取得首条 token URL，经 stdin 通知 Telegram 一次；不重试，通知失败不终止 Web。日志仍可能含启动 token，读取必须脱敏。
+- 启动器从 stdout 取得首条 loopback token URL（兼容同一行附带 LAN 链接），经 stdin 通知 Telegram 一次；不重试，通知失败不终止 Web。日志仍可能含启动 token，读取必须脱敏。
 - 本地源码 runtime 默认不通知；现有本机服务可保留显式 DSH_WEB_NOTIFY_START_URL=1 与本地 public origin。
 - 统一 Web Profile 保留 gateway、cron scheduler、cron manager、assistant。cron manager 和 assistant 使用同一个控制 socket。
 - OpenClaw 完全不参与依赖、凭据、进程识别或验收。
@@ -104,7 +107,7 @@ git diff --check
 
 真实隔离验收使用合成 home、空 Workspace 和显式测试端口，禁用 Telegram polling、cron scheduler 和其他外部副作用。验证官方 plugin add 自动登记、自有包可加载、独立 Web 插件真实可见／可交互，并验证断开 registry 后重启不变版。
 
-获得切换授权后才验证真实业务：监督进程、loopback/LAN/域名、无会话 API 为 401、错误 Host/Origin 为 403、非白名单为 403；token 经 303/Cookie 登录为 200；Telegram 新链接、既有会话续接、cron、assistant、模型和 Notion。PID、HTTP 或单元测试通过不等于真实业务验收。
+获得切换授权后才验证真实业务：只有一棵 Web 树且 0.0.0.0:3080 由 Web 持有；loopback 未登录为 401，域名直接 API 为 403，未配对 remote API 为 403；token 经 303/Cookie 登录，设备配对后真实 remote RPC 成功；保留 Host/Origin 检查。再核对 Telegram 新链接、既有会话续接、cron、assistant、模型和 Notion。不要请求不存在的 /api 根路径后把 404 当作权限证明；自定义 Host 的检查用能保留该头的 HTTP 客户端。PID、HTTP 或单元测试通过不等于真实业务验收。
 
 ### 本次迁移已批准的单项例外
 
