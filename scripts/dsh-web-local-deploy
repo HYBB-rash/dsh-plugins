@@ -3,6 +3,25 @@ set -euo pipefail
 umask 077
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 destination=${DSH_WEB_PACKAGE_ROOT:-$HOME/.local/share/dsh-web-package-local}
+if [[ "${1:-}" == install ]]; then
+  [[ $# == 2 ]] || { echo 'usage: dsh-web-local-deploy install <prepared-batch-directory>' >&2; exit 2; }
+  destination=$(cd -- "$destination" && pwd -P)
+  batch=$(cd -- "$2" && pwd -P)
+  [[ "$batch" == "$destination"/incoming/batch.* && -x "$batch/dsh-web-install" ]] || { echo 'select a prepared local batch under this package root' >&2; exit 1; }
+  state=$(systemctl --user show dsh-web-local.service -p ActiveState -p MainPID -p ExecStart)
+  if ! grep -Eq '^ActiveState=(inactive|failed)$' <<<"$state" || ! grep -Fxq 'MainPID=0' <<<"$state"; then
+    echo 'stop dsh-web-local.service and confirm its process tree has exited before installation' >&2
+    exit 1
+  fi
+  [[ "$state" == *"path=$destination/current/bin/web ;"* ]] || { echo 'unit ExecStart does not match this package root; leave it unchanged' >&2; exit 1; }
+  export DSH_HOME=${DSH_HOME:-$HOME/.dsh}
+  export DSH_WEB_HOME="$DSH_HOME"
+  DSH_WEB_PACKAGE_ROOT="$destination" "$batch/dsh-web-install" --archive-dir "$batch" --migrate
+  printf 'Local current updated. Start separately: systemctl --user start dsh-web-local.service\n'
+  exit 0
+fi
+[[ $# == 0 || ( $# == 1 && "$1" == prepare ) ]] || { echo 'usage: dsh-web-local-deploy [prepare | install <prepared-batch-directory>]' >&2; exit 2; }
+[[ "${DSH_WEB_PRODUCTION_CREDENTIALS:-}" == /* ]] || { echo 'set DSH_WEB_PRODUCTION_CREDENTIALS to the absolute local credentials directory; no remote credential default' >&2; exit 1; }
 # Preparation only: do not stop systemd, reset a service checkout, install or start.
 mkdir -p "$destination/incoming"
 batch=$(mktemp -d "$destination/incoming/batch.XXXXXX")
@@ -11,3 +30,4 @@ batch=$(mktemp -d "$destination/incoming/batch.XXXXXX")
 install -m 0755 "$repository_root/scripts/dsh-web-install" "$batch/dsh-web-install"
 install -m 0755 "$repository_root/scripts/dsh-web-start" "$batch/dsh-web-start"
 printf 'prepared: %s\nInstall and start remain separate, after explicit downtime approval.\n' "$batch"
+printf 'After stopping and backing up the local service: DSH_WEB_PACKAGE_ROOT=%q %q install %q\n' "$destination" "$repository_root/scripts/dsh-web-local-deploy" "$batch"

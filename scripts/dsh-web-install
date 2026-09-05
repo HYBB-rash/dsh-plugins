@@ -2,12 +2,18 @@
 set -euo pipefail
 umask 077
 package_root=${DSH_WEB_PACKAGE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
-archive="$package_root/dsh-web.tar.gz"
+archive_root=$package_root
+if [[ "${1:-}" == --archive-dir ]]; then
+  [[ $# -ge 2 && -d "$2" ]] || { echo 'usage: dsh-web-install [--archive-dir DIRECTORY] [--migrate]' >&2; exit 2; }
+  archive_root=$(cd -- "$2" && pwd -P)
+  shift 2
+fi
+archive="$archive_root/dsh-web.tar.gz"
 export DSH_HOME=${DSH_HOME:-$HOME/.dsh}
 for file in "$archive" "$archive.sha256"; do
   [[ -f "$file" && ! -L "$file" ]] || { echo "missing regular deployment input: $file" >&2; exit 1; }
 done
-(cd "$package_root" && sha256sum -c dsh-web.tar.gz.sha256)
+(cd "$archive_root" && sha256sum -c dsh-web.tar.gz.sha256)
 archive_sha=$(sha256sum "$archive" | awk '{print $1}')
 releases="$package_root/releases"
 release="$releases/$archive_sha"
