@@ -16,7 +16,7 @@
 nix develop -c ./scripts/dsh-web-deploy
 ```
 
-该命令构建并上传完整 Harness、三个插件包、固定 Node runtime 和生产凭据，但不会隐式停止或启动远端服务。远端启动、重启、健康检查和 Telegram 登录 URL 遵循项目 `$dsh-web-deploy` Skill；完整结构与现场经验见 [`docs/dsh-web-portable-deployment.md`](docs/dsh-web-portable-deployment.md)。旧 Docker/OCI `release/dsh` 发版系统已经退役，不得恢复或与普通归档流程混用。
+该命令选择一次官方 npm 最新运行时，构建测试三个自有插件，上传薄归档与生产凭据；不携带上游源码、Node 或 node_modules，也不会隐式停止、安装或启动远端服务。远端启动、重启、健康检查和 Telegram 登录 URL 遵循项目 `$dsh-web-deploy` Skill；完整结构与现场经验见 [`docs/dsh-web-portable-deployment.md`](docs/dsh-web-portable-deployment.md)。旧 Docker/OCI `release/dsh` 发版系统已经退役，不得恢复或与普通归档流程混用。
 
 ## 仓库总览
 
@@ -41,14 +41,12 @@ flowchart LR
 
 ## 公开范围与前置条件
 
-这个仓库主要是源码参考，不是公开发布的安装包或 Skill 集合：没有根 `package.json`、公开 npm tarball 或自动激活清单；仓库内普通归档脚本只服务作者自己的 `herman.hermes`。插件目录自己的 `package.json` 都声明了 DSH/Cordis peer dependencies，且目前的版本是 `0.1.0-rc.*`。要构建或测试，需要：
+这个仓库维护三个自有插件，不再包含上游源码或 fork。开发使用根 npm workspace 和锁文件；安装时使用官方 npm Harness 与插件管理器，自有包打成 tgz，无需公开发布。
 
-- 一个与这些源码相容的 DeepSeek Harness 源码检出，其中能提供 `@deepseek-ai/*` 与 Cordis 依赖；兼容版本没有在本仓库冻结。
-- Node.js、pnpm、TypeScript/`tsc`、`tsdown`、Vitest；它们应由该兼容开发环境提供。
-- 使用 Telegram 相关插件时，一个凭据提供方中的 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_ALLOWED_CHAT_ID`。不要把真实值写进配置、`.env`、测试夹具或提交。
-- 使用 Exploration Opportunity 时，宿主必须支持发现和加载 Skill，并允许 Agent 在当前工作区维护 `EXPLORE.md`；Skill 本身不会增加新的网页或浏览器工具。
-
-因此没有可靠的“一行安装命令”。Cordis 插件请先在隔离环境中接入；Skill 放入宿主可发现的目录。这里没有声称 `dsh plugin add`、npm 安装或任意 DSH 版本可以直接工作。
+- 从 `nix develop` 进入 Node/npm 开发环境，再运行 `npm ci --ignore-scripts`。
+- 发布 SDK 和本次运行时必须兼容；安装器取所选官方运行时的真实依赖，依赖冲突会报错，不强装。
+- Telegram 凭据交给 credential provider，不写入源码或测试。
+- Skill 仍由宿主自己的发现机制加载；安装插件不会自动发布或激活 Skill。
 
 ### 最小配置形状
 
@@ -121,40 +119,22 @@ flowchart LR
 
 ## 构建、测试与本地开发
 
-当前没有统一的 install/build/test 命令，而且 `@deepseek-ai/*` 依赖没有作为可直接获取的 npm 依赖发布。不要在独立克隆中直接运行 `pnpm install` 或 `pnpm run bundle`：包管理器会尝试从 npm 补齐这些私有/源码依赖而失败。下面是以兼容 Harness 源码检出作为工具链和依赖来源的命令；它们不是发布流程，也不会部署服务。
+不需要任何 Harness 源码检出：
 
 ```bash
-# 先指向你自己、已准备好的兼容 Harness 源码检出。
-export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
+nix develop
+npm ci --ignore-scripts
+npm run build
+npm test
+npm run test:scripts
 
-# 所有公开包都有 tsdown.config.ts；对要构建的目录逐个执行。
-(cd telegram-gateway && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
-(cd dsh-assistant && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
-(cd dsh-cron && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
+DSH_WEB_HOME=/absolute/isolated-home ./scripts/dsh-web-install-plugins
+DSH_WEB_HOME=/absolute/isolated-home ./scripts/dsh-web-runtime --no-open
 ```
 
-测试同样逐包执行：
+安装会选择并验证一批最新运行时与插件；普通启动只用已安装版本，不更新。开发默认 5080，正式本机为 3080。首次迁移旧 Profile 需要先停机，再显式使用 `--migrate`；不能在运行中的 home 上重装。详见 [部署说明](docs/dsh-web-portable-deployment.md)。
 
-```bash
-# 需要将该变量指向你自己的兼容 Harness 源码检出。
-export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
-
-(cd dsh-assistant && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
-(cd dsh-cron && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
-(cd telegram-gateway && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
-
-# Skill 没有构建产物；可用兼容的 Skill Creator 校验目录结构和 frontmatter。
-python '<path-to-skill-creator>/scripts/quick_validate.py' skills/explore-opportunity
-```
-
-每个包的 `tsconfig.json` 和 `tsdown.config.ts` 也可用于显式检查：
-
-```bash
-(cd telegram-gateway && "$DSH_HARNESS_ROOT/node_modules/.bin/tsc" -b tsconfig.json)
-# 对其他目录替换目录名即可；请勿把本机依赖的绝对路径重新提交到 manifest 或锁文件。
-```
-
-本地开发时，可改动一个插件并在相应目录构建/测试，或修改一个 Skill 后重新运行 Skill 校验，再由你自己的 DSH 宿主加载。不要把 `lib/`、`node_modules/`、SQLite/session 数据、cookie、`.env`、私钥或真实运行日志提交回来；它们都不是公开源码的一部分。
+构建产物、node_modules、凭据和业务数据库不入 Git。自有代码修改后重新安装才能进入运行时；不要手动改 Profile 的 bundle 或 node_modules。
 
 ## 安全与部署边界
 
@@ -162,7 +142,7 @@ python '<path-to-skill-creator>/scripts/quick_validate.py' skills/explore-opport
 - Telegram 凭据只应交给宿主的 credential provider。示例从不包含真实 token、chat ID、主机、账号、cookie 或个人档案。
 - `explore-opportunity` 只是对现有工具的行为指导，不是安全沙箱；网页和外部文件仍应视为不可信数据，实际可访问范围与副作用由宿主提供的工具决定。
 - 探索状态只放在工作区 `EXPLORE.md`；它不等于任务系统、长期 MEMORY、X 收藏夹或 cron，也不会自行启动深度调查。
-- 本公开仓库不包含作者的部署脚本、远端主机资料、运行数据库、验收记录、研究笔记或个人长期认识；也不提供任何生产部署承诺。
+- 仓库包含部署代码，但不应包含真实凭据、运行数据库或秘密日志；不提供任何生产部署承诺。
 - 自动调度、自动重挂、子 Agent 和外部消息投递都有不可逆或重复风险。先在隔离环境验证，再决定是否用于真实账号或数据。
 
 ## 目录结构

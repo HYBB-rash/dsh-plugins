@@ -1,0 +1,20 @@
+[
+  "@linxin666/dsh-client-ui-plugin-manager",
+  "@linxin666/dsh-client-ui-community-plugins",
+  "@linxin666/dsh-client-ui-market",
+  "@linxin666/dsh-client-ui-task-board",
+  "@linxin666/dsh-client-ui-git-graph",
+  "@linxin666/dsh-pet",
+  "@linxin666/dsh-remote-web-ui",
+  "@linxin666/dsh-ssh",
+  "@linxin666/dsh-tool-describe-image",
+  "@linxin666/dsh-liangshen",
+  "@linxin666/dsh-client-ui-skill-explorer",
+  "@linxin666/dsh-doctor",
+  "@linxin666/dsh-usage",
+  "@linxin666/dsh-session-archive",
+  "@linxin666/dsh-client-ui-web-ui-settings",
+  "@linxin666/dsh-client-ui-skin-center",
+  "@linxin666/dsh-i18n",
+  "dsh-better-sidebar"
+]

@@ -22,7 +22,8 @@
   },
   "scripts": {
     "bundle": "tsdown",
-    "watch": "tsdown --watch"
+    "watch": "tsdown --watch",
+    "test": "vitest run --config ../vitest.config.ts --root .. telegram-gateway/tests"
   },
   "files": [
     "lib/index.js",
@@ -36,34 +37,34 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-agent": "*",
-    "@deepseek-ai/dsh-agent-default-model": "*",
-    "@deepseek-ai/dsh-agent-presets": "*",
-    "@deepseek-ai/dsh-cmdline": "*",
-    "@deepseek-ai/dsh-credentials": "*",
-    "@deepseek-ai/dsh-home-paths": "*",
-    "@deepseek-ai/dsh-invariants": "*",
-    "@deepseek-ai/dsh-llm": "*",
-    "@deepseek-ai/dsh-session": "*",
-    "@deepseek-ai/dsh-session-persistence": "*",
-    "@deepseek-ai/dsh-workspace": "*",
-    "@deepseek-ai/cordis": "workspace:*"
+    "@deepseek-ai/dsh-agent": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-agent-default-model": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-agent-presets": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-cmdline": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-credentials": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-home-paths": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-invariants": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-llm": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-session": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-session-persistence": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-workspace": "0.1.2-rc.1",
+    "@deepseek-ai/cordis": "4.0.2"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "*"
+    "@deepseek-ai/schemastery": "3.18.2"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-agent": "*",
-    "@deepseek-ai/dsh-agent-default-model": "*",
-    "@deepseek-ai/dsh-agent-presets": "*",
-    "@deepseek-ai/dsh-cmdline": "*",
-    "@deepseek-ai/dsh-credentials": "*",
-    "@deepseek-ai/dsh-home-paths": "*",
-    "@deepseek-ai/dsh-invariants": "*",
-    "@deepseek-ai/dsh-llm": "*",
-    "@deepseek-ai/dsh-session": "*",
-    "@deepseek-ai/dsh-session-persistence": "*",
-    "@deepseek-ai/dsh-workspace": "*",
-    "@deepseek-ai/cordis": "workspace:*"
+    "@deepseek-ai/dsh-agent": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-agent-default-model": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-agent-presets": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-cmdline": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-credentials": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-home-paths": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-invariants": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-llm": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-session": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-session-persistence": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-workspace": "0.1.2-rc.1",
+    "@deepseek-ai/cordis": "4.0.2"
   }
 }

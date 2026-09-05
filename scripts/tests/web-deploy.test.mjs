@@ -1,0 +1,124 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, cpSync, writeFileSync, readFileSync, rmSync, symlinkSync, existsSync, readlinkSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { spawn, spawnSync } from 'node:child_process'
+
+const repository = resolve(import.meta.dirname, '../..')
+function fixture(t) {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-deploy-contract-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  mkdirSync(join(root, 'scripts'))
+  mkdirSync(join(root, 'fake-bin'))
+  return root
+}
+const script = (path, text) => writeFileSync(path, '#!/usr/bin/env bash\nset -euo pipefail\n' + text, { mode: 0o755 })
+
+test('upload writes an incoming batch, not current, and never executes install/start/stop remotely', t => {
+  const root = fixture(t)
+  for (const file of ['dsh-web-deploy', 'dsh-web-install', 'dsh-web-start', 'dsh-web-lan-proxy.mjs', 'dsh-web-notify-start-url.mjs']) cpSync(join(repository, 'scripts', file), join(root, 'scripts', file))
+  script(join(root, 'scripts/package-dsh-web'), 'printf archive >"$1"\n')
+  for (const command of ['ssh', 'scp']) script(join(root, 'fake-bin', command), 'printf "%s\\n" "$0 $*" >>"$TEST_COMMAND_LOG"\n')
+  const log = join(root, 'commands')
+  const result = spawnSync(join(root, 'scripts/dsh-web-deploy'), [], { encoding: 'utf8', env: { ...process.env, PATH: `${root}/fake-bin:${process.env.PATH}`, TEST_COMMAND_LOG: log, DSH_WEB_REMOTE_ROOT: '/deployment', DSH_WEB_DEPLOY_TARGET: 'test-host' } })
+  assert.equal(result.status, 0, result.stderr)
+  const commands = readFileSync(log, 'utf8').trim().split('\n')
+  const ssh = commands.filter(line => line.includes('/ssh '))
+  assert.ok(ssh.length > 0 && ssh.every(line => /test-host install -d -m 0700 \/deployment/.test(line)))
+  const uploads = commands.filter(line => line.includes('/scp '))
+  assert.equal(uploads.length, 4)
+  assert.ok(uploads.every(line => /test-host:\/deployment\/incoming\/[a-f0-9]{64}\//.test(line)))
+  assert.ok(uploads.some(line => line.endsWith('/dsh-web-install')))
+  assert.doesNotMatch(commands.join('\n'), /systemctl|pkill|reset --hard|\/current/)
+})
+
+test('local preparation never overwrites active launch files or invokes a service manager', t => {
+  const root = fixture(t)
+  for (const file of ['dsh-web-local-deploy', 'dsh-web-install', 'dsh-web-start']) cpSync(join(repository, 'scripts', file), join(root, 'scripts', file))
+  script(join(root, 'scripts/package-dsh-web'), 'printf archive >"$1"\n')
+  const destination = join(root, 'deployment')
+  mkdirSync(destination)
+  writeFileSync(join(destination, 'dsh-web-start'), 'active launcher')
+  for (const command of ['systemctl', 'pkill', 'git', 'npm']) script(join(root, 'fake-bin', command), 'echo forbidden >&2; exit 98\n')
+  const result = spawnSync(join(root, 'scripts/dsh-web-local-deploy'), [], { encoding: 'utf8', env: { ...process.env, PATH: `${root}/fake-bin:${process.env.PATH}`, DSH_WEB_PACKAGE_ROOT: destination } })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(readFileSync(join(destination, 'dsh-web-start'), 'utf8'), 'active launcher')
+  const batch = result.stdout.match(/prepared: (.+)/)?.[1]
+  assert.ok(batch?.startsWith(join(destination, 'incoming') + '/'))
+  for (const file of ['dsh-web.tar.gz', 'dsh-web.tar.gz.sha256', 'dsh-web-install', 'dsh-web-start']) assert.ok(existsSync(join(batch, file)))
+})
+
+for (const exitCode of [0, 42]) test(`archive installation keeps start separate and switches current only on success (${exitCode})`, t => {
+  const root = fixture(t)
+  const payload = join(root, 'payload/dsh-web/bin')
+  mkdirSync(payload, { recursive: true })
+  script(join(payload, 'install'), `printf '%s\\n' "$*" >"$DSH_HOME/install-arguments"\nexit ${exitCode}\n`)
+  script(join(payload, 'web'), 'echo forbidden >&2; exit 99\n')
+  const archive = join(root, 'dsh-web.tar.gz')
+  assert.equal(spawnSync('tar', ['-czf', archive, '-C', join(root, 'payload'), 'dsh-web']).status, 0)
+  const sha = createHash('sha256').update(readFileSync(archive)).digest('hex')
+  writeFileSync(archive + '.sha256', `${sha}  dsh-web.tar.gz\n`)
+  cpSync(join(repository, 'scripts/dsh-web-install'), join(root, 'dsh-web-install'))
+  mkdirSync(join(root, 'home'))
+  mkdirSync(join(root, 'old'))
+  symlinkSync('old', join(root, 'current'))
+  const result = spawnSync(join(root, 'dsh-web-install'), ['--migrate'], { encoding: 'utf8', env: { ...process.env, DSH_WEB_PACKAGE_ROOT: root, DSH_HOME: join(root, 'home') } })
+  assert.equal(result.status, exitCode, result.stderr)
+  assert.equal(readFileSync(join(root, 'home/install-arguments'), 'utf8'), '--migrate\n')
+  assert.equal(readlinkSync(join(root, 'current')), exitCode === 0 ? `releases/${sha}` : 'old')
+})
+
+test('start runs only the installed release and supervises Web/proxy without installing', t => {
+  const root = fixture(t)
+  const release = join(root, 'release')
+  for (const directory of ['bin', 'scripts']) mkdirSync(join(release, directory), { recursive: true })
+  mkdirSync(join(root, 'home/runtime'), { recursive: true })
+  writeFileSync(join(root, 'home/runtime/package-lock.json'), '{}')
+  cpSync(join(repository, 'scripts/dsh-web-start'), join(root, 'dsh-web-start'))
+  symlinkSync('release', join(root, 'current'))
+  script(join(release, 'bin/dsh'), 'printf "cli %s\\n" "$*" >>"$TEST_COMMAND_LOG"\n')
+  script(join(release, 'bin/web'), 'printf "web %s\\n" "$*" >>"$TEST_COMMAND_LOG"\nexec sleep 20\n')
+  writeFileSync(join(release, 'scripts/dsh-web-lan-proxy.mjs'), 'setTimeout(()=>process.exit(7), 150)\n')
+  writeFileSync(join(release, 'scripts/dsh-web-notify-start-url.mjs'), '')
+  for (const command of ['npm', 'pnpm', 'tar', 'systemctl']) script(join(root, 'fake-bin', command), 'echo forbidden >&2; exit 98\n')
+  const log = join(root, 'commands')
+  const result = spawnSync(join(root, 'dsh-web-start'), [], { encoding: 'utf8', timeout: 5000, env: { ...process.env, DSH_WEB_HOME: '', DSH_HOME: join(root, 'home'), PATH: `${root}/fake-bin:${process.env.PATH}`, TEST_COMMAND_LOG: log } })
+  assert.equal(result.status, 7, result.stderr)
+  const commands = readFileSync(log, 'utf8')
+  assert.match(commands, /cli --version/)
+  assert.match(commands, /web --host 127.0.0.1 --port 3080 --no-open --trusted-host 192.168.6.240 dsh.man-her.icu/)
+  assert.doesNotMatch(commands, /install|latest/)
+})
+
+test('start through current launches the real LAN proxy entry point', async t => {
+  const root = fixture(t)
+  const release = join(root, 'release')
+  for (const directory of ['bin', 'scripts']) mkdirSync(join(release, directory), { recursive: true })
+  mkdirSync(join(root, 'home/runtime'), { recursive: true })
+  writeFileSync(join(root, 'home/runtime/package-lock.json'), '{}')
+  cpSync(join(repository, 'scripts/dsh-web-start'), join(root, 'dsh-web-start'))
+  cpSync(join(repository, 'scripts/dsh-web-lan-proxy.mjs'), join(release, 'scripts/dsh-web-lan-proxy.mjs'))
+  writeFileSync(join(release, 'scripts/dsh-web-notify-start-url.mjs'), '')
+  symlinkSync('release', join(root, 'current'))
+  script(join(release, 'bin/dsh'), 'exit 0\n')
+  script(join(release, 'bin/web'), 'exec sleep 20\n')
+  const child = spawn(join(root, 'dsh-web-start'), [], {
+    env: { ...process.env, DSH_HOME: join(root, 'home'), DSH_LAN_ADDRESS: '127.0.0.1', DSH_LAN_PORT: '0' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let output = ''
+  const stopped = new Promise(resolve => child.once('exit', resolve))
+  const ready = await new Promise(resolve => {
+    const timer = setTimeout(() => resolve(false), 3000)
+    child.stdout.on('data', data => {
+      output += data
+      if (output.includes('dsh lan proxy:')) { clearTimeout(timer); resolve(true) }
+    })
+    child.once('exit', () => { clearTimeout(timer); resolve(false) })
+  })
+  if (child.exitCode === null) child.kill('SIGTERM')
+  await stopped
+  assert.equal(ready, true, 'real proxy must listen when the selected release is a symlink')
+})

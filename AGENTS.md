@@ -30,13 +30,13 @@
 
 ## 本地 Web 开发
 
-涉及 Harness、`telegram-gateway`、`dsh-cron`、`dsh-assistant`、Web Profile、插件注册或本地 Web 开发服时，先读取并遵循 `$dsh-web-dev`。本地开发固定使用两段式入口：`./scripts/dsh-web-install-plugins` 负责构建和安装，`./scripts/dsh-web-runtime` 只负责启动；不得恢复已清退的 `scripts/dsh-web`，不得直接维护 Profile 的 `node_modules` 或手工登记 bundle。开发与传输包必须使用同一份 Harness、插件构建产物、Web patch 和 runtime 脚本；生产包唯一允许的环境差异是打包阶段附加 Git 忽略的线上凭据数据。
+涉及 Harness、`telegram-gateway`、`dsh-cron`、`dsh-assistant`、Web Profile、插件注册或本地 Web 开发服时，先读取并遵循 `$dsh-web-dev`。本地开发固定使用两段式入口：`./scripts/dsh-web-install-plugins` 负责构建和安装，`./scripts/dsh-web-runtime` 只负责启动；不得恢复已清退的 `scripts/dsh-web`，不得直接维护 Profile 的 `node_modules` 或手工登记 bundle。使用官方 npm Harness，不引入上游源码、fork 或 patch。每批安装/部署只在准备时解析一次最新版，按该运行时的发布 SDK 构建验证；普通重启只用已安装版本。开发与传输包使用同批 npm 版本、插件产物、Web patch 和启动脚本，生产凭据仅在打包时加入。
 
 本机正式部署固定占用 `3080`；源码开发服默认使用 `5080`，避免与正式部署争抢端口。临时验收需要其他端口时必须显式传入 `--port`，不得改变正式部署的 `3080`。
 
 ## 发布入口与隔离
 
-`herman.hermes` 唯一现役发布入口是普通 `tar.gz` Web 部署。先读取并遵循 `$dsh-web-deploy` 与 `docs/dsh-web-portable-deployment.md`；只使用 `scripts/package-dsh-web`、`scripts/dsh-web-deploy` 和远端 `dsh-web-start`，上传与启动必须分离。旧 Docker/OCI `release/dsh` 系统已退役，不得恢复 `release/`、容器发布入口或与普通归档并行的第二套生产流程。
+`herman.hermes` 唯一现役发布入口是普通 `tar.gz` Web 部署。先读取并遵循 `$dsh-web-deploy` 与 `docs/dsh-web-portable-deployment.md`；使用 `scripts/package-dsh-web`、`scripts/dsh-web-deploy`、目标侧 `dsh-web-install` 和 `dsh-web-start`，上传、安装与启动必须分离。归档不携带上游源码、Node 或 node_modules；目标机安装本批精确的官方 npm 依赖。修改活跃 runtime 或 Profile 必须在明确授权并停机后进行。旧 Docker/OCI `release/dsh` 系统已退役，不得恢复另一套生产流程。
 
 OpenClaw 始终在流程之外，不得改动；开发、测试、发布和运行都必须允许它完全不存在，也不得读取其目录、凭据、CLI、插件或状态。普通归档是秘密载体；生产凭据只允许由打包器从 Git 忽略目录加入，`DSH_HOME`、Workspace 和业务状态留在归档外。
 

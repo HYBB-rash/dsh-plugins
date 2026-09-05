@@ -133,9 +133,12 @@ function gatewayContext(options: {
     agents,
     sessions: { flush: vi.fn(async () => {}) },
     sessionPersistence: {
-      list: vi.fn(async () => options.persisted === true
-        ? (options.persistedSessionIds ?? ['session-telegram']).map(id => ({ header: { id, cwd: sessionCwd } }))
-        : []),
+      list: vi.fn(async (signal?: AbortSignal) => {
+        expect(signal).toBeInstanceOf(AbortSignal)
+        return options.persisted === true
+          ? (options.persistedSessionIds ?? ['session-telegram']).map(id => ({ version: 2, id, createdAt: 0, isSeeded: false, cwd: sessionCwd }))
+          : []
+      }),
     },
     workspaceRegistry,
     credentials: {

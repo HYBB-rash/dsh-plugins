@@ -1,120 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-
-unit=dsh-web-local.service
-script_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-source_root=$(git -C "$script_root" rev-parse --show-toplevel)
-source_root=$(realpath -m -- "$source_root")
-
-if [[ -n $(git -C "$source_root" status --porcelain --untracked-files=all) ]]; then
-  echo 'dsh web local deploy: source worktree must be clean' >&2
-  exit 1
-fi
-
-exec_start=$(systemctl --user show "$unit" -p ExecStart --value)
-if [[ ! "$exec_start" =~ path=([^[:space:];]+/scripts/dsh-web-runtime) ]]; then
-  echo 'dsh web local deploy: cannot resolve the service runtime' >&2
-  exit 1
-fi
-runtime=${BASH_REMATCH[1]}
-if [[ ! -f "$runtime" || -L "$runtime" ]]; then
-  echo 'dsh web local deploy: service runtime must be a regular file' >&2
-  exit 1
-fi
-target_root=$(realpath -m -- "${runtime%/scripts/dsh-web-runtime}")
-
-source_git_dir=$(realpath -m -- "$(git -C "$source_root" rev-parse --git-common-dir)")
-target_git_dir=$(realpath -m -- "$(git -C "$target_root" rev-parse --git-common-dir)")
-if [[ "$source_git_dir" != "$target_git_dir" ]]; then
-  echo 'dsh web local deploy: source and service checkout are not the same repository' >&2
-  exit 1
-fi
-if [[ $(git -C "$target_root" rev-parse --abbrev-ref HEAD) != main ]]; then
-  echo 'dsh web local deploy: service checkout must be on main' >&2
-  exit 1
-fi
-if [[ -n $(git -C "$target_root" status --porcelain --untracked-files=all) ]]; then
-  echo 'dsh web local deploy: service checkout must be clean' >&2
-  exit 1
-fi
-
-source_head=$(git -C "$source_root" rev-parse HEAD)
-target_head=$(git -C "$target_root" rev-parse HEAD)
-if [[ "$source_root" != "$target_root" ]] \
-  && ! git -C "$target_root" merge-base --is-ancestor "$target_head" "$source_head"; then
-  echo 'dsh web local deploy: code must fast-forward the local main checkout' >&2
-  exit 1
-fi
-
-systemctl --user stop "$unit"
-
-if [[ "$source_root" != "$target_root" ]]; then
-  git -C "$target_root" reset --hard "$source_head" >/dev/null
-  git -C "$target_root" submodule update --init --recursive
-fi
-
-dsh_home=${DSH_WEB_HOME:-$HOME/.dsh}
-dump_file=$(mktemp /tmp/dsh-web-local-deploy-config.XXXXXX)
-cleanup() { rm -f -- "$dump_file"; }
-trap cleanup EXIT
-
-(
-  cd "$target_root"
-  DSH_WEB_HOME="$dsh_home" nix develop -c ./scripts/dsh-web-install-plugins
-  DSH_WEB_HOME="$dsh_home" nix develop -c ./scripts/dsh-web-runtime --dump-config >"$dump_file"
-)
-
-for plugin in telegram-gateway dsh-cron dsh-assistant; do
-  count=$(grep -Ec "^[[:space:]]*- id: $plugin$" "$dump_file" || true)
-  if [[ "$count" -ne 1 ]]; then
-    echo "dsh web local deploy: effective config must contain exactly one $plugin" >&2
-    exit 1
-  fi
-done
-
-profile_manifest="$dsh_home/profiles/web/package.json"
-if [[ ! -f "$profile_manifest" ]]; then
-  echo 'dsh web local deploy: Web profile manifest is missing' >&2
-  exit 1
-fi
-mapfile -t file_references < <(grep -oE 'file:[^"[:space:]]+' "$profile_manifest" || true)
-if [[ ${#file_references[@]} -ne 3 ]]; then
-  echo 'dsh web local deploy: Web profile must contain exactly three source references' >&2
-  exit 1
-fi
-for plugin in telegram-gateway dsh-cron dsh-assistant; do
-  expected="file:$target_root/$plugin"
-  found=0
-  for reference in "${file_references[@]}"; do
-    if [[ "$reference" == "$expected" ]]; then
-      found=1
-      break
-    fi
-  done
-  if [[ "$found" -ne 1 ]]; then
-    echo "dsh web local deploy: Web profile does not reference the service checkout for $plugin" >&2
-    exit 1
-  fi
-done
-
-systemctl --user start "$unit"
-for _attempt in $(seq 1 30); do
-  listen_state=$(ss -ltn 'sport = :3080')
-  if systemctl --user is-active --quiet "$unit" && [[ "$listen_state" == *'127.0.0.1:3080'* ]]; then
-    while IFS= read -r line; do
-      if [[ "$line" == LISTEN* && "$line" != *'127.0.0.1:3080'* ]]; then
-        systemctl --user stop "$unit"
-        echo 'dsh web local deploy: port 3080 is listening beyond loopback' >&2
-        exit 1
-      fi
-    done <<<"$listen_state"
-    echo 'DSH local Web deployment passed'
-    exit 0
-  fi
-  sleep 1
-done
-
-systemctl --user stop "$unit"
-echo 'dsh web local deploy: service did not become ready on 127.0.0.1:3080' >&2
-exit 1
+repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+destination=${DSH_WEB_PACKAGE_ROOT:-$HOME/.local/share/dsh-web-package-local}
+# Preparation only: do not stop systemd, reset a service checkout, install or start.
+mkdir -p "$destination/incoming"
+batch=$(mktemp -d "$destination/incoming/batch.XXXXXX")
+"$repository_root/scripts/package-dsh-web" "$batch/dsh-web.tar.gz"
+(cd "$batch" && sha256sum dsh-web.tar.gz >dsh-web.tar.gz.sha256)
+install -m 0755 "$repository_root/scripts/dsh-web-install" "$batch/dsh-web-install"
+install -m 0755 "$repository_root/scripts/dsh-web-start" "$batch/dsh-web-start"
+printf 'prepared: %s\nInstall and start remain separate, after explicit downtime approval.\n' "$batch"

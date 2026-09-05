@@ -1,158 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+umask 077
 package_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-
-if [[ -d "$package_root/upstream/deepseek-harness" ]]; then
-  export DSH_HOME="${DSH_WEB_HOME:-$package_root/.dsh-web}"
-  harness_root="$package_root/upstream/deepseek-harness"
-  harness_node_modules="$harness_root/node_modules/.pnpm/node_modules"
-  harness_tsc="$harness_root/node_modules/.bin/tsc"
-  harness_tsdown="$harness_root/node_modules/.bin/tsdown"
-
-  ensure_build_dependency_link() {
-    local dependency=$1
-    local target="$harness_root/node_modules/$dependency"
-    local link="$harness_node_modules/$dependency"
-    if [[ ! -e "$target" ]]; then
-      echo "missing Harness build dependency: $dependency" >&2
-      return 1
-    fi
-    if [[ -e "$link" ]]; then
-      return
-    fi
-    mkdir -p "${link%/*}"
-    rm -f "$link"
-    ln -s "$target" "$link"
-  }
-
-  remove_legacy_local_plugin_link() {
-    local package_name=$1
-    local link="$harness_node_modules/@deepseek-ai/$package_name"
-    if [[ -L "$link" ]]; then
-      rm -f "$link"
-      return
-    fi
-    if [[ -e "$link" ]]; then
-      echo "$link is not a symlink; refusing to overwrite" >&2
-      return 1
-    fi
-  }
-
-  build_plugin() {
-    local plugin_directory=$1
-    local existing
-    existing=$(readlink "$plugin_directory/node_modules" 2>/dev/null || true)
-    if [[ "$existing" != "$harness_node_modules" ]]; then
-      if [[ -e "$plugin_directory/node_modules" || -L "$plugin_directory/node_modules" ]]; then
-        if [[ ! -L "$plugin_directory/node_modules" ]]; then
-          echo "$plugin_directory/node_modules is not a symlink; refusing to overwrite" >&2
-          return 1
-        fi
-        rm -f "$plugin_directory/node_modules"
-      fi
-      ln -s "$harness_node_modules" "$plugin_directory/node_modules"
-    fi
-
-    rm -rf "$plugin_directory/lib" "$plugin_directory/tsconfig.tsbuildinfo"
-    (cd "$plugin_directory" && "$harness_tsc" -b)
-    (cd "$plugin_directory" && "$harness_tsdown")
-    (cd "$plugin_directory" && "$harness_tsc" -b)
-    if [[ ! -f "$plugin_directory/lib/index.js" ]]; then
-      echo "missing $plugin_directory/lib/index.js after build" >&2
-      return 1
-    fi
-  }
-
-  (
-    cd "$harness_root"
-    export CI=true
-    pnpm install --frozen-lockfile
-    pnpm run build
-  )
-  for dependency in @types/node tsdown; do
-    ensure_build_dependency_link "$dependency"
-  done
-  for package_name in dsh-telegram-gateway dsh-cron dsh-assistant; do
-    remove_legacy_local_plugin_link "$package_name"
-  done
-  for plugin in telegram-gateway dsh-cron dsh-assistant; do
-    build_plugin "$package_root/$plugin"
-  done
-
-  installed_packages=()
-  for package in \
-    @deepseek-ai/dsh-telegram-gateway \
-    @deepseek-ai/dsh-cron \
-    @deepseek-ai/dsh-assistant; do
-    installed="$DSH_HOME/profiles/web/node_modules/$package"
-    if [[ -e "$installed" || -L "$installed" ]]; then
-      installed_packages+=("$package")
-    fi
-  done
-  if [[ ${#installed_packages[@]} -gt 0 ]]; then
-    node "$harness_root/apps/cli/lib/bin.js" \
-      plugin --profile web remove "${installed_packages[@]}"
-  fi
-
-  exec node "$harness_root/apps/cli/lib/bin.js" \
-    plugin --profile web add --ignore-scripts --force \
-    "file:$package_root/telegram-gateway" \
-    "file:$package_root/dsh-cron" \
-    "file:$package_root/dsh-assistant"
-fi
-
-: "${DSH_HOME:?set DSH_HOME to an external writable directory}"
-if ! command -v node >/dev/null 2>&1; then
-  echo 'node is required to install DSH plugins' >&2
-  exit 127
-fi
-if ! command -v pnpm >/dev/null 2>&1; then
-  echo 'pnpm is required to install DSH plugins' >&2
-  exit 127
-fi
-
-credentials_root="$package_root/production-credentials"
-for credential_file in \
-  "$credentials_root/.credentials.yaml" \
-  "$credentials_root/secrets/notion.token"; do
-  if [[ ! -f "$credential_file" || -L "$credential_file" ]]; then
-    echo "missing regular bundled production credential: $credential_file" >&2
-    exit 1
-  fi
+export DSH_HOME=${DSH_WEB_HOME:-${DSH_HOME:-$package_root/.dsh-web}}
+export DSH_WEB_HOME="$DSH_HOME"
+for argument in "$@"; do
+  [[ "$argument" == --migrate ]] || { echo 'usage: dsh-web-install-plugins [--migrate]' >&2; exit 2; }
 done
-
-plugin_archives=()
-for pattern in \
-  'deepseek-ai-dsh-telegram-gateway-*.tgz' \
-  'deepseek-ai-dsh-cron-*.tgz' \
-  'deepseek-ai-dsh-assistant-*.tgz'; do
-  matches=("$package_root"/plugins/$pattern)
-  if [[ ${#matches[@]} -ne 1 || ! -f "${matches[0]}" ]]; then
-    echo "expected exactly one $pattern under $package_root/plugins" >&2
-    exit 1
-  fi
-  plugin_archives+=("${matches[0]}")
-done
-
-installed_packages=()
-for package in \
-  @deepseek-ai/dsh-telegram-gateway \
-  @deepseek-ai/dsh-cron \
-  @deepseek-ai/dsh-assistant; do
-  installed="$DSH_HOME/profiles/web/node_modules/$package"
-  if [[ -e "$installed" || -L "$installed" ]]; then
-    installed_packages+=("$package")
-  fi
-done
-if [[ ${#installed_packages[@]} -gt 0 ]]; then
-  node "$package_root/harness/apps/cli/lib/bin.js" \
-    plugin --profile web remove "${installed_packages[@]}"
+mkdir -p "$DSH_HOME"
+exec 9>"$DSH_HOME/.web-runtime.lock"
+flock -n 9 || { echo 'dsh web: stop this DSH_HOME runtime before installation' >&2; exit 1; }
+if [[ -f "$package_root/runtime/package-lock.json" ]]; then
+  exec node "$package_root/scripts/lib/web-package.mjs" install "$@"
 fi
-
-node "$package_root/harness/apps/cli/lib/bin.js" \
-  plugin --profile web add --ignore-scripts "${plugin_archives[@]}"
-
-install -d -m 0700 "$DSH_HOME" "$DSH_HOME/secrets"
-install -m 0600 "$credentials_root/.credentials.yaml" "$DSH_HOME/.credentials.yaml"
-install -m 0600 "$credentials_root/secrets/notion.token" "$DSH_HOME/secrets/notion.token"
+work=$(mktemp -d /tmp/dsh-web-install.XXXXXX)
+cleanup() { rm -rf -- "$work"; }
+trap cleanup EXIT
+node "$package_root/scripts/lib/web-package.mjs" prepare "$work/dsh-web"
+node "$work/dsh-web/scripts/lib/web-package.mjs" install "$@"

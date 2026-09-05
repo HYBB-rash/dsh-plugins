@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+package_root=${DSH_WEB_PACKAGE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
+archive="$package_root/dsh-web.tar.gz"
+export DSH_HOME=${DSH_HOME:-$HOME/.dsh}
+for file in "$archive" "$archive.sha256"; do
+  [[ -f "$file" && ! -L "$file" ]] || { echo "missing regular deployment input: $file" >&2; exit 1; }
+done
+(cd "$package_root" && sha256sum -c dsh-web.tar.gz.sha256)
+archive_sha=$(sha256sum "$archive" | awk '{print $1}')
+releases="$package_root/releases"
+release="$releases/$archive_sha"
+mkdir -p "$releases"
+if [[ ! -d "$release" ]]; then
+  staging=$(mktemp -d "$releases/.unpack.XXXXXX")
+  cleanup() { rm -rf -- "$staging"; }
+  trap cleanup EXIT
+  tar --no-same-owner -xzf "$archive" -C "$staging"
+  [[ -x "$staging/dsh-web/bin/install" && -x "$staging/dsh-web/bin/web" ]] || { echo 'archive is missing installation/launch entries' >&2; exit 1; }
+  mv "$staging/dsh-web" "$release"
+  rmdir "$staging"
+  trap - EXIT
+fi
+"$release/bin/install" "$@"
+ln -sfn "releases/$archive_sha" "$package_root/current.next"
+mv -Tf "$package_root/current.next" "$package_root/current"
+printf 'installed: %s\nStart remains a separate action.\n' "$release"

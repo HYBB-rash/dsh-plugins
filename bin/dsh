@@ -1,27 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 package_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-if [[ -d "$package_root/upstream/deepseek-harness" ]]; then
-  harness_root="$package_root/upstream/deepseek-harness"
-else
-  harness_root="$package_root/harness"
-fi
-
-if [[ -x "$package_root/runtime-node/bin/node" ]]; then
-  node_bin="$package_root/runtime-node/bin/node"
-else
-  if ! command -v node >/dev/null 2>&1; then
-    echo 'node is required to run the DSH CLI' >&2
-    exit 127
-  fi
-  node_bin=$(command -v node)
-fi
-
-cli="$harness_root/apps/cli/lib/bin.js"
-if [[ ! -f "$cli" ]]; then
-  echo "missing built DSH CLI: $cli" >&2
-  exit 1
-fi
-
-exec "$node_bin" --expose-internals "$cli" "$@"
+export DSH_HOME=${DSH_HOME:-${DSH_WEB_HOME:-$package_root/.dsh-web}}
+runtime_root=${DSH_RUNTIME_ROOT:-$DSH_HOME/runtime}
+cli="$runtime_root/node_modules/@deepseek-ai/dsh/lib/bin.js"
+node - "$runtime_root" <<'NODE'
+const fs = require('node:fs')
+const path = require('node:path')
+try {
+  const root = process.argv[2]
+  const expected = JSON.parse(fs.readFileSync(path.join(root, 'package.json'))).dependencies['@deepseek-ai/dsh']
+  const actual = JSON.parse(fs.readFileSync(path.join(root, 'node_modules/@deepseek-ai/dsh/package.json'))).version
+  if (!expected || expected !== actual) throw new Error('installed runtime version mismatch; run the installer')
+  const cli = path.join(root, 'node_modules/@deepseek-ai/dsh/lib/bin.js')
+  if (fs.realpathSync(path.join(root, 'node_modules/.bin/dsh')) !== fs.realpathSync(cli)) throw new Error('installed CLI does not belong to the selected runtime')
+} catch (error) { console.error('dsh: installed runtime unavailable: ' + error.message); process.exit(1) }
+NODE
+launch_cwd=${DSH_CWD:-$PWD}
+cd "$runtime_root"
+# Quote every argument before handing it to npm's shell; never interpolate raw CLI input.
+# npm resolves the installed command here, but the application must run in its
+# original Workspace. DSH_CWD is our launcher contract, not an upstream setting.
+printf -v command 'cd -- %q && node --expose-internals %q' "$launch_cwd" "$cli"
+for argument in "$@"; do printf -v command '%s %q' "$command" "$argument"; done
+exec npx --offline --no --script-shell=bash --call "$command"

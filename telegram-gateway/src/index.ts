@@ -477,7 +477,7 @@ export async function runGateway(
   let handle: AgentHandle | undefined
   const live = agents.get(sessionId)
   if (live === undefined) {
-    const persisted = (await persistence.list({ signal })).some(snapshot => snapshot.header.id === sessionId)
+    const persisted = (await persistence.list(signal)).some(header => header.id === sessionId)
     handle = persisted
       ? await agents.resume({ resumeSessionId: sessionId, agentOptions: { provider: selection.provider, model: selection.model }, setup })
       : await agents.create({

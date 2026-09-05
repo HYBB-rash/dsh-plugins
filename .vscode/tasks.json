@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "DSH: Install Web Plugins (source)",
+      "label": "DSH: Install Web Plugins (official npm)",
       "type": "shell",
       "command": "${workspaceFolder}/scripts/dsh-web-install-plugins",
       "options": {
@@ -16,7 +16,7 @@
       }
     },
     {
-      "label": "DSH: Start Web (source)",
+      "label": "DSH: Start Web (installed runtime)",
       "type": "shell",
       "command": "${workspaceFolder}/scripts/dsh-web-runtime",
       "options": {

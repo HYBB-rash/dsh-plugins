@@ -139,10 +139,8 @@ interface AgentCall {
 }
 
 function persistenceSnapshot(id: string) {
-  return {
-    header: { version: 2 as const, id, createdAt: 0, isSeeded: false },
-    revision: 'test',
-  }
+  // Published SessionPersistence.list returns SessionHeader[], not snapshots.
+  return { version: 2 as const, id, createdAt: 0, isSeeded: false }
 }
 
 /** A test-only agent registry that exposes session lifecycle decisions. */

@@ -291,7 +291,7 @@ describe('delegate', () => {
     // NOT carry a global toolFilter.deny (tools.restrict cannot name them).
     expect(spec.request.toolFilter).toBeUndefined()
     expect(spec.request.prompt[0]!.text).toBe('去查 Y 并汇报')
-    expect(spec.request.persona).toContain('official report tool only for a meaningful completed stage')
+    expect(spec.request.persona).toContain('If an official report tool is available')
     expect(spec.request.persona).toContain('do not use report for the final result')
     expect(spec.request.persona).toContain('final message is collected by dsh-assistant automatically')
     store.close()

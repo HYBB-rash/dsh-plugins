@@ -13,10 +13,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import { installReportTool } from '@deepseek-ai/dsh-tool-subagent-report'
+import { SubagentRunId, type SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { MessageId } from '@deepseek-ai/dsh-llm'
 import { createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import * as plugin from '../src/index.ts'
+import { AssistantStore } from '../src/store.ts'
+import { WorkerController } from '../src/worker.ts'
 
 const dirs: string[] = []
 
@@ -58,7 +62,7 @@ async function mountReal(mode: 'web' | 'telegram' = 'telegram') {
     pollIntervalMs: 1000,
     ...mode === 'telegram' ? { telegramParentSessionId: 'session-telegram' } : {},
   } as never)
-  return { ctx, rootScope, mounted }
+  return { ctx, root, rootScope, mounted }
 }
 
 describe('child visibility', () => {
@@ -88,16 +92,33 @@ describe('child visibility', () => {
     await mounted.dispose()
   }, 10_000)
 
-  it('an actual continuable-child composition receives the official report tool but no assistant controls', async () => {
-    const { ctx, mounted } = await mountReal('telegram')
+  it('published lifecycle completion reaches the outbox while a child has no assistant controls', async () => {
+    const { ctx, root, rootScope, mounted } = await mountReal('telegram')
     let childScope!: ReturnType<typeof createScope>
     await ctx.plugin(Object.assign((inner: Context) => { childScope = createScope(inner, { name: 'continuable-child' }) },
       { inject: ['tools', 'systemPrompt'] }))
-    const disposeReport = installReportTool(childScope.ctx, ctx, 'wakeup')
     const childNames = ctx.tools.schemas(scopeOf(childScope.ctx)).map(schema => schema.name)
-    expect(childNames).toContain('report')
     expect(childNames.some(name => name.startsWith('assistant_'))).toBe(false)
-    disposeReport()
+    // The published SDK completes through subagent/end; it no longer publishes
+    // the old report-tool package. Exercise our listener using real Cordis dispatch.
+    const store = new AssistantStore(join(tempDir(), 'completion.sqlite'))
+    const identity = { id: SessionId('published-child'), runId: SubagentRunId('published-run'), provider: 'spawn', local: true }
+    const worker = new WorkerController({ store, mode: 'telegram', telegramParentSessionId: root.session.id,
+      subagents: { interrupt() {}, async startContinuable() {
+        rootScope.ctx.emit('subagent/start', identity)
+        return { childId: identity.id, messageId: MessageId('published-message') }
+      } },
+    })
+    const delegated = await worker.delegate(root as Agent, { title: 'published SDK', prompt: 'one task' }, new AbortController().signal)
+    expect(delegated.ok).toBe(true)
+    const completion: SubagentRunEndInfo = { ...identity, stopReason: 'completed', lastAssistantMessage: [
+      { type: 'text', text: 'Finished through the published lifecycle.\nDSH_ASSISTANT_RESULT {"status":"completed","summary":"finished"}' },
+    ] }
+    rootScope.ctx.emit('subagent/end', completion)
+    rootScope.ctx.emit('subagent/end', completion)
+    expect(store.getByWorkerSessionId(identity.id)).toMatchObject({ status: 'completed', result: 'Finished through the published lifecycle.' })
+    expect(store.listPendingOutbox()).toHaveLength(1)
     await mounted.dispose()
+    store.close()
   }, 10_000)
 })

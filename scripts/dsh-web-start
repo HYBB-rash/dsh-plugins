@@ -1,144 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-
-package_root=${DSH_WEB_PACKAGE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
-archive="$package_root/dsh-web.tar.gz"
-checksum="$package_root/dsh-web.tar.gz.sha256"
-proxy_script="$package_root/dsh-web-lan-proxy.mjs"
-notify_script="$package_root/dsh-web-notify-start-url.mjs"
-releases="$package_root/releases"
-runtime_bin="$package_root/runtime-bin"
+script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+package_root=${DSH_WEB_PACKAGE_ROOT:-$script_directory}
+release="$package_root/current"
+if [[ -f "$script_directory/../config/web.patch.yml" ]]; then release=$(cd "$script_directory/.." && pwd); fi
 export DSH_HOME=${DSH_HOME:-$HOME/.dsh}
 export DSH_CWD=${DSH_CWD:-$DSH_HOME/workspace}
+export DSH_WEB_HOME="$DSH_HOME"
+export DSH_WEB_PUBLIC_ORIGIN=${DSH_WEB_PUBLIC_ORIGIN:-https://dsh.man-her.icu}
 host=${DSH_WEB_HOST:-127.0.0.1}
 port=${DSH_WEB_PORT:-3080}
 lan_address=${DSH_LAN_ADDRESS:-192.168.6.240}
 public_authority=${DSH_WEB_PUBLIC_AUTHORITY:-dsh.man-her.icu}
-export DSH_WEB_PUBLIC_ORIGIN=${DSH_WEB_PUBLIC_ORIGIN:-https://dsh.man-her.icu}
-
-for command_name in tar sha256sum awk mktemp install mv ln; do
-  if ! command -v "$command_name" >/dev/null 2>&1; then
-    echo "$command_name is required to start DSH Web" >&2
-    exit 127
-  fi
+for file in "$release/bin/web" "$release/bin/dsh" "$release/scripts/dsh-web-lan-proxy.mjs" "$release/scripts/dsh-web-notify-start-url.mjs" "$DSH_HOME/runtime/package-lock.json"; do
+  [[ -f "$file" ]] || { echo "missing installed input: $file; install separately first" >&2; exit 1; }
 done
-for required_file in "$archive" "$checksum" "$proxy_script" "$notify_script"; do
-  if [[ ! -f "$required_file" || -L "$required_file" ]]; then
-    echo "missing regular deployment input: $required_file" >&2
-    exit 1
-  fi
-done
-
-install -d -m 0700 "$package_root" "$releases" "$runtime_bin" "$DSH_HOME" "$DSH_CWD"
-
-(
-  cd "$package_root"
-  sha256sum -c "$(basename -- "$checksum")"
-)
-archive_sha=$(sha256sum "$archive" | awk '{print $1}')
-release="$releases/$archive_sha"
-if [[ ! -d "$release" ]]; then
-  temporary_release=$(mktemp -d "$releases/.unpack.XXXXXX")
-  cleanup() { rm -rf -- "$temporary_release"; }
-  trap cleanup EXIT
-  tar --no-same-owner -xzf "$archive" -C "$temporary_release"
-  for required_file in \
-    "$temporary_release/dsh-web/bin/install-plugins" \
-    "$temporary_release/dsh-web/bin/web"; do
-    if [[ ! -x "$required_file" ]]; then
-      echo "archive is missing executable ${required_file#"$temporary_release/"}" >&2
-      exit 1
-    fi
-  done
-  mv "$temporary_release/dsh-web" "$release"
-  rmdir "$temporary_release"
-  trap - EXIT
-fi
-
-runtime_node="$release/runtime-node/bin/node"
-if [[ ! -f "$runtime_node" || -L "$runtime_node" || ! -x "$runtime_node" ]]; then
-  echo 'package is missing its regular bundled Node executable' >&2
-  exit 1
-fi
-if [[ $("$runtime_node" --version) != v24.19.0 ]]; then
-  echo 'bundled Node must be v24.19.0 to match packaged native addons' >&2
-  exit 1
-fi
-export PATH="$release/runtime-node/bin:$PATH"
-
-pnpm_command=${DSH_WEB_PNPM:-pnpm}
-corepack_command=${DSH_WEB_COREPACK:-corepack}
-if pnpm_path=$(command -v "$pnpm_command" 2>/dev/null); then
-  pnpm_argv=("$pnpm_path")
-elif corepack_path=$(command -v "$corepack_command" 2>/dev/null); then
-  package_manager=$("$runtime_node" -e '
-    const fs = require("node:fs")
-    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).packageManager
-    if (typeof value !== "string" || !/^pnpm@[0-9]+\.[0-9]+\.[0-9]+$/.test(value)) process.exit(1)
-    process.stdout.write(value)
-  ' "$release/harness/package.json") || {
-    echo 'packaged Harness does not declare a pinned pnpm version' >&2
-    exit 1
-  }
-  pnpm_version=${package_manager#pnpm@}
-  manager_dir="$package_root/package-managers/pnpm-$pnpm_version"
-  pnpm_entry="$manager_dir/bin/pnpm.cjs"
-  if [[ ! -f "$pnpm_entry" || -L "$pnpm_entry" ]]; then
-    temporary_manager=$(mktemp -d "$package_root/.pnpm.XXXXXX")
-    cleanup_manager() { rm -rf -- "$temporary_manager"; }
-    trap cleanup_manager EXIT
-    "$corepack_path" pack "$package_manager" -o "$temporary_manager/pnpm.tgz" >/dev/null
-    tar --no-same-owner -xzf "$temporary_manager/pnpm.tgz" -C "$temporary_manager"
-    extracted_entry="$temporary_manager/pnpm/$pnpm_version/bin/pnpm.cjs"
-    if [[ ! -f "$extracted_entry" || -L "$extracted_entry" ]]; then
-      echo "corepack package is missing pnpm/$pnpm_version/bin/pnpm.cjs" >&2
-      exit 1
-    fi
-    install -d -m 0700 "$package_root/package-managers"
-    mv "$temporary_manager/pnpm/$pnpm_version" "$manager_dir"
-    rm -rf -- "$temporary_manager"
-    trap - EXIT
-  fi
-  pnpm_argv=("$runtime_node" "$pnpm_entry")
-else
-  echo 'pnpm is required to install DSH plugins; install pnpm or provide corepack' >&2
-  exit 127
-fi
-
-printf '#!/usr/bin/env bash\nexec' >"$runtime_bin/pnpm"
-printf ' %q' "${pnpm_argv[@]}" >>"$runtime_bin/pnpm"
-printf ' "$@"\n' >>"$runtime_bin/pnpm"
-chmod 0700 "$runtime_bin/pnpm"
-export PATH="$runtime_bin:$PATH"
-
-"$release/bin/install-plugins"
-ln -sfn "releases/$archive_sha" "$package_root/current.next"
-mv -Tf "$package_root/current.next" "$package_root/current"
-relay_web_stdout() {
-  local line launch_url notified=0
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    printf '%s\n' "$line"
-    if ((notified == 0)) && [[ "$line" =~ ^dsh\ web:\ (http://127\.0\.0\.1:[0-9]+/\?token=[A-Za-z0-9_-]+)$ ]]; then
-      launch_url=${BASH_REMATCH[1]}
-      if ! printf '%s\n' "$launch_url" | "$runtime_node" "$notify_script" >/dev/null 2>&1; then
-        echo 'dsh web: Telegram startup URL notification failed' >&2
-      fi
-      notified=1
-    fi
-  done
-}
-
-cd "$DSH_CWD"
-"$package_root/current/bin/web" --host "$host" --port "$port" --no-open "$@" \
-  --trusted-host "$lan_address" "$public_authority" > >(relay_web_stdout) &
+# Node resolves module URLs to real paths; the proxy's entry-point check must
+# receive that same path rather than the mutable current symlink.
+release=$(cd -- "$release" && pwd -P)
+# A restart never unpacks, installs, rewrites Profile, or chooses a new version.
+"$release/bin/dsh" --version >/dev/null
+export DSH_WEB_NOTIFY_START_URL=1
+setsid "$release/bin/web" --host "$host" --port "$port" --no-open "$@" \
+  --trusted-host "$lan_address" "$public_authority" &
 web_pid=$!
-"$runtime_node" "$proxy_script" &
+node "$release/scripts/dsh-web-lan-proxy.mjs" &
 proxy_pid=$!
-
 stop_children() {
   trap - INT TERM
-  kill "$web_pid" "$proxy_pid" 2>/dev/null || true
+  kill -- "-$web_pid" "$proxy_pid" 2>/dev/null || true
   wait "$web_pid" "$proxy_pid" 2>/dev/null || true
 }
 trap 'stop_children; exit 143' INT TERM
@@ -146,6 +37,5 @@ set +e
 wait -n "$web_pid" "$proxy_pid"
 status=$?
 set -e
-trap - INT TERM
 stop_children
 exit "$status"

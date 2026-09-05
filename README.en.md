@@ -16,7 +16,7 @@ The only supported deployment path from this repository to `herman.hermes` is th
 nix develop -c ./scripts/dsh-web-deploy
 ```
 
-This command packages and uploads the complete Harness, three plugin archives, a pinned Node runtime, and production credentials. It deliberately does not stop or start the remote service. Use the project `$dsh-web-deploy` Skill for remote start, restart, health checks, and the Telegram login URL; see [`docs/dsh-web-portable-deployment.md`](docs/dsh-web-portable-deployment.md) for the complete design and incident history. The former Docker/OCI `release/dsh` system is retired and must not be restored or mixed with this flow.
+This command selects the latest official npm runtime once, builds and tests three plugin archives, and uploads a thin archive with production credentials. It ships no Harness source, Node binary, or node_modules, and does not stop, install into, or start the remote service. Use the project `$dsh-web-deploy` Skill for the separate installation, start, restart, health checks, and Telegram login URL; see [`docs/dsh-web-portable-deployment.md`](docs/dsh-web-portable-deployment.md) for the current design and boundaries. The former Docker/OCI `release/dsh` system is retired and must not be restored or mixed with this flow.
 
 ## Overview
 
@@ -41,14 +41,9 @@ The diagram shows code-level collaboration, not a requirement to install everyth
 
 ## Public scope and prerequisites
 
-This repository is primarily source reference, not a collection of publicly installable packages or Skills: it has no root `package.json`, published npm tarball, or automatic activation manifest. Its portable deployment scripts exist only for the author's own `herman.hermes`. Each plugin directory has its own `package.json`, declares DSH/Cordis peer dependencies, and is currently versioned `0.1.0-rc.*`. Building or testing requires:
+The repository maintains three own plugins without upstream source checkouts or forks. Development uses its root npm workspace and lockfile. Runtime installation uses official npm Harness and `plugin add`; own plugins are local tgz artifacts, not publicly published packages.
 
-- A compatible DeepSeek Harness source checkout that can provide `@deepseek-ai/*` and Cordis dependencies. This repository does not pin a compatible Harness version.
-- Node.js, pnpm, TypeScript/`tsc`, `tsdown`, and Vitest supplied by that compatible development environment.
-- For Telegram plugins, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_CHAT_ID` in a credential provider. Never put real values in configuration, `.env`, test fixtures, or commits.
-- For Exploration Opportunity, a host that discovers and loads Skills and lets the agent maintain `EXPLORE.md` in the current workspace. The Skill itself adds no Web or browser tool.
-
-There is therefore no trustworthy one-line install command. Integrate Cordis plugins in isolation and place Skills in a host-discoverable directory. This repository does not claim that `dsh plugin add`, npm installation, or every DSH version will work directly.
+Enter `nix develop`, then use `npm ci --ignore-scripts`. Keep Telegram credentials in the host credential provider. Skills are still discovered by the host, not activated by plugin installation.
 
 ### Minimal configuration shapes
 
@@ -119,40 +114,20 @@ When a new concept appears, you may want one concrete reason it matters before d
 
 ## Build, test, and local development
 
-There is no unified install/build/test command, and the `@deepseek-ai/*` dependencies are not published as directly retrievable npm dependencies. Do not run `pnpm install` or `pnpm run bundle` in an isolated clone: the package manager will try, and fail, to fetch those source/private dependencies from npm. The commands below use a compatible Harness source checkout as the toolchain and dependency source. They are not a release process and do not deploy services.
+No Harness source checkout is required:
 
 ```bash
-# Point at your own prepared, compatible Harness source checkout.
-export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
+nix develop
+npm ci --ignore-scripts
+npm run build
+npm test
+npm run test:scripts
 
-# Every public package has tsdown.config.ts; run this for the package you build.
-(cd telegram-gateway && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
-(cd dsh-assistant && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
-(cd dsh-cron && "$DSH_HARNESS_ROOT/node_modules/.bin/tsdown" --config tsdown.config.ts)
+DSH_WEB_HOME=/absolute/isolated-home ./scripts/dsh-web-install-plugins
+DSH_WEB_HOME=/absolute/isolated-home ./scripts/dsh-web-runtime --no-open
 ```
 
-Tests also run per package:
-
-```bash
-# Point this at your own compatible Harness source checkout.
-export DSH_HARNESS_ROOT='<path-to-deepseek-harness>'
-
-(cd dsh-assistant && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
-(cd dsh-cron && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
-(cd telegram-gateway && node "$DSH_HARNESS_ROOT/node_modules/vitest/vitest.mjs" run)
-
-# The Skill has no build artifact; validate its structure and frontmatter with a compatible Skill Creator.
-python '<path-to-skill-creator>/scripts/quick_validate.py' skills/explore-opportunity
-```
-
-Each package's `tsconfig.json` and `tsdown.config.ts` can also be used for explicit checks:
-
-```bash
-(cd telegram-gateway && "$DSH_HARNESS_ROOT/node_modules/.bin/tsc" -b tsconfig.json)
-# Replace the directory name for another package. Do not recommit machine-specific dependency paths into manifests or lockfiles.
-```
-
-For local development, change one plugin and build/test its directory, or change a Skill and rerun Skill validation, then load it through your own DSH host. Do not commit `lib/`, `node_modules/`, SQLite/session data, cookies, `.env`, private keys, or real runtime logs; they are not public source.
+Installation resolves one latest runtime batch and builds/tests against its published SDK. Restart only uses the installed version; it never installs or updates. Development defaults to 5080; local production keeps 3080. Stop a legacy instance before explicitly installing with `--migrate`. Never edit Profile bundles or node_modules by hand. See [deployment details](docs/dsh-web-portable-deployment.md).
 
 ## Security and deployment boundary
 
@@ -160,7 +135,7 @@ For local development, change one plugin and build/test its directory, or change
 - Telegram credentials belong only in the host credential provider. Examples never contain a real token, chat ID, host, account, cookie, or personal profile.
 - `explore-opportunity` is behavioral guidance over existing tools, not a security sandbox. Treat pages and external files as untrusted data; the host-supplied tools determine actual access and side effects.
 - Exploration state lives only in the workspace's `EXPLORE.md`. It is not a task system, long-term MEMORY, X bookmark store, or cron, and it does not autonomously start deep investigation.
-- This public repository excludes the author's deployment scripts, remote-host material, runtime databases, acceptance records, research notes, and personal long-term memory. It offers no production deployment promise.
+- The repository contains deployment code, but must not contain actual credentials, runtime databases or secret logs. It offers no production deployment promise.
 - Scheduling, automatic remounting, child agents, and external message delivery all carry irreversible or duplicate risks. Verify in isolation before using real accounts or data.
 
 ## Layout

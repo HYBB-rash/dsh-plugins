@@ -7,10 +7,11 @@ remote_root=${DSH_WEB_REMOTE_ROOT:-/home/herman/.local/share/dsh-web-package}
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 package_script="$repository_root/scripts/package-dsh-web"
 start_script="$repository_root/scripts/dsh-web-start"
+install_script="$repository_root/scripts/dsh-web-install"
 proxy_script="$repository_root/scripts/dsh-web-lan-proxy.mjs"
 notify_script="$repository_root/scripts/dsh-web-notify-start-url.mjs"
 
-for required_file in "$package_script" "$start_script"; do
+for required_file in "$package_script" "$start_script" "$install_script"; do
   if [[ ! -x "$required_file" ]]; then
     echo "missing executable deployment input: $required_file" >&2
     exit 1
@@ -45,12 +46,15 @@ chmod 0600 "$checksum"
 
 printf -v remote_root_q '%q' "$remote_root"
 ssh "$target" "install -d -m 0700 $remote_root_q"
-scp -p "$archive" "$target:$remote_root/dsh-web.tar.gz"
-scp -p "$checksum" "$target:$remote_root/dsh-web.tar.gz.sha256"
-scp -p "$start_script" "$target:$remote_root/dsh-web-start"
-scp -p "$proxy_script" "$target:$remote_root/dsh-web-lan-proxy.mjs"
-scp -p "$notify_script" "$target:$remote_root/dsh-web-notify-start-url.mjs"
+batch_root="$remote_root/incoming/$(awk '{print $1}' "$checksum")"
+printf -v batch_root_q '%q' "$batch_root"
+ssh "$target" "install -d -m 0700 $batch_root_q"
+scp -p "$archive" "$target:$batch_root/dsh-web.tar.gz"
+scp -p "$checksum" "$target:$batch_root/dsh-web.tar.gz.sha256"
+scp -p "$start_script" "$target:$batch_root/dsh-web-start"
+scp -p "$install_script" "$target:$batch_root/dsh-web-install"
 
-printf 'uploaded: %s:%s\n' "$target" "$remote_root"
+printf 'uploaded: %s:%s\n' "$target" "$batch_root"
 printf 'sha256: %s\n' "$(awk '{print $1}' "$checksum")"
-printf 'start with: ssh %q %q\n' "$target" "$remote_root/dsh-web-start"
+printf 'install separately after stopping the old instance: ssh %q %q\n' "$target" "$batch_root/dsh-web-install --migrate"
+printf 'start separately: ssh %q %q\n' "$target" "$batch_root/dsh-web-start"

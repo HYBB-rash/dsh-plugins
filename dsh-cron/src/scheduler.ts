@@ -1045,8 +1045,8 @@ export class SchedulerRuntime implements RunNowPort {
 
     let persistedSessionIds: ReadonlySet<string>
     try {
-      const snapshots = await persistence.list({ signal: this.signal })
-      persistedSessionIds = new Set(snapshots.map(snapshot => snapshot.header.id))
+      const headers = await persistence.list(this.signal)
+      persistedSessionIds = new Set(headers.map(header => header.id))
     } catch (error) {
       this.ctx.logger.error(
         `dsh-cron: per_run archive failed stage=session_list runId=- sessionId=- error=${errorMessage(error)}`,
@@ -1938,8 +1938,8 @@ export class SchedulerRuntime implements RunNowPort {
       const selected: ModelSelectionRef = { current: selection, assembled: undefined }
       installModelSelection(agentCtx, selected)
     }
-    const persisted = (await persistence.list({ signal: this.signal })).some(
-      (snapshot) => snapshot.header.id === sessionId,
+    const persisted = (await persistence.list(this.signal)).some(
+      (header) => header.id === sessionId,
     )
     const handle = persisted
       ? await agents.resume({

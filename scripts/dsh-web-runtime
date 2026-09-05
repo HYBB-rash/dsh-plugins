@@ -1,78 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 package_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-if [[ -d "$package_root/upstream/deepseek-harness" ]]; then
-  export DSH_HOME="${DSH_WEB_HOME:-$package_root/.dsh-web}"
-  export DSH_CWD="${DSH_CWD:-$DSH_HOME/workspace}"
-  harness_root="$package_root/upstream/deepseek-harness"
-  patch="$package_root/config/web/portable.patch.yml"
-  default_port=5080
-else
-  : "${DSH_HOME:?set DSH_HOME to an external writable directory}"
-  export DSH_CWD="${DSH_CWD:-$DSH_HOME/workspace}"
-  harness_root="$package_root/harness"
-  patch="$package_root/config/web.patch.yml"
-fi
-
+export DSH_HOME=${DSH_WEB_HOME:-${DSH_HOME:-$package_root/.dsh-web}}
+export DSH_CWD=${DSH_CWD:-$DSH_HOME/workspace}
 export PATH="$package_root/bin:$PATH"
-
-mkdir -p "$DSH_CWD"
-cd "$DSH_CWD"
-
-if ! command -v node >/dev/null 2>&1; then
-  echo 'node is required to run DSH Web' >&2
-  exit 127
+patch="$package_root/config/web/portable.patch.yml"
+default_port=5080
+if [[ -f "$package_root/config/web.patch.yml" ]]; then
+  patch="$package_root/config/web.patch.yml"
+  default_port=3080
 fi
-
 runtime_args=("$@")
-if [[ -n "${default_port:-}" ]]; then
-  add_default_port=true
-  for argument in "${runtime_args[@]}"; do
-    if [[ "$argument" == --port || "$argument" == --port=* \
-      || "$argument" == --dump-config || "$argument" == --dump-default-config ]]; then
-      add_default_port=false
-      break
-    fi
-  done
-  if [[ "$add_default_port" == true ]]; then
-    runtime_args+=(--port "$default_port")
+add_default_port=true
+for argument in "${runtime_args[@]}"; do
+  if [[ "$argument" == --port || "$argument" == --port=* || "$argument" == --dump-config || "$argument" == --dump-default-config ]]; then
+    add_default_port=false
   fi
-fi
-
-runtime_command=(
-  node --expose-internals "$harness_root/apps/cli/lib/bin.js"
-  --profile web
-  --patch "$patch"
-  "${runtime_args[@]}"
-)
-
-if [[ "${DSH_WEB_NOTIFY_START_URL:-}" != 1 ]]; then
-  exec "${runtime_command[@]}"
-fi
-
-notify_script="$package_root/scripts/dsh-web-notify-start-url.mjs"
-if [[ ! -f "$notify_script" || -L "$notify_script" ]]; then
-  echo 'dsh web: Telegram startup URL notification failed' >&2
-  exec "${runtime_command[@]}"
-fi
-
+done
+if [[ "$add_default_port" == true ]]; then runtime_args+=(--port "$default_port"); fi
+mkdir -p "$DSH_HOME" "$DSH_CWD"
+exec 9>"$DSH_HOME/.web-runtime.lock"
+flock -n 9 || { echo 'dsh web: this DSH_HOME is running or being installed' >&2; exit 1; }
+runtime_command=("$package_root/bin/dsh" --profile web --patch "$patch" "${runtime_args[@]}")
+if [[ "${DSH_WEB_NOTIFY_START_URL:-}" != 1 ]]; then exec "${runtime_command[@]}"; fi
 relay_web_stdout() {
   local line launch_url notified=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     printf '%s\n' "$line"
     if ((notified == 0)) && [[ "$line" =~ ^dsh\ web:\ (http://127\.0\.0\.1:[0-9]+/\?token=[A-Za-z0-9_-]+)$ ]]; then
       launch_url=${BASH_REMATCH[1]}
-      if ! printf '%s\n' "$launch_url" | node "$notify_script" >/dev/null 2>&1; then
+      if ! printf '%s\n' "$launch_url" | node "$package_root/scripts/dsh-web-notify-start-url.mjs" >/dev/null 2>&1; then
         echo 'dsh web: Telegram startup URL notification failed' >&2
       fi
       notified=1
     fi
   done
 }
-
 set +e
 "${runtime_command[@]}" | relay_web_stdout
-runtime_status=${PIPESTATUS[0]}
-set -e
-exit "$runtime_status"
+status=${PIPESTATUS[0]}
+exit "$status"

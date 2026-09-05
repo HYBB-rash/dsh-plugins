@@ -3,6 +3,8 @@ node_modules
 
 # Build and type-check outputs
 lib/
+!scripts/lib/
+!scripts/lib/**
 dist/
 build/
 *.tsbuildinfo
