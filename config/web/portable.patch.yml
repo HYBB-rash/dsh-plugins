@@ -8,6 +8,7 @@
 - id: dsh-cron
   config:
     mode: scheduler
+    agentPreset: standard
     pollIntervalMs: 10000
     maxConcurrent: 3
     deliverOnError: true

@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { validateJsonSchemaValue, type ToolOutputDefinition } from '@deepseek-ai/dsh-tools'
 import { registerCronTools } from '../src/manager.ts'
 import { JobStore } from '../src/store.ts'
 
@@ -29,6 +30,7 @@ afterEach(() => {
 
 interface ToolDef {
   name: string
+  output: ToolOutputDefinition
   execute(args: unknown, exec: unknown): Promise<unknown>
 }
 
@@ -136,6 +138,25 @@ describe('cron_create', () => {
 })
 
 describe('cron_list', () => {
+  it('returns schema-valid rows with and without a persisted working directory', async () => {
+    const store = new JobStore(tempDir())
+    for (const job of [
+      { id: 'cron-with-cwd', cwd: '/workspace' },
+      { id: 'cron-without-cwd' },
+    ]) {
+      store.append({ op: 'create', ...job, schedule: { kind: 'interval', minutes: 5 }, prompt: 'report', deliver: 'default', createdAt: '2026-09-05T00:00:00.000Z' })
+    }
+    const { tools, toolCtx, rootCtx } = fakeScope()
+    registerCronTools(rootCtx as never, toolCtx as never, store)
+    const tool = tools.get('cron_list')!
+    const result = await tool.execute({}, execSession)
+    expect(result).toEqual([
+      { id: 'cron-with-cwd', cwd: '/workspace', schedule: { kind: 'interval', minutes: 5 }, prompt: 'report', deliver: 'default', createdAt: '2026-09-05T00:00:00.000Z' },
+      { id: 'cron-without-cwd', schedule: { kind: 'interval', minutes: 5 }, prompt: 'report', deliver: 'default', createdAt: '2026-09-05T00:00:00.000Z' },
+    ])
+    expect(validateJsonSchemaValue(tool.output.schema, result)).toEqual([])
+  })
+
   it('lists active jobs in creation order', async () => {
     const dir = tempDir()
     const store = new JobStore(dir)

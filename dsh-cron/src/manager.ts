@@ -279,6 +279,7 @@ export function registerCronTools(rootCtx: Context, toolCtx: Context, store: Job
                   prompt: { type: 'string', required: true },
                   deliver: { type: 'string', required: true },
                   createdAt: { type: 'string', required: true },
+                  cwd: { type: 'string' },
                 },
               },
             },

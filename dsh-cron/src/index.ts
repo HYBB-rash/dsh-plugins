@@ -83,6 +83,8 @@ export interface Config {
   maxConcurrent?: number
   /** Whether the scheduler delivers error notices. Defaults to true. */
   deliverOnError?: boolean
+  /** Optional execution tool preset for ordinary scheduled Agent sessions. */
+  agentPreset?: string
   /** Store directory override. Defaults to `$DSH_HOME/storages/dsh-cron`. */
   storeDir?: string
   /** Unix socket override. Defaults to `<storeDir>/control.sock` in manager mode. */
@@ -108,6 +110,7 @@ export const Config: z<Config> = z.object({
   pollIntervalMs: z.number().step(1).min(1_000).default(10_000),
   maxConcurrent: z.number().step(1).min(1).default(3),
   deliverOnError: z.boolean().default(true),
+  agentPreset: z.string(),
   storeDir: z.string().default(''),
   controlSocketPath: z.string().default(''),
   managedCommandBindings: z.array(z.object({
@@ -246,6 +249,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       pollIntervalMs: config.pollIntervalMs ?? 10_000,
       maxConcurrent: config.maxConcurrent ?? 3,
       deliverOnError: config.deliverOnError ?? true,
+      ...(config.agentPreset === undefined ? {} : { agentPreset: config.agentPreset }),
     }, {
       installRunNow: port => installRunNowTools(ctx, port, 'session-telegram'),
     })

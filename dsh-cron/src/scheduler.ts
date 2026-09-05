@@ -27,6 +27,7 @@ import {
   type ModelSelectionRef,
 } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type {} from '@deepseek-ai/dsh-agent-presets'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -632,6 +633,8 @@ export interface SchedulerConfig {
   pollIntervalMs: number
   maxConcurrent: number
   deliverOnError: boolean
+  /** Execution tools for ordinary jobs; explicit environments own their tools. */
+  agentPreset?: string
 }
 
 /**
@@ -661,6 +664,7 @@ export class SchedulerRuntime implements RunNowPort {
   private readonly deliverText: DeliverText
   private readonly runCommand: RunCommand
   private readonly storeDir: string
+  private readonly agentPreset: string | undefined
 
   constructor(
     private readonly ctx: Context,
@@ -669,6 +673,7 @@ export class SchedulerRuntime implements RunNowPort {
     deps: SchedulerRuntimeDeps = {},
   ) {
     this.storeDir = config.storeDir
+    this.agentPreset = config.agentPreset
     this.jobStore = new JobStore(config.storeDir)
     this.ledger = new RunLedger(config.storeDir)
     this.semaphore = new Semaphore(config.maxConcurrent)
@@ -1891,6 +1896,14 @@ export class SchedulerRuntime implements RunNowPort {
     return { registry, lease, ...(meaningPortLease === undefined ? {} : { meaningPortLease }) }
   }
 
+  /** Mount the host-selected tools before an ordinary job can run. */
+  private async mountExecutionPreset(agentCtx: Context): Promise<void> {
+    if (this.agentPreset === undefined) return
+    const presets = this.ctx.get('agentPresets')
+    if (presets === undefined) throw new Error(`dsh-cron: Agent preset "${this.agentPreset}" requested but agent-presets is unavailable`)
+    await presets.mount(agentCtx, this.agentPreset)
+  }
+
   /** Acquire a persistent agent or create an isolated per-run agent. */
   private async acquireAgent(
     job: AgentJob,
@@ -1909,6 +1922,7 @@ export class SchedulerRuntime implements RunNowPort {
       const setup: AgentSetup = async (agentCtx) => {
         const selected: ModelSelectionRef = { current: selection, assembled: undefined }
         installModelSelection(agentCtx, selected)
+        if (environment === undefined) await this.mountExecutionPreset(agentCtx)
         if (environment !== undefined) {
           const setupResult = await environment.registry.setup(environment.lease, agentCtx)
           if (!setupResult.ok) {
@@ -1934,9 +1948,10 @@ export class SchedulerRuntime implements RunNowPort {
     const live = agents.get(sessionId)
     if (live !== undefined) return { agent: live as unknown as AgentLike, ownsHandle: false }
     const selection = defaultModel.currentSelection()
-    const setup: AgentSetup = (agentCtx) => {
+    const setup: AgentSetup = async (agentCtx) => {
       const selected: ModelSelectionRef = { current: selection, assembled: undefined }
       installModelSelection(agentCtx, selected)
+      await this.mountExecutionPreset(agentCtx)
     }
     const persisted = (await persistence.list(this.signal)).some(
       (header) => header.id === sessionId,

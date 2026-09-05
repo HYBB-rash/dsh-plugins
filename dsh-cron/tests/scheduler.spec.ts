@@ -1628,6 +1628,46 @@ describe('run-finished event (§8)', () => {
 })
 
 describe('scheduler responsibility bridge v2 (先红)', () => {
+  it.each(['create', 'resume', 'per_run'] as const)('mounts the configured execution tools for an ordinary %s session', async (mode) => {
+    const dir = tempDir()
+    const job = { ...dueIntervalJob(10, 601_000), id: 'preset-job', ...(mode === 'per_run' ? { sessionMode: 'per_run' as const } : {}) }
+    seedJob(dir, job)
+    const calls: AgentCall[] = []
+    const events: Array<{ name: string; payload: unknown }> = []
+    const base = lifecycleCtx(calls, events, mode === 'resume' ? ['session-cron-preset-job'] : []) as { get(name: string): unknown }
+    const agentCtx = { on: () => () => undefined, tools: new Set<string>() }
+    const registry = base.get('agents') as Record<string, (options: Record<string, unknown>) => Promise<unknown>>
+    const ctx = {
+      ...base,
+      get(name: string) {
+        if (name === 'agentPresets') return { mount: async (target: typeof agentCtx, preset: string) => {
+          if (preset !== 'standard') throw new Error('unknown preset')
+          target.tools.add('bash')
+        } }
+        if (name === 'agents') return { ...registry,
+          create: async (options: Record<string, unknown>) => { await (options.setup as (ctx: unknown) => Promise<void>)(agentCtx); return registry.create!(options) },
+          resume: async (options: Record<string, unknown>) => { await (options.setup as (ctx: unknown) => Promise<void>)(agentCtx); return registry.resume!(options) },
+        }
+        return base.get(name)
+      },
+    }
+    const runtime = new SchedulerRuntime(ctx as never, { ...makeConfig(dir), agentPreset: 'standard' }, new AbortController().signal, {
+      driveTurn: async () => {
+        if (!agentCtx.tools.has('bash')) throw new Error('execution tools missing')
+        return { text: 'report body' }
+      },
+      deliverText: async () => ({ state: 'delivered', deliveredAt: nowIso() }),
+    })
+    runtime.start()
+    try {
+      await waitFor(() => events.some(event => event.name === 'dsh-cron/run-finished'))
+      const finish = readLines(dir).map(line => JSON.parse(line)).find(record => record.event === 'finish')
+      expect(finish.status).toBe('success')
+      expect(finish.outputPreview).toBe('report body')
+      expect(calls.some(call => call.kind === (mode === 'resume' ? 'resume' : 'create'))).toBe(true)
+    } finally { await runtime.dispose() }
+  })
+
   it('per_run 为每轮创建哈希 session，不 resume 旧 session，并在轮次结束 finally dispose handle', async () => {
     const dir = tempDir()
     const job = {
@@ -2505,7 +2545,7 @@ describe('marked Agent environment and run lease lifecycle', () => {
     }
   })
 
-  it('does not inspect persistence, resume, or seed state for two marked per-run executions', async () => {
+  it('keeps explicit environments independent of the ordinary execution preset', async () => {
     const dir = tempDir()
     seedJob(dir, markedAgentJob('marked-run-one'))
     seedJob(dir, markedAgentJob('marked-run-two'))
@@ -2514,7 +2554,7 @@ describe('marked Agent environment and run lease lifecycle', () => {
     const ctx = orderedEnvironmentCtx(order, registry)
     const runtime = new SchedulerRuntime(
       ctx,
-      makeConfig(dir),
+      { ...makeConfig(dir), agentPreset: 'standard' },
       new AbortController().signal,
       { driveTurn: async agent => { agent.status = 'idle'; return { text: '' } } },
     )
@@ -2523,6 +2563,7 @@ describe('marked Agent environment and run lease lifecycle', () => {
       await waitFor(() => readLines(dir).filter(line => JSON.parse(line).event === 'finish').length === 2)
       const records = readLines(dir).map(line => JSON.parse(line) as Record<string, unknown>)
       const claims = records.filter(record => record.event === 'claim')
+      expect(records.filter(record => record.event === 'finish').map(record => record.status)).toEqual(['success', 'success'])
       expect(claims).toHaveLength(2)
       expect(new Set(claims.map(claim => claim.sessionId)).size).toBe(2)
       expect(records.some(record => record.event === 'resume')).toBe(false)
